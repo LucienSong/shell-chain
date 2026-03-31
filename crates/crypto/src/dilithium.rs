@@ -2,7 +2,6 @@ use pqcrypto_dilithium::dilithium3;
 use pqcrypto_traits::sign::{
     DetachedSignature, PublicKey, SecretKey,
 };
-use zeroize::Zeroize;
 
 use crate::{
     CryptoError, KeyPair, PQSignature, SignatureType, Signer, Verifier,
@@ -11,9 +10,13 @@ use crate::{
 // ── Signer ───────────────────────────────────────────────────
 
 /// CRYSTALS-Dilithium3 signer (NIST Level 3, 128-bit PQ security).
+///
+/// Stores key material as raw bytes wrapped in `Zeroizing` to ensure
+/// secret key is zeroed on drop, even though pqcrypto's SecretKey type
+/// does not implement Zeroize.
 pub struct DilithiumSigner {
-    secret_key: dilithium3::SecretKey,
-    public_key: dilithium3::PublicKey,
+    secret_key_bytes: zeroize::Zeroizing<Vec<u8>>,
+    public_key_bytes: Vec<u8>,
 }
 
 impl DilithiumSigner {
@@ -21,8 +24,8 @@ impl DilithiumSigner {
     pub fn generate() -> Self {
         let (pk, sk) = dilithium3::keypair();
         Self {
-            secret_key: sk,
-            public_key: pk,
+            secret_key_bytes: zeroize::Zeroizing::new(sk.as_bytes().to_vec()),
+            public_key_bytes: pk.as_bytes().to_vec(),
         }
     }
 
@@ -31,45 +34,44 @@ impl DilithiumSigner {
         public_key: &[u8],
         secret_key: &[u8],
     ) -> Result<Self, CryptoError> {
-        let pk = dilithium3::PublicKey::from_bytes(public_key).map_err(|_| {
+        // Validate by attempting to parse
+        dilithium3::PublicKey::from_bytes(public_key).map_err(|_| {
             CryptoError::InvalidPublicKeyLength {
                 expected: dilithium3::public_key_bytes(),
                 got: public_key.len(),
             }
         })?;
-        let sk = dilithium3::SecretKey::from_bytes(secret_key).map_err(|_| {
+        dilithium3::SecretKey::from_bytes(secret_key).map_err(|_| {
             CryptoError::InvalidSignatureLength {
                 expected: dilithium3::secret_key_bytes(),
                 got: secret_key.len(),
             }
         })?;
         Ok(Self {
-            secret_key: sk,
-            public_key: pk,
+            secret_key_bytes: zeroize::Zeroizing::new(secret_key.to_vec()),
+            public_key_bytes: public_key.to_vec(),
         })
     }
 
     /// Export the public half as a [`KeyPair`].
     pub fn key_pair(&self) -> KeyPair {
         KeyPair::new(
-            self.public_key.as_bytes().to_vec(),
+            self.public_key_bytes.clone(),
             SignatureType::Dilithium3,
         )
     }
-}
 
-impl Drop for DilithiumSigner {
-    fn drop(&mut self) {
-        // Best-effort zeroize of secret key material
-        let sk_bytes = self.secret_key.as_bytes().to_vec();
-        let mut buf = sk_bytes;
-        buf.zeroize();
+    fn secret_key(&self) -> dilithium3::SecretKey {
+        // Safe: bytes were validated at construction time
+        dilithium3::SecretKey::from_bytes(&self.secret_key_bytes)
+            .expect("secret key bytes validated at construction")
     }
 }
 
 impl Signer for DilithiumSigner {
     fn sign(&self, message: &[u8]) -> Result<PQSignature, CryptoError> {
-        let sig = dilithium3::detached_sign(message, &self.secret_key);
+        let sk = self.secret_key();
+        let sig = dilithium3::detached_sign(message, &sk);
         Ok(PQSignature::new(
             SignatureType::Dilithium3,
             sig.as_bytes().to_vec(),
@@ -77,7 +79,7 @@ impl Signer for DilithiumSigner {
     }
 
     fn public_key(&self) -> &[u8] {
-        self.public_key.as_bytes()
+        &self.public_key_bytes
     }
 
     fn sig_type(&self) -> SignatureType {
@@ -184,7 +186,7 @@ mod tests {
     fn from_bytes_roundtrip() {
         let signer = DilithiumSigner::generate();
         let pk = signer.public_key().to_vec();
-        let sk = signer.secret_key.as_bytes().to_vec();
+        let sk = signer.secret_key_bytes.to_vec();
 
         let signer2 = DilithiumSigner::from_bytes(&pk, &sk).unwrap();
         assert_eq!(signer.public_key(), signer2.public_key());
