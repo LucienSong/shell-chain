@@ -1,10 +1,26 @@
 use serde::{Deserialize, Serialize};
+use alloy_rlp::Encodable;
 
 /// Identifies which PQ signature algorithm was used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SignatureType {
     Dilithium3,
-    // Future: SphincsPlus, Custom(u8)
+    // Future: SphincsPlus, MlDsa65, Custom(u8)
+}
+
+impl SignatureType {
+    pub fn as_u8(&self) -> u8 {
+        match self {
+            SignatureType::Dilithium3 => 0,
+        }
+    }
+
+    pub fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(SignatureType::Dilithium3),
+            _ => None,
+        }
+    }
 }
 
 /// Container for a post-quantum signature.
@@ -25,5 +41,42 @@ impl PQSignature {
 
     pub fn is_empty(&self) -> bool {
         self.data.is_empty()
+    }
+}
+
+impl Encodable for PQSignature {
+    fn encode(&self, out: &mut dyn alloy_rlp::BufMut) {
+        let header = alloy_rlp::Header {
+            list: true,
+            payload_length: self.fields_len(),
+        };
+        header.encode(out);
+        self.sig_type.as_u8().encode(out);
+        self.data.as_slice().encode(out);
+    }
+
+    fn length(&self) -> usize {
+        let payload = self.fields_len();
+        alloy_rlp::Header { list: true, payload_length: payload }.length() + payload
+    }
+}
+
+impl alloy_rlp::Decodable for PQSignature {
+    fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
+        let header = alloy_rlp::Header::decode(buf)?;
+        if !header.list {
+            return Err(alloy_rlp::Error::UnexpectedString);
+        }
+        let sig_type_u8 = u8::decode(buf)?;
+        let sig_type = SignatureType::from_u8(sig_type_u8)
+            .ok_or(alloy_rlp::Error::Custom("unknown signature type"))?;
+        let data = alloy_rlp::Header::decode_bytes(buf, false)?.to_vec();
+        Ok(Self { sig_type, data })
+    }
+}
+
+impl PQSignature {
+    fn fields_len(&self) -> usize {
+        self.sig_type.as_u8().length() + self.data.as_slice().length()
     }
 }

@@ -29,4 +29,3 @@ shell-crypto = { path = "crates/crypto" }
 pqcrypto-dilithium = "0.5"
 pqcrypto-traits = "0.3"
 zeroize = { version = "1", features = ["derive"] }
-rand = "0.8"

@@ -21,6 +21,9 @@ pub struct DilithiumSigner {
 
 impl DilithiumSigner {
     /// Generate a fresh Dilithium3 key pair.
+    ///
+    /// Uses `pqcrypto-dilithium`'s internal CSPRNG (`randombytes` / system RNG).
+    /// See: <https://github.com/pqcrypto/pqcrypto/>
     pub fn generate() -> Self {
         let (pk, sk) = dilithium3::keypair();
         Self {
@@ -42,7 +45,7 @@ impl DilithiumSigner {
             }
         })?;
         dilithium3::SecretKey::from_bytes(secret_key).map_err(|_| {
-            CryptoError::InvalidSignatureLength {
+            CryptoError::InvalidSecretKeyLength {
                 expected: dilithium3::secret_key_bytes(),
                 got: secret_key.len(),
             }

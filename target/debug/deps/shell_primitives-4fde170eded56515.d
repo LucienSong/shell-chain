@@ -9,5 +9,5 @@ crates/primitives/src/bytes.rs:
 crates/primitives/src/error.rs:
 Cargo.toml:
 
-# env-dep:CLIPPY_ARGS=
+# env-dep:CLIPPY_ARGS=-D__CLIPPY_HACKERY__warnings__CLIPPY_HACKERY__
 # env-dep:CLIPPY_CONF_DIR

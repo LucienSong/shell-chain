@@ -11,6 +11,9 @@ pub enum CryptoError {
     #[error("invalid signature length: expected {expected}, got {got}")]
     InvalidSignatureLength { expected: usize, got: usize },
 
+    #[error("invalid secret key length: expected {expected}, got {got}")]
+    InvalidSecretKeyLength { expected: usize, got: usize },
+
     #[error("signing failed: {0}")]
     SigningFailed(String),
 

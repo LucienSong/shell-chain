@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use shell_primitives::{Address, ShellHash};
+use shell_primitives::{Address, Bytes, ShellHash};
 
 use crate::log::Log;
 
@@ -20,6 +20,9 @@ pub struct TransactionReceipt {
     pub cumulative_gas_used: u64,
     /// Contract address created, if any.
     pub contract_address: Option<Address>,
+    /// Bloom filter for fast log filtering (2048-bit / 256 bytes).
+    /// Populated by EVM executor; empty until execution.
+    pub logs_bloom: Bytes,
     /// Event logs emitted during execution.
     pub logs: Vec<Log>,
 }
@@ -45,6 +48,7 @@ mod tests {
             gas_used: 21000,
             cumulative_gas_used: 21000,
             contract_address: None,
+            logs_bloom: Bytes::new(),
             logs: vec![],
         };
         assert!(receipt.succeeded());
@@ -60,6 +64,7 @@ mod tests {
             gas_used: 50000,
             cumulative_gas_used: 100000,
             contract_address: Some(Address::from([0xAB; 20])),
+            logs_bloom: Bytes::new(),
             logs: vec![Log {
                 address: Address::from([0xCD; 20]),
                 topics: vec![keccak256(b"Transfer(address,address,uint256)")],

@@ -12,12 +12,17 @@ pub struct BlockHeader {
     pub state_root: ShellHash,
     pub transactions_root: ShellHash,
     pub receipts_root: ShellHash,
+    /// Bloom filter over all logs in this block (2048-bit / 256 bytes).
+    /// Populated by EVM executor; empty during construction.
+    pub logs_bloom: Bytes,
     pub number: u64,
     pub gas_limit: u64,
     pub gas_used: u64,
     pub timestamp: u64,
     pub extra_data: Bytes,
     pub proposer: Address,
+    /// Aggregated proof for batched signature verification (future use).
+    pub sig_aggregate_proof: Option<Bytes>,
 }
 
 impl Encodable for BlockHeader {
@@ -31,12 +36,20 @@ impl Encodable for BlockHeader {
         self.state_root.encode(out);
         self.transactions_root.encode(out);
         self.receipts_root.encode(out);
+        self.logs_bloom.encode(out);
         self.number.encode(out);
         self.gas_limit.encode(out);
         self.gas_used.encode(out);
         self.timestamp.encode(out);
         self.extra_data.encode(out);
         self.proposer.encode(out);
+        match &self.sig_aggregate_proof {
+            Some(proof) => proof.encode(out),
+            None => {
+                let empty: &[u8] = &[];
+                empty.encode(out);
+            }
+        }
     }
 
     fn length(&self) -> usize {
@@ -47,16 +60,22 @@ impl Encodable for BlockHeader {
 
 impl BlockHeader {
     fn fields_len(&self) -> usize {
+        let proof_len = match &self.sig_aggregate_proof {
+            Some(proof) => proof.length(),
+            None => 1, // 0x80
+        };
         self.parent_hash.length()
             + self.state_root.length()
             + self.transactions_root.length()
             + self.receipts_root.length()
+            + self.logs_bloom.length()
             + self.number.length()
             + self.gas_limit.length()
             + self.gas_used.length()
             + self.timestamp.length()
             + self.extra_data.length()
             + self.proposer.length()
+            + proof_len
     }
 
     /// Compute the block hash (keccak256 of RLP-encoded header).
@@ -105,12 +124,14 @@ mod tests {
             state_root: ShellHash::ZERO,
             transactions_root: ShellHash::ZERO,
             receipts_root: ShellHash::ZERO,
+            logs_bloom: Bytes::new(),
             number: 0,
             gas_limit: 30_000_000,
             gas_used: 0,
             timestamp: 1700000000,
             extra_data: Bytes::new(),
             proposer: Address::ZERO,
+            sig_aggregate_proof: None,
         }
     }
 
