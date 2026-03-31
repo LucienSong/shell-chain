@@ -1477,6 +1477,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "shell-core"
+version = "0.1.0"
+dependencies = [
+ "alloy-rlp",
+ "serde",
+ "serde_json",
+ "shell-crypto",
+ "shell-primitives",
+ "thiserror",
+]
+
+[[package]]
 name = "shell-crypto"
 version = "0.1.0"
 dependencies = [

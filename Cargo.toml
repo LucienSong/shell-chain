@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/primitives",
     "crates/crypto",
+    "crates/core",
 ]
 
 [workspace.package]
@@ -13,7 +14,7 @@ repository = "https://github.com/LucienSong/shell-chain"
 
 [workspace.dependencies]
 # --- primitives ---
-alloy-primitives = { version = "0.8", features = ["serde"] }
+alloy-primitives = { version = "0.8", features = ["serde", "rlp"] }
 alloy-rlp = { version = "0.3", features = ["derive"] }
 sha3 = "0.10"
 blake3 = "1"
@@ -24,6 +25,7 @@ thiserror = "2"
 
 # --- crypto ---
 shell-primitives = { path = "crates/primitives" }
+shell-crypto = { path = "crates/crypto" }
 pqcrypto-dilithium = "0.5"
 pqcrypto-traits = "0.3"
 zeroize = { version = "1", features = ["derive"] }
