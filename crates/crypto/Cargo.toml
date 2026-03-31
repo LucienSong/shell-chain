@@ -1,0 +1,19 @@
+[package]
+name = "shell-crypto"
+description = "Post-quantum cryptography for Shell-Chain"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+shell-primitives = { workspace = true }
+pqcrypto-dilithium = { workspace = true }
+pqcrypto-traits = { workspace = true }
+zeroize = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
