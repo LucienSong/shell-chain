@@ -18,4 +18,7 @@ pub use world_state::WorldState;
 pub use chain_store::{ChainConfig, ChainStore};
 
 #[cfg(feature = "rocksdb")]
-pub use rocks_db::{RocksDbStore, RocksDbStores, CF_CHAIN, CF_INDEX, CF_RECEIPTS, CF_STATE};
+pub use rocks_db::{
+    RocksCompactionStyle, RocksDbConfig, RocksDbStore, RocksDbStores,
+    CF_CHAIN, CF_INDEX, CF_RECEIPTS, CF_STATE,
+};

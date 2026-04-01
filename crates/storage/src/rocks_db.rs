@@ -15,9 +15,9 @@
 //! # Usage
 //!
 //! ```ignore
-//! use shell_storage::RocksDbStore;
+//! use shell_storage::{RocksDbStore, RocksDbConfig};
 //!
-//! let stores = RocksDbStore::open_all("/tmp/shell-chain-db")?;
+//! let stores = RocksDbStore::open_all("/tmp/shell-chain-db", None)?;
 //! let state_store = &stores.state;
 //! let chain_store = &stores.chain;
 //! ```
@@ -26,8 +26,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use rocksdb::{
-    AsColumnFamilyRef, BoundColumnFamily, ColumnFamilyDescriptor, DBWithThreadMode,
-    MultiThreaded, Options, WriteBatch as RocksWriteBatch,
+    BlockBasedOptions, BoundColumnFamily, Cache, ColumnFamilyDescriptor,
+    DBCompactionStyle, DBWithThreadMode, MultiThreaded, Options, WriteBatch as RocksWriteBatch,
 };
 
 use crate::{KvStore, StorageError, WriteBatch, WriteBatchOp};
@@ -42,6 +42,55 @@ pub const CF_INDEX: &str = "index";
 const ALL_CFS: &[&str] = &[CF_STATE, CF_CHAIN, CF_RECEIPTS, CF_INDEX];
 
 type RocksDb = DBWithThreadMode<MultiThreaded>;
+
+/// Tuning configuration for the RocksDB engine.
+///
+/// Pass to [`RocksDbStore::open_all`] to override defaults. All fields have
+/// sensible defaults via [`RocksDbConfig::default()`] that are suitable for
+/// development and light workloads. For production nodes, tune based on
+/// available RAM and disk characteristics.
+///
+/// # Example
+///
+/// ```ignore
+/// let cfg = RocksDbConfig {
+///     block_cache_mb: 256,
+///     write_buffer_mb: 128,
+///     ..Default::default()
+/// };
+/// let stores = RocksDbStore::open_all("/data/shell-chain", Some(cfg))?;
+/// ```
+#[derive(Debug, Clone)]
+pub struct RocksDbConfig {
+    /// LRU block cache size in megabytes. Shared across all column families.
+    /// Higher values reduce disk reads for hot data.
+    pub block_cache_mb: usize,
+    /// Write buffer (memtable) size per column family in megabytes.
+    pub write_buffer_mb: usize,
+    /// Maximum number of write buffers per column family before stalling.
+    pub max_write_buffers: i32,
+    /// RocksDB compaction style. `Level` is best for most blockchain workloads.
+    pub compaction_style: RocksCompactionStyle,
+}
+
+/// Compaction strategy selection (mirrors `rocksdb::DBCompactionStyle`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RocksCompactionStyle {
+    Level,
+    Universal,
+    Fifo,
+}
+
+impl Default for RocksDbConfig {
+    fn default() -> Self {
+        Self {
+            block_cache_mb: 128,
+            write_buffer_mb: 64,
+            max_write_buffers: 3,
+            compaction_style: RocksCompactionStyle::Level,
+        }
+    }
+}
 
 /// RocksDB-backed KvStore targeting a single column family.
 ///
@@ -67,17 +116,41 @@ pub struct RocksDbStores {
 impl RocksDbStore {
     /// Open a RocksDB database at the given path with all shell-chain column families.
     ///
+    /// Pass `None` for config to use [`RocksDbConfig::default()`].
     /// Creates the database and column families if they don't exist.
     /// Returns a [`RocksDbStores`] struct with one `RocksDbStore` per column family.
-    pub fn open_all<P: AsRef<Path>>(path: P) -> Result<RocksDbStores, StorageError> {
+    pub fn open_all<P: AsRef<Path>>(
+        path: P,
+        config: Option<RocksDbConfig>,
+    ) -> Result<RocksDbStores, StorageError> {
+        let cfg = config.unwrap_or_default();
+
+        // Shared block cache across all CFs
+        let cache = Cache::new_lru_cache(cfg.block_cache_mb * 1024 * 1024);
+        let mut table_opts = BlockBasedOptions::default();
+        table_opts.set_block_cache(&cache);
+
         let mut db_opts = Options::default();
         db_opts.create_if_missing(true);
         db_opts.create_missing_column_families(true);
 
-        let cf_opts = Options::default();
+        // Build per-CF options with tuning parameters
+        let make_cf_opts = || {
+            let mut opts = Options::default();
+            opts.set_write_buffer_size(cfg.write_buffer_mb * 1024 * 1024);
+            opts.set_max_write_buffer_number(cfg.max_write_buffers);
+            opts.set_compaction_style(match cfg.compaction_style {
+                RocksCompactionStyle::Level => DBCompactionStyle::Level,
+                RocksCompactionStyle::Universal => DBCompactionStyle::Universal,
+                RocksCompactionStyle::Fifo => DBCompactionStyle::Fifo,
+            });
+            opts.set_block_based_table_factory(&table_opts);
+            opts
+        };
+
         let cf_descriptors: Vec<ColumnFamilyDescriptor> = ALL_CFS
             .iter()
-            .map(|name| ColumnFamilyDescriptor::new(*name, cf_opts.clone()))
+            .map(|name| ColumnFamilyDescriptor::new(*name, make_cf_opts()))
             .collect();
 
         let db = RocksDb::open_cf_descriptors(&db_opts, path, cf_descriptors)
@@ -166,7 +239,7 @@ mod tests {
 
     fn open_temp() -> (tempfile::TempDir, RocksDbStores) {
         let dir = tempfile::tempdir().unwrap();
-        let stores = RocksDbStore::open_all(dir.path()).unwrap();
+        let stores = RocksDbStore::open_all(dir.path(), None).unwrap();
         (dir, stores)
     }
 
@@ -246,14 +319,14 @@ mod tests {
 
         // Open, write, close
         {
-            let stores = RocksDbStore::open_all(dir.path()).unwrap();
+            let stores = RocksDbStore::open_all(dir.path(), None).unwrap();
             stores.state.put(b"persist", b"value").unwrap();
             stores.chain.put(b"block", b"data").unwrap();
         }
 
         // Reopen and verify
         {
-            let stores = RocksDbStore::open_all(dir.path()).unwrap();
+            let stores = RocksDbStore::open_all(dir.path(), None).unwrap();
             assert_eq!(stores.state.get(b"persist").unwrap(), Some(b"value".to_vec()));
             assert_eq!(stores.chain.get(b"block").unwrap(), Some(b"data".to_vec()));
         }
@@ -275,5 +348,19 @@ mod tests {
         let (_dir, stores) = open_temp();
         let batch = WriteBatch::new();
         stores.state.write_batch(batch).unwrap();
+    }
+
+    #[test]
+    fn custom_config_opens_successfully() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = RocksDbConfig {
+            block_cache_mb: 16,
+            write_buffer_mb: 8,
+            max_write_buffers: 2,
+            compaction_style: RocksCompactionStyle::Universal,
+        };
+        let stores = RocksDbStore::open_all(dir.path(), Some(cfg)).unwrap();
+        stores.state.put(b"k", b"v").unwrap();
+        assert_eq!(stores.state.get(b"k").unwrap(), Some(b"v".to_vec()));
     }
 }
