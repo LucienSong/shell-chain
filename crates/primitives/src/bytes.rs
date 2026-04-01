@@ -22,6 +22,11 @@ impl Bytes {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
+
+    /// Construct from a byte slice (infallible, variable-length).
+    pub fn try_from_slice(slice: &[u8]) -> Self {
+        Self(alloy_primitives::Bytes::copy_from_slice(slice))
+    }
 }
 
 impl fmt::Debug for Bytes {

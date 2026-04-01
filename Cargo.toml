@@ -4,6 +4,7 @@ members = [
     "crates/primitives",
     "crates/crypto",
     "crates/core",
+    "crates/storage",
 ]
 
 [workspace.package]
@@ -26,6 +27,7 @@ thiserror = "2"
 # --- crypto ---
 shell-primitives = { path = "crates/primitives" }
 shell-crypto = { path = "crates/crypto" }
+shell-storage = { path = "crates/storage" }
 pqcrypto-dilithium = "0.5"
 pqcrypto-traits = "0.3"
 zeroize = { version = "1", features = ["derive"] }

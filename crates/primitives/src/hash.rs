@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use sha3::{Digest, Keccak256};
 use core::fmt;
 
+use crate::PrimitivesError;
+
 /// 32-byte hash used throughout Shell-Chain.
 ///
 /// Wraps [`B256`] for Ethereum-compatible semantics while keeping the door
@@ -20,6 +22,17 @@ impl ShellHash {
 
     pub fn as_bytes(&self) -> &[u8; 32] {
         self.0.as_ref()
+    }
+
+    /// Try to construct from a byte slice, returning an error if length ≠ 32.
+    pub fn try_from_slice(slice: &[u8]) -> Result<Self, PrimitivesError> {
+        if slice.len() != 32 {
+            return Err(PrimitivesError::InvalidSliceLength {
+                expected: 32,
+                got: slice.len(),
+            });
+        }
+        Ok(Self(B256::from_slice(slice)))
     }
 }
 
@@ -144,5 +157,19 @@ mod tests {
         h.encode(&mut buf);
         let h2 = ShellHash::decode(&mut buf.as_slice()).unwrap();
         assert_eq!(h, h2);
+    }
+
+    #[test]
+    fn try_from_slice_valid() {
+        let data = [0xABu8; 32];
+        let h = ShellHash::try_from_slice(&data).unwrap();
+        assert_eq!(h.as_bytes(), &data);
+    }
+
+    #[test]
+    fn try_from_slice_wrong_length() {
+        assert!(ShellHash::try_from_slice(&[0u8; 31]).is_err());
+        assert!(ShellHash::try_from_slice(&[0u8; 33]).is_err());
+        assert!(ShellHash::try_from_slice(&[]).is_err());
     }
 }

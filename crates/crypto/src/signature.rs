@@ -4,20 +4,26 @@ use alloy_rlp::Encodable;
 /// Identifies which PQ signature algorithm was used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SignatureType {
+    /// CRYSTALS-Dilithium3 (pre-FIPS, `pqcrypto-dilithium 0.5`).
+    /// Based on the Round 3 submission, NOT the final FIPS 204 ML-DSA-65.
     Dilithium3,
-    // Future: SphincsPlus, MlDsa65, Custom(u8)
+    /// FIPS 204 ML-DSA-65. Reserved for future migration when a compliant
+    /// Rust implementation is available and verified.
+    MlDsa65,
 }
 
 impl SignatureType {
     pub fn as_u8(&self) -> u8 {
         match self {
             SignatureType::Dilithium3 => 0,
+            SignatureType::MlDsa65 => 1,
         }
     }
 
     pub fn from_u8(v: u8) -> Option<Self> {
         match v {
             0 => Some(SignatureType::Dilithium3),
+            1 => Some(SignatureType::MlDsa65),
             _ => None,
         }
     }

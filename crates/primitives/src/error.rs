@@ -7,4 +7,7 @@ pub enum PrimitivesError {
 
     #[error("invalid length: expected {expected}, got {got}")]
     InvalidLength { expected: usize, got: usize },
+
+    #[error("invalid slice length: expected {expected}, got {got}")]
+    InvalidSliceLength { expected: usize, got: usize },
 }

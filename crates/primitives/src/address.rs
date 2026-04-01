@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use core::fmt;
 
-use crate::ShellHash;
+use crate::{PrimitivesError, ShellHash};
 
 /// 20-byte address, identical layout to Ethereum addresses.
 ///
@@ -27,6 +27,17 @@ impl Address {
 
     pub fn as_bytes(&self) -> &[u8; 20] {
         self.0.as_ref()
+    }
+
+    /// Try to construct from a byte slice, returning an error if length ≠ 20.
+    pub fn try_from_slice(slice: &[u8]) -> Result<Self, PrimitivesError> {
+        if slice.len() != 20 {
+            return Err(PrimitivesError::InvalidSliceLength {
+                expected: 20,
+                got: slice.len(),
+            });
+        }
+        Ok(Self(alloy_primitives::Address::from_slice(slice)))
     }
 }
 
@@ -135,5 +146,19 @@ mod tests {
         addr.encode(&mut buf);
         let addr2 = Address::decode(&mut buf.as_slice()).unwrap();
         assert_eq!(addr, addr2);
+    }
+
+    #[test]
+    fn try_from_slice_valid() {
+        let data = [0x42u8; 20];
+        let addr = Address::try_from_slice(&data).unwrap();
+        assert_eq!(addr.as_bytes(), &data);
+    }
+
+    #[test]
+    fn try_from_slice_wrong_length() {
+        assert!(Address::try_from_slice(&[0u8; 19]).is_err());
+        assert!(Address::try_from_slice(&[0u8; 21]).is_err());
+        assert!(Address::try_from_slice(&[]).is_err());
     }
 }
