@@ -8,5 +8,7 @@
 //! - (future) PQ precompile provider
 
 mod state_db;
+mod tx_validation;
 
 pub use state_db::{ShellStateDb, StateDbError};
+pub use tx_validation::{compute_intrinsic_gas, validate_tx, TxValidationError};

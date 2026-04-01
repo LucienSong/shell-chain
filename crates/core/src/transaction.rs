@@ -81,6 +81,11 @@ impl Transaction {
 /// PQ signatures (unlike ECDSA) do not allow public key recovery from the
 /// signature alone. The sender must explicitly declare their address so
 /// nodes can look up the account and verify the signature.
+///
+/// The optional `sender_pubkey` field implements the **Hybrid registration**
+/// model: the first transaction from a new address carries the full PQ
+/// public key (~1952 bytes for Dilithium3). Subsequent transactions omit it,
+/// and the pubkey is read from the on-chain registry.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SignedTransaction {
     /// The sender's address (derived from their PQ public key).
@@ -88,6 +93,10 @@ pub struct SignedTransaction {
     pub from: Address,
     pub tx: Transaction,
     pub signature: PQSignature,
+    /// Optional full PQ public key for first-time registration.
+    /// If present, the node registers it on-chain after verification.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_pubkey: Option<Vec<u8>>,
     /// Lazily cached hash — computed from the unsigned tx on first access.
     #[serde(skip)]
     tx_hash: OnceLock<ShellHash>,
@@ -103,6 +112,7 @@ impl Clone for SignedTransaction {
             from: self.from,
             tx: self.tx.clone(),
             signature: self.signature.clone(),
+            sender_pubkey: self.sender_pubkey.clone(),
             tx_hash: lock,
         }
     }
@@ -113,6 +123,7 @@ impl PartialEq for SignedTransaction {
         self.from == other.from
             && self.tx == other.tx
             && self.signature == other.signature
+            && self.sender_pubkey == other.sender_pubkey
     }
 }
 
@@ -124,6 +135,24 @@ impl SignedTransaction {
             from,
             tx,
             signature,
+            sender_pubkey: None,
+            tx_hash: OnceLock::new(),
+        }
+    }
+
+    /// Create a signed transaction with an attached public key for
+    /// first-time registration on the PQ pubkey registry.
+    pub fn with_pubkey(
+        from: Address,
+        tx: Transaction,
+        signature: PQSignature,
+        pubkey: Vec<u8>,
+    ) -> Self {
+        Self {
+            from,
+            tx,
+            signature,
+            sender_pubkey: Some(pubkey),
             tx_hash: OnceLock::new(),
         }
     }
@@ -151,10 +180,16 @@ impl Encodable for SignedTransaction {
         };
         header.encode(out);
         self.from.encode(out);
-        // Encode inner tx as nested RLP
         self.tx.encode(out);
-        // Encode signature as nested RLP
         self.signature.encode(out);
+        // Encode sender_pubkey: Some(bytes) → bytes, None → empty bytes
+        match &self.sender_pubkey {
+            Some(pk) => pk.as_slice().encode(out),
+            None => {
+                let empty: &[u8] = &[];
+                empty.encode(out);
+            }
+        }
     }
 
     fn length(&self) -> usize {
@@ -165,7 +200,11 @@ impl Encodable for SignedTransaction {
 
 impl SignedTransaction {
     fn fields_len(&self) -> usize {
-        self.from.length() + self.tx.length() + self.signature.length()
+        let pk_len = match &self.sender_pubkey {
+            Some(pk) => pk.as_slice().length(),
+            None => 1, // RLP encoding of empty bytes
+        };
+        self.from.length() + self.tx.length() + self.signature.length() + pk_len
     }
 }
 
