@@ -7,7 +7,11 @@ pub enum WriteBatchOp {
     Delete { key: Vec<u8> },
 }
 
-/// Atomic batch of write operations.
+/// Batch of write operations.
+///
+/// Atomicity guarantees depend on the backend implementation:
+/// - `RocksDbStore`: fully atomic (all-or-nothing via RocksDB WriteBatch)
+/// - `MemoryDb`: best-effort under write lock; not rollback-safe on panic
 #[derive(Debug, Clone, Default)]
 pub struct WriteBatch {
     ops: Vec<WriteBatchOp>,

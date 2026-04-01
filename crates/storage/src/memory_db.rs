@@ -4,6 +4,9 @@ use std::sync::RwLock;
 use crate::{KvStore, StorageError, WriteBatch, WriteBatchOp};
 
 /// In-memory KV store for testing and lightweight use cases.
+///
+/// Write batches are applied under a single write lock but are **not**
+/// rollback-safe — if a panic occurs mid-batch, partial writes persist.
 #[derive(Debug, Default)]
 pub struct MemoryDb {
     data: RwLock<HashMap<Vec<u8>, Vec<u8>>>,
@@ -16,12 +19,16 @@ impl MemoryDb {
         }
     }
 
-    pub fn len(&self) -> usize {
-        self.data.read().unwrap().len()
+    pub fn len(&self) -> Result<usize, StorageError> {
+        let data = self
+            .data
+            .read()
+            .map_err(|e| StorageError::Database(e.to_string()))?;
+        Ok(data.len())
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.data.read().unwrap().is_empty()
+    pub fn is_empty(&self) -> Result<bool, StorageError> {
+        Ok(self.len()? == 0)
     }
 }
 
@@ -144,7 +151,7 @@ mod tests {
         let batch = WriteBatch::new();
         assert!(batch.is_empty());
         db.write_batch(batch).unwrap();
-        assert!(db.is_empty());
+        assert!(db.is_empty().unwrap());
     }
 
     #[test]
@@ -158,11 +165,11 @@ mod tests {
     #[test]
     fn len_and_is_empty() {
         let db = MemoryDb::new();
-        assert!(db.is_empty());
-        assert_eq!(db.len(), 0);
+        assert!(db.is_empty().unwrap());
+        assert_eq!(db.len().unwrap(), 0);
         db.put(b"k1", b"v1").unwrap();
         db.put(b"k2", b"v2").unwrap();
-        assert_eq!(db.len(), 2);
-        assert!(!db.is_empty());
+        assert_eq!(db.len().unwrap(), 2);
+        assert!(!db.is_empty().unwrap());
     }
 }

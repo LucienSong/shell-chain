@@ -24,7 +24,7 @@ impl Bytes {
     }
 
     /// Construct from a byte slice (infallible, variable-length).
-    pub fn try_from_slice(slice: &[u8]) -> Self {
+    pub fn copy_from_slice(slice: &[u8]) -> Self {
         Self(alloy_primitives::Bytes::copy_from_slice(slice))
     }
 }

@@ -73,10 +73,14 @@ impl alloy_rlp::Decodable for PQSignature {
         if !header.list {
             return Err(alloy_rlp::Error::UnexpectedString);
         }
-        let sig_type_u8 = u8::decode(buf)?;
+        // Restrict decoding to the declared payload length to prevent
+        // malicious RLP from reading beyond the list boundary.
+        let mut payload = &buf[..header.payload_length];
+        let sig_type_u8 = u8::decode(&mut payload)?;
         let sig_type = SignatureType::from_u8(sig_type_u8)
             .ok_or(alloy_rlp::Error::Custom("unknown signature type"))?;
-        let data = alloy_rlp::Header::decode_bytes(buf, false)?.to_vec();
+        let data = alloy_rlp::Header::decode_bytes(&mut payload, false)?.to_vec();
+        *buf = &buf[header.payload_length..];
         Ok(Self { sig_type, data })
     }
 }
