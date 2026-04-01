@@ -130,13 +130,13 @@ impl<S: KvStore + 'static> Database for ShellStateDb<S> {
 
 /// Convert ShellHash ([u8; 32] wrapper) to alloy B256.
 #[inline]
-fn shell_hash_to_b256(h: &ShellHash) -> B256 {
+pub(crate) fn shell_hash_to_b256(h: &ShellHash) -> B256 {
     B256::from_slice(h.as_bytes())
 }
 
 /// Convert alloy B256 to ShellHash.
 #[inline]
-fn b256_to_shell_hash(b: &B256) -> ShellHash {
+pub(crate) fn b256_to_shell_hash(b: &B256) -> ShellHash {
     ShellHash::from(*b)
 }
 

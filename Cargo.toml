@@ -43,4 +43,4 @@ async-trait = "0.1"
 eth_trie = "0.4"
 
 # --- evm ---
-revm = { version = "36", default-features = false, features = ["std"] }
+revm = { version = "36", default-features = false, features = ["std", "optional_no_base_fee"] }
