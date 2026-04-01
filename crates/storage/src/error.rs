@@ -13,4 +13,10 @@ pub enum StorageError {
 
     #[error("trie error: {0}")]
     Trie(String),
+
+    #[error("codec error: {0}")]
+    Codec(String),
+
+    #[error("state error: {0}")]
+    State(String),
 }

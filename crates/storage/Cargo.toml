@@ -9,3 +9,6 @@ repository.workspace = true
 thiserror.workspace = true
 eth_trie.workspace = true
 ethereum-types = "0.14"
+alloy-rlp.workspace = true
+shell-primitives = { path = "../primitives" }
+shell-core = { path = "../core" }

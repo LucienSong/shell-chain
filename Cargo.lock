@@ -1689,8 +1689,11 @@ dependencies = [
 name = "shell-storage"
 version = "0.1.0"
 dependencies = [
+ "alloy-rlp",
  "eth_trie",
  "ethereum-types",
+ "shell-core",
+ "shell-primitives",
  "thiserror",
 ]
 

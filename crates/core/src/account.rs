@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use shell_primitives::{ShellHash, U256};
-use alloy_rlp::Encodable;
+use alloy_rlp::{Decodable, Encodable};
 
 /// Account with native Account Abstraction support.
 ///
@@ -95,6 +95,53 @@ impl Account {
     }
 }
 
+fn decode_optional_hash(buf: &mut &[u8]) -> alloy_rlp::Result<Option<ShellHash>> {
+    if buf.is_empty() {
+        return Err(alloy_rlp::Error::InputTooShort);
+    }
+    // 0x80 = RLP encoding of empty bytes → None
+    if buf[0] == 0x80 {
+        *buf = &buf[1..];
+        Ok(None)
+    } else {
+        Ok(Some(ShellHash::decode(buf)?))
+    }
+}
+
+impl Decodable for Account {
+    fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
+        let header = alloy_rlp::Header::decode(buf)?;
+        if !header.list {
+            return Err(alloy_rlp::Error::UnexpectedString);
+        }
+        let remaining = buf.len();
+
+        let pq_pubkey_hash = ShellHash::decode(buf)?;
+        let nonce = u64::decode(buf)?;
+        let balance = U256::decode(buf)?;
+        let validation_code_hash = decode_optional_hash(buf)?;
+        let code_hash = decode_optional_hash(buf)?;
+        let storage_root = ShellHash::decode(buf)?;
+
+        let consumed = remaining - buf.len();
+        if consumed != header.payload_length {
+            return Err(alloy_rlp::Error::ListLengthMismatch {
+                expected: header.payload_length,
+                got: consumed,
+            });
+        }
+
+        Ok(Self {
+            pq_pubkey_hash,
+            nonce,
+            balance,
+            validation_code_hash,
+            code_hash,
+            storage_root,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,11 +170,9 @@ mod tests {
         let mut buf = Vec::new();
         acct.encode(&mut buf);
         assert!(!buf.is_empty());
-        // Hash is deterministic
-        let h1 = keccak256(&buf);
-        let mut buf2 = Vec::new();
-        acct.encode(&mut buf2);
-        assert_eq!(h1, keccak256(&buf2));
+
+        let decoded = Account::decode(&mut &buf[..]).unwrap();
+        assert_eq!(acct, decoded);
     }
 
     #[test]
@@ -139,10 +184,7 @@ mod tests {
         let mut buf = Vec::new();
         acct.encode(&mut buf);
 
-        // Should be longer than a plain EOA (validation + code hashes present)
-        let plain = Account::new_eoa(keccak256(b"aa-test"), U256::from(0));
-        let mut buf_plain = Vec::new();
-        plain.encode(&mut buf_plain);
-        assert!(buf.len() > buf_plain.len());
+        let decoded = Account::decode(&mut &buf[..]).unwrap();
+        assert_eq!(acct, decoded);
     }
 }
