@@ -1,0 +1,15 @@
+[package]
+name = "shell-evm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+shell-primitives.workspace = true
+shell-crypto.workspace = true
+shell-core.workspace = true
+shell-storage = { path = "../storage" }
+revm.workspace = true
+alloy-primitives.workspace = true
+thiserror.workspace = true
