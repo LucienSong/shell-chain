@@ -5,6 +5,7 @@ members = [
     "crates/crypto",
     "crates/core",
     "crates/storage",
+    "crates/consensus",
 ]
 
 [workspace.package]
@@ -27,7 +28,14 @@ thiserror = "2"
 # --- crypto ---
 shell-primitives = { path = "crates/primitives" }
 shell-crypto = { path = "crates/crypto" }
+shell-core = { path = "crates/core" }
 shell-storage = { path = "crates/storage" }
 pqcrypto-dilithium = "0.5"
 pqcrypto-traits = "0.3"
 zeroize = { version = "1", features = ["derive"] }
+
+# --- consensus ---
+async-trait = "0.1"
+
+# --- storage (trie) ---
+eth_trie = "0.4"
