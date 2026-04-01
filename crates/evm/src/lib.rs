@@ -4,8 +4,9 @@
 //! with revm, providing:
 //!
 //! - [`ShellStateDb`]: implements `revm::Database` over WorldState + ChainStore
-//! - (future) [`ShellEvm`]: transaction executor
-//! - (future) PQ precompile provider
+//! - [`ShellEvm`]: transaction executor (Shanghai spec)
+//! - [`ShellPrecompiles`]: PQ precompile provider (ecrecover disabled, PQ_DILITHIUM_VERIFY at 0x0100)
+//! - [`validate_tx`]: PQ signature verification + hybrid pubkey registration
 
 mod executor;
 mod precompiles;
