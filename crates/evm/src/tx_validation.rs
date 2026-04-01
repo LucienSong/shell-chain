@@ -127,8 +127,18 @@ pub fn validate_tx<S: KvStore + 'static, V: Verifier>(
     }
 
     // 8. Balance check: sender must afford gas_limit * max_fee_per_gas + value
-    let max_gas_cost = U256::from(tx.gas_limit) * U256::from(tx.max_fee_per_gas);
-    let needed = max_gas_cost + tx.value;
+    //    Use checked arithmetic to prevent overflow panic (debug) / wrapping (release).
+    let max_gas_cost = U256::from(tx.gas_limit).checked_mul(U256::from(tx.max_fee_per_gas));
+    let needed = match max_gas_cost.and_then(|c| c.checked_add(tx.value)) {
+        Some(n) => n,
+        None => {
+            // Overflow means the required amount exceeds U256::MAX — always insufficient.
+            return Err(TxValidationError::InsufficientBalance {
+                needed: U256::MAX,
+                have: world_state.get_balance(&signed_tx.from)?,
+            });
+        }
+    };
     let balance = world_state.get_balance(&signed_tx.from)?;
     if balance < needed {
         return Err(TxValidationError::InsufficientBalance {
@@ -425,5 +435,35 @@ mod tests {
         let verifier = DilithiumVerifier;
         let result = validate_tx(&signed, &ws, &cs, &verifier, test_chain_id());
         assert!(matches!(result, Err(TxValidationError::InsufficientBalance { .. })));
+    }
+
+    #[test]
+    fn validate_overflow_gas_cost_does_not_panic() {
+        let signer = make_signer();
+        let (mut ws, cs) = setup_stores();
+        let from = Address::from_public_key(signer.public_key());
+        fund_account(&mut ws, &from, U256::MAX);
+
+        // Craft a tx where gas_limit * max_fee_per_gas + value overflows U256
+        let tx = Transaction {
+            chain_id: test_chain_id(),
+            nonce: 0,
+            to: Some(Address::from([0x01; 20])),
+            value: U256::MAX, // near-max value
+            data: Bytes::new(),
+            gas_limit: u64::MAX,
+            max_fee_per_gas: u64::MAX,
+            max_priority_fee_per_gas: 0,
+        };
+        let signed = sign_tx(&signer, tx, true);
+
+        let verifier = DilithiumVerifier;
+        // Must not panic — should return InsufficientBalance with needed = U256::MAX
+        let result = validate_tx(&signed, &ws, &cs, &verifier, test_chain_id());
+        assert!(
+            matches!(result, Err(TxValidationError::InsufficientBalance { .. })),
+            "overflow should be caught, got: {:?}",
+            result
+        );
     }
 }
