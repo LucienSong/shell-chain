@@ -44,3 +44,6 @@ eth_trie = "0.4"
 
 # --- evm ---
 revm = { version = "36", default-features = false, features = ["std", "optional_no_base_fee"] }
+
+# --- storage (rocksdb) ---
+rocksdb = { version = "0.22", default-features = false, features = ["snappy"] }
