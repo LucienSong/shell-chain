@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use shell_core::{Block, BlockHeader, TransactionReceipt};
-use shell_primitives::ShellHash;
+use shell_primitives::{Address, ShellHash};
 
 use crate::{KvStore, StorageError};
 
@@ -23,6 +23,8 @@ mod prefix {
     pub const TX_INDEX: &[u8] = b"t/";
     pub const HEAD_BLOCK: &[u8] = b"HEAD";
     pub const CHAIN_CONFIG: &[u8] = b"CFG";
+    pub const CODE_BY_HASH: &[u8] = b"c/";
+    pub const PUBKEY_BY_ADDR: &[u8] = b"pk/";
 }
 
 /// Block/receipt/transaction-index storage.
@@ -58,6 +60,14 @@ impl<S: KvStore> ChainStore<S> {
 
     fn tx_index_key(tx_hash: &ShellHash) -> Vec<u8> {
         [prefix::TX_INDEX, tx_hash.as_bytes()].concat()
+    }
+
+    fn code_key(code_hash: &ShellHash) -> Vec<u8> {
+        [prefix::CODE_BY_HASH, code_hash.as_bytes()].concat()
+    }
+
+    fn pubkey_key(address: &Address) -> Vec<u8> {
+        [prefix::PUBKEY_BY_ADDR, address.as_ref()].concat()
     }
 
     // ── Block operations ───────────────────────────────────────
@@ -229,6 +239,38 @@ impl<S: KvStore> ChainStore<S> {
             }
             None => Ok(None),
         }
+    }
+
+    // ── Contract code storage ──────────────────────────────────
+
+    /// Store contract bytecode keyed by its hash.
+    ///
+    /// The caller is responsible for computing `keccak256(code)` and passing
+    /// it as `code_hash`. The code can later be retrieved by hash via
+    /// [`get_code`].
+    pub fn put_code(&self, code_hash: &ShellHash, code: &[u8]) -> Result<(), StorageError> {
+        self.store.put(&Self::code_key(code_hash), code)
+    }
+
+    /// Retrieve contract bytecode by its hash.
+    pub fn get_code(&self, code_hash: &ShellHash) -> Result<Option<Vec<u8>>, StorageError> {
+        self.store.get(&Self::code_key(code_hash))
+    }
+
+    // ── PQ public key registry ─────────────────────────────────
+
+    /// Register a PQ public key for an address.
+    ///
+    /// Called on the first transaction from this address (the Hybrid
+    /// registration model). Subsequent transactions skip pubkey transfer
+    /// and read from this registry.
+    pub fn put_pubkey(&self, address: &Address, pubkey: &[u8]) -> Result<(), StorageError> {
+        self.store.put(&Self::pubkey_key(address), pubkey)
+    }
+
+    /// Retrieve the registered PQ public key for an address.
+    pub fn get_pubkey(&self, address: &Address) -> Result<Option<Vec<u8>>, StorageError> {
+        self.store.get(&Self::pubkey_key(address))
     }
 }
 
@@ -428,5 +470,47 @@ mod tests {
         let loaded = cs.get_chain_config().unwrap().unwrap();
         assert_eq!(loaded.chain_id, 1337);
         assert_eq!(loaded.genesis_hash, ShellHash::ZERO);
+    }
+
+    #[test]
+    fn code_storage_roundtrip() {
+        let store = Arc::new(MemoryDb::new());
+        let cs = ChainStore::new(store);
+        let code = b"\x60\x80\x60\x40\x52"; // PUSH1 0x80 PUSH1 0x40 MSTORE
+        let code_hash = shell_primitives::keccak256(code);
+
+        assert!(cs.get_code(&code_hash).unwrap().is_none());
+
+        cs.put_code(&code_hash, code).unwrap();
+        let loaded = cs.get_code(&code_hash).unwrap().unwrap();
+        assert_eq!(loaded, code);
+    }
+
+    #[test]
+    fn pubkey_registry_roundtrip() {
+        let store = Arc::new(MemoryDb::new());
+        let cs = ChainStore::new(store);
+        let addr = Address::ZERO;
+        let fake_pubkey = vec![0xAA; 1952]; // Dilithium3 pubkey size
+
+        assert!(cs.get_pubkey(&addr).unwrap().is_none());
+
+        cs.put_pubkey(&addr, &fake_pubkey).unwrap();
+        let loaded = cs.get_pubkey(&addr).unwrap().unwrap();
+        assert_eq!(loaded.len(), 1952);
+        assert_eq!(loaded, fake_pubkey);
+    }
+
+    #[test]
+    fn pubkey_overwrite() {
+        let store = Arc::new(MemoryDb::new());
+        let cs = ChainStore::new(store);
+        let addr = Address::ZERO;
+
+        cs.put_pubkey(&addr, &[1; 100]).unwrap();
+        cs.put_pubkey(&addr, &[2; 200]).unwrap();
+
+        let loaded = cs.get_pubkey(&addr).unwrap().unwrap();
+        assert_eq!(loaded, vec![2; 200]);
     }
 }
