@@ -8,9 +8,11 @@
 //! - (future) PQ precompile provider
 
 mod executor;
+mod precompiles;
 mod state_db;
 mod tx_validation;
 
 pub use executor::{ExecutorError, ShellEvm, TxExecutionResult};
+pub use precompiles::{ShellPrecompiles, PQ_DILITHIUM_VERIFY_GAS};
 pub use state_db::{ShellStateDb, StateDbError};
 pub use tx_validation::{compute_intrinsic_gas, validate_tx, TxValidationError};

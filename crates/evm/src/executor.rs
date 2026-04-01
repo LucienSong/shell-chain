@@ -6,8 +6,9 @@
 
 use alloy_primitives::{Bytes as AlBytes, B256, U256};
 use revm::context::result::ExecutionResult;
-use revm::context::{BlockEnv, CfgEnv, Context, TxEnv};
-use revm::handler::{ExecuteEvm, MainBuilder, MainnetContext};
+use revm::context::{BlockEnv, CfgEnv, Context, Evm, TxEnv};
+use revm::handler::instructions::EthInstructions;
+use revm::handler::{ExecuteEvm, MainnetContext};
 use revm::primitives::hardfork::SpecId;
 use revm::primitives::TxKind;
 use revm::state::EvmState;
@@ -15,6 +16,7 @@ use shell_core::{BlockHeader, TransactionReceipt};
 use shell_primitives::{Address as ShellAddress, ShellHash};
 use shell_storage::{KvStore, StorageError};
 
+use crate::precompiles::ShellPrecompiles;
 use crate::state_db::{ShellStateDb, StateDbError};
 
 /// Errors returned during EVM execution.
@@ -116,7 +118,12 @@ impl<S: KvStore + 'static> ShellEvm<S> {
                     cfg.disable_base_fee = true;
                 });
 
-        let mut evm = ctx.build_mainnet();
+        let spec = SpecId::SHANGHAI;
+        let mut evm = Evm::new(
+            ctx,
+            EthInstructions::new_mainnet_with_spec(spec),
+            ShellPrecompiles::new(spec),
+        );
 
         // Execute
         let result_and_state = evm
