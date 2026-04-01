@@ -1672,6 +1672,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "shell-genesis"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "serde",
+ "serde_json",
+ "shell-consensus",
+ "shell-core",
+ "shell-primitives",
+ "shell-storage",
+ "thiserror",
+]
+
+[[package]]
 name = "shell-primitives"
 version = "0.1.0"
 dependencies = [
@@ -1692,6 +1706,7 @@ dependencies = [
  "alloy-rlp",
  "eth_trie",
  "ethereum-types",
+ "serde_json",
  "shell-core",
  "shell-primitives",
  "thiserror",

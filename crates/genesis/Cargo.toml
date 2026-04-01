@@ -1,0 +1,16 @@
+[package]
+name = "shell-genesis"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+shell-primitives.workspace = true
+shell-core.workspace = true
+shell-consensus = { path = "../consensus" }
+shell-storage = { path = "../storage" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+hex.workspace = true
