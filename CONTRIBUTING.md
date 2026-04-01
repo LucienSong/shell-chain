@@ -1,16 +1,16 @@
 # Contributing to Shell-Chain
 
-感谢你考虑为 Shell-Chain 做贡献！以下是参与指南。
+Thank you for considering contributing to Shell-Chain! Below are the guidelines for participation.
 
-## 开发环境
+## Development Environment
 
-### 前置要求
+### Prerequisites
 
-- Rust 1.75+（`rustup update stable`）
-- C 编译器（pqcrypto 原生绑定需要）
+- Rust 1.75+ (`rustup update stable`)
+- C compiler (required for pqcrypto native bindings)
 - Git
 
-### 初始化
+### Initialization
 
 ```bash
 git clone https://github.com/LucienSong/shell-chain.git
@@ -19,21 +19,21 @@ cargo build
 cargo test
 ```
 
-## 开发流程
+## Development Process
 
-我们使用 **Feature-Driven Development (FDD)** 方法论。每个功能以 Feature 为单位组织。
+We use the **Feature-Driven Development (FDD)** methodology. Every feature is organized as a distinct Feature unit.
 
-### 分支策略
+### Branch Strategy
 
-| 分支 | 用途 |
+| Branch | Purpose |
 |------|------|
-| `main` | 稳定版本，受保护 |
-| `feat/<feature-id>` | Feature 开发分支 |
-| `fix/<issue-id>` | Bug 修复分支 |
+| `main` | Stable release branch, protected |
+| `feat/<feature-id>` | Feature development branch |
+| `fix/<issue-id>` | Bug fix branch |
 
-### 提交规范
+### Commit Standards
 
-使用 [Conventional Commits](https://www.conventionalcommits.org/)：
+Use [Conventional Commits](https://www.conventionalcommits.org/):
 
 ```
 feat(primitives): add BLAKE3 hash function
@@ -43,44 +43,44 @@ test(core): add block RLP roundtrip test
 refactor(core): split Signer into Signer + Verifier
 ```
 
-格式：`<type>(<scope>): <description>`
+Format: `<type>(<scope>): <description>`
 
 **Type**: `feat`, `fix`, `docs`, `test`, `refactor`, `chore`, `ci`
-**Scope**: crate 名称或模块（`primitives`, `crypto`, `core`, `storage` 等）
+**Scope**: Crate name or module (`primitives`, `crypto`, `core`, `storage`, etc.)
 
-### Pull Request 流程
+### Pull Request Flow
 
-1. 从 `main` 创建 feature 分支
-2. 实现功能，确保通过所有测试
-3. 提交 PR，填写模板
-4. 等待 Code Review
-5. 合并后删除 feature 分支
+1. Create a feature branch from `main`
+2. Implement the feature and ensure all tests pass
+3. Submit a PR and fill out the template
+4. Wait for Code Review
+5. Delete the feature branch after merging
 
-## 代码规范
+## Code Conventions
 
-### Rust 风格
+### Rust Style
 
-- 遵循 `rustfmt` 默认配置
-- 遵循 `clippy` 建议（`cargo clippy --workspace`）
-- 公共 API 必须有文档注释（`///`）
-- 不在代码中添加多余注释，代码应当自解释
+- Follow default `rustfmt` configurations
+- Adhere to `clippy` suggestions (`cargo clippy --workspace`)
+- Public APIs must have documentation comments (`///`)
+- Avoid redundant comments; code should be self-explanatory
 
-### 测试
+### Testing
 
-- 每个模块包含单元测试（`#[cfg(test)] mod tests`）
-- 集成测试放在 `tests/` 目录
-- 新功能必须有测试覆盖
-- 运行全部测试：`cargo test --workspace`
+- Each module must include unit tests (`#[cfg(test)] mod tests`)
+- Integration tests belong in the `tests/` directory
+- New features must include test coverage
+- Run all tests: `cargo test --workspace`
 
-### 安全相关
+### Security Standards
 
-- 私钥材料必须使用 `zeroize` 保证 drop 时清零
-- 不引入非量子安全的密码学原语（除非明确标记为 deprecated 兼容层）
-- 签名验证代码必须有负面测试（错误签名、错误公钥）
+- Private key material must use `zeroize` to ensure wiping upon drop
+- Do not introduce non-quantum-safe cryptographic primitives (unless explicitly marked as a deprecated compatibility layer)
+- Signature verification code must include negative tests (e.g., invalid signature, mismatched public key)
 
-## 架构概览
+## Architecture Overview
 
-```
+```text
 shell-primitives  ←  shell-crypto  ←  shell-core
        ↑                  ↑               ↑
        └──────────────────┼───────────────┤
@@ -92,17 +92,17 @@ shell-primitives  ←  shell-crypto  ←  shell-core
                         node ← rpc ──────────┘
 ```
 
-详细设计见上游仓库 `shell-dev/plans/harness-design.md`。
+For detailed designs, refer to the upstream repository `shell-dev/plans/harness-design.md`.
 
-## 报告问题
+## Reporting Issues
 
-使用 [GitHub Issues](https://github.com/LucienSong/shell-chain/issues)，请包含：
+Use [GitHub Issues](https://github.com/LucienSong/shell-chain/issues) and include:
 
-- 问题的清晰描述
-- 复现步骤
-- 预期行为 vs 实际行为
-- Rust 版本和操作系统
+- A clear description of the issue
+- Steps to reproduce
+- Expected vs. actual behavior
+- Rust version and operating system
 
 ## License
 
-贡献的代码将以 [MIT License](LICENSE) 发布。
+Contributed code will be released under the [MIT License](LICENSE).
