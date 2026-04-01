@@ -2798,6 +2798,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "shell-mempool"
+version = "0.1.0"
+dependencies = [
+ "parking_lot",
+ "shell-core",
+ "shell-crypto",
+ "shell-primitives",
+ "thiserror",
+]
+
+[[package]]
 name = "shell-primitives"
 version = "0.1.0"
 dependencies = [

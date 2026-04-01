@@ -1,0 +1,13 @@
+[package]
+name = "shell-mempool"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+shell-primitives.workspace = true
+shell-crypto.workspace = true
+shell-core.workspace = true
+thiserror.workspace = true
+parking_lot = "0.12"
