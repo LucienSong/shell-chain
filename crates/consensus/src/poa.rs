@@ -11,14 +11,26 @@ pub struct PoaConfig {
     pub authorities: Vec<Address>,
     /// Minimum seconds between consecutive blocks.
     pub block_time_secs: u64,
+    /// Maximum seconds a block timestamp may be ahead of the current wall-clock.
+    /// Prevents miners from pre-dating blocks to gain proposer slots.
+    pub max_future_secs: u64,
 }
+
+/// Default maximum future timestamp tolerance (15 seconds).
+const DEFAULT_MAX_FUTURE_SECS: u64 = 15;
 
 impl PoaConfig {
     pub fn new(authorities: Vec<Address>, block_time_secs: u64) -> Self {
         Self {
             authorities,
             block_time_secs,
+            max_future_secs: DEFAULT_MAX_FUTURE_SECS,
         }
+    }
+
+    pub fn with_max_future_secs(mut self, secs: u64) -> Self {
+        self.max_future_secs = secs;
+        self
     }
 
     /// Return the expected proposer for a given block number.
@@ -68,7 +80,17 @@ impl PoaEngine {
         &self,
         header: &BlockHeader,
         parent: Option<&BlockHeader>,
+        current_time: u64,
     ) -> Result<(), ConsensusError> {
+        // F-011: Reject blocks with timestamps too far in the future
+        let max_allowed = current_time + self.config.max_future_secs;
+        if header.timestamp > max_allowed {
+            return Err(ConsensusError::InvalidTimestamp(format!(
+                "block {} timestamp {} exceeds current_time {} + max_future {}",
+                header.number, header.timestamp, current_time, self.config.max_future_secs,
+            )));
+        }
+
         if let Some(parent) = parent {
             if header.timestamp < parent.timestamp + self.config.block_time_secs {
                 return Err(ConsensusError::InvalidTimestamp(format!(
@@ -144,6 +166,9 @@ impl ConsensusEngine for PoaEngine {
 
 impl PoaEngine {
     /// Full header verification including parent checks and seal.
+    ///
+    /// `current_time` is the wall-clock Unix timestamp (seconds) used to
+    /// reject blocks with timestamps too far in the future.
     pub fn verify_header_with_parent(
         &self,
         header: &BlockHeader,
@@ -151,9 +176,10 @@ impl PoaEngine {
         seal: &PQSignature,
         proposer_pubkey: &[u8],
         verifier: &dyn Verifier,
+        current_time: u64,
     ) -> Result<(), ConsensusError> {
         self.verify_proposer(header)?;
-        self.verify_timestamp(header, Some(parent))?;
+        self.verify_timestamp(header, Some(parent), current_time)?;
         self.verify_seal(header, seal, proposer_pubkey, verifier)?;
         Ok(())
     }
@@ -252,7 +278,7 @@ mod tests {
         let parent = sample_header(0, addr, 1000);
         let child = sample_header(1, addr, 1000); // same timestamp, needs +1
 
-        let result = engine.verify_timestamp(&child, Some(&parent));
+        let result = engine.verify_timestamp(&child, Some(&parent), 2000);
         assert!(result.is_err());
     }
 
@@ -265,8 +291,37 @@ mod tests {
         let mut child = sample_header(1, addr, 1001);
         child.parent_hash = parent.hash();
 
-        let result = engine.verify_timestamp(&child, Some(&parent));
+        let result = engine.verify_timestamp(&child, Some(&parent), 2000);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn verify_timestamp_future_rejected() {
+        let (config, addr, _) = test_config();
+        let engine = PoaEngine::new(config);
+
+        // Block timestamp 100 seconds in the future (max_future_secs = 15)
+        let header = sample_header(0, addr, 2100);
+        let result = engine.verify_timestamp(&header, None, 2000);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("exceeds current_time"));
+    }
+
+    #[test]
+    fn verify_timestamp_within_future_tolerance() {
+        let (config, addr, _) = test_config();
+        let engine = PoaEngine::new(config);
+
+        // Block timestamp exactly at max_future_secs boundary (15s)
+        let header = sample_header(0, addr, 2015);
+        let result = engine.verify_timestamp(&header, None, 2000);
+        assert!(result.is_ok());
+
+        // 1 second over → rejected
+        let header_over = sample_header(0, addr, 2016);
+        let result_over = engine.verify_timestamp(&header_over, None, 2000);
+        assert!(result_over.is_err());
     }
 
     #[test]

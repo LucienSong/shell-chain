@@ -1,9 +1,17 @@
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
 use shell_core::{Block, BlockHeader, TransactionReceipt};
 use shell_primitives::ShellHash;
 
 use crate::{KvStore, StorageError};
+
+/// Persistent chain configuration (written once at genesis).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChainConfig {
+    pub chain_id: u64,
+    pub genesis_hash: ShellHash,
+}
 
 /// Key prefixes for chain store data. All keys are prefixed to avoid
 /// collisions when sharing a single [`KvStore`] instance.
@@ -14,6 +22,7 @@ mod prefix {
     pub const RECEIPTS_BY_HASH: &[u8] = b"r/";
     pub const TX_INDEX: &[u8] = b"t/";
     pub const HEAD_BLOCK: &[u8] = b"HEAD";
+    pub const CHAIN_CONFIG: &[u8] = b"CFG";
 }
 
 /// Block/receipt/transaction-index storage.
@@ -53,7 +62,11 @@ impl<S: KvStore> ChainStore<S> {
 
     // ── Block operations ───────────────────────────────────────
 
-    /// Store a block (header + body), update number→hash index and tx index.
+    /// Store a block (header + body) and update the transaction index.
+    ///
+    /// Does **not** update HEAD or the canonical number→hash index.
+    /// Callers must explicitly call [`set_canonical`] and [`set_head`]
+    /// to mark a block as part of the canonical chain.
     pub fn put_block(&self, block: &Block) -> Result<(), StorageError> {
         let block_hash = block.hash();
 
@@ -67,12 +80,6 @@ impl<S: KvStore> ChainStore<S> {
             .map_err(|e| StorageError::Serialization(e.to_string()))?;
         self.store.put(&Self::body_key(&block_hash), &body_bytes)?;
 
-        // Number → hash index
-        self.store.put(
-            &Self::number_key(block.number()),
-            block_hash.as_bytes(),
-        )?;
-
         // Transaction → (block_hash, tx_index) mapping
         for (i, tx) in block.transactions.iter().enumerate() {
             let tx_hash = tx.hash();
@@ -81,10 +88,17 @@ impl<S: KvStore> ChainStore<S> {
             self.store.put(&Self::tx_index_key(&tx_hash), &index_value)?;
         }
 
-        // Update HEAD
-        self.store.put(prefix::HEAD_BLOCK, block_hash.as_bytes())?;
-
         Ok(())
+    }
+
+    /// Mark a block number → hash mapping in the canonical chain index.
+    pub fn set_canonical(&self, number: u64, hash: &ShellHash) -> Result<(), StorageError> {
+        self.store.put(&Self::number_key(number), hash.as_bytes())
+    }
+
+    /// Set the HEAD pointer to the given block hash.
+    pub fn set_head(&self, hash: &ShellHash) -> Result<(), StorageError> {
+        self.store.put(prefix::HEAD_BLOCK, hash.as_bytes())
     }
 
     /// Get a block by its hash.
@@ -194,6 +208,28 @@ impl<S: KvStore> ChainStore<S> {
             None => Ok(None),
         }
     }
+
+    // ── Chain config ───────────────────────────────────────────
+
+    /// Persist the chain configuration (chain_id + genesis hash).
+    /// Should be called exactly once after genesis initialization.
+    pub fn put_chain_config(&self, config: &ChainConfig) -> Result<(), StorageError> {
+        let data = serde_json::to_vec(config)
+            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        self.store.put(prefix::CHAIN_CONFIG, &data)
+    }
+
+    /// Retrieve the persisted chain configuration.
+    pub fn get_chain_config(&self) -> Result<Option<ChainConfig>, StorageError> {
+        match self.store.get(prefix::CHAIN_CONFIG)? {
+            Some(data) => {
+                let config: ChainConfig = serde_json::from_slice(&data)
+                    .map_err(|e| StorageError::Codec(e.to_string()))?;
+                Ok(Some(config))
+            }
+            None => Ok(None),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -223,6 +259,14 @@ mod tests {
         }
     }
 
+    /// Helper: put block + set canonical + set head (mimics old behavior).
+    fn put_canonical(cs: &ChainStore<MemoryDb>, block: &Block) {
+        let hash = block.hash();
+        cs.put_block(block).unwrap();
+        cs.set_canonical(block.number(), &hash).unwrap();
+        cs.set_head(&hash).unwrap();
+    }
+
     #[test]
     fn put_and_get_by_hash() {
         let store = Arc::new(MemoryDb::new());
@@ -236,14 +280,50 @@ mod tests {
     }
 
     #[test]
-    fn put_and_get_by_number() {
+    fn put_block_does_not_set_head() {
+        let store = Arc::new(MemoryDb::new());
+        let cs = ChainStore::new(store);
+        let block = empty_block(0);
+
+        cs.put_block(&block).unwrap();
+        // HEAD should still be None — put_block no longer sets it
+        assert!(cs.get_head_hash().unwrap().is_none());
+    }
+
+    #[test]
+    fn put_block_does_not_set_canonical() {
         let store = Arc::new(MemoryDb::new());
         let cs = ChainStore::new(store);
         let block = empty_block(42);
 
         cs.put_block(&block).unwrap();
+        // Number→hash should not be set
+        assert!(cs.get_block_by_number(42).unwrap().is_none());
+    }
+
+    #[test]
+    fn set_canonical_and_get_by_number() {
+        let store = Arc::new(MemoryDb::new());
+        let cs = ChainStore::new(store);
+        let block = empty_block(42);
+        let hash = block.hash();
+
+        cs.put_block(&block).unwrap();
+        cs.set_canonical(42, &hash).unwrap();
         let loaded = cs.get_block_by_number(42).unwrap().unwrap();
         assert_eq!(loaded.number(), 42);
+    }
+
+    #[test]
+    fn set_head_and_get_head() {
+        let store = Arc::new(MemoryDb::new());
+        let cs = ChainStore::new(store);
+        let block = empty_block(0);
+        let hash = block.hash();
+
+        cs.put_block(&block).unwrap();
+        cs.set_head(&hash).unwrap();
+        assert_eq!(cs.get_head_hash().unwrap().unwrap(), hash);
     }
 
     #[test]
@@ -262,12 +342,12 @@ mod tests {
         assert!(cs.get_head_hash().unwrap().is_none());
 
         let b0 = empty_block(0);
-        cs.put_block(&b0).unwrap();
+        put_canonical(&cs, &b0);
         assert_eq!(cs.get_head_hash().unwrap().unwrap(), b0.hash());
 
         let mut b1 = empty_block(1);
         b1.header.parent_hash = b0.hash();
-        cs.put_block(&b1).unwrap();
+        put_canonical(&cs, &b1);
         assert_eq!(cs.get_head_hash().unwrap().unwrap(), b1.hash());
     }
 
@@ -315,20 +395,38 @@ mod tests {
         let cs = ChainStore::new(store);
 
         let b0 = empty_block(0);
-        cs.put_block(&b0).unwrap();
+        put_canonical(&cs, &b0);
 
         let mut b1 = empty_block(1);
         b1.header.parent_hash = b0.hash();
-        cs.put_block(&b1).unwrap();
+        put_canonical(&cs, &b1);
 
         let mut b2 = empty_block(2);
         b2.header.parent_hash = b1.hash();
-        cs.put_block(&b2).unwrap();
+        put_canonical(&cs, &b2);
 
         // All blocks retrievable
         assert!(cs.get_block_by_number(0).unwrap().is_some());
         assert!(cs.get_block_by_number(1).unwrap().is_some());
         assert!(cs.get_block_by_number(2).unwrap().is_some());
         assert_eq!(cs.get_head_hash().unwrap().unwrap(), b2.hash());
+    }
+
+    #[test]
+    fn chain_config_roundtrip() {
+        let store = Arc::new(MemoryDb::new());
+        let cs = ChainStore::new(store);
+
+        assert!(cs.get_chain_config().unwrap().is_none());
+
+        let config = ChainConfig {
+            chain_id: 1337,
+            genesis_hash: ShellHash::ZERO,
+        };
+        cs.put_chain_config(&config).unwrap();
+
+        let loaded = cs.get_chain_config().unwrap().unwrap();
+        assert_eq!(loaded.chain_id, 1337);
+        assert_eq!(loaded.genesis_hash, ShellHash::ZERO);
     }
 }

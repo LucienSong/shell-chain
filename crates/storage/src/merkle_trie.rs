@@ -10,6 +10,11 @@ use crate::trie_adapter::KvStoreTrieDb;
 ///
 /// Wraps [`eth_trie::EthTrie`] and maps errors to [`StorageError::Trie`].
 /// Produces state roots identical to Ethereum given the same inputs.
+///
+/// **Phase 1 Accepted Risk (F-014):** The underlying `eth_trie` crate is
+/// hardcoded to use Keccak-256 as its hash function. This is intentional
+/// for Ethereum state compatibility in Phase 1. A migration to Verkle
+/// Trees (with a PQ-friendly hash) is planned for Phase 2+.
 pub struct MerkleTrie<S: KvStore> {
     trie: EthTrie<KvStoreTrieDb<S>>,
 }

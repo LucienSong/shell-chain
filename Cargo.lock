@@ -1706,6 +1706,7 @@ dependencies = [
  "alloy-rlp",
  "eth_trie",
  "ethereum-types",
+ "serde",
  "serde_json",
  "shell-core",
  "shell-primitives",

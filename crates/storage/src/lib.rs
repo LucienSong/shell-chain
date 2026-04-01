@@ -12,4 +12,4 @@ pub use memory_db::MemoryDb;
 pub use trie_adapter::KvStoreTrieDb;
 pub use merkle_trie::MerkleTrie;
 pub use world_state::WorldState;
-pub use chain_store::ChainStore;
+pub use chain_store::{ChainConfig, ChainStore};

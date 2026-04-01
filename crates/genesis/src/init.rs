@@ -1,10 +1,13 @@
 use shell_core::{Account, Block, BlockHeader};
 use shell_primitives::{keccak256, Address, Bytes, ShellHash};
-use shell_storage::{KvStore, StorageError, WorldState};
+use shell_storage::{ChainConfig, ChainStore, KvStore, StorageError, WorldState};
 
 use crate::{AllocEntry, ConsensusConfig, GenesisConfig, GenesisError};
 
 /// Initialize world state from genesis allocations and produce the genesis block.
+///
+/// Persists the genesis block into `chain_store` and writes chain configuration
+/// (chain_id + genesis_hash) so that later boot-up can verify chain identity.
 pub fn initialize_genesis<S: KvStore + 'static>(
     config: &GenesisConfig,
     store: std::sync::Arc<S>,
@@ -50,6 +53,26 @@ pub fn initialize_genesis<S: KvStore + 'static>(
         proposer_seal: None,
     };
 
+    // F-012 / F-013: Persist genesis block + canonical mapping + chain config
+    let chain_store = ChainStore::new(std::sync::Arc::clone(&store));
+    let genesis_hash = block.hash();
+
+    chain_store
+        .put_block(&block)
+        .map_err(|e| GenesisError::StateInit(e.to_string()))?;
+    chain_store
+        .set_canonical(0, &genesis_hash)
+        .map_err(|e| GenesisError::StateInit(e.to_string()))?;
+    chain_store
+        .set_head(&genesis_hash)
+        .map_err(|e| GenesisError::StateInit(e.to_string()))?;
+    chain_store
+        .put_chain_config(&ChainConfig {
+            chain_id: config.chain_id,
+            genesis_hash,
+        })
+        .map_err(|e| GenesisError::StateInit(e.to_string()))?;
+
     Ok(block)
 }
 
@@ -84,7 +107,8 @@ fn apply_alloc<S: KvStore + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shell_storage::MemoryDb;
+    use shell_primitives::U256;
+    use shell_storage::{ChainStore, MemoryDb};
     use std::collections::HashMap;
     use std::sync::Arc;
 
@@ -220,5 +244,29 @@ mod tests {
         let block = initialize_genesis(&config, store).unwrap();
 
         assert_eq!(block.header.extra_data.as_ref(), b"genesis");
+    }
+
+    #[test]
+    fn genesis_persists_chain_config() {
+        let config = test_genesis();
+        let store = Arc::new(MemoryDb::new());
+        let block = initialize_genesis(&config, Arc::clone(&store)).unwrap();
+
+        let chain_store = ChainStore::new(store);
+        let chain_cfg = chain_store.get_chain_config().unwrap().unwrap();
+        assert_eq!(chain_cfg.chain_id, 1337);
+        assert_eq!(chain_cfg.genesis_hash, block.hash());
+    }
+
+    #[test]
+    fn genesis_sets_head_and_canonical() {
+        let config = test_genesis();
+        let store = Arc::new(MemoryDb::new());
+        let block = initialize_genesis(&config, Arc::clone(&store)).unwrap();
+
+        let chain_store = ChainStore::new(store);
+        assert_eq!(chain_store.get_head_hash().unwrap().unwrap(), block.hash());
+        let loaded = chain_store.get_block_by_number(0).unwrap().unwrap();
+        assert_eq!(loaded.hash(), block.hash());
     }
 }
