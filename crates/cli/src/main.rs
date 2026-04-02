@@ -61,7 +61,7 @@ enum Commands {
         bootnode: Vec<String>,
 
         /// Enable mDNS local peer discovery (disable in production/cloud).
-        #[arg(long, default_value = "true")]
+        #[arg(long)]
         enable_mdns: bool,
     },
 

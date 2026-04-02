@@ -27,7 +27,7 @@ impl Default for NetworkConfig {
             blocks_topic: "/shell/blocks/1".into(),
             txs_topic: "/shell/txs/1".into(),
             max_peers: 50,
-            enable_mdns: true,
+            enable_mdns: false,
         }
     }
 }
