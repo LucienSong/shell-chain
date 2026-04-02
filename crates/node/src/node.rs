@@ -177,14 +177,17 @@ impl<S: KvStore + 'static> Node<S> {
                                     }
                                 }
                                 NetworkMessage::BlockRequest { start_number, count } => {
+                                    const MAX_BLOCK_RESPONSE: u64 = 128;
+                                    let safe_count = count.min(MAX_BLOCK_RESPONSE);
                                     debug!(
                                         %peer,
                                         start_number,
                                         count,
+                                        safe_count,
                                         "received BlockRequest"
                                     );
                                     let mut blocks = Vec::new();
-                                    for n in start_number..start_number.saturating_add(count) {
+                                    for n in start_number..start_number.saturating_add(safe_count) {
                                         match self.chain_store.get_block_by_number(n) {
                                             Ok(Some(block)) => blocks.push(block),
                                             _ => break,
