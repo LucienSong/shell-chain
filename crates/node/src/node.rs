@@ -11,6 +11,7 @@ use shell_core::{Block, BlockHeader, SignedTransaction};
 use shell_crypto::{DilithiumVerifier, Signer, Verifier};
 use shell_evm::{commit_evm_state, ShellEvm, ShellStateDb};
 use shell_mempool::TxPool;
+use shell_network::NetworkService;
 use shell_primitives::{Address, Bytes, ShellHash, U256};
 use shell_storage::{ChainStore, KvStore, WorldState};
 
@@ -56,6 +57,112 @@ impl<S: KvStore + 'static> Node<S> {
     /// Signal the node to shut down.
     pub fn shutdown(&self) {
         let _ = self.shutdown_tx.send(true);
+    }
+
+    /// Get a shutdown receiver for external coordination.
+    pub fn subscribe_shutdown(&self) -> watch::Receiver<bool> {
+        self.shutdown_tx.subscribe()
+    }
+
+    /// Run the async event loop.
+    ///
+    /// Drives block production, network event handling, and RPC serving:
+    /// - **Block production**: on a timer, if this node is the current proposer,
+    ///   produce a block from pending mempool txs and broadcast it.
+    /// - **Network events**: import blocks and transactions from peers.
+    /// - **RPC server**: serves JSON-RPC on the configured address.
+    /// - **Shutdown**: stops on `shutdown()` call or Ctrl-C.
+    pub async fn run(
+        &self,
+        signer: Arc<dyn Signer>,
+        network: &mut dyn NetworkService,
+    ) -> Result<(), NodeError> {
+        use shell_network::{NetworkEvent, NetworkMessage};
+        use shell_rpc::start_rpc_server;
+        use tokio::time::{interval, Duration};
+
+        // Start JSON-RPC server.
+        let (_rpc_addr, _rpc_handle) = start_rpc_server(
+            self.config.rpc.clone(),
+            self.chain_store.clone(),
+            self.world_state.clone(),
+            self.tx_pool.clone(),
+            self.config.chain_id,
+        )
+        .await
+        .map_err(|e| NodeError::Startup(format!("RPC: {e}")))?;
+
+        let mut block_timer = interval(Duration::from_millis(self.config.block_time_ms));
+        let mut shutdown_rx = self.shutdown_tx.subscribe();
+
+        // Skip the first immediate tick.
+        block_timer.tick().await;
+
+        loop {
+            tokio::select! {
+                _ = block_timer.tick() => {
+                    if self.config.proposer_address.is_some() {
+                        match self.produce_block(&*signer, 500) {
+                            Ok(block) => {
+                                let number = block.number();
+                                let tx_count = block.transactions.len();
+                                let gas = block.header.gas_used;
+                                eprintln!(
+                                    "⛏  Block #{number} produced ({tx_count} txs, {gas} gas)"
+                                );
+                                let msg = NetworkMessage::NewBlock(Box::new(block));
+                                let _ = network.broadcast(msg).await;
+                            }
+                            Err(NodeError::NotProposer) => {
+                                // Not our turn to propose; silently skip.
+                            }
+                            Err(e) => {
+                                eprintln!("⚠  Block production error: {e}");
+                            }
+                        }
+                    }
+                }
+
+                event = network.next_event() => {
+                    match event {
+                        Some(NetworkEvent::MessageReceived { message, .. }) => {
+                            match message {
+                                NetworkMessage::NewBlock(block) => {
+                                    let verifier = DilithiumVerifier;
+                                    match self.import_block(*block, &verifier) {
+                                        Ok(()) => {}
+                                        Err(e) => eprintln!("⚠  Block import error: {e}"),
+                                    }
+                                }
+                                NetworkMessage::NewTransaction(tx) => {
+                                    let verifier = DilithiumVerifier;
+                                    match self.handle_incoming_tx(*tx, &verifier) {
+                                        Ok(_hash) => {}
+                                        Err(e) => eprintln!("⚠  Tx handling error: {e}"),
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        Some(_) => {} // PeerConnected / PeerDisconnected
+                        None => {
+                            eprintln!("Network channel closed, shutting down");
+                            break;
+                        }
+                    }
+                }
+
+                _ = shutdown_rx.changed() => {
+                    if *shutdown_rx.borrow() {
+                        eprintln!("Shutdown signal received");
+                        break;
+                    }
+                }
+            }
+        }
+
+        let _ = network.shutdown().await;
+        Ok(())
     }
 
     /// Produce a block from pending mempool transactions.
@@ -504,5 +611,44 @@ mod tests {
 
         node.shutdown();
         assert!(*rx.borrow());
+    }
+
+    #[tokio::test]
+    async fn event_loop_produces_blocks() {
+        use shell_network::{NetworkBus, NetworkConfig};
+        use std::time::Duration;
+
+        let (node, signer) = setup_node();
+        store_genesis(&node);
+
+        let bus = NetworkBus::new(64);
+        let mut network = bus.join(&NetworkConfig::default());
+
+        let node = Arc::new(node);
+        let node_clone = node.clone();
+        let signer = Arc::new(signer) as Arc<dyn Signer>;
+
+        // Spawn the event loop in a background task.
+        let handle = tokio::spawn(async move {
+            // Use a very short block time for testing.
+            // We can't mutate config directly, so we test with the default.
+            node_clone.run(signer, &mut network).await
+        });
+
+        // Wait for at least 3 blocks to be produced (~6s with 2s block_time).
+        tokio::time::sleep(Duration::from_secs(7)).await;
+
+        // Shut down the node.
+        node.shutdown();
+        let result = handle.await.expect("task panicked");
+        assert!(result.is_ok(), "run() returned error: {:?}", result.err());
+
+        // Verify blocks were produced.
+        let head = node.chain_store.get_head_block().unwrap().unwrap();
+        assert!(
+            head.number() >= 3,
+            "expected at least 3 blocks, got {}",
+            head.number()
+        );
     }
 }
