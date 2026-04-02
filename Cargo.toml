@@ -10,6 +10,7 @@ members = [
     "crates/evm",
     "crates/mempool",
     "crates/rpc",
+    "crates/network",
 ]
 
 [workspace.package]
