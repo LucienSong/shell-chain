@@ -73,6 +73,22 @@ pub struct RpcLog {
     pub data: String,
 }
 
+/// Ethereum `eth_call` / `eth_estimateGas` request object.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CallRequest {
+    /// Sender address (defaults to zero address if absent).
+    pub from: Option<Address>,
+    /// Destination address (required for calls, absent for contract creation).
+    pub to: Option<Address>,
+    /// Hex-encoded call data.
+    pub data: Option<String>,
+    /// Hex-encoded value in wei.
+    pub value: Option<String>,
+    /// Hex-encoded gas limit.
+    pub gas: Option<String>,
+}
+
 /// Format a u64 as "0x..." hex string.
 pub fn hex_u64(v: u64) -> String {
     format!("{:#x}", v)

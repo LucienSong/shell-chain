@@ -40,6 +40,8 @@ pub struct TxExecutionResult {
     pub state_changes: EvmState,
     /// Gas actually used by this transaction.
     pub gas_used: u64,
+    /// Raw output bytes returned by the EVM (return data or revert reason).
+    pub output: Vec<u8>,
 }
 
 /// High-level EVM executor for shell-chain.
@@ -137,7 +139,7 @@ impl<S: KvStore + 'static> ShellEvm<S> {
         let gas_used = exec_result.gas().spent();
         let new_cumulative = cumulative_gas_used + gas_used;
 
-        let (status, logs, contract_address) = match &exec_result {
+        let (status, logs, contract_address, output_bytes) = match &exec_result {
             ExecutionResult::Success { logs, output, .. } => {
                 let contract_addr = match output {
                     revm::context::result::Output::Create(_, Some(addr)) => {
@@ -145,10 +147,14 @@ impl<S: KvStore + 'static> ShellEvm<S> {
                     }
                     _ => None,
                 };
-                (1u8, logs.clone(), contract_addr)
+                let data = match output {
+                    revm::context::result::Output::Call(bytes) => bytes.to_vec(),
+                    revm::context::result::Output::Create(bytes, _) => bytes.to_vec(),
+                };
+                (1u8, logs.clone(), contract_addr, data)
             }
-            ExecutionResult::Revert { .. } => (0u8, vec![], None),
-            ExecutionResult::Halt { .. } => (0u8, vec![], None),
+            ExecutionResult::Revert { output, .. } => (0u8, vec![], None, output.to_vec()),
+            ExecutionResult::Halt { .. } => (0u8, vec![], None, vec![]),
         };
 
         // Convert revm logs to shell-chain logs
@@ -180,6 +186,7 @@ impl<S: KvStore + 'static> ShellEvm<S> {
             receipt,
             state_changes: state,
             gas_used,
+            output: output_bytes,
         })
     }
 

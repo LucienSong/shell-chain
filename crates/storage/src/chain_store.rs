@@ -40,6 +40,11 @@ impl<S: KvStore> ChainStore<S> {
         Self { store }
     }
 
+    /// Returns a reference to the underlying key-value store.
+    pub fn store(&self) -> &Arc<S> {
+        &self.store
+    }
+
     // ── Key helpers ────────────────────────────────────────────
 
     fn header_key(hash: &ShellHash) -> Vec<u8> {

@@ -3,7 +3,7 @@
 use jsonrpsee::proc_macros::rpc;
 use shell_primitives::{Address, ShellHash};
 
-use crate::types::{RpcBlock, RpcReceipt, RpcTransaction};
+use crate::types::{RpcBlock, RpcReceipt, RpcTransaction, CallRequest};
 
 /// Ethereum-compatible JSON-RPC API.
 #[rpc(server, namespace = "eth")]
@@ -72,6 +72,38 @@ pub trait EthApi {
         &self,
         data: String,
     ) -> Result<ShellHash, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Executes a call without creating a transaction (read-only).
+    #[method(name = "call")]
+    async fn call(
+        &self,
+        tx: CallRequest,
+        block: Option<String>,
+    ) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Estimates gas needed for a transaction.
+    #[method(name = "estimateGas")]
+    async fn estimate_gas(
+        &self,
+        tx: CallRequest,
+    ) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns the bytecode at a given address.
+    #[method(name = "getCode")]
+    async fn get_code(
+        &self,
+        address: Address,
+        block: Option<String>,
+    ) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns the value from a storage position at a given address.
+    #[method(name = "getStorageAt")]
+    async fn get_storage_at(
+        &self,
+        address: Address,
+        position: String,
+        block: Option<String>,
+    ) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
 }
 
 /// Shell-chain extension API for PQ-specific features.
