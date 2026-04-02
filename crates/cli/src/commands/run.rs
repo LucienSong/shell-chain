@@ -71,9 +71,7 @@ async fn run_with_store<S: KvStore + 'static>(
             let encrypted: EncryptedKey = serde_json::from_str(&json)?;
 
             eprint!("Enter keystore password: ");
-            let mut password = String::new();
-            std::io::stdin().read_line(&mut password)?;
-            let password = password.trim();
+            let password = rpassword::read_password()?;
 
             let signer = decrypt(&encrypted, password.as_bytes())?;
             info!("Keystore unlocked: 0x{}", encrypted.address);

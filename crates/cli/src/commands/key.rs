@@ -59,10 +59,9 @@ pub fn key_inspect(path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Simple password prompt (reads from stdin).
+/// Secure password prompt (no terminal echo).
 fn prompt_password(prompt: &str) -> Result<String, Box<dyn std::error::Error>> {
     eprint!("{prompt}");
-    let mut input = String::new();
-    std::io::stdin().read_line(&mut input)?;
-    Ok(input.trim().to_string())
+    let password = rpassword::read_password()?;
+    Ok(password)
 }
