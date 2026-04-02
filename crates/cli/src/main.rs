@@ -59,6 +59,10 @@ enum Commands {
         /// Bootstrap peer multiaddrs (repeatable).
         #[arg(long)]
         bootnode: Vec<String>,
+
+        /// Enable mDNS local peer discovery (disable in production/cloud).
+        #[arg(long, default_value = "true")]
+        enable_mdns: bool,
     },
 
     /// Initialize genesis block and data directory.
@@ -118,6 +122,7 @@ async fn main() {
             p2p,
             p2p_addr,
             bootnode,
+            enable_mdns,
         } => {
             commands::run(commands::run::RunArgs {
                 datadir: cli.datadir,
@@ -129,6 +134,7 @@ async fn main() {
                 p2p,
                 p2p_addr,
                 bootnodes: bootnode,
+                enable_mdns,
             })
             .await
         }

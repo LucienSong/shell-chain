@@ -28,6 +28,7 @@ pub struct RunArgs {
     pub p2p: bool,
     pub p2p_addr: String,
     pub bootnodes: Vec<String>,
+    pub enable_mdns: bool,
 }
 
 /// Start the node: load genesis, initialize state, and run the event loop.
@@ -188,6 +189,7 @@ async fn run_with_store<S: KvStore + 'static>(
             let net_config = NetworkConfig {
                 listen_addr: p2p_listen,
                 boot_nodes: args.bootnodes,
+                enable_mdns: args.enable_mdns,
                 ..NetworkConfig::default()
             };
             let mut network = shell_network::Libp2pNetwork::new(&net_config).await?;

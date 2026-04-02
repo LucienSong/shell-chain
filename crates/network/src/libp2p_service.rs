@@ -3,8 +3,6 @@
 //! Uses TCP + Noise + Yamux transport with GossipSub for message
 //! broadcast and mDNS for local peer discovery.
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,6 +12,7 @@ use libp2p::futures::StreamExt;
 use libp2p::gossipsub::{self, IdentTopic};
 use libp2p::swarm::SwarmEvent;
 use libp2p::{identify, mdns, noise, tcp, yamux, Multiaddr, Swarm, SwarmBuilder};
+use libp2p::swarm::behaviour::toggle::Toggle;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
@@ -38,7 +37,7 @@ enum SwarmCommand {
 #[derive(libp2p::swarm::NetworkBehaviour)]
 struct ShellBehaviour {
     gossipsub: gossipsub::Behaviour,
-    mdns: mdns::tokio::Behaviour,
+    mdns: Toggle<mdns::tokio::Behaviour>,
     identify: identify::Behaviour,
 }
 
@@ -107,12 +106,14 @@ impl Libp2pNetwork {
 }
 
 fn build_swarm(config: &NetworkConfig) -> Result<Swarm<ShellBehaviour>, NetworkError> {
-    let _ = config; // NetworkConfig fields used by caller, not here directly.
+    let enable_mdns = config.enable_mdns;
 
+    // Deterministic message ID: blake3 hash of payload.
+    // CRITICAL: Do NOT use DefaultHasher — its random per-process seed
+    // makes MessageIds differ across nodes, breaking dedup (F-031).
     let message_id_fn = |msg: &gossipsub::Message| {
-        let mut hasher = DefaultHasher::new();
-        msg.data.hash(&mut hasher);
-        gossipsub::MessageId::from(hasher.finish().to_string())
+        let hash = blake3::hash(&msg.data);
+        gossipsub::MessageId::from(hash.to_hex().as_str().to_owned())
     };
 
     let gs_config = gossipsub::ConfigBuilder::default()
@@ -140,8 +141,14 @@ fn build_swarm(config: &NetworkConfig) -> Result<Swarm<ShellBehaviour>, NetworkE
             )
             .map_err(|e| format!("gossipsub: {e}"))?;
 
-            let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), peer_id)
-                .map_err(|e| format!("mdns: {e}"))?;
+            let mdns = if enable_mdns {
+                Some(
+                    mdns::tokio::Behaviour::new(mdns::Config::default(), peer_id)
+                        .map_err(|e| format!("mdns: {e}"))?,
+                )
+            } else {
+                None
+            };
 
             let identify = identify::Behaviour::new(identify::Config::new(
                 "/shell-chain/1.0.0".into(),
@@ -150,13 +157,19 @@ fn build_swarm(config: &NetworkConfig) -> Result<Swarm<ShellBehaviour>, NetworkE
 
             Ok(ShellBehaviour {
                 gossipsub,
-                mdns,
+                mdns: mdns.into(),
                 identify,
             })
         })
         .map_err(|e| NetworkError::Transport(format!("behaviour: {e}")))?
         .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
         .build();
+
+    if enable_mdns {
+        info!("mDNS peer discovery enabled");
+    } else {
+        info!("mDNS peer discovery disabled (production mode)");
+    }
 
     Ok(swarm)
 }

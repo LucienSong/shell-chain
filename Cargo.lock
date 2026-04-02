@@ -5233,6 +5233,7 @@ name = "shell-network"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "blake3",
  "libp2p",
  "serde",
  "serde_json",
