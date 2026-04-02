@@ -1,5 +1,5 @@
 # Multi-stage build for shell-node with RocksDB + libp2p
-FROM rust:1.83-bookworm AS builder
+FROM rust:1.93-bookworm AS builder
 
 # Install RocksDB build dependencies
 RUN apt-get update && apt-get install -y \

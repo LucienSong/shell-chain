@@ -114,6 +114,8 @@ impl<S: KvStore + 'static> Node<S> {
         block_timer.tick().await;
 
         // Startup sync: request blocks we don't have from peers.
+        // Track whether we are catching up so we don't spam requests.
+        let mut sync_requested = false;
         if network.peer_count().await > 0 {
             let head_number = self
                 .chain_store
@@ -131,6 +133,7 @@ impl<S: KvStore + 'static> Node<S> {
                 count: 128,
             };
             let _ = network.broadcast(req).await;
+            sync_requested = true;
         }
 
         loop {
@@ -165,8 +168,32 @@ impl<S: KvStore + 'static> Node<S> {
                                 NetworkMessage::NewBlock(block) => {
                                     let verifier = DilithiumVerifier;
                                     match self.import_block(*block, &verifier) {
-                                        Ok(()) => {}
-                                        Err(e) => eprintln!("⚠  Block import error: {e}"),
+                                        Ok(()) => {
+                                            sync_requested = false;
+                                        }
+                                        Err(e) => {
+                                            // On gap error, request missing blocks.
+                                            let head_num = self
+                                                .chain_store
+                                                .get_head_block()
+                                                .ok()
+                                                .flatten()
+                                                .map(|b| b.number())
+                                                .unwrap_or(0);
+                                            if !sync_requested && head_num + 1 < u64::MAX {
+                                                info!(
+                                                    head = head_num,
+                                                    "requesting missing blocks for sync"
+                                                );
+                                                let req = NetworkMessage::BlockRequest {
+                                                    start_number: head_num + 1,
+                                                    count: 128,
+                                                };
+                                                let _ = network.broadcast(req).await;
+                                                sync_requested = true;
+                                            }
+                                            eprintln!("⚠  Block import error: {e}");
+                                        }
                                     }
                                 }
                                 NetworkMessage::NewTransaction(tx) => {
@@ -209,10 +236,12 @@ impl<S: KvStore + 'static> Node<S> {
                                         "received BlockResponse, importing blocks"
                                     );
                                     let verifier = DilithiumVerifier;
+                                    let mut last_ok = 0u64;
                                     for block in blocks {
                                         let num = block.number();
                                         match self.import_block(block, &verifier) {
                                             Ok(()) => {
+                                                last_ok = num;
                                                 debug!(number = num, "synced block");
                                             }
                                             Err(e) => {
@@ -224,6 +253,18 @@ impl<S: KvStore + 'static> Node<S> {
                                                 break;
                                             }
                                         }
+                                    }
+                                    // Request next batch if we imported blocks
+                                    // (there may be more to catch up on).
+                                    if last_ok > 0 {
+                                        let req = NetworkMessage::BlockRequest {
+                                            start_number: last_ok + 1,
+                                            count: 128,
+                                        };
+                                        let _ = network.broadcast(req).await;
+                                        sync_requested = true;
+                                    } else {
+                                        sync_requested = false;
                                     }
                                 }
                                 NetworkMessage::Ping => {
