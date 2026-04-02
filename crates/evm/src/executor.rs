@@ -10,11 +10,11 @@ use revm::context::{BlockEnv, CfgEnv, Context, Evm, TxEnv};
 use revm::handler::instructions::EthInstructions;
 use revm::handler::{ExecuteEvm, MainnetContext};
 use revm::primitives::hardfork::SpecId;
-use revm::primitives::TxKind;
+use revm::primitives::{TxKind, KECCAK_EMPTY};
 use revm::state::EvmState;
-use shell_core::{BlockHeader, TransactionReceipt};
+use shell_core::{Account, BlockHeader, TransactionReceipt};
 use shell_primitives::{Address as ShellAddress, ShellHash};
-use shell_storage::{KvStore, StorageError};
+use shell_storage::{ChainStore, KvStore, StorageError, WorldState};
 
 use crate::precompiles::ShellPrecompiles;
 use crate::state_db::{ShellStateDb, StateDbError};
@@ -192,6 +192,60 @@ impl<S: KvStore + 'static> ShellEvm<S> {
     pub fn state_db_mut(&mut self) -> &mut ShellStateDb<S> {
         &mut self.state_db
     }
+}
+
+/// Apply EVM state changes to a WorldState and ChainStore.
+///
+/// Iterates the revm `EvmState` (address → account) and for each touched
+/// account, updates balance, nonce, contract code, and storage slots.
+///
+/// Call this after `ShellEvm::execute_tx()` to persist the computed state
+/// diff. For multi-transaction blocks, call after **each** transaction so
+/// subsequent transactions see prior state updates.
+pub fn commit_evm_state<S: KvStore + 'static>(
+    state: &EvmState,
+    world_state: &mut WorldState<S>,
+    chain_store: &ChainStore<S>,
+) -> Result<(), ExecutorError> {
+    for (addr, acct) in state {
+        let shell_addr = ShellAddress::from(*addr);
+        let info = &acct.info;
+
+        let mut account = world_state
+            .get_account(&shell_addr)?
+            .unwrap_or_else(|| Account {
+                pq_pubkey_hash: ShellHash::default(),
+                nonce: 0,
+                balance: U256::ZERO,
+                validation_code_hash: None,
+                code_hash: None,
+                storage_root: ShellHash::ZERO,
+            });
+
+        account.nonce = info.nonce;
+        account.balance = info.balance;
+
+        // Store deployed contract bytecode
+        if let Some(code) = &info.code {
+            let code_bytes = code.bytes_slice();
+            if !code_bytes.is_empty() && info.code_hash != KECCAK_EMPTY {
+                let code_hash = ShellHash::from(info.code_hash);
+                chain_store.put_code(&code_hash, code_bytes)?;
+                account.code_hash = Some(code_hash);
+            }
+        }
+
+        world_state.set_account(&shell_addr, &account)?;
+
+        // Apply storage slot changes
+        for (slot, value) in &acct.storage {
+            let key = ShellHash::from(B256::from(*slot));
+            let val = ShellHash::from(B256::from(value.present_value));
+            world_state.set_storage(&shell_addr, &key, &val)?;
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

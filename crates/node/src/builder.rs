@@ -55,6 +55,7 @@ impl<S: KvStore + 'static> NodeBuilder<S> {
 
         let node = Node::new(
             self.config,
+            store.clone(),
             chain_store,
             world_state,
             tx_pool,

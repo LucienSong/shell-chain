@@ -9,7 +9,7 @@ use tokio::sync::watch;
 use shell_consensus::{ConsensusEngine, PoaEngine};
 use shell_core::{Block, BlockHeader, SignedTransaction};
 use shell_crypto::{DilithiumVerifier, Signer, Verifier};
-use shell_evm::{ShellEvm, ShellStateDb};
+use shell_evm::{commit_evm_state, ShellEvm, ShellStateDb};
 use shell_mempool::TxPool;
 use shell_primitives::{Address, Bytes, ShellHash, U256};
 use shell_storage::{ChainStore, KvStore, WorldState};
@@ -23,6 +23,7 @@ use crate::error::NodeError;
 /// into a unified event loop with optional block production.
 pub struct Node<S: KvStore + 'static> {
     pub config: NodeConfig,
+    pub store: Arc<S>,
     pub chain_store: Arc<ChainStore<S>>,
     pub world_state: Arc<RwLock<WorldState<S>>>,
     pub tx_pool: Arc<TxPool>,
@@ -34,6 +35,7 @@ impl<S: KvStore + 'static> Node<S> {
     /// Create a new node from pre-built components.
     pub fn new(
         config: NodeConfig,
+        store: Arc<S>,
         chain_store: Arc<ChainStore<S>>,
         world_state: Arc<RwLock<WorldState<S>>>,
         tx_pool: Arc<TxPool>,
@@ -42,6 +44,7 @@ impl<S: KvStore + 'static> Node<S> {
         let (shutdown_tx, _) = watch::channel(false);
         Self {
             config,
+            store,
             chain_store,
             world_state,
             tx_pool,
@@ -58,10 +61,10 @@ impl<S: KvStore + 'static> Node<S> {
     /// Produce a block from pending mempool transactions.
     ///
     /// Collects up to `max_txs` transactions, executes each through the EVM,
-    /// assembles a block, and commits it to storage. Returns the new block.
+    /// commits state changes after every transaction (so subsequent txs see
+    /// prior updates), assembles a block, and commits it to storage.
     pub fn produce_block(
         &self,
-        state_store: Arc<S>,
         signer: &dyn Signer,
         max_txs: usize,
     ) -> Result<Block, NodeError> {
@@ -84,9 +87,13 @@ impl<S: KvStore + 'static> Node<S> {
         // Collect pending transactions from mempool.
         let candidates = self.tx_pool.pending(max_txs);
 
-        // Create an isolated EVM instance backed by the same store.
-        let ws = WorldState::new(state_store.clone());
-        let cs = ChainStore::new(state_store);
+        // Create an isolated EVM instance at the current state root.
+        let current_root = {
+            let mut ws = self.world_state.write();
+            ws.state_root()?
+        };
+        let ws = WorldState::at_root(self.store.clone(), &current_root)?;
+        let cs = ChainStore::new(self.store.clone());
         let state_db = ShellStateDb::new(ws, cs);
         let mut evm = ShellEvm::new(state_db, self.config.chain_id);
 
@@ -121,6 +128,24 @@ impl<S: KvStore + 'static> Node<S> {
                     cumulative_gas += result.gas_used;
                     receipts.push(result.receipt);
                     included_txs.push(tx.clone());
+
+                    // Commit state changes to the EVM's WorldState so the
+                    // next transaction sees updated balances/nonces.
+                    commit_evm_state(
+                        &result.state_changes,
+                        evm.state_db_mut().world_state_mut(),
+                        &self.chain_store,
+                    )?;
+
+                    // Commit to the node's persistent WorldState.
+                    {
+                        let mut ws = self.world_state.write();
+                        commit_evm_state(
+                            &result.state_changes,
+                            &mut ws,
+                            &self.chain_store,
+                        )?;
+                    }
                 }
                 Err(_) => {
                     // Skip failed transactions.
@@ -167,6 +192,9 @@ impl<S: KvStore + 'static> Node<S> {
     }
 
     /// Import and validate a block received from the network.
+    ///
+    /// Re-executes all transactions through the EVM and commits state
+    /// changes to WorldState, then stores the block.
     pub fn import_block(
         &self,
         block: Block,
@@ -188,6 +216,46 @@ impl<S: KvStore + 'static> Node<S> {
 
         // Verify consensus rules.
         self.consensus.verify_header(&block.header)?;
+
+        // Re-execute transactions and commit state changes.
+        if !block.transactions.is_empty() {
+            let current_root = {
+                let mut ws = self.world_state.write();
+                ws.state_root()?
+            };
+            let ws = WorldState::at_root(self.store.clone(), &current_root)?;
+            let cs = ChainStore::new(self.store.clone());
+            let state_db = ShellStateDb::new(ws, cs);
+            let mut evm = ShellEvm::new(state_db, self.config.chain_id);
+            let mut cumulative_gas: u64 = 0;
+
+            for (idx, tx) in block.transactions.iter().enumerate() {
+                match evm.execute_tx(tx, &block.header, idx as u32, cumulative_gas) {
+                    Ok(result) => {
+                        cumulative_gas += result.gas_used;
+
+                        commit_evm_state(
+                            &result.state_changes,
+                            evm.state_db_mut().world_state_mut(),
+                            &self.chain_store,
+                        )?;
+
+                        let mut ws = self.world_state.write();
+                        commit_evm_state(
+                            &result.state_changes,
+                            &mut ws,
+                            &self.chain_store,
+                        )?;
+                    }
+                    Err(e) => {
+                        return Err(NodeError::Startup(format!(
+                            "tx {} re-execution failed: {e}",
+                            idx
+                        )));
+                    }
+                }
+            }
+        }
 
         // Commit to storage.
         let block_hash = block.hash();
@@ -234,11 +302,12 @@ impl<S: KvStore + 'static> Node<S> {
 mod tests {
     use super::*;
     use shell_consensus::PoaConfig;
+    use shell_core::Transaction;
     use shell_crypto::DilithiumSigner;
     use shell_mempool::MempoolConfig;
     use shell_storage::MemoryDb;
 
-    fn setup_node() -> (Node<MemoryDb>, Arc<MemoryDb>) {
+    fn setup_node() -> (Node<MemoryDb>, DilithiumSigner) {
         let signer = DilithiumSigner::generate();
         let pubkey = signer.public_key().to_vec();
         let authority = Address::from_public_key(&pubkey);
@@ -253,8 +322,8 @@ mod tests {
         }));
 
         let config = NodeConfig::dev(authority);
-        let node = Node::new(config, chain_store, world_state, tx_pool, consensus);
-        (node, db)
+        let node = Node::new(config, db, chain_store, world_state, tx_pool, consensus);
+        (node, signer)
     }
 
     fn store_genesis(node: &Node<MemoryDb>) {
@@ -282,28 +351,123 @@ mod tests {
         node.chain_store.set_head(&hash).unwrap();
     }
 
+    fn fund_account(node: &Node<MemoryDb>, addr: &Address, balance: U256) {
+        let account = shell_core::Account {
+            pq_pubkey_hash: ShellHash::default(),
+            nonce: 0,
+            balance,
+            validation_code_hash: None,
+            code_hash: None,
+            storage_root: ShellHash::default(),
+        };
+        let mut ws = node.world_state.write();
+        ws.set_account(addr, &account).unwrap();
+    }
+
     #[test]
     fn node_creation() {
-        let (node, _) = setup_node();
+        let (node, _signer) = setup_node();
         assert_eq!(node.config.chain_id, 1337);
         assert!(node.config.proposer_address.is_some());
     }
 
     #[test]
     fn produce_empty_block() {
-        let (node, db) = setup_node();
+        let (node, signer) = setup_node();
         store_genesis(&node);
 
-        let signer = DilithiumSigner::generate();
-        let block = node.produce_block(db, &signer, 100).unwrap();
+        let block = node.produce_block(&signer, 100).unwrap();
         assert_eq!(block.number(), 1);
         assert!(block.transactions.is_empty());
         assert!(block.proposer_seal.is_some());
     }
 
     #[test]
+    fn produce_block_commits_state() {
+        let (node, signer) = setup_node();
+        store_genesis(&node);
+
+        // Create sender and receiver
+        let tx_signer = DilithiumSigner::generate();
+        let sender = Address::from_public_key(tx_signer.public_key());
+        let receiver = Address::from([0xBB; 20]);
+        let transfer_value = U256::from(1_000_000);
+
+        // Fund sender
+        fund_account(&node, &sender, U256::from(10_000_000_000u64));
+
+        // Verify initial balances
+        {
+            let ws = node.world_state.read();
+            assert_eq!(ws.get_balance(&sender).unwrap(), U256::from(10_000_000_000u64));
+            assert_eq!(ws.get_balance(&receiver).unwrap(), U256::ZERO);
+        }
+
+        // Create and submit a transfer transaction
+        let tx = Transaction {
+            chain_id: 1337,
+            nonce: 0,
+            to: Some(receiver),
+            value: transfer_value,
+            data: shell_primitives::Bytes::new(),
+            gas_limit: 21_000,
+            max_fee_per_gas: 0,
+            max_priority_fee_per_gas: 0,
+        };
+
+        // Sign with real Dilithium key
+        let tx_hash = {
+            let encoded = alloy_rlp::encode(&tx);
+            shell_primitives::keccak256(&encoded)
+        };
+        let sig = tx_signer.sign(tx_hash.as_bytes()).expect("sign failed");
+        let signed = SignedTransaction::with_pubkey(
+            sender,
+            tx,
+            sig,
+            tx_signer.public_key().to_vec(),
+        );
+
+        // Insert into mempool with real verification
+        let verifier = DilithiumVerifier;
+        let known_pubkeys = |_: &Address| -> Option<Vec<u8>> { None };
+        let balance_of = |addr: &Address| -> U256 {
+            node.world_state.read().get_balance(addr).unwrap_or(U256::ZERO)
+        };
+        node.tx_pool
+            .insert(signed, &verifier, &known_pubkeys, &balance_of)
+            .unwrap();
+
+        // Produce block with the transfer
+        let block = node.produce_block(&signer, 100).unwrap();
+        assert_eq!(block.number(), 1);
+        assert_eq!(block.transactions.len(), 1);
+
+        // Verify state was committed: receiver got funds
+        {
+            let ws = node.world_state.read();
+            let receiver_balance = ws.get_balance(&receiver).unwrap();
+            assert_eq!(receiver_balance, transfer_value, "receiver should have received the transfer");
+
+            // Sender balance should have decreased (value transferred + gas)
+            let sender_balance = ws.get_balance(&sender).unwrap();
+            assert!(
+                sender_balance < U256::from(10_000_000_000u64),
+                "sender balance should decrease after transfer"
+            );
+        }
+
+        // State root should be non-default (state was modified)
+        assert_ne!(
+            block.header.state_root,
+            ShellHash::default(),
+            "state root should reflect committed state"
+        );
+    }
+
+    #[test]
     fn import_block() {
-        let (node, _) = setup_node();
+        let (node, _signer) = setup_node();
         store_genesis(&node);
 
         let block = Block {
@@ -334,7 +498,7 @@ mod tests {
 
     #[test]
     fn shutdown_signal() {
-        let (node, _) = setup_node();
+        let (node, _signer) = setup_node();
         let rx = node.shutdown_tx.subscribe();
         assert!(!*rx.borrow());
 
