@@ -43,6 +43,10 @@ enum Commands {
         /// Chain ID.
         #[arg(long, default_value = "1337")]
         chain_id: u64,
+
+        /// Storage backend: "memory" or "rocksdb".
+        #[arg(long, default_value = "memory")]
+        db: String,
     },
 
     /// Initialize genesis block and data directory.
@@ -98,8 +102,9 @@ async fn main() {
             block_time,
             keystore,
             chain_id,
+            db,
         } => {
-            commands::run(cli.datadir, rpc_addr, block_time, keystore, chain_id).await
+            commands::run(cli.datadir, rpc_addr, block_time, keystore, chain_id, db).await
         }
         Commands::Init { genesis, chain_id } => {
             commands::init(cli.datadir, genesis, chain_id)

@@ -45,11 +45,26 @@ impl<S: KvStore + 'static> NodeBuilder<S> {
     }
 
     /// Build the node, wiring all components together.
+    ///
+    /// Automatically detects whether the chain has been initialized:
+    /// if a head block exists, WorldState resumes from its state root;
+    /// otherwise, WorldState starts empty (pre-genesis).
     pub fn build(mut self) -> (Node<S>, Arc<S>) {
         let store = self.store.take().expect("store must be set");
 
         let chain_store = Arc::new(ChainStore::new(store.clone()));
-        let world_state = Arc::new(RwLock::new(WorldState::new(store.clone())));
+
+        // Resume from existing chain state if available.
+        let world_state = match chain_store.get_head_block() {
+            Ok(Some(head)) => {
+                match WorldState::at_root(store.clone(), &head.header.state_root) {
+                    Ok(ws) => Arc::new(RwLock::new(ws)),
+                    Err(_) => Arc::new(RwLock::new(WorldState::new(store.clone()))),
+                }
+            }
+            _ => Arc::new(RwLock::new(WorldState::new(store.clone()))),
+        };
+
         let consensus = Arc::new(PoaEngine::new(self.config.consensus.clone()));
         let tx_pool = Arc::new(TxPool::new(self.config.mempool.clone()));
 

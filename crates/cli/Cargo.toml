@@ -9,6 +9,10 @@ repository.workspace = true
 name = "shell-node"
 path = "src/main.rs"
 
+[features]
+default = []
+rocksdb = ["shell-storage/rocksdb"]
+
 [dependencies]
 shell-primitives.workspace = true
 shell-crypto.workspace = true
