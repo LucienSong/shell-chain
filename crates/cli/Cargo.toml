@@ -1,0 +1,31 @@
+[package]
+name = "shell-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "shell-node"
+path = "src/main.rs"
+
+[dependencies]
+shell-primitives.workspace = true
+shell-crypto.workspace = true
+shell-core.workspace = true
+shell-storage.workspace = true
+shell-consensus = { path = "../consensus" }
+shell-genesis = { path = "../genesis" }
+shell-evm = { path = "../evm" }
+shell-mempool = { path = "../mempool" }
+shell-rpc = { path = "../rpc" }
+shell-network = { path = "../network" }
+shell-node = { path = "../node" }
+shell-keystore = { path = "../keystore" }
+clap.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+hex.workspace = true

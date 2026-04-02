@@ -13,6 +13,7 @@ members = [
     "crates/network",
     "crates/node",
     "crates/keystore",
+    "crates/cli",
 ]
 
 [workspace.package]
@@ -62,3 +63,8 @@ parking_lot = "0.12"
 
 # --- storage (rocksdb) ---
 rocksdb = { version = "0.22", default-features = false, features = ["snappy"] }
+
+# --- cli ---
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
