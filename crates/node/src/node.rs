@@ -102,6 +102,11 @@ impl<S: KvStore + 'static> Node<S> {
         .await
         .map_err(|e| NodeError::Startup(format!("RPC: {e}")))?;
 
+        // Register own authority pubkey for seal verification.
+        if let Some(addr) = self.config.proposer_address {
+            self.register_authority_pubkey(addr, signer.public_key().to_vec());
+        }
+
         let mut block_timer = interval(Duration::from_millis(self.config.block_time_ms));
         let mut shutdown_rx = self.shutdown_tx.subscribe();
 
@@ -365,6 +370,9 @@ impl<S: KvStore + 'static> Node<S> {
         // Sign the block with the proposer's key.
         self.consensus.sign_block(&mut block, signer)?;
 
+        // Register the signer's pubkey so we can verify our own blocks on re-import.
+        self.register_authority_pubkey(proposer_addr, signer.public_key().to_vec());
+
         // Commit to storage.
         let block_hash = block.hash();
         self.chain_store.put_block(&block)?;
@@ -442,6 +450,52 @@ impl<S: KvStore + 'static> Node<S> {
 
         // Verify consensus rules.
         self.consensus.verify_header(&block.header)?;
+
+        // Verify proposer seal (PQ signature).
+        match &block.proposer_seal {
+            Some(seal) => {
+                let proposer = &block.header.proposer;
+                let known = self.known_authorities.read();
+                if let Some(pubkey) = known.get(proposer) {
+                    let verifier = DilithiumVerifier;
+                    self.consensus.verify_seal(
+                        &block.header,
+                        seal,
+                        pubkey,
+                        &verifier,
+                    )?;
+                } else {
+                    // Try chain store as fallback.
+                    drop(known);
+                    if let Ok(Some(pubkey)) = self.chain_store.get_pubkey(proposer) {
+                        let verifier = DilithiumVerifier;
+                        self.consensus.verify_seal(
+                            &block.header,
+                            seal,
+                            &pubkey,
+                            &verifier,
+                        )?;
+                        // Cache for future lookups.
+                        self.known_authorities
+                            .write()
+                            .insert(*proposer, pubkey);
+                    } else {
+                        warn!(
+                            proposer = %proposer,
+                            block = block.number(),
+                            "seal present but proposer pubkey unknown, skipping verification (M1b)"
+                        );
+                    }
+                }
+            }
+            None => {
+                warn!(
+                    block = block.number(),
+                    proposer = %block.header.proposer,
+                    "imported block has no proposer seal (M1b: allowed, will be strict in M2)"
+                );
+            }
+        }
 
         // Re-execute transactions and commit state changes.
         if !block.transactions.is_empty() {
@@ -720,6 +774,124 @@ mod tests {
 
         let head = node.chain_store.get_head_block().unwrap().unwrap();
         assert_eq!(head.number(), 1);
+    }
+
+    #[test]
+    fn import_block_with_valid_seal() {
+        let (node, signer) = setup_node();
+        store_genesis(&node);
+        let proposer = node.config.proposer_address.unwrap();
+
+        // Register authority pubkey so seal verification runs.
+        node.register_authority_pubkey(proposer, signer.public_key().to_vec());
+
+        // Produce a properly signed block and re-import it on a fresh node.
+        let block = node.produce_block(&signer, 100).unwrap();
+        assert!(block.proposer_seal.is_some());
+
+        // Set up a second node sharing storage to import the block.
+        let node2_db = Arc::new(MemoryDb::new());
+        let node2_cs = Arc::new(ChainStore::new(node2_db.clone()));
+        let node2_ws = Arc::new(RwLock::new(WorldState::new(node2_db.clone())));
+        let consensus = Arc::new(PoaEngine::new(PoaConfig::new(vec![proposer], 1)));
+        let tx_pool = Arc::new(TxPool::new(MempoolConfig {
+            chain_id: 1337,
+            ..MempoolConfig::default()
+        }));
+        let config = NodeConfig::dev(proposer);
+        let node2 = Node::new(config, node2_db, node2_cs, node2_ws, tx_pool, consensus);
+        store_genesis(&node2);
+
+        // Register authority pubkey on node2.
+        node2.register_authority_pubkey(proposer, signer.public_key().to_vec());
+
+        let verifier = DilithiumVerifier;
+        node2.import_block(block, &verifier).unwrap();
+
+        let head = node2.chain_store.get_head_block().unwrap().unwrap();
+        assert_eq!(head.number(), 1);
+    }
+
+    #[test]
+    fn import_block_with_invalid_seal_rejected() {
+        let (node, signer) = setup_node();
+        store_genesis(&node);
+        let proposer = node.config.proposer_address.unwrap();
+
+        // Register authority pubkey.
+        node.register_authority_pubkey(proposer, signer.public_key().to_vec());
+
+        let mut block = node.produce_block(&signer, 100).unwrap();
+
+        // Corrupt the seal.
+        if let Some(ref mut seal) = block.proposer_seal {
+            seal.data[0] ^= 0xFF;
+        }
+
+        // Set up a second node to import the corrupted block.
+        let node2_db = Arc::new(MemoryDb::new());
+        let node2_cs = Arc::new(ChainStore::new(node2_db.clone()));
+        let node2_ws = Arc::new(RwLock::new(WorldState::new(node2_db.clone())));
+        let consensus = Arc::new(PoaEngine::new(PoaConfig::new(vec![proposer], 1)));
+        let tx_pool = Arc::new(TxPool::new(MempoolConfig {
+            chain_id: 1337,
+            ..MempoolConfig::default()
+        }));
+        let config = NodeConfig::dev(proposer);
+        let node2 = Node::new(config, node2_db, node2_cs, node2_ws, tx_pool, consensus);
+        store_genesis(&node2);
+        node2.register_authority_pubkey(proposer, signer.public_key().to_vec());
+
+        let verifier = DilithiumVerifier;
+        let result = node2.import_block(block, &verifier);
+        assert!(result.is_err(), "block with invalid seal should be rejected");
+    }
+
+    #[test]
+    fn import_block_without_seal_allowed_m1b() {
+        // In M1b, blocks without a seal are allowed with a warning.
+        let (node, _signer) = setup_node();
+        store_genesis(&node);
+
+        let block = Block {
+            header: BlockHeader {
+                parent_hash: node.chain_store.get_head_hash().unwrap().unwrap(),
+                state_root: ShellHash::default(),
+                transactions_root: ShellHash::default(),
+                receipts_root: ShellHash::default(),
+                logs_bloom: Bytes::default(),
+                number: 1,
+                gas_limit: 30_000_000,
+                gas_used: 0,
+                timestamp: 1_700_000_001,
+                extra_data: Bytes::default(),
+                proposer: node.config.proposer_address.unwrap(),
+                sig_aggregate_proof: None,
+            },
+            transactions: vec![],
+            proposer_seal: None,
+        };
+
+        let verifier = DilithiumVerifier;
+        // Should succeed despite missing seal (M1b tolerance).
+        node.import_block(block, &verifier).unwrap();
+        let head = node.chain_store.get_head_block().unwrap().unwrap();
+        assert_eq!(head.number(), 1);
+    }
+
+    #[test]
+    fn produce_block_registers_authority_pubkey() {
+        let (node, signer) = setup_node();
+        store_genesis(&node);
+
+        let proposer = node.config.proposer_address.unwrap();
+        assert!(node.known_authorities.read().get(&proposer).is_none());
+
+        node.produce_block(&signer, 100).unwrap();
+
+        let known = node.known_authorities.read();
+        let pubkey = known.get(&proposer).expect("pubkey should be registered after produce_block");
+        assert_eq!(pubkey, signer.public_key());
     }
 
     #[test]
