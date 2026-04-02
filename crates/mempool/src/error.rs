@@ -1,4 +1,4 @@
-use shell_primitives::{Address, ShellHash};
+use shell_primitives::{Address, ShellHash, U256};
 use thiserror::Error;
 
 /// Errors that can occur during mempool operations.
@@ -21,6 +21,12 @@ pub enum MempoolError {
 
     #[error("nonce {got} too low, sender has pending nonce >= {pending}")]
     NonceTooLow { got: u64, pending: u64 },
+
+    #[error("insufficient balance: need {needed}, have {have}")]
+    InsufficientBalance { needed: U256, have: U256 },
+
+    #[error("replacement fee too low: need >{required}, got {got}")]
+    ReplacementFeeTooLow { got: u64, required: u64 },
 
     #[error("invalid signature: {0}")]
     InvalidSignature(String),
