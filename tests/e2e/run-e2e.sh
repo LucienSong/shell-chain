@@ -79,16 +79,26 @@ else
 fi
 
 # ─── Test 3: Node2 and Node3 are syncing blocks ─────────────
-info "Waiting for block sync (15 seconds)..."
-sleep 15
+info "Polling for block sync..."
+
+N2_DEC=0
+for i in $(seq 1 30); do
+    N2=$(rpc 8546 eth_blockNumber 2>/dev/null || echo "0x0")
+    N2_DEC=$((16#${N2#0x}))
+    if [ "$N2_DEC" -gt 0 ]; then break; fi
+    sleep 2
+done
+
+N3_DEC=0
+for i in $(seq 1 30); do
+    N3=$(rpc 8547 eth_blockNumber 2>/dev/null || echo "0x0")
+    N3_DEC=$((16#${N3#0x}))
+    if [ "$N3_DEC" -gt 0 ]; then break; fi
+    sleep 2
+done
 
 N1=$(rpc 8545 eth_blockNumber)
-N2=$(rpc 8546 eth_blockNumber)
-N3=$(rpc 8547 eth_blockNumber)
-
 N1_DEC=$((16#${N1#0x}))
-N2_DEC=$((16#${N2#0x}))
-N3_DEC=$((16#${N3#0x}))
 
 if [ "$N2_DEC" -gt 0 ]; then
     pass "Node2 synced (block #${N2_DEC})"

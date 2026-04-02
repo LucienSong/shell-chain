@@ -19,12 +19,18 @@ RUN apt-get update && apt-get install -y \
     ca-certificates curl jq \
     && rm -rf /var/lib/apt/lists/*
 
+RUN useradd -m -s /bin/bash shelluser
+
 COPY --from=builder /build/target/release/shell-node /usr/local/bin/shell-node
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 ENV DATADIR=/data
 ENV SHARED=/shared
+
+RUN mkdir -p /data /shared && chown shelluser:shelluser /data /shared
+
+USER shelluser
 
 EXPOSE 8545 30303
 
