@@ -1,10 +1,12 @@
 //! Running node with event loop and block production.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use parking_lot::RwLock;
 use tokio::sync::watch;
+use tracing::{debug, info, warn};
 
 use shell_consensus::{ConsensusEngine, PoaEngine};
 use shell_core::{Block, BlockHeader, SignedTransaction};
@@ -29,6 +31,8 @@ pub struct Node<S: KvStore + 'static> {
     pub world_state: Arc<RwLock<WorldState<S>>>,
     pub tx_pool: Arc<TxPool>,
     pub consensus: Arc<PoaEngine>,
+    /// Known authority public keys for seal verification (Address → PQ pubkey).
+    pub known_authorities: Arc<RwLock<HashMap<Address, Vec<u8>>>>,
     shutdown_tx: watch::Sender<bool>,
 }
 
@@ -50,8 +54,14 @@ impl<S: KvStore + 'static> Node<S> {
             world_state,
             tx_pool,
             consensus,
+            known_authorities: Arc::new(RwLock::new(HashMap::new())),
             shutdown_tx,
         }
+    }
+
+    /// Register an authority's public key for seal verification.
+    pub fn register_authority_pubkey(&self, address: Address, pubkey: Vec<u8>) {
+        self.known_authorities.write().insert(address, pubkey);
     }
 
     /// Signal the node to shut down.
@@ -98,6 +108,26 @@ impl<S: KvStore + 'static> Node<S> {
         // Skip the first immediate tick.
         block_timer.tick().await;
 
+        // Startup sync: request blocks we don't have from peers.
+        if network.peer_count().await > 0 {
+            let head_number = self
+                .chain_store
+                .get_head_block()
+                .ok()
+                .flatten()
+                .map(|b| b.number())
+                .unwrap_or(0);
+            info!(
+                head = head_number,
+                "requesting blocks from peers for initial sync"
+            );
+            let req = NetworkMessage::BlockRequest {
+                start_number: head_number + 1,
+                count: 128,
+            };
+            let _ = network.broadcast(req).await;
+        }
+
         loop {
             tokio::select! {
                 _ = block_timer.tick() => {
@@ -125,7 +155,7 @@ impl<S: KvStore + 'static> Node<S> {
 
                 event = network.next_event() => {
                     match event {
-                        Some(NetworkEvent::MessageReceived { message, .. }) => {
+                        Some(NetworkEvent::MessageReceived { peer, message }) => {
                             match message {
                                 NetworkMessage::NewBlock(block) => {
                                     let verifier = DilithiumVerifier;
@@ -141,7 +171,60 @@ impl<S: KvStore + 'static> Node<S> {
                                         Err(e) => eprintln!("⚠  Tx handling error: {e}"),
                                     }
                                 }
-                                _ => {}
+                                NetworkMessage::BlockRequest { start_number, count } => {
+                                    debug!(
+                                        %peer,
+                                        start_number,
+                                        count,
+                                        "received BlockRequest"
+                                    );
+                                    let mut blocks = Vec::new();
+                                    for n in start_number..start_number.saturating_add(count) {
+                                        match self.chain_store.get_block_by_number(n) {
+                                            Ok(Some(block)) => blocks.push(block),
+                                            _ => break,
+                                        }
+                                    }
+                                    if !blocks.is_empty() {
+                                        info!(
+                                            count = blocks.len(),
+                                            from = start_number,
+                                            "responding with blocks"
+                                        );
+                                        let resp = NetworkMessage::BlockResponse { blocks };
+                                        let _ = network.broadcast(resp).await;
+                                    }
+                                }
+                                NetworkMessage::BlockResponse { blocks } => {
+                                    info!(
+                                        count = blocks.len(),
+                                        "received BlockResponse, importing blocks"
+                                    );
+                                    let verifier = DilithiumVerifier;
+                                    for block in blocks {
+                                        let num = block.number();
+                                        match self.import_block(block, &verifier) {
+                                            Ok(()) => {
+                                                debug!(number = num, "synced block");
+                                            }
+                                            Err(e) => {
+                                                warn!(
+                                                    number = num,
+                                                    error = %e,
+                                                    "block sync import failed"
+                                                );
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                                NetworkMessage::Ping => {
+                                    debug!(%peer, "received Ping, responding with Pong");
+                                    let _ = network.broadcast(NetworkMessage::Pong).await;
+                                }
+                                NetworkMessage::Pong => {
+                                    debug!(%peer, "received Pong");
+                                }
                             }
                         }
                         Some(_) => {} // PeerConnected / PeerDisconnected
@@ -302,6 +385,11 @@ impl<S: KvStore + 'static> Node<S> {
     ///
     /// Re-executes all transactions through the EVM and commits state
     /// changes to WorldState, then stores the block.
+    ///
+    /// Fork detection: if the incoming block is at the same height as
+    /// the current head but with a different hash, it is treated as a
+    /// potential fork and skipped. If there is a gap (block number is
+    /// more than one ahead of head), missing blocks are requested.
     pub fn import_block(
         &self,
         block: Block,
@@ -312,12 +400,43 @@ impl<S: KvStore + 'static> Node<S> {
             .get_head_block()?
             .ok_or(NodeError::NoGenesis)?;
 
-        // Basic ordering check.
-        if block.number() != head.number() + 1 {
+        let expected = head.number() + 1;
+        let incoming = block.number();
+
+        // Fork detection: same height, different hash.
+        if incoming == head.number() && block.hash() != head.hash() {
+            warn!(
+                number = incoming,
+                local_hash = %head.hash(),
+                remote_hash = %block.hash(),
+                "potential fork detected at same height, skipping import"
+            );
+            return Ok(());
+        }
+
+        // Duplicate of current head — already have it.
+        if incoming <= head.number() {
+            debug!(
+                incoming,
+                head = head.number(),
+                "ignoring block at or below current head"
+            );
+            return Ok(());
+        }
+
+        // Gap detection: block is too far ahead.
+        if incoming > expected {
+            warn!(
+                incoming,
+                expected,
+                gap = incoming - expected,
+                "block too far ahead, missing blocks need to be requested"
+            );
             return Err(NodeError::Startup(format!(
-                "block {} does not follow head {}",
-                block.number(),
-                head.number()
+                "block {} does not follow head {} (gap: {})",
+                incoming,
+                head.number(),
+                incoming - expected
             )));
         }
 
