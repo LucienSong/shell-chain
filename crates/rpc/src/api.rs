@@ -87,4 +87,11 @@ pub trait ShellApi {
     /// Returns the number of pending transactions in the mempool.
     #[method(name = "pendingCount")]
     async fn pending_count(&self) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Submit a signed transaction as structured JSON (developer-friendly).
+    #[method(name = "sendTransaction")]
+    async fn send_transaction(
+        &self,
+        tx: shell_core::SignedTransaction,
+    ) -> Result<ShellHash, jsonrpsee::types::ErrorObjectOwned>;
 }

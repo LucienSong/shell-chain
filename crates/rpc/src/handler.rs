@@ -5,8 +5,9 @@ use std::sync::Arc;
 use jsonrpsee::types::ErrorObjectOwned;
 
 use shell_core::{Block, SignedTransaction};
+use shell_crypto::DilithiumVerifier;
 use shell_mempool::TxPool;
-use shell_primitives::{Address, ShellHash};
+use shell_primitives::{Address, ShellHash, U256};
 use shell_storage::{ChainStore, KvStore, WorldState};
 
 use crate::api::{EthApiServer, ShellApiServer};
@@ -49,6 +50,24 @@ impl<S: KvStore + 'static> RpcHandler<S> {
             tx_pool,
             chain_id,
         }
+    }
+
+    /// Validate and submit a signed transaction to the mempool.
+    fn submit_tx(&self, signed_tx: SignedTransaction) -> Result<ShellHash, ErrorObjectOwned> {
+        let chain_store = &self.chain_store;
+        let ws = self.world_state.read();
+
+        let known_pubkeys = |addr: &Address| -> Option<Vec<u8>> {
+            chain_store.get_pubkey(addr).ok().flatten()
+        };
+        let balance_of = |addr: &Address| -> U256 {
+            ws.get_balance(addr).unwrap_or(U256::ZERO)
+        };
+
+        let verifier = DilithiumVerifier;
+        self.tx_pool
+            .insert(signed_tx, &verifier, &known_pubkeys, &balance_of)
+            .map_err(|e| ErrorObjectOwned::owned(-32000, e.to_string(), None::<()>))
     }
 }
 
@@ -111,6 +130,10 @@ fn tx_to_rpc(
         nonce: hex_u64(tx.tx.nonce),
         input: hex_bytes(tx.tx.data.as_ref()),
         chain_id: hex_u64(tx.tx.chain_id),
+        tx_type: "0x2".into(),
+        v: "0x0".into(),
+        r: "0x0".into(),
+        s: "0x0".into(),
     }
 }
 
@@ -257,15 +280,16 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
 
     async fn send_raw_transaction(
         &self,
-        _data: String,
+        data: String,
     ) -> Result<ShellHash, ErrorObjectOwned> {
-        // Full implementation requires RLP decoding of SignedTransaction from raw bytes.
-        // Stub: return an error until wire format is finalized.
-        Err(ErrorObjectOwned::owned(
-            -32000,
-            "eth_sendRawTransaction not yet implemented — use shell_sendTransaction",
-            None::<()>,
-        ))
+        // Decode hex payload: "0x" + hex-encoded JSON of SignedTransaction.
+        let raw = data.strip_prefix("0x").unwrap_or(&data);
+        let bytes = hex::decode(raw)
+            .map_err(|e| internal_err(format!("invalid hex: {e}")))?;
+        let signed_tx: SignedTransaction = serde_json::from_slice(&bytes)
+            .map_err(|e| internal_err(format!("invalid tx JSON: {e}")))?;
+
+        self.submit_tx(signed_tx)
     }
 }
 
@@ -285,6 +309,13 @@ impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
     async fn pending_count(&self) -> Result<String, ErrorObjectOwned> {
         Ok(hex_u64(self.tx_pool.len() as u64))
     }
+
+    async fn send_transaction(
+        &self,
+        tx: SignedTransaction,
+    ) -> Result<ShellHash, ErrorObjectOwned> {
+        self.submit_tx(tx)
+    }
 }
 
 #[cfg(test)]
@@ -299,7 +330,10 @@ mod tests {
         let db = Arc::new(MemoryDb::new());
         let chain_store = Arc::new(ChainStore::new(db.clone()));
         let world_state = Arc::new(parking_lot::RwLock::new(WorldState::new(db)));
-        let tx_pool = Arc::new(TxPool::new(shell_mempool::MempoolConfig::default()));
+        let tx_pool = Arc::new(TxPool::new(shell_mempool::MempoolConfig {
+            chain_id: 42,
+            ..shell_mempool::MempoolConfig::default()
+        }));
         RpcHandler::new(chain_store, world_state, tx_pool, 42)
     }
 
@@ -439,5 +473,124 @@ mod tests {
         let result = ShellApiServer::get_pq_pubkey(&handler, addr).await.unwrap();
         assert!(result.is_some());
         assert!(result.unwrap().starts_with("0x"));
+    }
+
+    #[tokio::test]
+    async fn tx_response_includes_vrs_compat_fields() {
+        let handler = setup();
+        let block = make_genesis_block();
+        let hash = block.hash();
+        handler.chain_store.put_block(&block).unwrap();
+        handler.chain_store.set_canonical(0, &hash).unwrap();
+        handler.chain_store.set_head(&hash).unwrap();
+
+        // Verify block is stored, then check RpcTransaction v/r/s fields.
+        let _block = EthApiServer::get_block_by_number(&handler, "latest".into(), false)
+            .await
+            .unwrap()
+            .unwrap();
+        // Directly construct an RpcTransaction to check compat fields.
+        let rpc_tx = tx_to_rpc(
+            &shell_core::SignedTransaction::new(
+                Address::from_public_key(b"test"),
+                Transaction {
+                    chain_id: 42,
+                    nonce: 0,
+                    max_fee_per_gas: 1_000_000_000,
+                    max_priority_fee_per_gas: 100_000_000,
+                    gas_limit: 21_000,
+                    to: None,
+                    value: U256::ZERO,
+                    data: Bytes::default(),
+                },
+                shell_crypto::PQSignature::new(
+                    shell_crypto::SignatureType::Dilithium3,
+                    vec![],
+                ),
+            ),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(rpc_tx.v, "0x0");
+        assert_eq!(rpc_tx.r, "0x0");
+        assert_eq!(rpc_tx.s, "0x0");
+        assert_eq!(rpc_tx.tx_type, "0x2");
+    }
+
+    #[tokio::test]
+    async fn send_raw_transaction_decodes_hex_json() {
+        let handler = setup();
+        let signer = DilithiumSigner::generate();
+        let pubkey = signer.public_key().to_vec();
+        let addr = Address::from_public_key(&pubkey);
+
+        // Fund the sender so balance check passes.
+        {
+            let mut ws = handler.world_state.write();
+            ws.add_balance(&addr, U256::from(100_000_000_000_000u64)).unwrap();
+        }
+        // Register pubkey so mempool can verify.
+        handler.chain_store.put_pubkey(&addr, &pubkey).unwrap();
+
+        let tx = Transaction {
+            chain_id: 42,
+            nonce: 0,
+            max_fee_per_gas: 1_000_000_000,
+            max_priority_fee_per_gas: 100_000_000,
+            gas_limit: 21_000,
+            to: None,
+            value: U256::ZERO,
+            data: Bytes::default(),
+        };
+
+        let signature = signer.sign(tx.hash().0.as_slice()).unwrap();
+        let signed = SignedTransaction::new(addr, tx, signature);
+
+        let json_bytes = serde_json::to_vec(&signed).unwrap();
+        let hex_payload = format!("0x{}", hex::encode(&json_bytes));
+
+        let result = EthApiServer::send_raw_transaction(&handler, hex_payload).await;
+        assert!(result.is_ok(), "send_raw_transaction failed: {:?}", result.err());
+
+        assert_eq!(handler.tx_pool.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn shell_send_transaction() {
+        let handler = setup();
+        let signer = DilithiumSigner::generate();
+        let pubkey = signer.public_key().to_vec();
+        let addr = Address::from_public_key(&pubkey);
+
+        {
+            let mut ws = handler.world_state.write();
+            ws.add_balance(&addr, U256::from(100_000_000_000_000u64)).unwrap();
+        }
+        handler.chain_store.put_pubkey(&addr, &pubkey).unwrap();
+
+        let tx = Transaction {
+            chain_id: 42,
+            nonce: 0,
+            max_fee_per_gas: 1_000_000_000,
+            max_priority_fee_per_gas: 100_000_000,
+            gas_limit: 21_000,
+            to: None,
+            value: U256::ZERO,
+            data: Bytes::default(),
+        };
+        let signature = signer.sign(tx.hash().0.as_slice()).unwrap();
+        let signed = SignedTransaction::new(addr, tx, signature);
+
+        let result = ShellApiServer::send_transaction(&handler, signed).await;
+        assert!(result.is_ok());
+        assert_eq!(handler.tx_pool.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn send_raw_transaction_rejects_invalid_hex() {
+        let handler = setup();
+        let result = EthApiServer::send_raw_transaction(&handler, "not-hex".into()).await;
+        assert!(result.is_err());
     }
 }

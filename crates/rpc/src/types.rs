@@ -39,6 +39,15 @@ pub struct RpcTransaction {
     pub nonce: String,
     pub input: String,
     pub chain_id: String,
+    /// EIP-2718 transaction type — always "0x2" (EIP-1559).
+    #[serde(rename = "type")]
+    pub tx_type: String,
+    /// Legacy ECDSA compat stub — always "0x0" (PQ chain has no ECDSA).
+    pub v: String,
+    /// Legacy ECDSA compat stub — always "0x0".
+    pub r: String,
+    /// Legacy ECDSA compat stub — always "0x0".
+    pub s: String,
 }
 
 /// Hex-encoded transaction receipt response.
