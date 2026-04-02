@@ -132,6 +132,8 @@ fn build_swarm(config: &NetworkConfig) -> Result<Swarm<ShellBehaviour>, NetworkE
             yamux::Config::default,
         )
         .map_err(|e| NetworkError::Transport(format!("transport: {e}")))?
+        .with_dns()
+        .map_err(|e| NetworkError::Transport(format!("dns transport: {e}")))?
         .with_behaviour(|key| {
             let peer_id = key.public().to_peer_id();
 
@@ -260,7 +262,8 @@ async fn handle_swarm_event(
         // mDNS peer discovered.
         SwarmEvent::Behaviour(ShellBehaviourEvent::Mdns(mdns::Event::Discovered(peers))) => {
             for (peer_id, addr) in peers {
-                debug!("mDNS discovered: {peer_id} at {addr}");
+                info!("discovered peer on address peer={peer_id} address={addr}");
+                swarm.add_peer_address(peer_id, addr);
                 swarm
                     .behaviour_mut()
                     .gossipsub

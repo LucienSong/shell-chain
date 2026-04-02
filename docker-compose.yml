@@ -45,7 +45,7 @@ services:
       --rpc-addr 0.0.0.0:8545
       --p2p
       --p2p-addr 0.0.0.0:30303
-      --bootnode /ip4/node1/tcp/30303
+      --bootnode /dns4/node1/tcp/30303
       --enable-mdns
       --db rocksdb
       --block-time 2000
@@ -69,7 +69,7 @@ services:
       --rpc-addr 0.0.0.0:8545
       --p2p
       --p2p-addr 0.0.0.0:30303
-      --bootnode /ip4/node1/tcp/30303
+      --bootnode /dns4/node1/tcp/30303
       --enable-mdns
       --db rocksdb
       --block-time 2000

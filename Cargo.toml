@@ -62,7 +62,7 @@ tokio = { version = "1", features = ["full"] }
 parking_lot = "0.12"
 
 # --- network (libp2p) ---
-libp2p = { version = "0.56", features = ["tcp", "noise", "yamux", "gossipsub", "mdns", "tokio", "identify", "macros"] }
+libp2p = { version = "0.56", features = ["tcp", "dns", "noise", "yamux", "gossipsub", "mdns", "tokio", "identify", "macros"] }
 
 # --- storage (rocksdb) ---
 rocksdb = { version = "0.22", default-features = false, features = ["snappy"] }
