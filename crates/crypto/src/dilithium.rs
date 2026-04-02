@@ -66,6 +66,14 @@ impl DilithiumSigner {
         )
     }
 
+    /// Export raw secret key bytes for keystore encryption.
+    ///
+    /// The caller MUST handle the returned bytes securely and zeroize
+    /// them after use. Prefer using the [`Signer`] trait for signing.
+    pub fn secret_key_bytes(&self) -> &[u8] {
+        &self.secret_key_bytes
+    }
+
     fn secret_key(&self) -> dilithium3::SecretKey {
         // Safe: bytes were validated at construction time
         dilithium3::SecretKey::from_bytes(&self.secret_key_bytes)

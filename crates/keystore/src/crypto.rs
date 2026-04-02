@@ -1,0 +1,195 @@
+//! Encryption and decryption of Dilithium3 secret keys.
+
+use argon2::{Algorithm, Argon2, Params, Version};
+use chacha20poly1305::aead::{Aead, KeyInit};
+use chacha20poly1305::XChaCha20Poly1305;
+use rand::RngCore;
+use zeroize::Zeroize;
+
+use shell_crypto::{DilithiumSigner, Signer};
+use shell_primitives::Address;
+
+use crate::types::{CipherParams, EncryptedKey, KdfParams, KeystoreError};
+
+/// Encrypt a Dilithium3 signer with a password.
+///
+/// Returns an [`EncryptedKey`] that can be serialized to JSON and stored
+/// on disk. The secret key is encrypted with XChaCha20-Poly1305 using a
+/// key derived from the password via argon2id.
+pub fn encrypt(signer: &DilithiumSigner, password: &[u8]) -> Result<EncryptedKey, KeystoreError> {
+    let mut salt = [0u8; 32];
+    let mut nonce = [0u8; 24]; // XChaCha20 uses 24-byte nonce
+    rand::thread_rng().fill_bytes(&mut salt);
+    rand::thread_rng().fill_bytes(&mut nonce);
+
+    let kdf_params = KdfParams {
+        m_cost: 65536, // 64 MiB
+        t_cost: 3,
+        p_cost: 4,
+        salt: hex::encode(salt),
+    };
+
+    // Derive 32-byte encryption key from password.
+    let mut derived_key = derive_key(password, &salt, &kdf_params)?;
+
+    // Encrypt the secret key bytes.
+    let cipher = XChaCha20Poly1305::new((&derived_key).into());
+    let plaintext = signer.secret_key_bytes();
+
+    let ciphertext = cipher
+        .encrypt((&nonce).into(), plaintext)
+        .map_err(|e| KeystoreError::Encryption(e.to_string()))?;
+
+    derived_key.zeroize();
+
+    let address = Address::from_public_key(signer.public_key());
+
+    Ok(EncryptedKey {
+        version: 1,
+        address: hex::encode(address.as_bytes()),
+        kdf: "argon2id".into(),
+        kdf_params,
+        cipher: "xchacha20-poly1305".into(),
+        cipher_params: CipherParams {
+            nonce: hex::encode(nonce),
+        },
+        ciphertext: hex::encode(&ciphertext),
+        public_key: hex::encode(signer.public_key()),
+    })
+}
+
+/// Decrypt an encrypted key with a password, returning a DilithiumSigner.
+///
+/// Verifies that the decrypted public key matches the stored address
+/// to catch wrong-password errors early (via AEAD tag check).
+pub fn decrypt(encrypted: &EncryptedKey, password: &[u8]) -> Result<DilithiumSigner, KeystoreError> {
+    let salt = hex::decode(&encrypted.kdf_params.salt)
+        .map_err(|e| KeystoreError::InvalidKey(format!("bad salt hex: {e}")))?;
+    let nonce_bytes = hex::decode(&encrypted.cipher_params.nonce)
+        .map_err(|e| KeystoreError::InvalidKey(format!("bad nonce hex: {e}")))?;
+    let ciphertext = hex::decode(&encrypted.ciphertext)
+        .map_err(|e| KeystoreError::InvalidKey(format!("bad ciphertext hex: {e}")))?;
+    let public_key = hex::decode(&encrypted.public_key)
+        .map_err(|e| KeystoreError::InvalidKey(format!("bad pubkey hex: {e}")))?;
+
+    if nonce_bytes.len() != 24 {
+        return Err(KeystoreError::InvalidKey(format!(
+            "nonce must be 24 bytes, got {}",
+            nonce_bytes.len()
+        )));
+    }
+
+    // Derive decryption key.
+    let mut derived_key = derive_key(password, &salt, &encrypted.kdf_params)?;
+
+    let cipher = XChaCha20Poly1305::new((&derived_key).into());
+    let nonce: [u8; 24] = nonce_bytes.try_into().unwrap();
+
+    let mut secret_key = cipher
+        .decrypt((&nonce).into(), ciphertext.as_ref())
+        .map_err(|_| KeystoreError::Decryption)?;
+
+    derived_key.zeroize();
+
+    let signer = DilithiumSigner::from_bytes(&public_key, &secret_key)?;
+
+    secret_key.zeroize();
+
+    Ok(signer)
+}
+
+/// Derive a 32-byte key from password + salt using argon2id.
+fn derive_key(
+    password: &[u8],
+    salt: &[u8],
+    params: &KdfParams,
+) -> Result<[u8; 32], KeystoreError> {
+    let argon2_params = Params::new(params.m_cost, params.t_cost, params.p_cost, Some(32))
+        .map_err(|e| KeystoreError::Encryption(format!("argon2 params: {e}")))?;
+
+    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, argon2_params);
+
+    let mut key = [0u8; 32];
+    argon2
+        .hash_password_into(password, salt, &mut key)
+        .map_err(|e| KeystoreError::Encryption(format!("argon2 hash: {e}")))?;
+
+    Ok(key)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use shell_crypto::Signer;
+
+    #[test]
+    fn encrypt_decrypt_roundtrip() {
+        let signer = DilithiumSigner::generate();
+        let password = b"test-password-123";
+
+        let encrypted = encrypt(&signer, password).unwrap();
+        assert_eq!(encrypted.version, 1);
+        assert_eq!(encrypted.kdf, "argon2id");
+        assert_eq!(encrypted.cipher, "xchacha20-poly1305");
+
+        let recovered = decrypt(&encrypted, password).unwrap();
+        assert_eq!(recovered.public_key(), signer.public_key());
+
+        // Verify signing still works
+        let msg = b"hello world";
+        let sig = recovered.sign(msg).unwrap();
+        let verifier = shell_crypto::DilithiumVerifier;
+        use shell_crypto::Verifier;
+        assert!(verifier
+            .verify(recovered.public_key(), msg, &sig)
+            .is_ok());
+    }
+
+    #[test]
+    fn wrong_password_fails() {
+        let signer = DilithiumSigner::generate();
+        let encrypted = encrypt(&signer, b"correct-password").unwrap();
+
+        let result = decrypt(&encrypted, b"wrong-password");
+        assert!(result.is_err());
+        match result {
+            Err(KeystoreError::Decryption) => {} // expected
+            other => panic!("expected Decryption error, got err={}", other.is_err()),
+        }
+    }
+
+    #[test]
+    fn tampered_ciphertext_fails() {
+        let signer = DilithiumSigner::generate();
+        let mut encrypted = encrypt(&signer, b"password").unwrap();
+
+        // Tamper with ciphertext
+        let mut ct = hex::decode(&encrypted.ciphertext).unwrap();
+        ct[0] ^= 0xFF;
+        encrypted.ciphertext = hex::encode(&ct);
+
+        let result = decrypt(&encrypted, b"password");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn json_roundtrip() {
+        let signer = DilithiumSigner::generate();
+        let encrypted = encrypt(&signer, b"json-test").unwrap();
+
+        let json = serde_json::to_string_pretty(&encrypted).unwrap();
+        let loaded: EncryptedKey = serde_json::from_str(&json).unwrap();
+
+        let recovered = decrypt(&loaded, b"json-test").unwrap();
+        assert_eq!(recovered.public_key(), signer.public_key());
+    }
+
+    #[test]
+    fn address_matches() {
+        let signer = DilithiumSigner::generate();
+        let expected = Address::from_public_key(signer.public_key());
+        let encrypted = encrypt(&signer, b"addr-test").unwrap();
+
+        assert_eq!(encrypted.address, hex::encode(expected.as_bytes()));
+    }
+}

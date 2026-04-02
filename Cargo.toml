@@ -12,6 +12,7 @@ members = [
     "crates/rpc",
     "crates/network",
     "crates/node",
+    "crates/keystore",
 ]
 
 [workspace.package]
@@ -39,6 +40,11 @@ shell-storage = { path = "crates/storage" }
 pqcrypto-dilithium = "0.5"
 pqcrypto-traits = "0.3"
 zeroize = { version = "1", features = ["derive"] }
+
+# --- keystore ---
+argon2 = "0.5"
+chacha20poly1305 = "0.10"
+rand = "0.8"
 
 # --- consensus ---
 async-trait = "0.1"
