@@ -10,4 +10,4 @@ shell-primitives.workspace = true
 shell-crypto.workspace = true
 shell-core.workspace = true
 thiserror.workspace = true
-parking_lot = "0.12"
+parking_lot = { workspace = true }

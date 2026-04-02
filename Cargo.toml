@@ -9,6 +9,7 @@ members = [
     "crates/genesis",
     "crates/evm",
     "crates/mempool",
+    "crates/rpc",
 ]
 
 [workspace.package]
@@ -45,6 +46,11 @@ eth_trie = "0.4"
 
 # --- evm ---
 revm = { version = "36", default-features = false, features = ["std", "optional_no_base_fee"] }
+
+# --- rpc ---
+jsonrpsee = { version = "0.24", features = ["server", "macros"] }
+tokio = { version = "1", features = ["full"] }
+parking_lot = "0.12"
 
 # --- storage (rocksdb) ---
 rocksdb = { version = "0.22", default-features = false, features = ["snappy"] }
