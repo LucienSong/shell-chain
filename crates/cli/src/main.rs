@@ -47,6 +47,18 @@ enum Commands {
         /// Storage backend: "memory" or "rocksdb".
         #[arg(long, default_value = "memory")]
         db: String,
+
+        /// Enable libp2p P2P networking (requires --features libp2p).
+        #[arg(long)]
+        p2p: bool,
+
+        /// P2P listen address (ip:port for libp2p TCP).
+        #[arg(long, default_value = "0.0.0.0:30303")]
+        p2p_addr: String,
+
+        /// Bootstrap peer multiaddrs (repeatable).
+        #[arg(long)]
+        bootnode: Vec<String>,
     },
 
     /// Initialize genesis block and data directory.
@@ -103,8 +115,22 @@ async fn main() {
             keystore,
             chain_id,
             db,
+            p2p,
+            p2p_addr,
+            bootnode,
         } => {
-            commands::run(cli.datadir, rpc_addr, block_time, keystore, chain_id, db).await
+            commands::run(commands::run::RunArgs {
+                datadir: cli.datadir,
+                rpc_addr,
+                block_time,
+                keystore,
+                chain_id,
+                db,
+                p2p,
+                p2p_addr,
+                bootnodes: bootnode,
+            })
+            .await
         }
         Commands::Init { genesis, chain_id } => {
             commands::init(cli.datadir, genesis, chain_id)

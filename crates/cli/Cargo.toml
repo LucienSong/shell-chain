@@ -12,6 +12,7 @@ path = "src/main.rs"
 [features]
 default = []
 rocksdb = ["shell-storage/rocksdb"]
+libp2p = ["shell-network/libp2p"]
 
 [dependencies]
 shell-primitives.workspace = true
