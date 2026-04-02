@@ -3660,6 +3660,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "shell-node"
+version = "0.1.0"
+dependencies = [
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "shell-consensus",
+ "shell-core",
+ "shell-crypto",
+ "shell-evm",
+ "shell-mempool",
+ "shell-network",
+ "shell-primitives",
+ "shell-rpc",
+ "shell-storage",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "shell-primitives"
 version = "0.1.0"
 dependencies = [

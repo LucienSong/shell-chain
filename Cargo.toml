@@ -11,6 +11,7 @@ members = [
     "crates/mempool",
     "crates/rpc",
     "crates/network",
+    "crates/node",
 ]
 
 [workspace.package]
