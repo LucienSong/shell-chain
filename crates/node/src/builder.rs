@@ -65,7 +65,7 @@ impl<S: KvStore + 'static> NodeBuilder<S> {
             _ => Arc::new(RwLock::new(WorldState::new(store.clone()))),
         };
 
-        let consensus = Arc::new(PoaEngine::new(self.config.consensus.clone()));
+        let consensus = Arc::new(RwLock::new(PoaEngine::new(self.config.consensus.clone())));
         let tx_pool = Arc::new(TxPool::new(self.config.mempool.clone()));
 
         let node = Node::new(

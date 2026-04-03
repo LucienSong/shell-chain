@@ -20,6 +20,16 @@ pub fn initialize_genesis<S: KvStore + 'static>(
             .map_err(|e| GenesisError::StateInit(e.to_string()))?;
     }
 
+    // Write initial validator set to the validator registry in world state.
+    let authorities = match &config.consensus {
+        ConsensusConfig::PoA { authorities, .. } => authorities.clone(),
+    };
+    if !authorities.is_empty() {
+        world_state
+            .set_validators(&authorities)
+            .map_err(|e| GenesisError::StateInit(e.to_string()))?;
+    }
+
     // Compute state root
     let state_root = world_state
         .state_root()
@@ -269,5 +279,20 @@ mod tests {
         assert_eq!(chain_store.get_head_hash().unwrap().unwrap(), block.hash());
         let loaded = chain_store.get_block_by_number(0).unwrap().unwrap();
         assert_eq!(loaded.hash(), block.hash());
+    }
+
+    #[test]
+    fn genesis_writes_validators_to_world_state() {
+        let config = test_genesis();
+        let store = Arc::new(MemoryDb::new());
+        let block = initialize_genesis(&config, Arc::clone(&store)).unwrap();
+
+        let ws = WorldState::at_root(store, &block.header.state_root).unwrap();
+        let validators = ws.get_validators().unwrap();
+
+        let expected = match &config.consensus {
+            ConsensusConfig::PoA { authorities, .. } => authorities.clone(),
+        };
+        assert_eq!(validators, expected);
     }
 }

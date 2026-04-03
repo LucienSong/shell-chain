@@ -30,7 +30,7 @@ pub struct Node<S: KvStore + 'static> {
     pub chain_store: Arc<ChainStore<S>>,
     pub world_state: Arc<RwLock<WorldState<S>>>,
     pub tx_pool: Arc<TxPool>,
-    pub consensus: Arc<PoaEngine>,
+    pub consensus: Arc<RwLock<PoaEngine>>,
     /// Known authority public keys for seal verification (Address → PQ pubkey).
     pub known_authorities: Arc<RwLock<HashMap<Address, Vec<u8>>>>,
     shutdown_tx: watch::Sender<bool>,
@@ -44,7 +44,7 @@ impl<S: KvStore + 'static> Node<S> {
         chain_store: Arc<ChainStore<S>>,
         world_state: Arc<RwLock<WorldState<S>>>,
         tx_pool: Arc<TxPool>,
-        consensus: Arc<PoaEngine>,
+        consensus: Arc<RwLock<PoaEngine>>,
     ) -> Self {
         let (shutdown_tx, _) = watch::channel(false);
         Self {
@@ -88,13 +88,17 @@ impl<S: KvStore + 'static> Node<S> {
         network: &mut dyn NetworkService,
     ) -> Result<(), NodeError> {
         use shell_network::{NetworkEvent, NetworkMessage};
-        use shell_rpc::start_rpc_server;
+        use shell_rpc::{start_rpc_server, BlockEvent};
         use tokio::time::{interval, Duration};
 
         // Create a channel for the RPC layer to forward submitted transactions
         // to the network broadcast loop.
         let (tx_broadcast_tx, mut tx_broadcast_rx) =
             tokio::sync::mpsc::unbounded_channel::<SignedTransaction>();
+
+        // Create a broadcast channel for block events (eth_subscribe).
+        let (block_event_tx, _) =
+            tokio::sync::broadcast::channel::<BlockEvent>(64);
 
         // Start JSON-RPC server.
         let _rpc = start_rpc_server(
@@ -104,6 +108,7 @@ impl<S: KvStore + 'static> Node<S> {
             self.tx_pool.clone(),
             self.config.chain_id,
             Some(tx_broadcast_tx),
+            block_event_tx.clone(),
         )
         .await
         .map_err(|e| NodeError::Startup(format!("RPC: {e}")))?;
@@ -151,13 +156,37 @@ impl<S: KvStore + 'static> Node<S> {
                                 let number = block.number();
                                 let tx_count = block.transactions.len();
                                 let gas = block.header.gas_used;
-                                if self.consensus.config().is_epoch_boundary(number) {
-                                    let epoch = self.consensus.config().epoch_of(number);
+                                if self.consensus.read().config().is_epoch_boundary(number) {
+                                    let epoch = self.consensus.read().config().epoch_of(number);
                                     info!(epoch, block = number, "new epoch started");
+
+                                    // Reload validators from world state at epoch boundaries.
+                                    let ws = self.world_state.read();
+                                    let validators = ws.get_validators();
+                                    drop(ws);
+                                    if let Ok(v) = validators {
+                                        if !v.is_empty() {
+                                            self.consensus.write().config_mut().set_authorities(v);
+                                        }
+                                    }
                                 }
                                 eprintln!(
                                     "⛏  Block #{number} produced ({tx_count} txs, {gas} gas)"
                                 );
+
+                                // Notify eth_subscribe listeners.
+                                let block_hash = block.hash();
+                                let receipts = self
+                                    .chain_store
+                                    .get_receipts(&block_hash)
+                                    .ok()
+                                    .flatten()
+                                    .unwrap_or_default();
+                                let _ = block_event_tx.send(BlockEvent::NewBlock {
+                                    header: block.header.clone(),
+                                    receipts,
+                                });
+
                                 let msg = NetworkMessage::NewBlock(Box::new(block));
                                 let _ = network.broadcast(msg).await;
                             }
@@ -177,9 +206,23 @@ impl<S: KvStore + 'static> Node<S> {
                             match message {
                                 NetworkMessage::NewBlock(block) => {
                                     let verifier = DilithiumVerifier;
+                                    let saved_header = block.header.clone();
+                                    let saved_hash = block.hash();
                                     match self.import_block(*block, &verifier) {
                                         Ok(()) => {
                                             sync_requested = false;
+
+                                            // Notify eth_subscribe listeners.
+                                            let receipts = self
+                                                .chain_store
+                                                .get_receipts(&saved_hash)
+                                                .ok()
+                                                .flatten()
+                                                .unwrap_or_default();
+                                            let _ = block_event_tx.send(BlockEvent::NewBlock {
+                                                header: saved_header,
+                                                receipts,
+                                            });
                                         }
                                         Err(NodeError::GapDetected { .. }) => {
                                             // Only request missing blocks on genuine gap,
@@ -257,10 +300,24 @@ impl<S: KvStore + 'static> Node<S> {
                                     let mut last_ok = 0u64;
                                     for block in blocks {
                                         let num = block.number();
+                                        let hdr = block.header.clone();
+                                        let bhash = block.hash();
                                         match self.import_block(block, &verifier) {
                                             Ok(()) => {
                                                 last_ok = num;
                                                 debug!(number = num, "synced block");
+
+                                                // Notify eth_subscribe listeners.
+                                                let receipts = self
+                                                    .chain_store
+                                                    .get_receipts(&bhash)
+                                                    .ok()
+                                                    .flatten()
+                                                    .unwrap_or_default();
+                                                let _ = block_event_tx.send(BlockEvent::NewBlock {
+                                                    header: hdr,
+                                                    receipts,
+                                                });
                                             }
                                             Err(e) => {
                                                 warn!(
@@ -343,7 +400,7 @@ impl<S: KvStore + 'static> Node<S> {
             .proposer_address
             .ok_or(NodeError::NotProposer)?;
 
-        if !self.consensus.is_proposer(next_number, &proposer_addr) {
+        if !self.consensus.read().is_proposer(next_number, &proposer_addr) {
             return Err(NodeError::NotProposer);
         }
 
@@ -452,7 +509,7 @@ impl<S: KvStore + 'static> Node<S> {
         };
 
         // Sign the block with the proposer's key.
-        self.consensus.sign_block(&mut block, signer)?;
+        self.consensus.read().sign_block(&mut block, signer)?;
 
         // Register the signer's pubkey so we can verify our own blocks on re-import.
         self.register_authority_pubkey(proposer_addr, signer.public_key().to_vec());
@@ -531,7 +588,7 @@ impl<S: KvStore + 'static> Node<S> {
         }
 
         // Verify consensus rules.
-        self.consensus.verify_header(&block.header)?;
+        self.consensus.read().verify_header(&block.header)?;
 
         // Verify proposer seal (PQ signature).
         match &block.proposer_seal {
@@ -540,7 +597,7 @@ impl<S: KvStore + 'static> Node<S> {
                 let known = self.known_authorities.read();
                 if let Some(pubkey) = known.get(proposer) {
                     let verifier = DilithiumVerifier;
-                    self.consensus.verify_seal(
+                    self.consensus.read().verify_seal(
                         &block.header,
                         seal,
                         pubkey,
@@ -551,7 +608,7 @@ impl<S: KvStore + 'static> Node<S> {
                     drop(known);
                     if let Ok(Some(pubkey)) = self.chain_store.get_pubkey(proposer) {
                         let verifier = DilithiumVerifier;
-                        self.consensus.verify_seal(
+                        self.consensus.read().verify_seal(
                             &block.header,
                             seal,
                             &pubkey,
@@ -580,6 +637,7 @@ impl<S: KvStore + 'static> Node<S> {
         }
 
         // Re-execute transactions and commit state changes.
+        let mut receipts = Vec::new();
         if !block.transactions.is_empty() {
             let current_root = {
                 let mut ws = self.world_state.write();
@@ -595,6 +653,7 @@ impl<S: KvStore + 'static> Node<S> {
                 match evm.execute_tx(tx, &block.header, idx as u32, cumulative_gas) {
                     Ok(result) => {
                         cumulative_gas += result.gas_used;
+                        receipts.push(result.receipt);
 
                         commit_evm_state(
                             &result.state_changes,
@@ -622,6 +681,9 @@ impl<S: KvStore + 'static> Node<S> {
         // Commit to storage.
         let block_hash = block.hash();
         self.chain_store.put_block(&block)?;
+        if !receipts.is_empty() {
+            self.chain_store.put_receipts(&block_hash, &receipts)?;
+        }
         self.chain_store
             .set_canonical(block.number(), &block_hash)?;
         self.chain_store.set_head(&block_hash)?;
@@ -677,7 +739,7 @@ mod tests {
         let db = Arc::new(MemoryDb::new());
         let chain_store = Arc::new(ChainStore::new(db.clone()));
         let world_state = Arc::new(RwLock::new(WorldState::new(db.clone())));
-        let consensus = Arc::new(PoaEngine::new(PoaConfig::new(vec![authority], 1)));
+        let consensus = Arc::new(RwLock::new(PoaEngine::new(PoaConfig::new(vec![authority], 1))));
         let tx_pool = Arc::new(TxPool::new(MempoolConfig {
             chain_id: 1337,
             ..MempoolConfig::default()
@@ -875,7 +937,7 @@ mod tests {
         let node2_db = Arc::new(MemoryDb::new());
         let node2_cs = Arc::new(ChainStore::new(node2_db.clone()));
         let node2_ws = Arc::new(RwLock::new(WorldState::new(node2_db.clone())));
-        let consensus = Arc::new(PoaEngine::new(PoaConfig::new(vec![proposer], 1)));
+        let consensus = Arc::new(RwLock::new(PoaEngine::new(PoaConfig::new(vec![proposer], 1))));
         let tx_pool = Arc::new(TxPool::new(MempoolConfig {
             chain_id: 1337,
             ..MempoolConfig::default()
@@ -914,7 +976,7 @@ mod tests {
         let node2_db = Arc::new(MemoryDb::new());
         let node2_cs = Arc::new(ChainStore::new(node2_db.clone()));
         let node2_ws = Arc::new(RwLock::new(WorldState::new(node2_db.clone())));
-        let consensus = Arc::new(PoaEngine::new(PoaConfig::new(vec![proposer], 1)));
+        let consensus = Arc::new(RwLock::new(PoaEngine::new(PoaConfig::new(vec![proposer], 1))));
         let tx_pool = Arc::new(TxPool::new(MempoolConfig {
             chain_id: 1337,
             ..MempoolConfig::default()
@@ -1023,5 +1085,132 @@ mod tests {
             "expected at least 3 blocks, got {}",
             head.number()
         );
+    }
+
+    #[test]
+    fn epoch_boundary_reloads_validators() {
+        let signer = DilithiumSigner::generate();
+        let authority = Address::from_public_key(signer.public_key());
+
+        let db = Arc::new(MemoryDb::new());
+        let chain_store = Arc::new(ChainStore::new(db.clone()));
+        let world_state = Arc::new(RwLock::new(WorldState::new(db.clone())));
+        let consensus = Arc::new(RwLock::new(
+            PoaEngine::new(PoaConfig::new(vec![authority], 1).with_epoch_length(3)),
+        ));
+        let tx_pool = Arc::new(TxPool::new(MempoolConfig {
+            chain_id: 1337,
+            ..MempoolConfig::default()
+        }));
+
+        let config = NodeConfig::dev(authority);
+        let node = Node::new(
+            config,
+            db,
+            chain_store,
+            world_state,
+            tx_pool,
+            consensus,
+        );
+        store_genesis(&node);
+
+        // Write a new validator set to world state.
+        let new_validator = Address::from([0xAA; 20]);
+        {
+            let mut ws = node.world_state.write();
+            ws.set_validators(&[authority, new_validator]).unwrap();
+        }
+
+        // Before epoch boundary, consensus has 1 authority.
+        assert_eq!(node.consensus.read().config().authorities.len(), 1);
+
+        // Produce blocks until we hit the epoch boundary (block 3).
+        for _ in 0..3 {
+            node.produce_block(&signer, 0).unwrap();
+        }
+
+        // Block 3 is an epoch boundary (epoch_length=3).
+        // Simulate the epoch boundary sync that the event loop would do.
+        {
+            let consensus = node.consensus.read();
+            if consensus.config().is_epoch_boundary(3) {
+                drop(consensus);
+                let ws = node.world_state.read();
+                let validators = ws.get_validators().unwrap();
+                drop(ws);
+                if !validators.is_empty() {
+                    node.consensus.write().config_mut().set_authorities(validators);
+                }
+            }
+        }
+
+        // After epoch boundary reload, consensus should have 2 authorities.
+        let consensus_guard = node.consensus.read();
+        let authorities = &consensus_guard.config().authorities;
+        assert_eq!(authorities.len(), 2);
+        assert!(authorities.contains(&authority));
+        assert!(authorities.contains(&new_validator));
+    }
+
+    #[test]
+    fn validator_change_takes_effect_at_next_epoch() {
+        let signer = DilithiumSigner::generate();
+        let authority = Address::from_public_key(signer.public_key());
+
+        let db = Arc::new(MemoryDb::new());
+        let chain_store = Arc::new(ChainStore::new(db.clone()));
+        let world_state = Arc::new(RwLock::new(WorldState::new(db.clone())));
+        let consensus = Arc::new(RwLock::new(
+            PoaEngine::new(PoaConfig::new(vec![authority], 1).with_epoch_length(2)),
+        ));
+        let tx_pool = Arc::new(TxPool::new(MempoolConfig {
+            chain_id: 1337,
+            ..MempoolConfig::default()
+        }));
+
+        let config = NodeConfig::dev(authority);
+        let node = Node::new(
+            config,
+            db,
+            chain_store,
+            world_state,
+            tx_pool,
+            consensus,
+        );
+        store_genesis(&node);
+
+        // Produce block 1 — not an epoch boundary.
+        node.produce_block(&signer, 0).unwrap();
+        assert_eq!(node.consensus.read().config().authorities.len(), 1);
+
+        // Write validators mid-epoch.
+        let new_val = Address::from([0xCC; 20]);
+        {
+            let mut ws = node.world_state.write();
+            ws.set_validators(&[authority, new_val]).unwrap();
+        }
+
+        // Still not reloaded until epoch boundary.
+        assert_eq!(node.consensus.read().config().authorities.len(), 1);
+
+        // Produce block 2 — epoch boundary (epoch_length=2).
+        node.produce_block(&signer, 0).unwrap();
+
+        // Simulate epoch boundary sync.
+        {
+            let consensus = node.consensus.read();
+            if consensus.config().is_epoch_boundary(2) {
+                drop(consensus);
+                let ws = node.world_state.read();
+                let validators = ws.get_validators().unwrap();
+                drop(ws);
+                if !validators.is_empty() {
+                    node.consensus.write().config_mut().set_authorities(validators);
+                }
+            }
+        }
+
+        // Now the validator set should be updated.
+        assert_eq!(node.consensus.read().config().authorities.len(), 2);
     }
 }

@@ -6,6 +6,11 @@ use shell_primitives::{keccak256, Address, ShellHash, U256};
 
 use crate::{KvStore, MerkleTrie, StorageError};
 
+/// Returns the system address used for the validator registry (0x0000…0001).
+pub fn validator_registry_addr() -> Address {
+    Address::from([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1])
+}
+
 /// Manages the world state (all accounts and their storage).
 ///
 /// Accounts are stored in a Merkle Patricia Trie keyed by `keccak256(address)`.
@@ -178,6 +183,87 @@ impl<S: KvStore + 'static> WorldState<S> {
         self.set_account(address, &account)
     }
 
+    // ── Validator registry ──────────────────────────────────────
+
+    fn validator_count_key() -> ShellHash {
+        keccak256(b"validator_count")
+    }
+
+    fn validator_slot_key(i: u64) -> ShellHash {
+        let label = format!("validator_{i}");
+        keccak256(label.as_bytes())
+    }
+
+    /// Read the current validator set from the validator registry in world state.
+    pub fn get_validators(&self) -> Result<Vec<Address>, StorageError> {
+        let registry = validator_registry_addr();
+        let count_hash = self.get_storage(&registry, &Self::validator_count_key())?;
+        if count_hash == ShellHash::ZERO {
+            return Ok(Vec::new());
+        }
+        let count = u64::from_be_bytes(
+            count_hash.as_bytes()[24..32]
+                .try_into()
+                .map_err(|e: std::array::TryFromSliceError| StorageError::Codec(e.to_string()))?,
+        );
+        let mut validators = Vec::with_capacity(count as usize);
+        for i in 0..count {
+            let slot = self.get_storage(&registry, &Self::validator_slot_key(i))?;
+            // Address::ZERO is a valid validator (slot value is all zeros).
+            // We trust the count field to determine how many validators exist.
+            let addr = Address::try_from_slice(&slot.as_bytes()[12..32])
+                .map_err(|e| StorageError::Codec(e.to_string()))?;
+            validators.push(addr);
+        }
+        Ok(validators)
+    }
+
+    /// Write a validator set to the validator registry in world state.
+    pub fn set_validators(&mut self, validators: &[Address]) -> Result<(), StorageError> {
+        let registry = validator_registry_addr();
+        let old_count_hash = self.get_storage(&registry, &Self::validator_count_key())?;
+        let old_count = if old_count_hash == ShellHash::ZERO {
+            0u64
+        } else {
+            u64::from_be_bytes(
+                old_count_hash.as_bytes()[24..32]
+                    .try_into()
+                    .map_err(|e: std::array::TryFromSliceError| {
+                        StorageError::Codec(e.to_string())
+                    })?,
+            )
+        };
+
+        let new_count = validators.len() as u64;
+        for (i, addr) in validators.iter().enumerate() {
+            let mut slot = [0u8; 32];
+            slot[12..32].copy_from_slice(addr.as_bytes());
+            self.set_storage(
+                &registry,
+                &Self::validator_slot_key(i as u64),
+                &ShellHash::from(slot),
+            )?;
+        }
+
+        for i in new_count..old_count {
+            self.set_storage(
+                &registry,
+                &Self::validator_slot_key(i),
+                &ShellHash::ZERO,
+            )?;
+        }
+
+        let mut count_bytes = [0u8; 32];
+        count_bytes[24..32].copy_from_slice(&new_count.to_be_bytes());
+        self.set_storage(
+            &registry,
+            &Self::validator_count_key(),
+            &ShellHash::from(count_bytes),
+        )?;
+
+        Ok(())
+    }
+
     // ── State root ─────────────────────────────────────────────
 
     /// Compute and return the current state root hash.
@@ -348,5 +434,72 @@ mod tests {
         assert!(!ws.exists(&addr).unwrap());
         ws.add_balance(&addr, U256::from(1)).unwrap();
         assert!(ws.exists(&addr).unwrap());
+    }
+
+    // ── Validator registry tests ───────────────────────────────
+
+    #[test]
+    fn get_validators_empty() {
+        let store = test_store();
+        let ws = WorldState::new(store);
+        let validators = ws.get_validators().unwrap();
+        assert!(validators.is_empty());
+    }
+
+    #[test]
+    fn set_and_get_validators_roundtrip() {
+        let store = test_store();
+        let mut ws = WorldState::new(store);
+
+        let v1 = Address::from([0x01; 20]);
+        let v2 = Address::from([0x02; 20]);
+        let v3 = Address::from([0x03; 20]);
+        let validators = vec![v1, v2, v3];
+
+        ws.set_validators(&validators).unwrap();
+        let loaded = ws.get_validators().unwrap();
+        assert_eq!(loaded, validators);
+    }
+
+    #[test]
+    fn set_validators_overwrites_previous() {
+        let store = test_store();
+        let mut ws = WorldState::new(store);
+
+        let old_set = vec![
+            Address::from([0x0A; 20]),
+            Address::from([0x0B; 20]),
+            Address::from([0x0C; 20]),
+        ];
+        ws.set_validators(&old_set).unwrap();
+        assert_eq!(ws.get_validators().unwrap().len(), 3);
+
+        let new_set = vec![Address::from([0xDD; 20]), Address::from([0xEE; 20])];
+        ws.set_validators(&new_set).unwrap();
+        let loaded = ws.get_validators().unwrap();
+        assert_eq!(loaded, new_set);
+    }
+
+    #[test]
+    fn set_validators_single() {
+        let store = test_store();
+        let mut ws = WorldState::new(store);
+
+        let validators = vec![Address::from([0xFF; 20])];
+        ws.set_validators(&validators).unwrap();
+        assert_eq!(ws.get_validators().unwrap(), validators);
+    }
+
+    #[test]
+    fn set_validators_persists_across_root_reopen() {
+        let store = test_store();
+        let mut ws = WorldState::new(Arc::clone(&store));
+
+        let validators = vec![Address::from([0x11; 20]), Address::from([0x22; 20])];
+        ws.set_validators(&validators).unwrap();
+        let root = ws.state_root().unwrap();
+
+        let ws2 = WorldState::at_root(store, &root).unwrap();
+        assert_eq!(ws2.get_validators().unwrap(), validators);
     }
 }

@@ -95,6 +95,11 @@ impl PoaEngine {
         &self.config
     }
 
+    /// Mutable access to the consensus configuration (e.g. for validator set updates).
+    pub fn config_mut(&mut self) -> &mut PoaConfig {
+        &mut self.config
+    }
+
     fn verify_proposer(&self, header: &BlockHeader) -> Result<(), ConsensusError> {
         if !self.config.is_authority(&header.proposer) {
             return Err(ConsensusError::UnknownProposer(header.proposer));
