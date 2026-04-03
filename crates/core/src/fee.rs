@@ -35,7 +35,7 @@ pub fn calculate_base_fee(
             .saturating_mul(parent_gas_used - gas_target)
             / gas_target
             / BASE_FEE_CHANGE_DENOMINATOR;
-        parent_base_fee + delta.max(1)
+        parent_base_fee.saturating_add(delta.max(1))
     } else {
         let delta = parent_base_fee
             .saturating_mul(gas_target - parent_gas_used)
@@ -159,5 +159,14 @@ mod tests {
         let under = GAS_TARGET - 1_000_000;
         let new = calculate_base_fee(under, GAS_LIMIT, base);
         assert!(new < base);
+    }
+
+    #[test]
+    fn saturating_add_prevents_overflow() {
+        // With a very high base fee, increase must not overflow.
+        let base = u64::MAX - 1_000_000_000;
+        let new = calculate_base_fee(GAS_LIMIT, GAS_LIMIT, base);
+        assert!(new >= base, "fee should not wrap around");
+        assert!(new <= u64::MAX, "fee should cap at u64::MAX");
     }
 }

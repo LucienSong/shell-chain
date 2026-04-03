@@ -91,6 +91,21 @@ impl<S: KvStore + 'static> RpcHandler<S> {
     /// On success, also forwards the transaction to the network broadcast channel
     /// (if one was provided) so peers can include it in their mempools.
     fn submit_tx(&self, signed_tx: SignedTransaction) -> Result<ShellHash, ErrorObjectOwned> {
+        // EIP-1559: warn (and reject) if max_fee below current base_fee.
+        if let Ok(Some(head)) = self.chain_store.get_head_block() {
+            let current_base_fee = head.header.base_fee_per_gas;
+            if current_base_fee > 0 && signed_tx.tx.max_fee_per_gas < current_base_fee {
+                return Err(ErrorObjectOwned::owned(
+                    -32000,
+                    format!(
+                        "max fee per gas ({}) below current base fee ({})",
+                        signed_tx.tx.max_fee_per_gas, current_base_fee
+                    ),
+                    None::<()>,
+                ));
+            }
+        }
+
         let chain_store = &self.chain_store;
         let ws = self.world_state.read();
 
@@ -742,6 +757,11 @@ impl<S: KvStore + 'static> Web3ApiServer for RpcHandler<S> {
 
     async fn sha3(&self, data: String) -> Result<String, ErrorObjectOwned> {
         let raw = data.strip_prefix("0x").unwrap_or(&data);
+        // Limit input to 32 KB to prevent DoS via large allocations.
+        const MAX_HEX_LEN: usize = 32 * 1024 * 2; // 32 KB decoded = 64 KB hex
+        if raw.len() > MAX_HEX_LEN {
+            return Err(internal_err("input too large (max 32 KB)"));
+        }
         let bytes = hex::decode(raw)
             .map_err(|e| internal_err(format!("invalid hex: {e}")))?;
         let hash = shell_primitives::keccak256(&bytes);
