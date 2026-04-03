@@ -19,6 +19,8 @@ pub struct NetworkConfig {
     pub enable_mdns: bool,
     /// Enable Kademlia DHT for global peer discovery.
     pub enable_kademlia: bool,
+    /// Enable GossipSub peer scoring for block/transaction topics.
+    pub enable_peer_scoring: bool,
 }
 
 impl Default for NetworkConfig {
@@ -31,6 +33,7 @@ impl Default for NetworkConfig {
             max_peers: 50,
             enable_mdns: false,
             enable_kademlia: true,
+            enable_peer_scoring: true,
         }
     }
 }

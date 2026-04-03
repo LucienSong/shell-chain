@@ -4,18 +4,19 @@
 //! broadcast, mDNS for local peer discovery, and Kademlia DHT for
 //! global peer discovery.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use libp2p::futures::StreamExt;
-use libp2p::gossipsub::{self, IdentTopic};
+use libp2p::gossipsub::{self, IdentTopic, PeerScoreParams, PeerScoreThresholds, TopicScoreParams};
 use libp2p::kad;
 use libp2p::swarm::behaviour::toggle::Toggle;
 use libp2p::swarm::SwarmEvent;
 use libp2p::{identify, mdns, noise, tcp, yamux, Multiaddr, PeerId as Libp2pPeerId, Swarm, SwarmBuilder};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::interval;
 use tracing::{debug, info, warn};
 
@@ -33,6 +34,10 @@ enum TopicKind {
 /// Commands sent to the Swarm background task.
 enum SwarmCommand {
     Publish { topic: TopicKind, data: Vec<u8> },
+    /// Request a snapshot of current peer scores.
+    PeerScores {
+        reply: oneshot::Sender<Vec<(PeerId, f64)>>,
+    },
     Shutdown,
 }
 
@@ -122,11 +127,26 @@ impl Libp2pNetwork {
             peer_count,
         })
     }
+
+    /// Return a snapshot of all known peer scores.
+    ///
+    /// Sends a request to the swarm background task and awaits the reply.
+    /// Returns an empty vec if the channel is closed or scoring is disabled.
+    pub async fn peer_scores(&self) -> Vec<(PeerId, f64)> {
+        let (tx, rx) = oneshot::channel();
+        if self.cmd_tx.send(SwarmCommand::PeerScores { reply: tx }).await.is_err() {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
 }
 
 fn build_swarm(config: &NetworkConfig) -> Result<Swarm<ShellBehaviour>, NetworkError> {
     let enable_mdns = config.enable_mdns;
     let enable_kademlia = config.enable_kademlia;
+    let enable_peer_scoring = config.enable_peer_scoring;
+    let blocks_topic_name = config.blocks_topic.clone();
+    let txs_topic_name = config.txs_topic.clone();
 
     // Deterministic message ID: blake3 hash of payload.
     // CRITICAL: Do NOT use DefaultHasher — its random per-process seed
@@ -157,11 +177,69 @@ fn build_swarm(config: &NetworkConfig) -> Result<Swarm<ShellBehaviour>, NetworkE
         .with_behaviour(|key| {
             let peer_id = key.public().to_peer_id();
 
-            let gossipsub = gossipsub::Behaviour::new(
+            let mut gossipsub = gossipsub::Behaviour::new(
                 gossipsub::MessageAuthenticity::Signed(key.clone()),
                 gs_config,
             )
             .map_err(|e| format!("gossipsub: {e}"))?;
+
+            // Configure peer scoring to penalise misbehaving peers and
+            // reward timely block/tx delivery.
+            if enable_peer_scoring {
+                let blocks_topic_params = TopicScoreParams {
+                    topic_weight: 1.0,
+                    time_in_mesh_weight: 0.5,
+                    time_in_mesh_quantum: Duration::from_secs(1),
+                    time_in_mesh_cap: 3600.0,
+                    first_message_deliveries_weight: 5.0,
+                    first_message_deliveries_cap: 100.0,
+                    first_message_deliveries_decay: 0.99,
+                    invalid_message_deliveries_weight: -100.0,
+                    invalid_message_deliveries_decay: 0.5,
+                    mesh_message_deliveries_weight: 0.0,
+                    mesh_failure_penalty_weight: 0.0,
+                    ..Default::default()
+                };
+
+                let txs_topic_params = TopicScoreParams {
+                    topic_weight: 0.5,
+                    time_in_mesh_weight: 0.3,
+                    time_in_mesh_quantum: Duration::from_secs(1),
+                    time_in_mesh_cap: 3600.0,
+                    first_message_deliveries_weight: 2.0,
+                    first_message_deliveries_cap: 1000.0,
+                    first_message_deliveries_decay: 0.99,
+                    invalid_message_deliveries_weight: -50.0,
+                    invalid_message_deliveries_decay: 0.5,
+                    mesh_message_deliveries_weight: 0.0,
+                    mesh_failure_penalty_weight: 0.0,
+                    ..Default::default()
+                };
+
+                let blocks_hash = IdentTopic::new(&blocks_topic_name).hash();
+                let txs_hash = IdentTopic::new(&txs_topic_name).hash();
+
+                let mut topic_scores = HashMap::new();
+                topic_scores.insert(blocks_hash, blocks_topic_params);
+                topic_scores.insert(txs_hash, txs_topic_params);
+
+                let peer_score_params = PeerScoreParams {
+                    topics: topic_scores,
+                    ..Default::default()
+                };
+
+                let thresholds = PeerScoreThresholds {
+                    gossip_threshold: -100.0,
+                    publish_threshold: -200.0,
+                    graylist_threshold: -300.0,
+                    accept_px_threshold: 100.0,
+                    opportunistic_graft_threshold: 5.0,
+                };
+
+                gossipsub
+                    .with_peer_score(peer_score_params, thresholds)
+                    .map_err(|e| format!("peer scoring: {e}"))?;
+            }
 
             let kademlia = if enable_kademlia {
                 let store = kad::store::MemoryStore::new(peer_id);
@@ -200,6 +278,9 @@ fn build_swarm(config: &NetworkConfig) -> Result<Swarm<ShellBehaviour>, NetworkE
         .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
         .build();
 
+    if enable_peer_scoring {
+        info!("GossipSub peer scoring enabled");
+    }
     if enable_kademlia {
         info!("Kademlia DHT peer discovery enabled");
     }
@@ -234,6 +315,10 @@ async fn swarm_loop(
     // Skip the first immediate tick — bootstrap was already triggered on startup.
     kad_bootstrap_interval.tick().await;
 
+    // Periodic peer score logging (every 60 seconds).
+    let mut score_log_interval = interval(Duration::from_secs(60));
+    score_log_interval.tick().await;
+
     loop {
         tokio::select! {
             cmd = cmd_rx.recv() => {
@@ -250,6 +335,10 @@ async fn swarm_loop(
                         {
                             debug!("Gossipsub publish error: {e}");
                         }
+                    }
+                    Some(SwarmCommand::PeerScores { reply }) => {
+                        let scores = collect_peer_scores(&swarm);
+                        let _ = reply.send(scores);
                     }
                     Some(SwarmCommand::Shutdown) | None => {
                         info!("libp2p swarm shutting down");
@@ -270,6 +359,9 @@ async fn swarm_loop(
                     debug!("Periodic Kademlia bootstrap");
                     let _ = kad.bootstrap();
                 }
+            }
+            _ = score_log_interval.tick() => {
+                log_peer_scores(&swarm);
             }
         }
     }
@@ -393,6 +485,41 @@ fn update_peer_count(swarm: &Swarm<ShellBehaviour>, counter: &Arc<AtomicUsize>) 
     counter.store(swarm.connected_peers().count(), Ordering::Relaxed);
 }
 
+/// Collect current peer scores from the GossipSub behaviour.
+fn collect_peer_scores(swarm: &Swarm<ShellBehaviour>) -> Vec<(PeerId, f64)> {
+    swarm
+        .behaviour()
+        .gossipsub
+        .all_peers()
+        .filter_map(|(peer_id, _topics)| {
+            swarm
+                .behaviour()
+                .gossipsub
+                .peer_score(peer_id)
+                .map(|score| (PeerId(peer_id.to_string()), score))
+        })
+        .collect()
+}
+
+/// Log peer scores, warning about peers below the gossip threshold.
+fn log_peer_scores(swarm: &Swarm<ShellBehaviour>) {
+    const GOSSIP_THRESHOLD: f64 = -100.0;
+
+    for (peer_id, _topics) in swarm.behaviour().gossipsub.all_peers() {
+        if let Some(score) = swarm.behaviour().gossipsub.peer_score(peer_id) {
+            if score < GOSSIP_THRESHOLD {
+                warn!(
+                    %peer_id,
+                    score,
+                    "Peer score below gossip threshold"
+                );
+            } else {
+                debug!(%peer_id, score, "Peer score");
+            }
+        }
+    }
+}
+
 #[async_trait]
 impl NetworkService for Libp2pNetwork {
     async fn broadcast(&self, msg: NetworkMessage) -> Result<(), NetworkError> {
@@ -455,6 +582,45 @@ mod tests {
         assert!(config.enable_kademlia);
         assert!(!config.enable_mdns);
         assert_eq!(config.max_peers, 50);
+    }
+
+    #[test]
+    fn config_defaults_enable_peer_scoring() {
+        let config = NetworkConfig::default();
+        assert!(config.enable_peer_scoring);
+    }
+
+    #[test]
+    fn config_peer_scoring_disabled() {
+        let config = NetworkConfig {
+            enable_peer_scoring: false,
+            ..Default::default()
+        };
+        assert!(!config.enable_peer_scoring);
+    }
+
+    #[test]
+    fn build_swarm_with_peer_scoring() {
+        let config = NetworkConfig {
+            enable_peer_scoring: true,
+            enable_mdns: false,
+            enable_kademlia: false,
+            ..Default::default()
+        };
+        let swarm = build_swarm(&config);
+        assert!(swarm.is_ok(), "build_swarm should succeed with peer scoring enabled");
+    }
+
+    #[test]
+    fn build_swarm_without_peer_scoring() {
+        let config = NetworkConfig {
+            enable_peer_scoring: false,
+            enable_mdns: false,
+            enable_kademlia: false,
+            ..Default::default()
+        };
+        let swarm = build_swarm(&config);
+        assert!(swarm.is_ok(), "build_swarm should succeed with peer scoring disabled");
     }
 
     #[test]
