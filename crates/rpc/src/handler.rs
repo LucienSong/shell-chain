@@ -341,7 +341,17 @@ fn tx_to_rpc(
     block_hash: Option<ShellHash>,
     block_number: Option<u64>,
     tx_index: Option<u32>,
+    base_fee: Option<u64>,
 ) -> RpcTransaction {
+    // EIP-1559: mined txs report effective gas price; pending txs report max_fee
+    let gas_price = match base_fee {
+        Some(base) => shell_core::effective_gas_price(
+            tx.tx.max_fee_per_gas,
+            tx.tx.max_priority_fee_per_gas,
+            base,
+        ),
+        None => tx.tx.max_fee_per_gas,
+    };
     RpcTransaction {
         hash: tx.hash(),
         block_hash,
@@ -351,7 +361,7 @@ fn tx_to_rpc(
         to: tx.tx.to,
         value: hex_u256(tx.tx.value),
         gas: hex_u64(tx.tx.gas_limit),
-        gas_price: hex_u64(tx.tx.max_fee_per_gas),
+        gas_price: hex_u64(gas_price),
         max_fee_per_gas: hex_u64(tx.tx.max_fee_per_gas),
         max_priority_fee_per_gas: hex_u64(tx.tx.max_priority_fee_per_gas),
         nonce: hex_u64(tx.tx.nonce),
@@ -415,7 +425,7 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
     ) -> Result<Option<RpcTransaction>, ErrorObjectOwned> {
         // Check mempool first
         if let Some(pending_tx) = self.tx_pool.get(&hash) {
-            return Ok(Some(tx_to_rpc(&pending_tx, None, None, None)));
+            return Ok(Some(tx_to_rpc(&pending_tx, None, None, None, None)));
         }
 
         // Then check on-chain index
@@ -436,6 +446,7 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
                         Some(block_hash),
                         Some(block.number()),
                         Some(tx_index),
+                        Some(block.header.base_fee_per_gas),
                     )));
                 }
             }
@@ -1133,6 +1144,7 @@ mod tests {
                     vec![],
                 ),
             ),
+            None,
             None,
             None,
             None,
