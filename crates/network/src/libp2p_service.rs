@@ -600,6 +600,18 @@ async fn handle_swarm_event(
             debug!("Disconnected from {peer_id}");
             update_peer_count(swarm, peer_count);
         }
+        // Outgoing connection failed — surface relay/NAT failures for debugging.
+        SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
+            warn!(
+                peer = ?peer_id,
+                error = %error,
+                "outgoing connection failed"
+            );
+        }
+        // Incoming connection failed.
+        SwarmEvent::IncomingConnectionError { error, .. } => {
+            debug!(error = %error, "incoming connection failed");
+        }
         _ => {}
     }
 }
