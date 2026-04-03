@@ -53,10 +53,16 @@ impl StateRootTracker {
         }
     }
 
+    /// F-045: Even in archive mode, cap the in-memory tracker to prevent
+    /// unbounded growth over very long running periods.
+    const ARCHIVE_MAX_TRACKED: usize = 10_000;
+
     /// Record a newly finalised state root.
     ///
     /// If the history exceeds `keep_recent` (and pruning is enabled), the
     /// oldest entry is evicted and returned so the caller can log / act on it.
+    /// In archive mode, the tracker is still capped at [`ARCHIVE_MAX_TRACKED`]
+    /// entries to bound memory usage.
     pub fn record(
         &mut self,
         block_number: u64,
@@ -68,6 +74,10 @@ impl StateRootTracker {
         });
 
         if self.config.is_archive() {
+            // Archive mode: no pruning, but cap tracker memory.
+            if self.history.len() > Self::ARCHIVE_MAX_TRACKED {
+                return self.history.pop_front();
+            }
             return None;
         }
 

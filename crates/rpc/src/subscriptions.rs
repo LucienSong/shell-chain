@@ -249,9 +249,11 @@ async fn forward_new_heads(
     mut rx: broadcast::Receiver<BlockEvent>,
     sink: jsonrpsee::SubscriptionSink,
 ) {
+    let mut consecutive_lags: u32 = 0;
     loop {
         match rx.recv().await {
             Ok(BlockEvent::NewBlock { header, .. }) => {
+                consecutive_lags = 0;
                 let value = header_to_json(&header);
                 let msg = SubscriptionMessage::from_json(&value)
                     .expect("header serialization cannot fail");
@@ -260,8 +262,13 @@ async fn forward_new_heads(
                 }
             }
             Err(broadcast::error::RecvError::Lagged(n)) => {
-                tracing::warn!(skipped = n, "newHeads subscriber lagged, skipping events");
-                continue;
+                consecutive_lags += 1;
+                tracing::warn!(skipped = n, consecutive_lags, "newHeads subscriber lagged");
+                // F-042: auto-disconnect after 3 consecutive lags.
+                if consecutive_lags >= 3 {
+                    tracing::error!("newHeads subscriber too slow — disconnecting");
+                    break;
+                }
             }
             Err(broadcast::error::RecvError::Closed) => break,
         }
@@ -273,9 +280,11 @@ async fn forward_logs(
     sink: jsonrpsee::SubscriptionSink,
     filter: LogFilter,
 ) {
+    let mut consecutive_lags: u32 = 0;
     loop {
         match rx.recv().await {
             Ok(BlockEvent::NewBlock { header, receipts }) => {
+                consecutive_lags = 0;
                 let mut global_log_index: usize = 0;
                 for receipt in &receipts {
                     for log in &receipt.logs {
@@ -298,8 +307,13 @@ async fn forward_logs(
                 }
             }
             Err(broadcast::error::RecvError::Lagged(n)) => {
-                tracing::warn!(skipped = n, "logs subscriber lagged, skipping events");
-                continue;
+                consecutive_lags += 1;
+                tracing::warn!(skipped = n, consecutive_lags, "logs subscriber lagged");
+                // F-042: auto-disconnect after 3 consecutive lags.
+                if consecutive_lags >= 3 {
+                    tracing::error!("logs subscriber too slow — disconnecting");
+                    return;
+                }
             }
             Err(broadcast::error::RecvError::Closed) => return,
         }

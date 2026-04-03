@@ -218,8 +218,18 @@ impl<S: KvStore + 'static> WorldState<S> {
         Ok(validators)
     }
 
+    /// Maximum number of validators allowed (F-044: DoS protection).
+    pub const MAX_VALIDATORS: usize = 1000;
+
     /// Write a validator set to the validator registry in world state.
     pub fn set_validators(&mut self, validators: &[Address]) -> Result<(), StorageError> {
+        if validators.len() > Self::MAX_VALIDATORS {
+            return Err(StorageError::Codec(format!(
+                "validator set size {} exceeds maximum {}",
+                validators.len(),
+                Self::MAX_VALIDATORS
+            )));
+        }
         let registry = validator_registry_addr();
         let old_count_hash = self.get_storage(&registry, &Self::validator_count_key())?;
         let old_count = if old_count_hash == ShellHash::ZERO {

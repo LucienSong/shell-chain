@@ -612,63 +612,24 @@ impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
         ws.get_validators().map_err(internal_err)
     }
 
-    async fn add_validator(&self, address: String) -> Result<bool, ErrorObjectOwned> {
-        tracing::warn!("shell_addValidator called without authentication — will be gated in M3");
-
-        let addr = parse_address(&address)?;
-
-        let mut ws = self.world_state.write();
-        let mut validators = ws.get_validators().map_err(internal_err)?;
-
-        if validators.contains(&addr) {
-            return Err(ErrorObjectOwned::owned(
-                -32602,
-                format!("validator {address} is already in the set"),
-                None::<()>,
-            ));
-        }
-
-        validators.push(addr);
-        ws.set_validators(&validators).map_err(internal_err)?;
-        // Compute state root so trie changes are flushed to the backing store.
-        let _ = ws.state_root().map_err(internal_err)?;
-
-        tracing::info!("validator added: {address}");
-        Ok(true)
+    async fn add_validator(&self, _address: String) -> Result<bool, ErrorObjectOwned> {
+        // DISABLED (F-039/F-040): Direct WorldState mutation via RPC causes
+        // split-brain — validator changes must go through a system contract
+        // transaction so all nodes compute the same state_root deterministically.
+        Err(ErrorObjectOwned::owned(
+            -32601,
+            "shell_addValidator is disabled: validator changes require system contract (planned for M3)",
+            None::<()>,
+        ))
     }
 
-    async fn remove_validator(&self, address: String) -> Result<bool, ErrorObjectOwned> {
-        tracing::warn!(
-            "shell_removeValidator called without authentication — will be gated in M3"
-        );
-
-        let addr = parse_address(&address)?;
-
-        let mut ws = self.world_state.write();
-        let mut validators = ws.get_validators().map_err(internal_err)?;
-
-        let pos = validators.iter().position(|v| v == &addr).ok_or_else(|| {
-            ErrorObjectOwned::owned(
-                -32602,
-                format!("validator {address} is not in the set"),
-                None::<()>,
-            )
-        })?;
-
-        if validators.len() == 1 {
-            return Err(ErrorObjectOwned::owned(
-                -32602,
-                "cannot remove the last validator",
-                None::<()>,
-            ));
-        }
-
-        validators.remove(pos);
-        ws.set_validators(&validators).map_err(internal_err)?;
-        let _ = ws.state_root().map_err(internal_err)?;
-
-        tracing::info!("validator removed: {address}");
-        Ok(true)
+    async fn remove_validator(&self, _address: String) -> Result<bool, ErrorObjectOwned> {
+        // DISABLED (F-039/F-040): See add_validator rationale.
+        Err(ErrorObjectOwned::owned(
+            -32601,
+            "shell_removeValidator is disabled: validator changes require system contract (planned for M3)",
+            None::<()>,
+        ))
     }
 }
 
@@ -1318,68 +1279,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shell_add_validator() {
+    async fn shell_add_validator_disabled() {
         let handler = setup();
         let addr_hex = format!("0x{}", "ab".repeat(20));
 
-        let ok = ShellApiServer::add_validator(&handler, addr_hex.clone())
-            .await
-            .unwrap();
-        assert!(ok);
-
-        let validators = ShellApiServer::get_validators(&handler).await.unwrap();
-        assert_eq!(validators.len(), 1);
-        assert_eq!(validators[0], Address::from([0xAB; 20]));
-    }
-
-    #[tokio::test]
-    async fn shell_add_validator_duplicate_error() {
-        let handler = setup();
-        let addr_hex = format!("0x{}", "ab".repeat(20));
-
-        ShellApiServer::add_validator(&handler, addr_hex.clone())
-            .await
-            .unwrap();
         let err = ShellApiServer::add_validator(&handler, addr_hex)
             .await
             .unwrap_err();
-        assert!(err.message().contains("already in the set"));
+        assert!(err.message().contains("disabled"));
     }
 
     #[tokio::test]
-    async fn shell_remove_validator() {
-        let handler = setup();
-        let a1 = format!("0x{}", "aa".repeat(20));
-        let a2 = format!("0x{}", "bb".repeat(20));
-
-        ShellApiServer::add_validator(&handler, a1.clone())
-            .await
-            .unwrap();
-        ShellApiServer::add_validator(&handler, a2.clone())
-            .await
-            .unwrap();
-
-        let ok = ShellApiServer::remove_validator(&handler, a1.clone())
-            .await
-            .unwrap();
-        assert!(ok);
-
-        let validators = ShellApiServer::get_validators(&handler).await.unwrap();
-        assert_eq!(validators.len(), 1);
-        assert_eq!(validators[0], Address::from([0xBB; 20]));
-    }
-
-    #[tokio::test]
-    async fn shell_remove_last_validator_error() {
+    async fn shell_remove_validator_disabled() {
         let handler = setup();
         let addr_hex = format!("0x{}", "cc".repeat(20));
 
-        ShellApiServer::add_validator(&handler, addr_hex.clone())
-            .await
-            .unwrap();
         let err = ShellApiServer::remove_validator(&handler, addr_hex)
             .await
             .unwrap_err();
-        assert!(err.message().contains("cannot remove the last validator"));
+        assert!(err.message().contains("disabled"));
     }
 }

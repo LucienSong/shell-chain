@@ -124,8 +124,9 @@ impl<S: KvStore + 'static> Node<S> {
             tokio::sync::mpsc::unbounded_channel::<SignedTransaction>();
 
         // Create a broadcast channel for block events (eth_subscribe).
+        // F-042: Use larger capacity to reduce subscriber lag.
         let (block_event_tx, _) =
-            tokio::sync::broadcast::channel::<BlockEvent>(64);
+            tokio::sync::broadcast::channel::<BlockEvent>(256);
 
         // Start JSON-RPC server.
         let _rpc = start_rpc_server(
@@ -183,17 +184,34 @@ impl<S: KvStore + 'static> Node<S> {
                                 let number = block.number();
                                 let tx_count = block.transactions.len();
                                 let gas = block.header.gas_used;
+                                // F-046: Use scope blocks to manage lock lifetimes.
+                                {
+                                    let consensus = self.consensus.read();
+                                    if consensus.config().is_epoch_boundary(number) {
+                                        let epoch = consensus.config().epoch_of(number);
+                                        info!(epoch, block = number, "new epoch started");
+                                    }
+                                }
+                                // Reload validators at epoch boundaries (F-041: handle errors).
                                 if self.consensus.read().config().is_epoch_boundary(number) {
-                                    let epoch = self.consensus.read().config().epoch_of(number);
-                                    info!(epoch, block = number, "new epoch started");
-
-                                    // Reload validators from world state at epoch boundaries.
-                                    let ws = self.world_state.read();
-                                    let validators = ws.get_validators();
-                                    drop(ws);
-                                    if let Ok(v) = validators {
-                                        if !v.is_empty() {
+                                    let validators = {
+                                        let ws = self.world_state.read();
+                                        ws.get_validators()
+                                    };
+                                    match validators {
+                                        Ok(v) if !v.is_empty() => {
                                             self.consensus.write().config_mut().set_authorities(v);
+                                        }
+                                        Ok(_) => {
+                                            // Empty validator set in world state — keep current authorities.
+                                        }
+                                        Err(e) => {
+                                            tracing::error!(
+                                                error = %e,
+                                                block = number,
+                                                "CRITICAL: failed to reload validators at epoch boundary — \
+                                                 continuing with stale validator set may cause consensus divergence"
+                                            );
                                         }
                                     }
                                 }
@@ -209,10 +227,12 @@ impl<S: KvStore + 'static> Node<S> {
                                     .ok()
                                     .flatten()
                                     .unwrap_or_default();
-                                let _ = block_event_tx.send(BlockEvent::NewBlock {
+                                if block_event_tx.send(BlockEvent::NewBlock {
                                     header: block.header.clone(),
                                     receipts,
-                                });
+                                }).is_err() {
+                                    tracing::warn!("no active subscribers for block events");
+                                }
 
                                 let msg = NetworkMessage::NewBlock(Box::new(block));
                                 let _ = network.broadcast(msg).await;
@@ -246,10 +266,12 @@ impl<S: KvStore + 'static> Node<S> {
                                                 .ok()
                                                 .flatten()
                                                 .unwrap_or_default();
-                                            let _ = block_event_tx.send(BlockEvent::NewBlock {
+                                            if block_event_tx.send(BlockEvent::NewBlock {
                                                 header: saved_header,
                                                 receipts,
-                                            });
+                                            }).is_err() {
+                                                tracing::warn!("no active subscribers for block events");
+                                            }
                                         }
                                         Err(NodeError::GapDetected { .. }) => {
                                             // Only request missing blocks on genuine gap,
@@ -280,14 +302,17 @@ impl<S: KvStore + 'static> Node<S> {
                                     }
                                 }
                                 NetworkMessage::NewTransaction(tx) => {
-                                    // Deduplicate: skip if already in mempool.
-                                    if self.tx_pool.contains(&tx.hash()) {
-                                        debug!(%peer, "ignoring already-known transaction");
-                                    } else {
-                                        let verifier = DilithiumVerifier;
-                                        match self.handle_incoming_tx(*tx, &verifier) {
-                                            Ok(_hash) => {}
-                                            Err(e) => eprintln!("⚠  Tx handling error: {e}"),
+                                    // F-043: Use insert() directly — it returns Duplicate
+                                    // error if already known, avoiding TOCTOU race.
+                                    let verifier = DilithiumVerifier;
+                                    match self.handle_incoming_tx(*tx, &verifier) {
+                                        Ok(_hash) => {}
+                                        Err(e) => {
+                                            // MempoolError::Duplicate is expected for re-broadcast; don't log it as error.
+                                            let msg = format!("{e}");
+                                            if !msg.contains("duplicate") && !msg.contains("Duplicate") {
+                                                eprintln!("⚠  Tx handling error: {e}");
+                                            }
                                         }
                                     }
                                 }
@@ -341,10 +366,12 @@ impl<S: KvStore + 'static> Node<S> {
                                                     .ok()
                                                     .flatten()
                                                     .unwrap_or_default();
-                                                let _ = block_event_tx.send(BlockEvent::NewBlock {
+                                                if block_event_tx.send(BlockEvent::NewBlock {
                                                     header: hdr,
                                                     receipts,
-                                                });
+                                                }).is_err() {
+                                                    tracing::warn!("no active subscribers for block events");
+                                                }
                                             }
                                             Err(e) => {
                                                 warn!(
