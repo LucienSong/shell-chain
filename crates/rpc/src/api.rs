@@ -6,6 +6,34 @@ use shell_primitives::{Address, ShellHash};
 use crate::types::{RpcBlock, RpcLogWithMeta, RpcReceipt, RpcTransaction, CallRequest};
 use crate::filter::RawLogFilter;
 
+/// Web3 namespace RPCs (client metadata and utility).
+#[rpc(server, namespace = "web3")]
+pub trait Web3Api {
+    /// Returns the current client version string.
+    #[method(name = "clientVersion")]
+    async fn client_version(&self) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns the Keccak-256 hash of the given data.
+    #[method(name = "sha3")]
+    async fn sha3(&self, data: String) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+}
+
+/// Net namespace RPCs (network status).
+#[rpc(server, namespace = "net")]
+pub trait NetApi {
+    /// Returns the chain ID as a decimal string.
+    #[method(name = "version")]
+    async fn version(&self) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns true if the node is listening for connections.
+    #[method(name = "listening")]
+    async fn listening(&self) -> Result<bool, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns the number of connected peers as a hex string.
+    #[method(name = "peerCount")]
+    async fn peer_count(&self) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+}
+
 /// Ethereum-compatible JSON-RPC API.
 #[rpc(server, namespace = "eth")]
 pub trait EthApi {
@@ -16,6 +44,10 @@ pub trait EthApi {
     /// Returns the chain ID.
     #[method(name = "chainId")]
     async fn chain_id(&self) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns false when not syncing; will return sync status object later.
+    #[method(name = "syncing")]
+    async fn syncing(&self) -> Result<serde_json::Value, jsonrpsee::types::ErrorObjectOwned>;
 
     /// Returns a block by number (hex-encoded or "latest").
     #[method(name = "getBlockByNumber")]

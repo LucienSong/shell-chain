@@ -12,7 +12,7 @@ use shell_mempool::TxPool;
 use shell_primitives::{Address, Bytes, ShellHash, U256};
 use shell_storage::{ChainStore, KvStore, WorldState};
 
-use crate::api::{EthApiServer, ShellApiServer};
+use crate::api::{EthApiServer, ShellApiServer, Web3ApiServer, NetApiServer};
 use crate::filter::{RawLogFilter, MAX_BLOCK_RANGE};
 use crate::subscriptions::BlockEvent;
 use crate::types::*;
@@ -360,6 +360,11 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
 
     async fn chain_id(&self) -> Result<String, ErrorObjectOwned> {
         Ok(hex_u64(self.chain_id))
+    }
+
+    async fn syncing(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // Shell-chain has no sync protocol yet; always report "not syncing".
+        Ok(serde_json::Value::Bool(false))
     }
 
     async fn get_block_by_number(
@@ -724,6 +729,37 @@ impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
         let calldata = shell_evm::encode_remove_validator_calldata(&addr);
         let hash = self.propose_validator_tx(calldata)?;
         Ok(format!("0x{}", hex::encode(hash.0)))
+    }
+}
+
+#[jsonrpsee::core::async_trait]
+impl<S: KvStore + 'static> Web3ApiServer for RpcHandler<S> {
+    async fn client_version(&self) -> Result<String, ErrorObjectOwned> {
+        Ok("ShellChain/v0.1.0/rust".to_string())
+    }
+
+    async fn sha3(&self, data: String) -> Result<String, ErrorObjectOwned> {
+        let raw = data.strip_prefix("0x").unwrap_or(&data);
+        let bytes = hex::decode(raw)
+            .map_err(|e| internal_err(format!("invalid hex: {e}")))?;
+        let hash = shell_primitives::keccak256(&bytes);
+        Ok(format!("0x{}", hex::encode(hash.0)))
+    }
+}
+
+#[jsonrpsee::core::async_trait]
+impl<S: KvStore + 'static> NetApiServer for RpcHandler<S> {
+    async fn version(&self) -> Result<String, ErrorObjectOwned> {
+        Ok(self.chain_id.to_string())
+    }
+
+    async fn listening(&self) -> Result<bool, ErrorObjectOwned> {
+        Ok(true)
+    }
+
+    async fn peer_count(&self) -> Result<String, ErrorObjectOwned> {
+        // No peer tracking yet; report 0 peers.
+        Ok(hex_u64(0))
     }
 }
 
@@ -1520,5 +1556,67 @@ mod tests {
         // Must be a hex string starting with 0x, 32 bytes = 66 chars.
         assert!(result.starts_with("0x"));
         assert_eq!(result.len(), 66);
+    }
+
+    // ── web3_* tests ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn web3_client_version() {
+        let handler = setup();
+        let result = Web3ApiServer::client_version(&handler).await.unwrap();
+        assert_eq!(result, "ShellChain/v0.1.0/rust");
+    }
+
+    #[tokio::test]
+    async fn web3_sha3_known_vector() {
+        let handler = setup();
+        // keccak256("") = c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470
+        let result = Web3ApiServer::sha3(&handler, "0x".to_string()).await.unwrap();
+        assert_eq!(
+            result,
+            "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470"
+        );
+    }
+
+    #[tokio::test]
+    async fn web3_sha3_hello() {
+        let handler = setup();
+        let input = format!("0x{}", hex::encode(b"hello"));
+        let result = Web3ApiServer::sha3(&handler, input).await.unwrap();
+        let expected = shell_primitives::keccak256(b"hello");
+        assert_eq!(result, format!("0x{}", hex::encode(expected.0)));
+    }
+
+    // ── net_* tests ───────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn net_version_returns_chain_id_decimal() {
+        let handler = setup();
+        // setup() uses chain_id = 42
+        let result = NetApiServer::version(&handler).await.unwrap();
+        assert_eq!(result, "42");
+    }
+
+    #[tokio::test]
+    async fn net_listening_returns_true() {
+        let handler = setup();
+        let result = NetApiServer::listening(&handler).await.unwrap();
+        assert!(result);
+    }
+
+    #[tokio::test]
+    async fn net_peer_count_returns_hex() {
+        let handler = setup();
+        let result = NetApiServer::peer_count(&handler).await.unwrap();
+        assert_eq!(result, "0x0");
+    }
+
+    // ── eth_syncing test ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn eth_syncing_returns_false() {
+        let handler = setup();
+        let result = EthApiServer::syncing(&handler).await.unwrap();
+        assert_eq!(result, serde_json::Value::Bool(false));
     }
 }
