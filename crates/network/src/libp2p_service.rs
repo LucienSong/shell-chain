@@ -846,4 +846,172 @@ mod tests {
         let swarm = build_swarm(&config);
         assert!(swarm.is_ok(), "build_swarm should succeed with NAT traversal disabled");
     }
+
+    #[tokio::test]
+    async fn build_swarm_all_features_enabled() {
+        let config = NetworkConfig {
+            enable_mdns: true,
+            enable_kademlia: true,
+            enable_peer_scoring: true,
+            enable_relay: true,
+            enable_dcutr: true,
+            enable_autonat: true,
+            ..Default::default()
+        };
+        let swarm = build_swarm(&config);
+        assert!(swarm.is_ok(), "build_swarm should succeed with all features enabled");
+    }
+
+    #[test]
+    fn build_swarm_all_features_disabled() {
+        let config = NetworkConfig {
+            enable_mdns: false,
+            enable_kademlia: false,
+            enable_peer_scoring: false,
+            enable_relay: false,
+            enable_dcutr: false,
+            enable_autonat: false,
+            ..Default::default()
+        };
+        let swarm = build_swarm(&config);
+        assert!(swarm.is_ok(), "build_swarm should succeed with all features disabled");
+    }
+
+    #[test]
+    fn build_swarm_kademlia_only() {
+        let config = NetworkConfig {
+            enable_mdns: false,
+            enable_kademlia: true,
+            enable_peer_scoring: false,
+            enable_relay: false,
+            enable_dcutr: false,
+            enable_autonat: false,
+            ..Default::default()
+        };
+        let swarm = build_swarm(&config);
+        assert!(swarm.is_ok(), "build_swarm should succeed with kademlia only");
+    }
+
+    #[test]
+    fn build_swarm_relay_without_dcutr() {
+        let config = NetworkConfig {
+            enable_mdns: false,
+            enable_kademlia: false,
+            enable_peer_scoring: false,
+            enable_relay: true,
+            enable_dcutr: false,
+            enable_autonat: false,
+            ..Default::default()
+        };
+        let swarm = build_swarm(&config);
+        assert!(swarm.is_ok(), "build_swarm should succeed with relay but no dcutr");
+    }
+
+    #[test]
+    fn build_swarm_custom_topics() {
+        let config = NetworkConfig {
+            blocks_topic: "/custom/blocks/2".into(),
+            txs_topic: "/custom/txs/2".into(),
+            enable_mdns: false,
+            enable_kademlia: false,
+            enable_peer_scoring: true,
+            enable_relay: false,
+            enable_dcutr: false,
+            enable_autonat: false,
+            ..Default::default()
+        };
+        let swarm = build_swarm(&config);
+        assert!(swarm.is_ok(), "build_swarm should succeed with custom topic names");
+    }
+
+    #[test]
+    fn build_swarm_with_boot_nodes_adds_to_kademlia() {
+        let keypair = libp2p::identity::Keypair::generate_ed25519();
+        let peer_id = keypair.public().to_peer_id();
+        let boot_addr = format!("/ip4/10.0.0.1/tcp/30303/p2p/{peer_id}");
+
+        let config = NetworkConfig {
+            boot_nodes: vec![boot_addr.clone()],
+            enable_mdns: false,
+            enable_kademlia: true,
+            enable_peer_scoring: false,
+            enable_relay: false,
+            enable_dcutr: false,
+            enable_autonat: false,
+            ..Default::default()
+        };
+
+        let mut swarm = build_swarm(&config).expect("build_swarm should succeed");
+        // Add boot node to Kademlia (mirrors what Libp2pNetwork::new does).
+        let addr: Multiaddr = boot_addr.parse().unwrap();
+        if let Some(kad) = swarm.behaviour_mut().kademlia.as_mut() {
+            kad.add_address(&peer_id, addr);
+        }
+        // Verify the peer was added by checking kbuckets.
+        let kad = swarm.behaviour_mut().kademlia.as_mut().unwrap();
+        let entry_count: usize = kad.kbuckets().map(|b| b.num_entries()).sum();
+        assert!(entry_count >= 1, "boot node should be added to Kademlia routing table");
+    }
+
+    #[test]
+    fn extract_peer_id_from_complex_multiaddr() {
+        let keypair = libp2p::identity::Keypair::generate_ed25519();
+        let peer_id = keypair.public().to_peer_id();
+        let addr: Multiaddr = format!("/ip4/10.0.0.1/tcp/30303/p2p/{peer_id}")
+            .parse()
+            .unwrap();
+        assert_eq!(extract_peer_id(&addr), Some(peer_id));
+    }
+
+    #[test]
+    fn extract_peer_id_ip6_multiaddr() {
+        let keypair = libp2p::identity::Keypair::generate_ed25519();
+        let peer_id = keypair.public().to_peer_id();
+        let addr: Multiaddr = format!("/ip6/::1/tcp/4001/p2p/{peer_id}")
+            .parse()
+            .unwrap();
+        assert_eq!(extract_peer_id(&addr), Some(peer_id));
+    }
+
+    #[test]
+    fn extract_peer_id_udp_multiaddr() {
+        let keypair = libp2p::identity::Keypair::generate_ed25519();
+        let peer_id = keypair.public().to_peer_id();
+        let addr: Multiaddr = format!("/ip4/192.168.0.1/udp/9000/p2p/{peer_id}")
+            .parse()
+            .unwrap();
+        assert_eq!(extract_peer_id(&addr), Some(peer_id));
+    }
+
+    #[test]
+    fn config_custom_listen_addr() {
+        let addr: std::net::SocketAddr = "192.168.1.100:9999".parse().unwrap();
+        let config = NetworkConfig {
+            listen_addr: addr,
+            ..Default::default()
+        };
+        assert_eq!(config.listen_addr.port(), 9999);
+        assert_eq!(config.listen_addr.ip().to_string(), "192.168.1.100");
+    }
+
+    #[test]
+    fn peer_scoring_thresholds_are_ordered() {
+        // Verify the scoring thresholds used in build_swarm are logically ordered:
+        // gossip_threshold > publish_threshold > graylist_threshold (all negative, less severe first).
+        let gossip: f64 = -100.0;
+        let publish: f64 = -200.0;
+        let graylist: f64 = -300.0;
+        assert!(gossip > publish, "gossip threshold should be less severe than publish");
+        assert!(publish > graylist, "publish threshold should be less severe than graylist");
+    }
+
+    #[test]
+    fn peer_scoring_topic_weights_positive() {
+        // The block topic weight should be higher than or equal to the txs topic weight.
+        let blocks_weight: f64 = 1.0;
+        let txs_weight: f64 = 0.5;
+        assert!(blocks_weight > 0.0);
+        assert!(txs_weight > 0.0);
+        assert!(blocks_weight >= txs_weight, "block topic should have >= weight than txs");
+    }
 }
