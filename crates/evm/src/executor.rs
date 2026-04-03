@@ -13,11 +13,14 @@ use revm::primitives::hardfork::SpecId;
 use revm::primitives::{TxKind, KECCAK_EMPTY};
 use revm::state::EvmState;
 use shell_core::{Account, BlockHeader, TransactionReceipt};
-use shell_primitives::{Address as ShellAddress, ShellHash};
+use shell_primitives::{keccak256, Address as ShellAddress, ShellHash};
 use shell_storage::{ChainStore, KvStore, StorageError, WorldState};
 
 use crate::precompiles::ShellPrecompiles;
 use crate::state_db::{ShellStateDb, StateDbError};
+use crate::system_contracts::{
+    self, execute_system_contract, SystemContractError, SYSTEM_CALL_BASE_GAS, SYSTEM_CALL_OP_GAS,
+};
 
 /// Errors returned during EVM execution.
 #[derive(Debug, thiserror::Error)]
@@ -67,6 +70,10 @@ impl<S: KvStore + 'static> ShellEvm<S> {
     ///
     /// State changes are NOT committed — the caller must apply them to
     /// WorldState after collecting all transactions in a block.
+    ///
+    /// **System contract intercept**: if the transaction targets the
+    /// ValidatorRegistry at 0x0000…0001, native Rust logic handles it
+    /// instead of routing through revm.
     pub fn execute_tx(
         &mut self,
         signed_tx: &shell_core::SignedTransaction,
@@ -74,6 +81,21 @@ impl<S: KvStore + 'static> ShellEvm<S> {
         tx_index: u32,
         cumulative_gas_used: u64,
     ) -> Result<TxExecutionResult, ExecutorError> {
+        let tx = &signed_tx.tx;
+
+        // ── System contract intercept ──────────────────────────
+        if let Some(to) = &tx.to {
+            if to.as_bytes() == &system_contracts::VALIDATOR_REGISTRY_ADDR {
+                return self.execute_system_contract_tx(
+                    signed_tx,
+                    header,
+                    tx_index,
+                    cumulative_gas_used,
+                );
+            }
+        }
+
+        // ── Normal EVM execution path ──────────────────────────
         let tx = &signed_tx.tx;
 
         // Build revm TxEnv
@@ -198,6 +220,111 @@ impl<S: KvStore + 'static> ShellEvm<S> {
     /// Access the underlying state database mutably.
     pub fn state_db_mut(&mut self) -> &mut ShellStateDb<S> {
         &mut self.state_db
+    }
+
+    /// Execute a transaction targeting the ValidatorRegistry system contract.
+    ///
+    /// Runs native Rust logic instead of the EVM, produces appropriate logs,
+    /// and charges a fixed gas fee.
+    fn execute_system_contract_tx(
+        &mut self,
+        signed_tx: &shell_core::SignedTransaction,
+        header: &BlockHeader,
+        tx_index: u32,
+        cumulative_gas_used: u64,
+    ) -> Result<TxExecutionResult, ExecutorError> {
+        let caller = &signed_tx.from;
+        let input = signed_tx.tx.data.as_ref();
+        let ws = self.state_db.world_state_mut();
+
+        let result = execute_system_contract(caller, input, ws);
+
+        match result {
+            Ok((output, gas_used)) => {
+                let new_cumulative = cumulative_gas_used + gas_used;
+
+                // Build event logs for mutating operations
+                let mut shell_logs = Vec::new();
+                if input.len() >= 4 {
+                    let selector: [u8; 4] = input[..4].try_into().unwrap();
+                    let registry_addr = system_contracts::registry_address();
+                    if selector == system_contracts::ADD_VALIDATOR_SELECTOR {
+                        if let Ok(addr) = system_contracts::decode_address(&input[4..]) {
+                            let topic = ShellHash::from(system_contracts::validator_added_topic());
+                            let mut addr_word = [0u8; 32];
+                            addr_word[12..32].copy_from_slice(addr.as_bytes());
+                            if let Ok(log) = shell_core::Log::new(
+                                registry_addr,
+                                vec![topic],
+                                shell_primitives::Bytes::from(addr_word.to_vec()),
+                            ) {
+                                shell_logs.push(log);
+                            }
+                        }
+                    } else if selector == system_contracts::REMOVE_VALIDATOR_SELECTOR {
+                        if let Ok(addr) = system_contracts::decode_address(&input[4..]) {
+                            let topic =
+                                ShellHash::from(system_contracts::validator_removed_topic());
+                            let mut addr_word = [0u8; 32];
+                            addr_word[12..32].copy_from_slice(addr.as_bytes());
+                            if let Ok(log) = shell_core::Log::new(
+                                registry_addr,
+                                vec![topic],
+                                shell_primitives::Bytes::from(addr_word.to_vec()),
+                            ) {
+                                shell_logs.push(log);
+                            }
+                        }
+                    }
+                }
+
+                let receipt = TransactionReceipt {
+                    tx_hash: signed_tx.hash(),
+                    block_number: header.number,
+                    tx_index,
+                    status: 1, // success
+                    gas_used,
+                    cumulative_gas_used: new_cumulative,
+                    contract_address: None,
+                    logs_bloom: shell_primitives::Bytes::from(
+                        crate::bloom::logs_bloom(&shell_logs).to_vec(),
+                    ),
+                    logs: shell_logs,
+                };
+
+                Ok(TxExecutionResult {
+                    receipt,
+                    state_changes: EvmState::default(),
+                    gas_used,
+                    output,
+                })
+            }
+            Err(e) => {
+                // System contract reverted — produce a failed receipt
+                let gas_used = SYSTEM_CALL_BASE_GAS;
+                let new_cumulative = cumulative_gas_used + gas_used;
+                let revert_msg = e.to_string().into_bytes();
+
+                let receipt = TransactionReceipt {
+                    tx_hash: signed_tx.hash(),
+                    block_number: header.number,
+                    tx_index,
+                    status: 0, // failure
+                    gas_used,
+                    cumulative_gas_used: new_cumulative,
+                    contract_address: None,
+                    logs_bloom: shell_primitives::Bytes::new(),
+                    logs: vec![],
+                };
+
+                Ok(TxExecutionResult {
+                    receipt,
+                    state_changes: EvmState::default(),
+                    gas_used,
+                    output: revert_msg,
+                })
+            }
+        }
     }
 }
 

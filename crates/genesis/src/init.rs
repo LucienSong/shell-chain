@@ -30,6 +30,12 @@ pub fn initialize_genesis<S: KvStore + 'static>(
             .map_err(|e| GenesisError::StateInit(e.to_string()))?;
     }
 
+    // Mark the ValidatorRegistry system contract address with a placeholder
+    // code hash so eth_getCode returns non-empty and the address is recognized
+    // as a contract account.
+    mark_system_contract(&mut world_state)
+        .map_err(|e| GenesisError::StateInit(e.to_string()))?;
+
     // Compute state root
     let state_root = world_state
         .state_root()
@@ -112,6 +118,16 @@ fn apply_alloc<S: KvStore + 'static>(
     }
 
     Ok(())
+}
+
+/// Mark the ValidatorRegistry system contract address (0x0000…0001) as a code
+/// account with a deterministic code hash: `keccak256("ValidatorRegistry")`.
+fn mark_system_contract<S: KvStore + 'static>(
+    world_state: &mut WorldState<S>,
+) -> Result<(), StorageError> {
+    let addr = shell_storage::validator_registry_addr();
+    let code_hash = keccak256(b"ValidatorRegistry");
+    world_state.set_code_hash(&addr, code_hash)
 }
 
 #[cfg(test)]

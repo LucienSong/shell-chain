@@ -631,6 +631,18 @@ impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
             None::<()>,
         ))
     }
+
+    async fn encode_add_validator(&self, address: String) -> Result<String, ErrorObjectOwned> {
+        let addr = parse_address(&address)?;
+        let calldata = shell_evm::encode_add_validator_calldata(&addr);
+        Ok(format!("0x{}", hex::encode(calldata)))
+    }
+
+    async fn encode_remove_validator(&self, address: String) -> Result<String, ErrorObjectOwned> {
+        let addr = parse_address(&address)?;
+        let calldata = shell_evm::encode_remove_validator_calldata(&addr);
+        Ok(format!("0x{}", hex::encode(calldata)))
+    }
 }
 
 #[cfg(test)]

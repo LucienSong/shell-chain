@@ -154,4 +154,18 @@ pub trait ShellApi {
         &self,
         address: String,
     ) -> Result<bool, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Encode calldata for `addValidator(address)` system contract call.
+    #[method(name = "encodeAddValidator")]
+    async fn encode_add_validator(
+        &self,
+        address: String,
+    ) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Encode calldata for `removeValidator(address)` system contract call.
+    #[method(name = "encodeRemoveValidator")]
+    async fn encode_remove_validator(
+        &self,
+        address: String,
+    ) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
 }
