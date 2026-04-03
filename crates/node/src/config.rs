@@ -41,6 +41,7 @@ impl NodeConfig {
             },
             rpc: RpcConfig {
                 listen_addr: SocketAddr::from(([127, 0, 0, 1], 8545)),
+                ws_addr: None,
                 ..RpcConfig::default()
             },
             network: NetworkConfig::default(),

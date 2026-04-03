@@ -9,4 +9,4 @@ pub mod server;
 pub mod types;
 
 pub use handler::RpcHandler;
-pub use server::{start_rpc_server, RpcConfig};
+pub use server::{start_rpc_server, RpcConfig, RpcServerHandle};

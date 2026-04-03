@@ -48,6 +48,14 @@ enum Commands {
         #[arg(long, default_value = "memory")]
         db: String,
 
+        /// Enable dedicated WebSocket RPC server on a separate port.
+        #[arg(long)]
+        ws: bool,
+
+        /// WebSocket RPC listen port (used with --ws).
+        #[arg(long, default_value = "8546")]
+        ws_port: u16,
+
         /// Enable libp2p P2P networking (requires --features libp2p).
         #[arg(long)]
         p2p: bool,
@@ -119,6 +127,8 @@ async fn main() {
             keystore,
             chain_id,
             db,
+            ws,
+            ws_port,
             p2p,
             p2p_addr,
             bootnode,
@@ -131,6 +141,8 @@ async fn main() {
                 keystore,
                 chain_id,
                 db,
+                ws,
+                ws_port,
                 p2p,
                 p2p_addr,
                 bootnodes: bootnode,
