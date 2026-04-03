@@ -1,6 +1,7 @@
 //! RPC handler implementation backed by chain storage, world state, and mempool.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use jsonrpsee::types::ErrorObjectOwned;
 
@@ -35,6 +36,8 @@ pub struct RpcHandler<S: KvStore + 'static> {
     proposer_signer: Option<Arc<dyn Signer>>,
     /// Address of the proposer (derived from the signer's public key).
     proposer_address: Option<Address>,
+    /// Timestamp when the RPC handler was created, used for uptime calculation.
+    start_time: Instant,
 }
 
 impl<S: KvStore + 'static> Clone for RpcHandler<S> {
@@ -48,6 +51,7 @@ impl<S: KvStore + 'static> Clone for RpcHandler<S> {
             block_events: self.block_events.clone(),
             proposer_signer: self.proposer_signer.clone(),
             proposer_address: self.proposer_address,
+            start_time: self.start_time,
         }
     }
 }
@@ -71,6 +75,7 @@ impl<S: KvStore + 'static> RpcHandler<S> {
             block_events,
             proposer_signer: None,
             proposer_address: None,
+            start_time: Instant::now(),
         }
     }
 
@@ -870,6 +875,76 @@ impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
             }
         };
         Ok(hex_u64(gas))
+    }
+
+    async fn get_node_info(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let head = self.chain_store.get_head_block().map_err(internal_err)?;
+        let block_height = head.as_ref().map(|b| b.number()).unwrap_or(0);
+        let base_fee = match &head {
+            Some(h) if h.header.base_fee_per_gas > 0 => h.header.base_fee_per_gas,
+            _ => shell_core::INITIAL_BASE_FEE,
+        };
+
+        Ok(serde_json::json!({
+            "version": "ShellChain/v0.1.0/rust",
+            "chainId": self.chain_id,
+            "blockHeight": block_height,
+            "peerCount": 0,
+            "txPoolSize": self.tx_pool.len(),
+            "isMining": self.proposer_signer.is_some(),
+            "uptime": self.start_time.elapsed().as_secs(),
+            "baseFee": hex_u64(base_fee),
+        }))
+    }
+
+    async fn get_network_stats(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Ok(serde_json::json!({
+            "peerCount": 0,
+            "protocolVersion": "shell/1.0.0",
+            "listeningAddress": "/ip4/0.0.0.0/tcp/30303",
+            "protocols": ["gossipsub", "kademlia", "mdns"],
+        }))
+    }
+
+    async fn get_chain_stats(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let head = self.chain_store.get_head_block().map_err(internal_err)?;
+        let block_height = head.as_ref().map(|b| b.number()).unwrap_or(0);
+        let base_fee = match &head {
+            Some(h) if h.header.base_fee_per_gas > 0 => h.header.base_fee_per_gas,
+            _ => shell_core::INITIAL_BASE_FEE,
+        };
+
+        let mut total_txs: u64 = 0;
+        let mut gas_used_total = U256::ZERO;
+        let mut avg_block_time: f64 = 0.0;
+
+        if block_height > 0 {
+            for n in 0..=block_height {
+                if let Ok(Some(blk)) = self.chain_store.get_block_by_number(n) {
+                    total_txs += blk.transactions.len() as u64;
+                    gas_used_total += U256::from(blk.header.gas_used);
+                }
+            }
+
+            let window = std::cmp::min(block_height, 10);
+            if window >= 1 {
+                if let (Ok(Some(recent)), Ok(Some(older))) = (
+                    self.chain_store.get_block_by_number(block_height),
+                    self.chain_store.get_block_by_number(block_height - window),
+                ) {
+                    let dt = recent.header.timestamp.saturating_sub(older.header.timestamp);
+                    avg_block_time = dt as f64 / window as f64;
+                }
+            }
+        }
+
+        Ok(serde_json::json!({
+            "blockHeight": block_height,
+            "totalTransactions": total_txs,
+            "avgBlockTime": avg_block_time,
+            "gasUsedTotal": hex_u256(gas_used_total),
+            "latestBaseFee": hex_u64(base_fee),
+        }))
     }
 }
 
@@ -1980,5 +2055,120 @@ mod tests {
         let handler = setup();
         let result = ShellApiServer::encode_add_validator(&handler, "not-hex".into()).await;
         assert!(result.is_err());
+    }
+
+    // ── shell_getNodeInfo ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn get_node_info_returns_all_fields() {
+        let handler = setup();
+        let result = ShellApiServer::get_node_info(&handler).await.unwrap();
+
+        assert_eq!(result["version"], "ShellChain/v0.1.0/rust");
+        assert_eq!(result["chainId"], 42);
+        assert_eq!(result["blockHeight"], 0);
+        assert_eq!(result["peerCount"], 0);
+        assert!(result["txPoolSize"].is_u64());
+        assert_eq!(result["isMining"], false);
+        assert!(result["uptime"].is_u64());
+        assert!(result["baseFee"].is_string());
+    }
+
+    #[tokio::test]
+    async fn get_node_info_reflects_block_height() {
+        let handler = setup();
+        let block = make_genesis_block();
+        let hash = block.hash();
+        handler.chain_store.put_block(&block).unwrap();
+        handler.chain_store.set_canonical(0, &hash).unwrap();
+        handler.chain_store.set_head(&hash).unwrap();
+
+        let result = ShellApiServer::get_node_info(&handler).await.unwrap();
+        assert_eq!(result["blockHeight"], 0);
+        assert_eq!(result["chainId"], 42);
+    }
+
+    #[tokio::test]
+    async fn get_node_info_mining_true_with_proposer() {
+        let handler = setup();
+        let signer = DilithiumSigner::generate();
+        let addr = Address::from_public_key(&signer.public_key());
+        let handler = handler.with_proposer(Arc::new(signer), addr);
+
+        let result = ShellApiServer::get_node_info(&handler).await.unwrap();
+        assert_eq!(result["isMining"], true);
+    }
+
+    // ── shell_getNetworkStats ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn get_network_stats_returns_all_fields() {
+        let handler = setup();
+        let result = ShellApiServer::get_network_stats(&handler).await.unwrap();
+
+        assert_eq!(result["peerCount"], 0);
+        assert_eq!(result["protocolVersion"], "shell/1.0.0");
+        assert_eq!(result["listeningAddress"], "/ip4/0.0.0.0/tcp/30303");
+        let protocols = result["protocols"].as_array().unwrap();
+        assert_eq!(protocols.len(), 3);
+        assert!(protocols.contains(&serde_json::json!("gossipsub")));
+        assert!(protocols.contains(&serde_json::json!("kademlia")));
+        assert!(protocols.contains(&serde_json::json!("mdns")));
+    }
+
+    // ── shell_getChainStats ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn get_chain_stats_empty_chain() {
+        let handler = setup();
+        let result = ShellApiServer::get_chain_stats(&handler).await.unwrap();
+
+        assert_eq!(result["blockHeight"], 0);
+        assert_eq!(result["totalTransactions"], 0);
+        assert_eq!(result["avgBlockTime"], 0.0);
+        assert!(result["gasUsedTotal"].is_string());
+        assert!(result["latestBaseFee"].is_string());
+    }
+
+    #[tokio::test]
+    async fn get_chain_stats_with_blocks() {
+        let handler = setup();
+
+        let genesis = make_genesis_block();
+        let genesis_hash = genesis.hash();
+        handler.chain_store.put_block(&genesis).unwrap();
+        handler.chain_store.set_canonical(0, &genesis_hash).unwrap();
+        handler.chain_store.set_head(&genesis_hash).unwrap();
+
+        let block1 = Block {
+            header: BlockHeader {
+                parent_hash: genesis_hash,
+                state_root: ShellHash::default(),
+                transactions_root: ShellHash::default(),
+                receipts_root: ShellHash::default(),
+                logs_bloom: Bytes::default(),
+                number: 1,
+                gas_limit: 30_000_000,
+                gas_used: 21_000,
+                timestamp: 1_700_000_003,
+                extra_data: Bytes::default(),
+                proposer: Address::from_public_key(b"proposer-key-data"),
+                sig_aggregate_proof: None,
+                base_fee_per_gas: 1_000_000_000,
+            },
+            transactions: vec![],
+            proposer_seal: None,
+        };
+        let hash1 = block1.hash();
+        handler.chain_store.put_block(&block1).unwrap();
+        handler.chain_store.set_canonical(1, &hash1).unwrap();
+        handler.chain_store.set_head(&hash1).unwrap();
+
+        let result = ShellApiServer::get_chain_stats(&handler).await.unwrap();
+        assert_eq!(result["blockHeight"], 1);
+        assert_eq!(result["totalTransactions"], 0);
+        assert_eq!(result["avgBlockTime"], 3.0);
+        assert_eq!(result["gasUsedTotal"], "0x5208"); // 21000
+        assert!(result["latestBaseFee"].is_string());
     }
 }

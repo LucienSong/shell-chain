@@ -251,4 +251,16 @@ pub trait ShellApi {
         &self,
         operation: String,
     ) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns comprehensive node status information for the performance dashboard.
+    #[method(name = "getNodeInfo")]
+    async fn get_node_info(&self) -> Result<serde_json::Value, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns network statistics for the performance dashboard.
+    #[method(name = "getNetworkStats")]
+    async fn get_network_stats(&self) -> Result<serde_json::Value, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns chain performance statistics for the performance dashboard.
+    #[method(name = "getChainStats")]
+    async fn get_chain_stats(&self) -> Result<serde_json::Value, jsonrpsee::types::ErrorObjectOwned>;
 }
