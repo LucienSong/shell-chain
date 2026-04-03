@@ -58,6 +58,20 @@ for i in $(seq 1 60); do
     sleep 2
 done
 
+# Wait for all three nodes' RPC to be reachable.
+info "Waiting for all nodes RPC..."
+for port in 8546 8547; do
+    for i in $(seq 1 30); do
+        R=$(rpc $port eth_chainId 2>/dev/null)
+        if [ -n "$R" ] && [ "$R" != "null" ]; then break; fi
+        sleep 2
+    done
+done
+
+# Give GossipSub mesh time to form after mDNS discovery.
+info "Waiting for P2P mesh formation (10s)..."
+sleep 10
+
 # ─── Test 1: Node1 is producing blocks ───────────────────────
 BLOCK_HEX=$(rpc 8545 eth_blockNumber)
 BLOCK_NUM=$((16#${BLOCK_HEX#0x}))
