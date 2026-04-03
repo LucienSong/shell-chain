@@ -140,4 +140,18 @@ pub trait ShellApi {
     async fn get_validators(
         &self,
     ) -> Result<Vec<Address>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Add a validator to the active set. Unauthenticated until M3.
+    #[method(name = "addValidator")]
+    async fn add_validator(
+        &self,
+        address: String,
+    ) -> Result<bool, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Remove a validator from the active set. Unauthenticated until M3.
+    #[method(name = "removeValidator")]
+    async fn remove_validator(
+        &self,
+        address: String,
+    ) -> Result<bool, jsonrpsee::types::ErrorObjectOwned>;
 }
