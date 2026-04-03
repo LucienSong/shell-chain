@@ -750,4 +750,191 @@ mod tests {
         let compile_time = const_keccak256(b"isValidator(address)");
         assert_eq!(runtime.as_bytes(), &compile_time);
     }
+
+    // ── Multiple sequential operations ─────────────────────────
+
+    #[test]
+    fn sequential_add_then_remove_multiple() {
+        let v1 = Address::from([0x01; 20]);
+        let v2 = Address::from([0x02; 20]);
+        let v3 = Address::from([0x03; 20]);
+        let v4 = Address::from([0x04; 20]);
+        let mut ws = setup_with_validators(&[v1]);
+
+        // v1 adds v2
+        let calldata = encode_add_validator_calldata(&v2);
+        execute_system_contract(&v1, &calldata, &mut ws).unwrap();
+        assert_eq!(ws.get_validators().unwrap().len(), 2);
+
+        // v2 adds v3
+        let calldata = encode_add_validator_calldata(&v3);
+        execute_system_contract(&v2, &calldata, &mut ws).unwrap();
+        assert_eq!(ws.get_validators().unwrap().len(), 3);
+
+        // v3 adds v4
+        let calldata = encode_add_validator_calldata(&v4);
+        execute_system_contract(&v3, &calldata, &mut ws).unwrap();
+        assert_eq!(ws.get_validators().unwrap().len(), 4);
+
+        // v1 removes v2
+        let calldata = encode_remove_validator_calldata(&v2);
+        execute_system_contract(&v1, &calldata, &mut ws).unwrap();
+        let validators = ws.get_validators().unwrap();
+        assert_eq!(validators.len(), 3);
+        assert!(!validators.contains(&v2));
+
+        // v3 removes v4
+        let calldata = encode_remove_validator_calldata(&v4);
+        execute_system_contract(&v3, &calldata, &mut ws).unwrap();
+        let validators = ws.get_validators().unwrap();
+        assert_eq!(validators.len(), 2);
+        assert!(validators.contains(&v1));
+        assert!(validators.contains(&v3));
+    }
+
+    #[test]
+    fn add_remove_then_re_add_same_validator() {
+        let v1 = Address::from([0x01; 20]);
+        let v2 = Address::from([0x02; 20]);
+        let mut ws = setup_with_validators(&[v1, v2]);
+
+        // Remove v2
+        let calldata = encode_remove_validator_calldata(&v2);
+        execute_system_contract(&v1, &calldata, &mut ws).unwrap();
+        assert!(!ws.get_validators().unwrap().contains(&v2));
+
+        // Re-add v2
+        let calldata = encode_add_validator_calldata(&v2);
+        execute_system_contract(&v1, &calldata, &mut ws).unwrap();
+        assert!(ws.get_validators().unwrap().contains(&v2));
+        assert_eq!(ws.get_validators().unwrap().len(), 2);
+    }
+
+    // ── Event encoding correctness ─────────────────────────────
+
+    #[test]
+    fn validator_added_topic_matches_keccak() {
+        let expected = keccak256(b"ValidatorAdded(address)");
+        let topic = validator_added_topic();
+        assert_eq!(topic, *expected.as_bytes());
+    }
+
+    #[test]
+    fn validator_removed_topic_matches_keccak() {
+        let expected = keccak256(b"ValidatorRemoved(address)");
+        let topic = validator_removed_topic();
+        assert_eq!(topic, *expected.as_bytes());
+    }
+
+    #[test]
+    fn event_topics_are_distinct() {
+        let added = validator_added_topic();
+        let removed = validator_removed_topic();
+        assert_ne!(added, removed);
+    }
+
+    // ── Additional ABI encoding edge cases ─────────────────────
+
+    #[test]
+    fn encode_address_array_single_element() {
+        let addr = Address::from([0xAA; 20]);
+        let encoded = encode_address_array(&[addr]);
+
+        // offset(32) + len(32) + 1 * elem(32) = 96 bytes
+        assert_eq!(encoded.len(), 96);
+
+        // length = 1
+        let len = u64::from_be_bytes(encoded[56..64].try_into().unwrap());
+        assert_eq!(len, 1);
+
+        // Address
+        let decoded = Address::try_from_slice(&encoded[76..96]).unwrap();
+        assert_eq!(decoded, addr);
+    }
+
+    #[test]
+    fn encode_address_array_empty_is_just_header() {
+        let encoded = encode_address_array(&[]);
+
+        // offset(32) + len(32) = 64 bytes
+        assert_eq!(encoded.len(), 64);
+
+        // offset = 0x20
+        assert_eq!(encoded[31], 0x20);
+
+        // length = 0
+        let len = u64::from_be_bytes(encoded[56..64].try_into().unwrap());
+        assert_eq!(len, 0);
+    }
+
+    #[test]
+    fn decode_address_ignores_extra_bytes() {
+        let addr = Address::from([0xCC; 20]);
+        let mut input = vec![0u8; 64]; // 64 bytes, only first 32 matter
+        input[12..32].copy_from_slice(addr.as_bytes());
+
+        let decoded = decode_address(&input).unwrap();
+        assert_eq!(decoded, addr);
+    }
+
+    #[test]
+    fn decode_address_all_zeros() {
+        let input = [0u8; 32];
+        let decoded = decode_address(&input).unwrap();
+        assert_eq!(decoded, Address::ZERO);
+    }
+
+    #[test]
+    fn system_contract_code_hash_is_deterministic() {
+        let h1 = system_contract_code_hash();
+        let h2 = system_contract_code_hash();
+        assert_eq!(h1, h2);
+        // Must not be the zero hash
+        assert_ne!(h1, shell_primitives::ShellHash::ZERO);
+    }
+
+    #[test]
+    fn registry_address_matches_constant() {
+        let addr = registry_address();
+        assert_eq!(addr.as_bytes(), &VALIDATOR_REGISTRY_ADDR);
+    }
+
+    // ── Gas accounting ─────────────────────────────────────────
+
+    #[test]
+    fn get_validators_charges_base_gas_only() {
+        let v1 = Address::from([0x01; 20]);
+        let mut ws = setup_with_validators(&[v1]);
+        let calldata = GET_VALIDATORS_SELECTOR.to_vec();
+        let (_, gas) = execute_system_contract(&Address::ZERO, &calldata, &mut ws).unwrap();
+        assert_eq!(gas, SYSTEM_CALL_BASE_GAS);
+    }
+
+    #[test]
+    fn is_validator_charges_base_gas_only() {
+        let v1 = Address::from([0x01; 20]);
+        let mut ws = setup_with_validators(&[v1]);
+        let mut calldata = IS_VALIDATOR_SELECTOR.to_vec();
+        let mut word = [0u8; 32];
+        word[12..32].copy_from_slice(v1.as_bytes());
+        calldata.extend_from_slice(&word);
+        let (_, gas) = execute_system_contract(&Address::ZERO, &calldata, &mut ws).unwrap();
+        assert_eq!(gas, SYSTEM_CALL_BASE_GAS);
+    }
+
+    #[test]
+    fn mutating_ops_charge_base_plus_op_gas() {
+        let v1 = Address::from([0x01; 20]);
+        let v2 = Address::from([0x02; 20]);
+        let mut ws = setup_with_validators(&[v1]);
+        let expected = SYSTEM_CALL_BASE_GAS + SYSTEM_CALL_OP_GAS;
+
+        let calldata = encode_add_validator_calldata(&v2);
+        let (_, gas) = execute_system_contract(&v1, &calldata, &mut ws).unwrap();
+        assert_eq!(gas, expected);
+
+        let calldata = encode_remove_validator_calldata(&v2);
+        let (_, gas) = execute_system_contract(&v1, &calldata, &mut ws).unwrap();
+        assert_eq!(gas, expected);
+    }
 }

@@ -540,4 +540,289 @@ mod tests {
         // Contract creation should have a contract_address
         assert!(tx_result.receipt.contract_address.is_some());
     }
+
+    // ── Helper: build a system contract tx ─────────────────────
+
+    fn make_system_tx(
+        from: ShellAddress,
+        calldata: Vec<u8>,
+    ) -> SignedTransaction {
+        let tx = Transaction {
+            chain_id: 1337,
+            nonce: 0,
+            to: Some(system_contracts::registry_address()),
+            value: U256::ZERO,
+            data: shell_primitives::Bytes::from(calldata),
+            gas_limit: 100_000,
+            max_fee_per_gas: 0,
+            max_priority_fee_per_gas: 0,
+        };
+        let sig = PQSignature::new(SignatureType::Dilithium3, vec![0xDD; 100]);
+        SignedTransaction::new(from, tx, sig)
+    }
+
+    // ── System contract executor integration tests ─────────────
+
+    #[test]
+    fn execute_add_validator_via_executor() {
+        let mut evm = setup_evm();
+        let v1 = ShellAddress::from([0x01; 20]);
+        let new_val = ShellAddress::from([0x02; 20]);
+
+        // Seed v1 as an existing validator
+        evm.state_db_mut()
+            .world_state_mut()
+            .set_validators(&[v1])
+            .unwrap();
+
+        let calldata = system_contracts::encode_add_validator_calldata(&new_val);
+        let signed = make_system_tx(v1, calldata);
+        let header = sample_header();
+
+        let result = evm.execute_tx(&signed, &header, 0, 0);
+        assert!(result.is_ok(), "addValidator tx failed: {:?}", result.err());
+
+        let tx_result = result.unwrap();
+        assert_eq!(tx_result.receipt.status, 1);
+        assert!(tx_result.is_system_tx);
+        assert_eq!(
+            tx_result.gas_used,
+            system_contracts::SYSTEM_CALL_BASE_GAS + system_contracts::SYSTEM_CALL_OP_GAS
+        );
+        assert_eq!(tx_result.receipt.block_number, 1);
+        assert_eq!(tx_result.receipt.tx_index, 0);
+        assert!(tx_result.receipt.contract_address.is_none());
+        // Output should be ABI-encoded true
+        assert_eq!(tx_result.output, system_contracts::encode_bool(true));
+
+        // Verify the validator was actually added
+        let validators = evm.state_db_mut().world_state_mut().get_validators().unwrap();
+        assert_eq!(validators.len(), 2);
+        assert!(validators.contains(&new_val));
+    }
+
+    #[test]
+    fn execute_remove_validator_via_executor() {
+        let mut evm = setup_evm();
+        let v1 = ShellAddress::from([0x01; 20]);
+        let v2 = ShellAddress::from([0x02; 20]);
+
+        evm.state_db_mut()
+            .world_state_mut()
+            .set_validators(&[v1, v2])
+            .unwrap();
+
+        let calldata = system_contracts::encode_remove_validator_calldata(&v2);
+        let signed = make_system_tx(v1, calldata);
+        let header = sample_header();
+
+        let tx_result = evm.execute_tx(&signed, &header, 0, 0).unwrap();
+        assert_eq!(tx_result.receipt.status, 1);
+        assert!(tx_result.is_system_tx);
+
+        let validators = evm.state_db_mut().world_state_mut().get_validators().unwrap();
+        assert_eq!(validators, vec![v1]);
+    }
+
+    #[test]
+    fn system_tx_flag_is_true_for_system_contract() {
+        let mut evm = setup_evm();
+        let v1 = ShellAddress::from([0x01; 20]);
+        evm.state_db_mut()
+            .world_state_mut()
+            .set_validators(&[v1])
+            .unwrap();
+
+        // A read-only system call (getValidators)
+        let calldata = system_contracts::GET_VALIDATORS_SELECTOR.to_vec();
+        let signed = make_system_tx(v1, calldata);
+        let header = sample_header();
+
+        let tx_result = evm.execute_tx(&signed, &header, 0, 0).unwrap();
+        assert!(tx_result.is_system_tx);
+    }
+
+    #[test]
+    fn normal_tx_is_not_system_tx() {
+        let mut evm = setup_evm();
+        let from = ShellAddress::from([0x42; 20]);
+        fund_account(&mut evm, &from, U256::from(10_000_000_000u64));
+
+        let tx = Transaction {
+            chain_id: 1337,
+            nonce: 0,
+            to: Some(ShellAddress::from([0x01; 20])),
+            value: U256::from(100),
+            data: shell_primitives::Bytes::new(),
+            gas_limit: 21_000,
+            max_fee_per_gas: 10,
+            max_priority_fee_per_gas: 1,
+        };
+        let sig = PQSignature::new(SignatureType::Dilithium3, vec![0xAA; 100]);
+        let signed = SignedTransaction::new(from, tx, sig);
+        let header = sample_header();
+
+        let tx_result = evm.execute_tx(&signed, &header, 0, 0).unwrap();
+        assert!(!tx_result.is_system_tx);
+    }
+
+    #[test]
+    fn system_tx_invalid_calldata_produces_failed_receipt() {
+        let mut evm = setup_evm();
+        let v1 = ShellAddress::from([0x01; 20]);
+        evm.state_db_mut()
+            .world_state_mut()
+            .set_validators(&[v1])
+            .unwrap();
+
+        // Too short (< 4 bytes)
+        let signed = make_system_tx(v1, vec![0x00, 0x01]);
+        let header = sample_header();
+
+        let tx_result = evm.execute_tx(&signed, &header, 0, 0).unwrap();
+        assert_eq!(tx_result.receipt.status, 0); // failed
+        assert!(tx_result.is_system_tx);
+        assert_eq!(tx_result.gas_used, system_contracts::SYSTEM_CALL_BASE_GAS);
+        assert!(tx_result.receipt.logs.is_empty());
+    }
+
+    #[test]
+    fn system_tx_unknown_selector_produces_failed_receipt() {
+        let mut evm = setup_evm();
+        let v1 = ShellAddress::from([0x01; 20]);
+        evm.state_db_mut()
+            .world_state_mut()
+            .set_validators(&[v1])
+            .unwrap();
+
+        let signed = make_system_tx(v1, vec![0xDE, 0xAD, 0xBE, 0xEF]);
+        let header = sample_header();
+
+        let tx_result = evm.execute_tx(&signed, &header, 0, 0).unwrap();
+        assert_eq!(tx_result.receipt.status, 0);
+        assert!(tx_result.is_system_tx);
+        // Revert message should contain "unknown function selector"
+        let msg = String::from_utf8_lossy(&tx_result.output);
+        assert!(msg.contains("unknown function selector"), "got: {msg}");
+    }
+
+    #[test]
+    fn system_tx_unauthorized_produces_failed_receipt() {
+        let mut evm = setup_evm();
+        let v1 = ShellAddress::from([0x01; 20]);
+        let outsider = ShellAddress::from([0x99; 20]);
+        evm.state_db_mut()
+            .world_state_mut()
+            .set_validators(&[v1])
+            .unwrap();
+
+        let new_val = ShellAddress::from([0x02; 20]);
+        let calldata = system_contracts::encode_add_validator_calldata(&new_val);
+        let signed = make_system_tx(outsider, calldata);
+        let header = sample_header();
+
+        let tx_result = evm.execute_tx(&signed, &header, 0, 0).unwrap();
+        assert_eq!(tx_result.receipt.status, 0);
+        assert!(tx_result.is_system_tx);
+        let msg = String::from_utf8_lossy(&tx_result.output);
+        assert!(msg.contains("unauthorized"), "got: {msg}");
+    }
+
+    #[test]
+    fn system_tx_generates_event_logs() {
+        let mut evm = setup_evm();
+        let v1 = ShellAddress::from([0x01; 20]);
+        let new_val = ShellAddress::from([0x02; 20]);
+        evm.state_db_mut()
+            .world_state_mut()
+            .set_validators(&[v1])
+            .unwrap();
+
+        let calldata = system_contracts::encode_add_validator_calldata(&new_val);
+        let signed = make_system_tx(v1, calldata);
+        let header = sample_header();
+
+        let tx_result = evm.execute_tx(&signed, &header, 0, 0).unwrap();
+        assert_eq!(tx_result.receipt.status, 1);
+
+        // Should have exactly one ValidatorAdded log
+        assert_eq!(tx_result.receipt.logs.len(), 1);
+        let log = &tx_result.receipt.logs[0];
+        assert_eq!(log.address, system_contracts::registry_address());
+        assert_eq!(log.topics.len(), 1);
+        assert_eq!(
+            log.topics[0],
+            ShellHash::from(system_contracts::validator_added_topic())
+        );
+        // Log data should be the ABI-encoded address
+        let mut expected_data = [0u8; 32];
+        expected_data[12..32].copy_from_slice(new_val.as_bytes());
+        assert_eq!(log.data.as_ref(), &expected_data);
+    }
+
+    #[test]
+    fn system_tx_remove_generates_removed_event() {
+        let mut evm = setup_evm();
+        let v1 = ShellAddress::from([0x01; 20]);
+        let v2 = ShellAddress::from([0x02; 20]);
+        evm.state_db_mut()
+            .world_state_mut()
+            .set_validators(&[v1, v2])
+            .unwrap();
+
+        let calldata = system_contracts::encode_remove_validator_calldata(&v2);
+        let signed = make_system_tx(v1, calldata);
+        let header = sample_header();
+
+        let tx_result = evm.execute_tx(&signed, &header, 0, 0).unwrap();
+        assert_eq!(tx_result.receipt.status, 1);
+
+        assert_eq!(tx_result.receipt.logs.len(), 1);
+        let log = &tx_result.receipt.logs[0];
+        assert_eq!(
+            log.topics[0],
+            ShellHash::from(system_contracts::validator_removed_topic())
+        );
+    }
+
+    #[test]
+    fn system_tx_cumulative_gas_is_correct() {
+        let mut evm = setup_evm();
+        let v1 = ShellAddress::from([0x01; 20]);
+        evm.state_db_mut()
+            .world_state_mut()
+            .set_validators(&[v1])
+            .unwrap();
+
+        let calldata = system_contracts::GET_VALIDATORS_SELECTOR.to_vec();
+        let signed = make_system_tx(v1, calldata);
+        let header = sample_header();
+
+        let prior_cumulative = 50_000u64;
+        let tx_result = evm.execute_tx(&signed, &header, 1, prior_cumulative).unwrap();
+        assert_eq!(
+            tx_result.receipt.cumulative_gas_used,
+            prior_cumulative + tx_result.gas_used
+        );
+        assert_eq!(tx_result.receipt.tx_index, 1);
+    }
+
+    #[test]
+    fn system_tx_state_changes_are_empty() {
+        // System contract changes go directly to WorldState, not via EvmState
+        let mut evm = setup_evm();
+        let v1 = ShellAddress::from([0x01; 20]);
+        let new_val = ShellAddress::from([0x02; 20]);
+        evm.state_db_mut()
+            .world_state_mut()
+            .set_validators(&[v1])
+            .unwrap();
+
+        let calldata = system_contracts::encode_add_validator_calldata(&new_val);
+        let signed = make_system_tx(v1, calldata);
+        let header = sample_header();
+
+        let tx_result = evm.execute_tx(&signed, &header, 0, 0).unwrap();
+        assert!(tx_result.state_changes.is_empty());
+    }
 }

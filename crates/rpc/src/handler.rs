@@ -1895,4 +1895,78 @@ mod tests {
         let result = ShellApiServer::estimate_governance_gas(&handler, "badOp".into()).await;
         assert!(result.is_err());
     }
+
+    // ── shell_encodeAddValidator / encodeRemoveValidator tests ────────
+
+    #[tokio::test]
+    async fn encode_add_validator_returns_correct_hex() {
+        let handler = setup();
+        let target = Address::from([0xAB; 20]);
+        let hex_addr = format!("0x{}", hex::encode(target.as_bytes()));
+
+        let result = ShellApiServer::encode_add_validator(&handler, hex_addr)
+            .await
+            .unwrap();
+
+        let expected = shell_evm::encode_add_validator_calldata(&target);
+        assert_eq!(result, format!("0x{}", hex::encode(expected)));
+        // Must start with the selector
+        assert!(result.starts_with("0x"));
+        // 4-byte selector + 32-byte param = 36 bytes = 72 hex chars + "0x"
+        assert_eq!(result.len(), 74);
+    }
+
+    #[tokio::test]
+    async fn encode_remove_validator_returns_correct_hex() {
+        let handler = setup();
+        let target = Address::from([0xCD; 20]);
+        let hex_addr = format!("0x{}", hex::encode(target.as_bytes()));
+
+        let result = ShellApiServer::encode_remove_validator(&handler, hex_addr)
+            .await
+            .unwrap();
+
+        let expected = shell_evm::encode_remove_validator_calldata(&target);
+        assert_eq!(result, format!("0x{}", hex::encode(expected)));
+        assert_eq!(result.len(), 74);
+    }
+
+    #[tokio::test]
+    async fn get_governance_info_has_system_contract_address() {
+        let handler = setup();
+        let result = ShellApiServer::get_governance_info(&handler).await.unwrap();
+        let addr_str = result["systemContractAddress"].as_str().unwrap();
+        let expected = format!("{}", shell_evm::registry_address());
+        assert_eq!(addr_str, expected);
+    }
+
+    #[tokio::test]
+    async fn get_validator_status_reflects_changes() {
+        let handler = setup();
+        let addr = Address::from_public_key(b"dynamic-val");
+
+        // Initially not a validator
+        let result = ShellApiServer::get_validator_status(&handler, addr)
+            .await
+            .unwrap();
+        assert_eq!(result["isValidator"], false);
+
+        // Set as validator
+        {
+            let mut ws = handler.world_state.write();
+            ws.set_validators(&[addr]).unwrap();
+        }
+
+        let result = ShellApiServer::get_validator_status(&handler, addr)
+            .await
+            .unwrap();
+        assert_eq!(result["isValidator"], true);
+    }
+
+    #[tokio::test]
+    async fn encode_add_validator_rejects_bad_address() {
+        let handler = setup();
+        let result = ShellApiServer::encode_add_validator(&handler, "not-hex".into()).await;
+        assert!(result.is_err());
+    }
 }
