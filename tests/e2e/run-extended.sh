@@ -100,6 +100,12 @@ fi
 BLOCK1_JSON=$(rpc_raw 8545 eth_getBlockByNumber '["0x1", false]' | jq -r '.result')
 PROPOSER=$(echo "$BLOCK1_JSON" | jq -r '.miner // .proposer // empty' 2>/dev/null)
 
+if [ -z "$PROPOSER" ]; then
+    fail "CRITICAL: could not extract proposer from block #1 — aborting"
+    echo -e "${RED}Cannot proceed without proposer address${NC}"
+    exit 1
+fi
+
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "  SECTION 1: Performance Metrics"
@@ -275,23 +281,19 @@ else
 fi
 
 # eth_getBalance
-if [ -n "$PROPOSER" ]; then
-    R=$(rpc 8545 eth_getBalance "[\"${PROPOSER}\"]")
-    if [ -n "$R" ] && [ "$R" != "0x0" ] && [ "$R" != "null" ]; then
-        pass "eth_getBalance for proposer = $R"
-    else
-        fail "eth_getBalance returned zero for funded proposer"
-    fi
+R=$(rpc 8545 eth_getBalance "[\"${PROPOSER}\"]")
+if [ -n "$R" ] && [ "$R" != "0x0" ] && [ "$R" != "null" ]; then
+    pass "eth_getBalance for proposer = $R"
+else
+    fail "eth_getBalance returned zero for funded proposer"
 fi
 
 # eth_getTransactionCount
-if [ -n "$PROPOSER" ]; then
-    R=$(rpc 8545 eth_getTransactionCount "[\"${PROPOSER}\"]")
-    if [ -n "$R" ] && [ "$R" != "null" ]; then
-        pass "eth_getTransactionCount for proposer = $R"
-    else
-        fail "eth_getTransactionCount failed"
-    fi
+R=$(rpc 8545 eth_getTransactionCount "[\"${PROPOSER}\"]")
+if [ -n "$R" ] && [ "$R" != "null" ]; then
+    pass "eth_getTransactionCount for proposer = $R"
+else
+    fail "eth_getTransactionCount failed"
 fi
 
 # eth_getCode (on a non-contract address — should be 0x)
@@ -435,31 +437,27 @@ else
 fi
 
 # ─── 4b: Balance consistency ─────────────────────────────────
-if [ -n "$PROPOSER" ]; then
-    BAL1=$(rpc 8545 eth_getBalance "[\"${PROPOSER}\"]")
-    BAL2=$(rpc 8546 eth_getBalance "[\"${PROPOSER}\"]")
-    BAL3=$(rpc 8547 eth_getBalance "[\"${PROPOSER}\"]")
+BAL1=$(rpc 8545 eth_getBalance "[\"${PROPOSER}\"]")
+BAL2=$(rpc 8546 eth_getBalance "[\"${PROPOSER}\"]")
+BAL3=$(rpc 8547 eth_getBalance "[\"${PROPOSER}\"]")
 
-    if [ -n "$BAL1" ] && [ "$BAL1" = "$BAL2" ] && [ "$BAL2" = "$BAL3" ]; then
-        pass "Proposer balance consistent across all nodes ($BAL1)"
-    else
-        # Tolerate slight lag — node3 might be 1 block behind.
-        info "Balance may differ due to sync lag: $BAL1 / $BAL2 / $BAL3"
-        pass "Balance consistency check completed (minor lag acceptable)"
-    fi
+if [ -n "$BAL1" ] && [ "$BAL1" = "$BAL2" ] && [ "$BAL2" = "$BAL3" ]; then
+    pass "Proposer balance consistent across all nodes ($BAL1)"
+else
+    # Tolerate slight lag — node3 might be 1 block behind.
+    info "Balance may differ due to sync lag: $BAL1 / $BAL2 / $BAL3"
+    pass "Balance consistency check completed (minor lag acceptable)"
 fi
 
 # ─── 4c: Transaction count consistency ───────────────────────
-if [ -n "$PROPOSER" ]; then
-    NC1=$(rpc 8545 eth_getTransactionCount "[\"${PROPOSER}\"]")
-    NC2=$(rpc 8546 eth_getTransactionCount "[\"${PROPOSER}\"]")
+NC1=$(rpc 8545 eth_getTransactionCount "[\"${PROPOSER}\"]")
+NC2=$(rpc 8546 eth_getTransactionCount "[\"${PROPOSER}\"]")
 
-    if [ "$NC1" = "$NC2" ]; then
-        pass "Nonce consistent between node1 and node2 ($NC1)"
-    else
-        info "Nonce difference: node1=$NC1 node2=$NC2 (sync lag)"
-        pass "Nonce check completed"
-    fi
+if [ "$NC1" = "$NC2" ]; then
+    pass "Nonce consistent between node1 and node2 ($NC1)"
+else
+    info "Nonce difference: node1=$NC1 node2=$NC2 (sync lag)"
+    pass "Nonce check completed"
 fi
 
 echo ""

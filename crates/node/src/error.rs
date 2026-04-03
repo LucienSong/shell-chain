@@ -22,6 +22,9 @@ pub enum NodeError {
     #[error("missing genesis block")]
     NoGenesis,
 
+    #[error("block gap detected: incoming #{incoming} but expected #{expected}")]
+    GapDetected { incoming: u64, expected: u64 },
+
     #[error("startup failed: {0}")]
     Startup(String),
 }

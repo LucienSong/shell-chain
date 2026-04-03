@@ -171,8 +171,9 @@ impl<S: KvStore + 'static> Node<S> {
                                         Ok(()) => {
                                             sync_requested = false;
                                         }
-                                        Err(e) => {
-                                            // On gap error, request missing blocks.
+                                        Err(NodeError::GapDetected { .. }) => {
+                                            // Only request missing blocks on genuine gap,
+                                            // NOT on invalid signatures or other errors (F-037).
                                             let head_num = self
                                                 .chain_store
                                                 .get_head_block()
@@ -180,7 +181,7 @@ impl<S: KvStore + 'static> Node<S> {
                                                 .flatten()
                                                 .map(|b| b.number())
                                                 .unwrap_or(0);
-                                            if !sync_requested && head_num + 1 < u64::MAX {
+                                            if !sync_requested {
                                                 info!(
                                                     head = head_num,
                                                     "requesting missing blocks for sync"
@@ -192,6 +193,8 @@ impl<S: KvStore + 'static> Node<S> {
                                                 let _ = network.broadcast(req).await;
                                                 sync_requested = true;
                                             }
+                                        }
+                                        Err(e) => {
                                             eprintln!("⚠  Block import error: {e}");
                                         }
                                     }
@@ -484,12 +487,10 @@ impl<S: KvStore + 'static> Node<S> {
                 gap = incoming - expected,
                 "block too far ahead, missing blocks need to be requested"
             );
-            return Err(NodeError::Startup(format!(
-                "block {} does not follow head {} (gap: {})",
+            return Err(NodeError::GapDetected {
                 incoming,
-                head.number(),
-                incoming - expected
-            )));
+                expected,
+            });
         }
 
         // Verify consensus rules.
