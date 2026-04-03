@@ -20,6 +20,14 @@ struct Cli {
     #[arg(long, default_value = "shell-data", global = true)]
     datadir: PathBuf,
 
+    /// Log output format: "text" (human-readable) or "json" (structured).
+    #[arg(long, default_value = "text", global = true)]
+    log_format: String,
+
+    /// Log level filter (RUST_LOG style, e.g. "debug", "shell_node=trace").
+    #[arg(long, global = true)]
+    log_level: Option<String>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -117,16 +125,33 @@ enum KeyCommands {
 
 #[tokio::main]
 async fn main() {
-    // Initialize tracing (respects RUST_LOG env var).
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .with_target(false)
-        .init();
-
     let cli = Cli::parse();
+
+    // Build env filter: --log-level flag > RUST_LOG env var > "info" default.
+    let filter = match &cli.log_level {
+        Some(level) => EnvFilter::new(level),
+        None => EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| EnvFilter::new("info")),
+    };
+
+    // Initialize tracing subscriber with the chosen format.
+    match cli.log_format.as_str() {
+        "json" => {
+            tracing_subscriber::fmt()
+                .json()
+                .with_target(true)
+                .with_file(true)
+                .with_line_number(true)
+                .with_env_filter(filter)
+                .init();
+        }
+        _ => {
+            tracing_subscriber::fmt()
+                .with_target(true)
+                .with_env_filter(filter)
+                .init();
+        }
+    }
 
     let result = match cli.command {
         Commands::Run {
