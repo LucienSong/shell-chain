@@ -8,6 +8,7 @@
 //! - `Libp2pNetwork` (feature `libp2p`): Production TCP+Noise+Yamux
 //!   transport with GossipSub broadcast and mDNS peer discovery.
 
+pub mod bandwidth;
 pub mod channel;
 pub mod config;
 pub mod error;
@@ -16,6 +17,7 @@ pub mod libp2p_service;
 pub mod message;
 pub mod service;
 
+pub use bandwidth::{BandwidthStats, BandwidthTracker};
 pub use channel::{ChannelNetwork, NetworkBus};
 pub use config::NetworkConfig;
 #[cfg(feature = "libp2p")]

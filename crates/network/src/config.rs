@@ -41,6 +41,18 @@ pub struct NetworkConfig {
     pub enable_dcutr: bool,
     /// Enable autonat for automatic NAT status detection.
     pub enable_autonat: bool,
+    /// Maximum number of established connections (0 = unlimited).
+    pub max_connections: u32,
+    /// Maximum number of pending incoming connections.
+    pub max_pending_incoming: u32,
+    /// Maximum number of pending outgoing connections.
+    pub max_pending_outgoing: u32,
+    /// Maximum established connections per single peer (0 = unlimited).
+    pub max_established_per_peer: u32,
+    /// Maximum inbound bandwidth in bytes/second (0 = unlimited).
+    pub max_inbound_bandwidth: u64,
+    /// Maximum outbound bandwidth in bytes/second (0 = unlimited).
+    pub max_outbound_bandwidth: u64,
 }
 
 impl Default for NetworkConfig {
@@ -57,6 +69,12 @@ impl Default for NetworkConfig {
             enable_relay: true,
             enable_dcutr: true,
             enable_autonat: true,
+            max_connections: 100,
+            max_pending_incoming: 64,
+            max_pending_outgoing: 32,
+            max_established_per_peer: 3,
+            max_inbound_bandwidth: 0,
+            max_outbound_bandwidth: 0,
         }
     }
 }
@@ -166,6 +184,12 @@ mod tests {
         assert!(config.enable_relay);
         assert!(config.enable_dcutr);
         assert!(config.enable_autonat);
+        assert_eq!(config.max_connections, 100);
+        assert_eq!(config.max_pending_incoming, 64);
+        assert_eq!(config.max_pending_outgoing, 32);
+        assert_eq!(config.max_established_per_peer, 3);
+        assert_eq!(config.max_inbound_bandwidth, 0);
+        assert_eq!(config.max_outbound_bandwidth, 0);
     }
 
     #[test]

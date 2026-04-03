@@ -15,11 +15,12 @@ use libp2p::gossipsub::{self, IdentTopic, PeerScoreParams, PeerScoreThresholds, 
 use libp2p::kad;
 use libp2p::swarm::behaviour::toggle::Toggle;
 use libp2p::swarm::SwarmEvent;
-use libp2p::{autonat, dcutr, identify, mdns, noise, relay, tcp, yamux, Multiaddr, PeerId as Libp2pPeerId, Swarm, SwarmBuilder};
+use libp2p::{autonat, connection_limits, dcutr, identify, mdns, noise, relay, tcp, yamux, Multiaddr, PeerId as Libp2pPeerId, Swarm, SwarmBuilder};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::interval;
 use tracing::{debug, info, warn};
 
+use crate::bandwidth::BandwidthTracker;
 use crate::config::NetworkConfig;
 use crate::error::NetworkError;
 use crate::message::{NetworkEvent, NetworkMessage, PeerId};
@@ -51,6 +52,7 @@ struct ShellBehaviour {
     relay_client: Toggle<relay::client::Behaviour>,
     dcutr: Toggle<dcutr::Behaviour>,
     autonat: Toggle<autonat::Behaviour>,
+    connection_limits: connection_limits::Behaviour,
 }
 
 /// Production P2P network service backed by libp2p.
@@ -61,6 +63,7 @@ pub struct Libp2pNetwork {
     cmd_tx: mpsc::Sender<SwarmCommand>,
     event_rx: mpsc::Receiver<NetworkEvent>,
     peer_count: Arc<AtomicUsize>,
+    bandwidth: Arc<BandwidthTracker>,
 }
 
 impl Libp2pNetwork {
@@ -72,6 +75,10 @@ impl Libp2pNetwork {
         let (cmd_tx, cmd_rx) = mpsc::channel(256);
         let (event_tx, event_rx) = mpsc::channel(256);
         let peer_count = Arc::new(AtomicUsize::new(0));
+        let bandwidth = Arc::new(BandwidthTracker::new(
+            config.max_inbound_bandwidth,
+            config.max_outbound_bandwidth,
+        ));
 
         let mut swarm = build_swarm(config)?;
 
@@ -119,16 +126,23 @@ impl Libp2pNetwork {
         let blocks_topic = IdentTopic::new(&config.blocks_topic);
         let txs_topic = IdentTopic::new(&config.txs_topic);
         let pc = peer_count.clone();
+        let bw = bandwidth.clone();
 
         tokio::spawn(swarm_loop(
-            swarm, cmd_rx, event_tx, pc, blocks_topic, txs_topic,
+            swarm, cmd_rx, event_tx, pc, blocks_topic, txs_topic, bw,
         ));
 
         Ok(Self {
             cmd_tx,
             event_rx,
             peer_count,
+            bandwidth,
         })
+    }
+
+    /// Return a reference to the bandwidth tracker for stats/monitoring.
+    pub fn bandwidth(&self) -> &Arc<BandwidthTracker> {
+        &self.bandwidth
     }
 
     /// Return a snapshot of all known peer scores.
@@ -153,6 +167,22 @@ fn build_swarm(config: &NetworkConfig) -> Result<Swarm<ShellBehaviour>, NetworkE
     let enable_autonat = config.enable_autonat;
     let blocks_topic_name = config.blocks_topic.clone();
     let txs_topic_name = config.txs_topic.clone();
+
+    // Build libp2p connection limits from config.
+    let mut conn_limits = connection_limits::ConnectionLimits::default();
+    if config.max_connections > 0 {
+        conn_limits = conn_limits.with_max_established(Some(config.max_connections));
+    }
+    if config.max_pending_incoming > 0 {
+        conn_limits = conn_limits.with_max_pending_incoming(Some(config.max_pending_incoming));
+    }
+    if config.max_pending_outgoing > 0 {
+        conn_limits = conn_limits.with_max_pending_outgoing(Some(config.max_pending_outgoing));
+    }
+    if config.max_established_per_peer > 0 {
+        conn_limits =
+            conn_limits.with_max_established_per_peer(Some(config.max_established_per_peer));
+    }
 
     // Deterministic message ID: blake3 hash of payload.
     // CRITICAL: Do NOT use DefaultHasher — its random per-process seed
@@ -288,6 +318,7 @@ fn build_swarm(config: &NetworkConfig) -> Result<Swarm<ShellBehaviour>, NetworkE
             relay_client: relay_behaviour.into(),
             dcutr: dcutr_behaviour.into(),
             autonat: autonat_behaviour.into(),
+            connection_limits: connection_limits::Behaviour::new(conn_limits),
         })
     };
 
@@ -352,6 +383,13 @@ fn build_swarm(config: &NetworkConfig) -> Result<Swarm<ShellBehaviour>, NetworkE
     if enable_autonat {
         info!("AutoNAT status detection enabled");
     }
+    info!(
+        max_established = config.max_connections,
+        max_pending_in = config.max_pending_incoming,
+        max_pending_out = config.max_pending_outgoing,
+        max_per_peer = config.max_established_per_peer,
+        "Connection limits configured"
+    );
 
     Ok(swarm)
 }
@@ -364,6 +402,7 @@ async fn swarm_loop(
     peer_count: Arc<AtomicUsize>,
     blocks_topic: IdentTopic,
     txs_topic: IdentTopic,
+    bandwidth: Arc<BandwidthTracker>,
 ) {
     // Subscribe to gossipsub topics.
     if let Err(e) = swarm.behaviour_mut().gossipsub.subscribe(&blocks_topic) {
@@ -382,15 +421,26 @@ async fn swarm_loop(
     let mut score_log_interval = interval(Duration::from_secs(60));
     score_log_interval.tick().await;
 
+    // Bandwidth reset tick (every second).
+    let mut bw_tick = interval(Duration::from_secs(1));
+    bw_tick.tick().await;
+
     loop {
         tokio::select! {
             cmd = cmd_rx.recv() => {
                 match cmd {
                     Some(SwarmCommand::Publish { topic, data }) => {
+                        let data_len = data.len() as u64;
                         let ident = match topic {
                             TopicKind::Blocks => blocks_topic.clone(),
                             TopicKind::Transactions => txs_topic.clone(),
                         };
+                        if !bandwidth.record_outbound(data_len) {
+                            warn!(
+                                bytes = data_len,
+                                "Outbound bandwidth limit exceeded"
+                            );
+                        }
                         if let Err(e) = swarm
                             .behaviour_mut()
                             .gossipsub
@@ -415,6 +465,7 @@ async fn swarm_loop(
                     &mut swarm,
                     &event_tx,
                     &peer_count,
+                    &bandwidth,
                 ).await;
             }
             _ = kad_bootstrap_interval.tick() => {
@@ -426,6 +477,9 @@ async fn swarm_loop(
             _ = score_log_interval.tick() => {
                 log_peer_scores(&swarm);
             }
+            _ = bw_tick.tick() => {
+                bandwidth.reset_if_needed();
+            }
         }
     }
 }
@@ -436,6 +490,7 @@ async fn handle_swarm_event(
     swarm: &mut Swarm<ShellBehaviour>,
     event_tx: &mpsc::Sender<NetworkEvent>,
     peer_count: &Arc<AtomicUsize>,
+    bandwidth: &Arc<BandwidthTracker>,
 ) {
     match event {
         // Gossipsub message received.
@@ -446,6 +501,14 @@ async fn handle_swarm_event(
                 ..
             },
         )) => {
+            let data_len = message.data.len() as u64;
+            if !bandwidth.record_inbound(data_len) {
+                warn!(
+                    bytes = data_len,
+                    peer = %propagation_source,
+                    "Inbound bandwidth limit exceeded"
+                );
+            }
             let peer = PeerId(propagation_source.to_string());
             match serde_json::from_slice::<NetworkMessage>(&message.data) {
                 Ok(msg) => {
@@ -1013,5 +1076,71 @@ mod tests {
         assert!(blocks_weight > 0.0);
         assert!(txs_weight > 0.0);
         assert!(blocks_weight >= txs_weight, "block topic should have >= weight than txs");
+    }
+
+    #[test]
+    fn config_defaults_connection_limits() {
+        let config = NetworkConfig::default();
+        assert_eq!(config.max_connections, 100);
+        assert_eq!(config.max_pending_incoming, 64);
+        assert_eq!(config.max_pending_outgoing, 32);
+        assert_eq!(config.max_established_per_peer, 3);
+    }
+
+    #[test]
+    fn build_swarm_with_custom_connection_limits() {
+        let config = NetworkConfig {
+            max_connections: 50,
+            max_pending_incoming: 16,
+            max_pending_outgoing: 8,
+            max_established_per_peer: 2,
+            enable_mdns: false,
+            enable_kademlia: false,
+            enable_peer_scoring: false,
+            enable_relay: false,
+            enable_dcutr: false,
+            enable_autonat: false,
+            ..Default::default()
+        };
+        let swarm = build_swarm(&config);
+        assert!(swarm.is_ok(), "build_swarm should succeed with custom connection limits");
+    }
+
+    #[test]
+    fn build_swarm_unlimited_connections() {
+        let config = NetworkConfig {
+            max_connections: 0,
+            max_pending_incoming: 0,
+            max_pending_outgoing: 0,
+            max_established_per_peer: 0,
+            enable_mdns: false,
+            enable_kademlia: false,
+            enable_peer_scoring: false,
+            enable_relay: false,
+            enable_dcutr: false,
+            enable_autonat: false,
+            ..Default::default()
+        };
+        let swarm = build_swarm(&config);
+        assert!(swarm.is_ok(), "build_swarm should succeed with unlimited connections (0)");
+    }
+
+    #[test]
+    fn build_swarm_connection_limits_with_relay() {
+        let config = NetworkConfig {
+            max_connections: 200,
+            max_pending_incoming: 32,
+            max_pending_outgoing: 16,
+            max_established_per_peer: 5,
+            enable_mdns: false,
+            enable_kademlia: false,
+            enable_peer_scoring: false,
+            enable_relay: true,
+            enable_dcutr: true,
+            enable_autonat: false,
+            ..Default::default()
+        };
+        let swarm = build_swarm(&config);
+        assert!(swarm.is_ok(), "build_swarm should succeed with connection limits and relay");
     }
 }
