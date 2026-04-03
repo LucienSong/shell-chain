@@ -99,6 +99,19 @@ pub trait EthApi {
     #[method(name = "gasPrice")]
     async fn gas_price(&self) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
 
+    /// Returns a suggested max priority fee per gas (EIP-1559).
+    #[method(name = "maxPriorityFeePerGas")]
+    async fn max_priority_fee_per_gas(&self) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns base fee history for a range of blocks (EIP-1559).
+    #[method(name = "feeHistory")]
+    async fn fee_history(
+        &self,
+        block_count: String,
+        newest_block: String,
+        reward_percentiles: Option<Vec<f64>>,
+    ) -> Result<serde_json::Value, jsonrpsee::types::ErrorObjectOwned>;
+
     /// Submits a signed transaction to the mempool.
     #[method(name = "sendRawTransaction")]
     async fn send_raw_transaction(

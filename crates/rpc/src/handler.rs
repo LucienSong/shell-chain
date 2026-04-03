@@ -506,8 +506,80 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
     }
 
     async fn gas_price(&self) -> Result<String, ErrorObjectOwned> {
-        // Minimum gas price from a fixed baseline; will be dynamic later.
-        Ok(hex_u64(1_000_000_000)) // 1 gwei
+        // Return the base fee from the latest block, or INITIAL_BASE_FEE if no blocks exist.
+        let base_fee = match self.chain_store.get_head_block() {
+            Ok(Some(head)) if head.header.base_fee_per_gas > 0 => head.header.base_fee_per_gas,
+            _ => shell_core::INITIAL_BASE_FEE,
+        };
+        Ok(hex_u64(base_fee))
+    }
+
+    async fn max_priority_fee_per_gas(&self) -> Result<String, ErrorObjectOwned> {
+        // PoA chain: no fee market competition, priority fee is always 0.
+        Ok(hex_u64(0))
+    }
+
+    async fn fee_history(
+        &self,
+        block_count: String,
+        newest_block: String,
+        _reward_percentiles: Option<Vec<f64>>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let latest = match parse_block_number(&newest_block)? {
+            Some(n) => n,
+            None => {
+                // "latest" — get head block number
+                match self.chain_store.get_head_block() {
+                    Ok(Some(head)) => head.header.number,
+                    _ => 0,
+                }
+            }
+        };
+
+        let count = parse_hex_u64(&block_count)?.min(1024);
+
+        let oldest = latest.saturating_sub(count.saturating_sub(1));
+
+        let mut base_fee_per_gas = Vec::new();
+        let mut gas_used_ratio = Vec::new();
+
+        for num in oldest..=latest {
+            match self.chain_store.get_block_by_number(num) {
+                Ok(Some(block)) => {
+                    let h = &block.header;
+                    base_fee_per_gas.push(hex_u64(h.base_fee_per_gas));
+                    let ratio = if h.gas_limit > 0 {
+                        h.gas_used as f64 / h.gas_limit as f64
+                    } else {
+                        0.0
+                    };
+                    gas_used_ratio.push(ratio);
+                }
+                _ => {
+                    base_fee_per_gas.push(hex_u64(0));
+                    gas_used_ratio.push(0.0);
+                }
+            }
+        }
+
+        // Append next block's predicted base fee (one more entry than gas_used_ratio).
+        if let Ok(Some(head)) = self.chain_store.get_block_by_number(latest) {
+            let next = shell_core::fee::calculate_base_fee(
+                head.header.gas_used,
+                head.header.gas_limit,
+                head.header.base_fee_per_gas,
+            );
+            base_fee_per_gas.push(hex_u64(next));
+        } else {
+            base_fee_per_gas.push(hex_u64(shell_core::INITIAL_BASE_FEE));
+        }
+
+        Ok(serde_json::json!({
+            "oldestBlock": hex_u64(oldest),
+            "baseFeePerGas": base_fee_per_gas,
+            "gasUsedRatio": gas_used_ratio,
+            "reward": []
+        }))
     }
 
     async fn send_raw_transaction(
@@ -935,7 +1007,50 @@ mod tests {
     async fn gas_price_returns_default() {
         let handler = setup();
         let result = EthApiServer::gas_price(&handler).await.unwrap();
-        assert_eq!(result, "0x3b9aca00"); // 1 gwei
+        // No blocks stored → returns INITIAL_BASE_FEE (1 gwei)
+        assert_eq!(result, "0x3b9aca00");
+    }
+
+    #[tokio::test]
+    async fn gas_price_returns_latest_base_fee() {
+        let handler = setup();
+        let mut block = make_genesis_block();
+        block.header.base_fee_per_gas = 2_000_000_000; // 2 gwei
+        block.header.number = 1;
+        let hash = block.hash();
+        handler.chain_store.put_block(&block).unwrap();
+        handler.chain_store.set_canonical(1, &hash).unwrap();
+        handler.chain_store.set_head(&hash).unwrap();
+
+        let result = EthApiServer::gas_price(&handler).await.unwrap();
+        assert_eq!(result, "0x77359400"); // 2 gwei
+    }
+
+    #[tokio::test]
+    async fn max_priority_fee_per_gas_returns_zero() {
+        let handler = setup();
+        let result = EthApiServer::max_priority_fee_per_gas(&handler).await.unwrap();
+        assert_eq!(result, "0x0");
+    }
+
+    #[tokio::test]
+    async fn fee_history_returns_base_fees() {
+        let handler = setup();
+        let mut block = make_genesis_block();
+        block.header.base_fee_per_gas = 1_000_000_000;
+        block.header.number = 0;
+        let hash = block.hash();
+        handler.chain_store.put_block(&block).unwrap();
+        handler.chain_store.set_canonical(0, &hash).unwrap();
+        handler.chain_store.set_head(&hash).unwrap();
+
+        let result = EthApiServer::fee_history(&handler, "0x1".into(), "latest".into(), None)
+            .await
+            .unwrap();
+        let base_fees = result["baseFeePerGas"].as_array().unwrap();
+        // Should have 2 entries: block 0 + predicted next block
+        assert_eq!(base_fees.len(), 2);
+        assert_eq!(base_fees[0].as_str().unwrap(), "0x3b9aca00");
     }
 
     #[tokio::test]
