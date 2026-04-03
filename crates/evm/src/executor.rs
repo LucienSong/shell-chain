@@ -13,14 +13,12 @@ use revm::primitives::hardfork::SpecId;
 use revm::primitives::{TxKind, KECCAK_EMPTY};
 use revm::state::EvmState;
 use shell_core::{Account, BlockHeader, TransactionReceipt};
-use shell_primitives::{keccak256, Address as ShellAddress, ShellHash};
+use shell_primitives::{Address as ShellAddress, ShellHash};
 use shell_storage::{ChainStore, KvStore, StorageError, WorldState};
 
 use crate::precompiles::ShellPrecompiles;
 use crate::state_db::{ShellStateDb, StateDbError};
-use crate::system_contracts::{
-    self, execute_system_contract, SystemContractError, SYSTEM_CALL_BASE_GAS, SYSTEM_CALL_OP_GAS,
-};
+use crate::system_contracts::{self, execute_system_contract, SYSTEM_CALL_BASE_GAS};
 
 /// Errors returned during EVM execution.
 #[derive(Debug, thiserror::Error)]
@@ -45,6 +43,9 @@ pub struct TxExecutionResult {
     pub gas_used: u64,
     /// Raw output bytes returned by the EVM (return data or revert reason).
     pub output: Vec<u8>,
+    /// True if this was a system contract transaction whose state changes
+    /// were applied directly to the EVM's WorldState (not via EvmState).
+    pub is_system_tx: bool,
 }
 
 /// High-level EVM executor for shell-chain.
@@ -209,6 +210,7 @@ impl<S: KvStore + 'static> ShellEvm<S> {
             state_changes: state,
             gas_used,
             output: output_bytes,
+            is_system_tx: false,
         })
     }
 
@@ -297,6 +299,7 @@ impl<S: KvStore + 'static> ShellEvm<S> {
                     state_changes: EvmState::default(),
                     gas_used,
                     output,
+                    is_system_tx: true,
                 })
             }
             Err(e) => {
@@ -322,6 +325,7 @@ impl<S: KvStore + 'static> ShellEvm<S> {
                     state_changes: EvmState::default(),
                     gas_used,
                     output: revert_msg,
+                    is_system_tx: true,
                 })
             }
         }

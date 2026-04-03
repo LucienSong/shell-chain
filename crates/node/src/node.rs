@@ -54,7 +54,9 @@ impl<S: KvStore + 'static> Node<S> {
     ) -> Self {
         let (shutdown_tx, _) = watch::channel(false);
         let tracker = StateRootTracker::new(config.pruning.clone());
-        let metrics = Arc::new(Metrics::new());
+        let metrics = Arc::new(
+            Metrics::new().expect("failed to register Prometheus metrics"),
+        );
         Self {
             config,
             store,
@@ -539,22 +541,34 @@ impl<S: KvStore + 'static> Node<S> {
                     receipts.push(result.receipt);
                     included_txs.push(tx.clone());
 
-                    // Commit state changes to the EVM's WorldState so the
-                    // next transaction sees updated balances/nonces.
-                    commit_evm_state(
-                        &result.state_changes,
-                        evm.state_db_mut().world_state_mut(),
-                        &self.chain_store,
-                    )?;
-
-                    // Commit to the node's persistent WorldState.
-                    {
-                        let mut ws = self.world_state.write();
+                    if result.is_system_tx {
+                        // System contract tx: state was applied directly to
+                        // the EVM's WorldState. Sync validator set to the
+                        // persistent WorldState so state_root is consistent.
+                        let local_ws = evm.state_db_mut().world_state_mut();
+                        if let Ok(validators) = local_ws.get_validators() {
+                            let mut ws = self.world_state.write();
+                            if let Err(e) = ws.set_validators(&validators) {
+                                tracing::error!(error = %e, "failed to sync system contract state");
+                            }
+                        }
+                    } else {
+                        // Normal EVM tx: commit EvmState changeset.
                         commit_evm_state(
                             &result.state_changes,
-                            &mut ws,
+                            evm.state_db_mut().world_state_mut(),
                             &self.chain_store,
                         )?;
+
+                        // Commit to the node's persistent WorldState.
+                        {
+                            let mut ws = self.world_state.write();
+                            commit_evm_state(
+                                &result.state_changes,
+                                &mut ws,
+                                &self.chain_store,
+                            )?;
+                        }
                     }
                 }
                 Err(_) => {
@@ -748,18 +762,28 @@ impl<S: KvStore + 'static> Node<S> {
                         cumulative_gas += result.gas_used;
                         receipts.push(result.receipt);
 
-                        commit_evm_state(
-                            &result.state_changes,
-                            evm.state_db_mut().world_state_mut(),
-                            &self.chain_store,
-                        )?;
+                        if result.is_system_tx {
+                            let local_ws = evm.state_db_mut().world_state_mut();
+                            if let Ok(validators) = local_ws.get_validators() {
+                                let mut ws = self.world_state.write();
+                                if let Err(e) = ws.set_validators(&validators) {
+                                    tracing::error!(error = %e, "failed to sync system contract state on import");
+                                }
+                            }
+                        } else {
+                            commit_evm_state(
+                                &result.state_changes,
+                                evm.state_db_mut().world_state_mut(),
+                                &self.chain_store,
+                            )?;
 
-                        let mut ws = self.world_state.write();
-                        commit_evm_state(
-                            &result.state_changes,
-                            &mut ws,
-                            &self.chain_store,
-                        )?;
+                            let mut ws = self.world_state.write();
+                            commit_evm_state(
+                                &result.state_changes,
+                                &mut ws,
+                                &self.chain_store,
+                            )?;
+                        }
                     }
                     Err(e) => {
                         return Err(NodeError::Startup(format!(

@@ -33,52 +33,43 @@ pub struct Metrics {
 impl Metrics {
     /// Create a new `Metrics` instance with all gauges, counters and histograms
     /// registered against a fresh [`Registry`].
-    pub fn new() -> Self {
+    ///
+    /// Returns an error if metric registration fails (e.g. duplicate names).
+    pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
         let registry = Registry::new();
 
         let block_height =
-            IntGauge::with_opts(Opts::new("shell_block_height", "Current block height")).unwrap();
+            IntGauge::with_opts(Opts::new("shell_block_height", "Current block height"))?;
         let peer_count =
-            IntGauge::with_opts(Opts::new("shell_peer_count", "Number of connected peers"))
-                .unwrap();
+            IntGauge::with_opts(Opts::new("shell_peer_count", "Number of connected peers"))?;
         let tx_pool_size = IntGauge::with_opts(Opts::new(
             "shell_tx_pool_size",
             "Number of pending transactions",
-        ))
-        .unwrap();
+        ))?;
         let block_production_ms = Histogram::with_opts(
             HistogramOpts::new(
                 "shell_block_production_duration_seconds",
                 "Block production latency",
             )
             .buckets(vec![0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0]),
-        )
-        .unwrap();
+        )?;
         let blocks_imported = IntCounter::with_opts(Opts::new(
             "shell_blocks_imported_total",
             "Total blocks imported",
-        ))
-        .unwrap();
+        ))?;
         let txs_received = IntCounter::with_opts(Opts::new(
             "shell_txs_received_total",
             "Total transactions received",
-        ))
-        .unwrap();
+        ))?;
 
-        registry.register(Box::new(block_height.clone())).unwrap();
-        registry.register(Box::new(peer_count.clone())).unwrap();
-        registry.register(Box::new(tx_pool_size.clone())).unwrap();
-        registry
-            .register(Box::new(block_production_ms.clone()))
-            .unwrap();
-        registry
-            .register(Box::new(blocks_imported.clone()))
-            .unwrap();
-        registry
-            .register(Box::new(txs_received.clone()))
-            .unwrap();
+        registry.register(Box::new(block_height.clone()))?;
+        registry.register(Box::new(peer_count.clone()))?;
+        registry.register(Box::new(tx_pool_size.clone()))?;
+        registry.register(Box::new(block_production_ms.clone()))?;
+        registry.register(Box::new(blocks_imported.clone()))?;
+        registry.register(Box::new(txs_received.clone()))?;
 
-        Self {
+        Ok(Self {
             block_height,
             peer_count,
             tx_pool_size,
@@ -86,7 +77,7 @@ impl Metrics {
             blocks_imported,
             txs_received,
             registry,
-        }
+        })
     }
 
     /// Encode all collected metrics into Prometheus text exposition format.
@@ -94,14 +85,17 @@ impl Metrics {
         let encoder = TextEncoder::new();
         let metric_families = self.registry.gather();
         let mut buffer = Vec::new();
-        encoder.encode(&metric_families, &mut buffer).unwrap();
-        String::from_utf8(buffer).unwrap()
+        if let Err(e) = encoder.encode(&metric_families, &mut buffer) {
+            tracing::error!(error = %e, "failed to encode Prometheus metrics");
+            return String::new();
+        }
+        String::from_utf8(buffer).unwrap_or_default()
     }
 }
 
 impl Default for Metrics {
     fn default() -> Self {
-        Self::new()
+        Self::new().expect("failed to register Prometheus metrics")
     }
 }
 
@@ -180,7 +174,7 @@ mod tests {
 
     #[test]
     fn metrics_new_creates_valid_instance() {
-        let m = Metrics::new();
+        let m = Metrics::new().expect("metrics init");
         // All gauges/counters should start at zero.
         assert_eq!(m.block_height.get(), 0);
         assert_eq!(m.peer_count.get(), 0);
@@ -191,7 +185,7 @@ mod tests {
 
     #[test]
     fn gather_returns_prometheus_text_format() {
-        let m = Metrics::new();
+        let m = Metrics::new().expect("metrics init");
         m.block_height.set(42);
         m.blocks_imported.inc();
 
@@ -224,7 +218,7 @@ mod tests {
 
     #[test]
     fn health_endpoint_returns_ok_json() {
-        let _metrics = Arc::new(Metrics::new());
+        let _metrics = Arc::new(Metrics::new().expect("metrics init"));
         // Build a request using an empty Full body and convert via handle_request_generic.
         let resp = handle_health_response();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -259,7 +253,7 @@ mod tests {
 
     #[test]
     fn block_height_gauge_updates() {
-        let m = Metrics::new();
+        let m = Metrics::new().expect("metrics init");
         assert_eq!(m.block_height.get(), 0);
         m.block_height.set(100);
         assert_eq!(m.block_height.get(), 100);
@@ -269,7 +263,7 @@ mod tests {
 
     #[test]
     fn histogram_records_values() {
-        let m = Metrics::new();
+        let m = Metrics::new().expect("metrics init");
         m.block_production_ms.observe(0.05);
         m.block_production_ms.observe(0.25);
         m.block_production_ms.observe(1.5);

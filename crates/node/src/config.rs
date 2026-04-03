@@ -23,7 +23,7 @@ impl Default for MetricsConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            listen_addr: SocketAddr::from(([0, 0, 0, 0], 9090)),
+            listen_addr: SocketAddr::from(([127, 0, 0, 1], 9090)),
         }
     }
 }
