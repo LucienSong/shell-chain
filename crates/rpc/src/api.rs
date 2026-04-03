@@ -218,4 +218,24 @@ pub trait ShellApi {
         &self,
         address: String,
     ) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns whether an address is currently a validator.
+    #[method(name = "getValidatorStatus")]
+    async fn get_validator_status(
+        &self,
+        address: Address,
+    ) -> Result<serde_json::Value, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns governance-related information (validator count, list, system contract address, gas limit).
+    #[method(name = "getGovernanceInfo")]
+    async fn get_governance_info(
+        &self,
+    ) -> Result<serde_json::Value, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns estimated gas for a governance operation ("addValidator" or "removeValidator").
+    #[method(name = "estimateGovernanceGas")]
+    async fn estimate_governance_gas(
+        &self,
+        operation: String,
+    ) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
 }

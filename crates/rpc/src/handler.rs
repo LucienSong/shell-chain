@@ -747,6 +747,47 @@ impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
         let hash = self.propose_validator_tx(calldata)?;
         Ok(format!("0x{}", hex::encode(hash.0)))
     }
+
+    async fn get_validator_status(
+        &self,
+        address: Address,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let ws = self.world_state.read();
+        let validators = ws.get_validators().map_err(internal_err)?;
+        let is_validator = validators.contains(&address);
+        Ok(serde_json::json!({
+            "address": address,
+            "isValidator": is_validator,
+        }))
+    }
+
+    async fn get_governance_info(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let ws = self.world_state.read();
+        let validators = ws.get_validators().map_err(internal_err)?;
+        Ok(serde_json::json!({
+            "validatorCount": validators.len(),
+            "validators": validators,
+            "systemContractAddress": shell_evm::registry_address(),
+            "proposalGasLimit": 100_000,
+        }))
+    }
+
+    async fn estimate_governance_gas(&self, operation: String) -> Result<String, ErrorObjectOwned> {
+        let gas = match operation.as_str() {
+            "addValidator" | "removeValidator" => {
+                shell_evm::SYSTEM_CALL_BASE_GAS + shell_evm::SYSTEM_CALL_OP_GAS
+            }
+            "getValidators" | "isValidator" => shell_evm::SYSTEM_CALL_BASE_GAS,
+            _ => {
+                return Err(ErrorObjectOwned::owned(
+                    -32602,
+                    format!("unknown governance operation: {operation}"),
+                    None::<()>,
+                ));
+            }
+        };
+        Ok(hex_u64(gas))
+    }
 }
 
 #[jsonrpsee::core::async_trait]
@@ -1642,5 +1683,101 @@ mod tests {
         let handler = setup();
         let result = EthApiServer::syncing(&handler).await.unwrap();
         assert_eq!(result, serde_json::Value::Bool(false));
+    }
+
+    // ── shell_getValidatorStatus tests ────────────────────────────────
+
+    #[tokio::test]
+    async fn get_validator_status_not_validator() {
+        let handler = setup();
+        let addr = Address::from_public_key(b"some-random-key");
+        let result = ShellApiServer::get_validator_status(&handler, addr)
+            .await
+            .unwrap();
+        assert_eq!(result["isValidator"], false);
+        assert!(result["address"].is_string());
+    }
+
+    #[tokio::test]
+    async fn get_validator_status_is_validator() {
+        let handler = setup();
+        let addr = Address::from_public_key(b"validator-key-1");
+        {
+            let mut ws = handler.world_state.write();
+            ws.set_validators(&[addr]).unwrap();
+        }
+        let result = ShellApiServer::get_validator_status(&handler, addr)
+            .await
+            .unwrap();
+        assert_eq!(result["isValidator"], true);
+    }
+
+    // ── shell_getGovernanceInfo tests ─────────────────────────────────
+
+    #[tokio::test]
+    async fn get_governance_info_empty() {
+        let handler = setup();
+        let result = ShellApiServer::get_governance_info(&handler).await.unwrap();
+        assert_eq!(result["validatorCount"], 0);
+        assert_eq!(result["validators"], serde_json::json!([]));
+        assert_eq!(result["proposalGasLimit"], 100_000);
+        assert!(result["systemContractAddress"].is_string());
+    }
+
+    #[tokio::test]
+    async fn get_governance_info_with_validators() {
+        let handler = setup();
+        let v1 = Address::from_public_key(b"validator-key-1");
+        let v2 = Address::from_public_key(b"validator-key-2");
+        {
+            let mut ws = handler.world_state.write();
+            ws.set_validators(&[v1, v2]).unwrap();
+        }
+        let result = ShellApiServer::get_governance_info(&handler).await.unwrap();
+        assert_eq!(result["validatorCount"], 2);
+        assert_eq!(result["validators"].as_array().unwrap().len(), 2);
+    }
+
+    // ── shell_estimateGovernanceGas tests ─────────────────────────────
+
+    #[tokio::test]
+    async fn estimate_governance_gas_add_validator() {
+        let handler = setup();
+        let result = ShellApiServer::estimate_governance_gas(&handler, "addValidator".into())
+            .await
+            .unwrap();
+        // 21000 + 5000 = 26000 = 0x6590
+        assert_eq!(result, "0x6590");
+    }
+
+    #[tokio::test]
+    async fn estimate_governance_gas_remove_validator() {
+        let handler = setup();
+        let result = ShellApiServer::estimate_governance_gas(&handler, "removeValidator".into())
+            .await
+            .unwrap();
+        assert_eq!(result, "0x6590");
+    }
+
+    #[tokio::test]
+    async fn estimate_governance_gas_view_ops() {
+        let handler = setup();
+        let result = ShellApiServer::estimate_governance_gas(&handler, "getValidators".into())
+            .await
+            .unwrap();
+        // 21000 = 0x5208
+        assert_eq!(result, "0x5208");
+
+        let result = ShellApiServer::estimate_governance_gas(&handler, "isValidator".into())
+            .await
+            .unwrap();
+        assert_eq!(result, "0x5208");
+    }
+
+    #[tokio::test]
+    async fn estimate_governance_gas_unknown_op() {
+        let handler = setup();
+        let result = ShellApiServer::estimate_governance_gas(&handler, "badOp".into()).await;
+        assert!(result.is_err());
     }
 }
