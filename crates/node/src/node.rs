@@ -91,6 +91,11 @@ impl<S: KvStore + 'static> Node<S> {
         use shell_rpc::start_rpc_server;
         use tokio::time::{interval, Duration};
 
+        // Create a channel for the RPC layer to forward submitted transactions
+        // to the network broadcast loop.
+        let (tx_broadcast_tx, mut tx_broadcast_rx) =
+            tokio::sync::mpsc::unbounded_channel::<SignedTransaction>();
+
         // Start JSON-RPC server.
         let (_rpc_addr, _rpc_handle) = start_rpc_server(
             self.config.rpc.clone(),
@@ -98,6 +103,7 @@ impl<S: KvStore + 'static> Node<S> {
             self.world_state.clone(),
             self.tx_pool.clone(),
             self.config.chain_id,
+            Some(tx_broadcast_tx),
         )
         .await
         .map_err(|e| NodeError::Startup(format!("RPC: {e}")))?;
@@ -200,10 +206,15 @@ impl<S: KvStore + 'static> Node<S> {
                                     }
                                 }
                                 NetworkMessage::NewTransaction(tx) => {
-                                    let verifier = DilithiumVerifier;
-                                    match self.handle_incoming_tx(*tx, &verifier) {
-                                        Ok(_hash) => {}
-                                        Err(e) => eprintln!("⚠  Tx handling error: {e}"),
+                                    // Deduplicate: skip if already in mempool.
+                                    if self.tx_pool.contains(&tx.hash()) {
+                                        debug!(%peer, "ignoring already-known transaction");
+                                    } else {
+                                        let verifier = DilithiumVerifier;
+                                        match self.handle_incoming_tx(*tx, &verifier) {
+                                            Ok(_hash) => {}
+                                            Err(e) => eprintln!("⚠  Tx handling error: {e}"),
+                                        }
                                     }
                                 }
                                 NetworkMessage::BlockRequest { start_number, count } => {
@@ -285,6 +296,12 @@ impl<S: KvStore + 'static> Node<S> {
                             break;
                         }
                     }
+                }
+
+                // Forward RPC-submitted transactions to peers.
+                Some(signed_tx) = tx_broadcast_rx.recv() => {
+                    let msg = NetworkMessage::NewTransaction(Box::new(signed_tx));
+                    let _ = network.broadcast(msg).await;
                 }
 
                 _ = shutdown_rx.changed() => {
@@ -401,6 +418,22 @@ impl<S: KvStore + 'static> Node<S> {
         }
 
         header.gas_used = cumulative_gas;
+
+        // Compute block-level logs bloom by OR-ing all receipt blooms.
+        {
+            let receipt_blooms: Vec<shell_evm::bloom::Bloom> = receipts
+                .iter()
+                .map(|r| {
+                    let mut bloom = [0u8; shell_evm::bloom::BLOOM_SIZE];
+                    let bytes = r.logs_bloom.as_ref();
+                    let len = bytes.len().min(shell_evm::bloom::BLOOM_SIZE);
+                    bloom[..len].copy_from_slice(&bytes[..len]);
+                    bloom
+                })
+                .collect();
+            let block_bloom = shell_evm::bloom::bloom_union(&receipt_blooms);
+            header.logs_bloom = Bytes::from(block_bloom.to_vec());
+        }
 
         // Compute state root from the updated world state.
         {

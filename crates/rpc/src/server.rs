@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use jsonrpsee::server::{Server, ServerHandle};
 
+use shell_core::SignedTransaction;
 use shell_mempool::TxPool;
 use shell_storage::{ChainStore, KvStore, WorldState};
 
@@ -38,13 +39,14 @@ pub async fn start_rpc_server<S: KvStore + 'static>(
     world_state: Arc<parking_lot::RwLock<WorldState<S>>>,
     tx_pool: Arc<TxPool>,
     chain_id: u64,
+    tx_broadcast: Option<tokio::sync::mpsc::UnboundedSender<SignedTransaction>>,
 ) -> Result<(SocketAddr, ServerHandle), Box<dyn std::error::Error + Send + Sync>> {
     let server = Server::builder()
         .max_connections(config.max_connections)
         .build(config.listen_addr)
         .await?;
 
-    let handler = RpcHandler::new(chain_store, world_state, tx_pool, chain_id);
+    let handler = RpcHandler::new(chain_store, world_state, tx_pool, chain_id, tx_broadcast);
 
     let mut module = jsonrpsee::server::RpcModule::new(());
     module.merge(EthApiServer::into_rpc(handler.clone()))?;

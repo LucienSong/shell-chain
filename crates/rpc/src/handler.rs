@@ -24,6 +24,8 @@ pub struct RpcHandler<S: KvStore + 'static> {
     world_state: Arc<parking_lot::RwLock<WorldState<S>>>,
     tx_pool: Arc<TxPool>,
     chain_id: u64,
+    /// Optional channel for broadcasting new transactions to the network layer.
+    tx_broadcast: Option<tokio::sync::mpsc::UnboundedSender<SignedTransaction>>,
 }
 
 impl<S: KvStore + 'static> Clone for RpcHandler<S> {
@@ -33,6 +35,7 @@ impl<S: KvStore + 'static> Clone for RpcHandler<S> {
             world_state: Arc::clone(&self.world_state),
             tx_pool: Arc::clone(&self.tx_pool),
             chain_id: self.chain_id,
+            tx_broadcast: self.tx_broadcast.clone(),
         }
     }
 }
@@ -44,16 +47,20 @@ impl<S: KvStore + 'static> RpcHandler<S> {
         world_state: Arc<parking_lot::RwLock<WorldState<S>>>,
         tx_pool: Arc<TxPool>,
         chain_id: u64,
+        tx_broadcast: Option<tokio::sync::mpsc::UnboundedSender<SignedTransaction>>,
     ) -> Self {
         Self {
             chain_store,
             world_state,
             tx_pool,
             chain_id,
+            tx_broadcast,
         }
     }
 
     /// Validate and submit a signed transaction to the mempool.
+    /// On success, also forwards the transaction to the network broadcast channel
+    /// (if one was provided) so peers can include it in their mempools.
     fn submit_tx(&self, signed_tx: SignedTransaction) -> Result<ShellHash, ErrorObjectOwned> {
         let chain_store = &self.chain_store;
         let ws = self.world_state.read();
@@ -65,10 +72,21 @@ impl<S: KvStore + 'static> RpcHandler<S> {
             ws.get_balance(addr).unwrap_or(U256::ZERO)
         };
 
+        // Clone before insert (which consumes the value) so we can broadcast on success.
+        let tx_for_broadcast = self.tx_broadcast.as_ref().map(|_| signed_tx.clone());
+
         let verifier = DilithiumVerifier;
-        self.tx_pool
+        let hash = self
+            .tx_pool
             .insert(signed_tx, &verifier, &known_pubkeys, &balance_of)
-            .map_err(|e| ErrorObjectOwned::owned(-32000, e.to_string(), None::<()>))
+            .map_err(|e| ErrorObjectOwned::owned(-32000, e.to_string(), None::<()>))?;
+
+        // Broadcast to peers via the network channel.
+        if let (Some(sender), Some(tx)) = (&self.tx_broadcast, tx_for_broadcast) {
+            let _ = sender.send(tx);
+        }
+
+        Ok(hash)
     }
 
     /// Execute a call against a temporary EVM and return (output_bytes, gas_used).
@@ -493,7 +511,7 @@ mod tests {
             chain_id: 42,
             ..shell_mempool::MempoolConfig::default()
         }));
-        RpcHandler::new(chain_store, world_state, tx_pool, 42)
+        RpcHandler::new(chain_store, world_state, tx_pool, 42, None)
     }
 
     fn make_genesis_block() -> Block {
