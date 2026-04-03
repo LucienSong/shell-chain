@@ -17,6 +17,8 @@ pub struct NetworkConfig {
     pub max_peers: usize,
     /// Enable mDNS local peer discovery (disable in production/cloud).
     pub enable_mdns: bool,
+    /// Enable Kademlia DHT for global peer discovery.
+    pub enable_kademlia: bool,
 }
 
 impl Default for NetworkConfig {
@@ -28,6 +30,7 @@ impl Default for NetworkConfig {
             txs_topic: "/shell/txs/1".into(),
             max_peers: 50,
             enable_mdns: false,
+            enable_kademlia: true,
         }
     }
 }

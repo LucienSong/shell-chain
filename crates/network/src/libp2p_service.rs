@@ -1,7 +1,8 @@
 //! libp2p-based NetworkService implementation.
 //!
 //! Uses TCP + Noise + Yamux transport with GossipSub for message
-//! broadcast and mDNS for local peer discovery.
+//! broadcast, mDNS for local peer discovery, and Kademlia DHT for
+//! global peer discovery.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -10,10 +11,12 @@ use std::time::Duration;
 use async_trait::async_trait;
 use libp2p::futures::StreamExt;
 use libp2p::gossipsub::{self, IdentTopic};
-use libp2p::swarm::SwarmEvent;
-use libp2p::{identify, mdns, noise, tcp, yamux, Multiaddr, Swarm, SwarmBuilder};
+use libp2p::kad;
 use libp2p::swarm::behaviour::toggle::Toggle;
+use libp2p::swarm::SwarmEvent;
+use libp2p::{identify, mdns, noise, tcp, yamux, Multiaddr, PeerId as Libp2pPeerId, Swarm, SwarmBuilder};
 use tokio::sync::mpsc;
+use tokio::time::interval;
 use tracing::{debug, info, warn};
 
 use crate::config::NetworkConfig;
@@ -37,6 +40,7 @@ enum SwarmCommand {
 #[derive(libp2p::swarm::NetworkBehaviour)]
 struct ShellBehaviour {
     gossipsub: gossipsub::Behaviour,
+    kademlia: Toggle<kad::Behaviour<kad::store::MemoryStore>>,
     mdns: Toggle<mdns::tokio::Behaviour>,
     identify: identify::Behaviour,
 }
@@ -76,16 +80,31 @@ impl Libp2pNetwork {
             .listen_on(listen_addr)
             .map_err(|e| NetworkError::Transport(e.to_string()))?;
 
-        // Dial boot nodes.
+        // Dial boot nodes and seed Kademlia routing table.
         for addr_str in &config.boot_nodes {
             match addr_str.parse::<Multiaddr>() {
                 Ok(addr) => {
                     info!("Dialing boot node: {addr}");
+                    // Extract PeerId from /p2p/<peer_id> component for Kademlia.
+                    if let Some(peer_id) = extract_peer_id(&addr) {
+                        if let Some(kad) = swarm.behaviour_mut().kademlia.as_mut() {
+                            kad.add_address(&peer_id, addr.clone());
+                        }
+                    }
                     if let Err(e) = swarm.dial(addr) {
                         warn!("Failed to dial boot node: {e}");
                     }
                 }
                 Err(e) => warn!("Invalid boot node address '{addr_str}': {e}"),
+            }
+        }
+
+        // Trigger initial Kademlia bootstrap if we have boot nodes.
+        if !config.boot_nodes.is_empty() {
+            if let Some(kad) = swarm.behaviour_mut().kademlia.as_mut() {
+                if let Err(e) = kad.bootstrap() {
+                    warn!("Kademlia bootstrap failed: {e:?}");
+                }
             }
         }
 
@@ -107,6 +126,7 @@ impl Libp2pNetwork {
 
 fn build_swarm(config: &NetworkConfig) -> Result<Swarm<ShellBehaviour>, NetworkError> {
     let enable_mdns = config.enable_mdns;
+    let enable_kademlia = config.enable_kademlia;
 
     // Deterministic message ID: blake3 hash of payload.
     // CRITICAL: Do NOT use DefaultHasher — its random per-process seed
@@ -143,6 +163,18 @@ fn build_swarm(config: &NetworkConfig) -> Result<Swarm<ShellBehaviour>, NetworkE
             )
             .map_err(|e| format!("gossipsub: {e}"))?;
 
+            let kademlia = if enable_kademlia {
+                let store = kad::store::MemoryStore::new(peer_id);
+                let mut kad_config =
+                    kad::Config::new(libp2p::StreamProtocol::new("/shell-chain/kad/1.0.0"));
+                kad_config.set_query_timeout(Duration::from_secs(60));
+                let mut behaviour = kad::Behaviour::with_config(peer_id, store, kad_config);
+                behaviour.set_mode(Some(kad::Mode::Server));
+                Some(behaviour)
+            } else {
+                None
+            };
+
             let mdns = if enable_mdns {
                 Some(
                     mdns::tokio::Behaviour::new(mdns::Config::default(), peer_id)
@@ -159,6 +191,7 @@ fn build_swarm(config: &NetworkConfig) -> Result<Swarm<ShellBehaviour>, NetworkE
 
             Ok(ShellBehaviour {
                 gossipsub,
+                kademlia: kademlia.into(),
                 mdns: mdns.into(),
                 identify,
             })
@@ -167,6 +200,9 @@ fn build_swarm(config: &NetworkConfig) -> Result<Swarm<ShellBehaviour>, NetworkE
         .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
         .build();
 
+    if enable_kademlia {
+        info!("Kademlia DHT peer discovery enabled");
+    }
     if enable_mdns {
         info!("mDNS peer discovery enabled");
     } else {
@@ -192,6 +228,11 @@ async fn swarm_loop(
     if let Err(e) = swarm.behaviour_mut().gossipsub.subscribe(&txs_topic) {
         warn!("Failed to subscribe to txs topic: {e}");
     }
+
+    // Periodic Kademlia bootstrap refresh (every 5 minutes).
+    let mut kad_bootstrap_interval = interval(Duration::from_secs(300));
+    // Skip the first immediate tick — bootstrap was already triggered on startup.
+    kad_bootstrap_interval.tick().await;
 
     loop {
         tokio::select! {
@@ -223,6 +264,12 @@ async fn swarm_loop(
                     &event_tx,
                     &peer_count,
                 ).await;
+            }
+            _ = kad_bootstrap_interval.tick() => {
+                if let Some(kad) = swarm.behaviour_mut().kademlia.as_mut() {
+                    debug!("Periodic Kademlia bootstrap");
+                    let _ = kad.bootstrap();
+                }
             }
         }
     }
@@ -258,6 +305,39 @@ async fn handle_swarm_event(
                     debug!("Failed to deserialize gossipsub message: {e}");
                 }
             }
+        }
+        // Kademlia routing table updated.
+        SwarmEvent::Behaviour(ShellBehaviourEvent::Kademlia(
+            kad::Event::RoutingUpdated { peer, .. },
+        )) => {
+            debug!("Kademlia routing updated: {peer}");
+            // Add newly discovered peer to GossipSub mesh.
+            swarm
+                .behaviour_mut()
+                .gossipsub
+                .add_explicit_peer(&peer);
+            let _ = event_tx
+                .send(NetworkEvent::PeerConnected(PeerId(peer.to_string())))
+                .await;
+            // Emit routing table size update.
+            if let Some(kad) = swarm.behaviour_mut().kademlia.as_mut() {
+                let bucket_count: usize = kad.kbuckets().map(|b| b.num_entries()).sum();
+                let _ = event_tx
+                    .send(NetworkEvent::RoutingTableUpdated {
+                        peer_count: bucket_count,
+                    })
+                    .await;
+            }
+        }
+        // Kademlia query progress.
+        SwarmEvent::Behaviour(ShellBehaviourEvent::Kademlia(
+            kad::Event::OutboundQueryProgressed { result, .. },
+        )) => {
+            debug!("Kademlia query progress: {result:?}");
+        }
+        // Other Kademlia events.
+        SwarmEvent::Behaviour(ShellBehaviourEvent::Kademlia(event)) => {
+            debug!("Kademlia event: {event:?}");
         }
         // mDNS peer discovered.
         SwarmEvent::Behaviour(ShellBehaviourEvent::Mdns(mdns::Event::Discovered(peers))) => {
@@ -350,5 +430,68 @@ impl NetworkService for Libp2pNetwork {
             .await
             .map_err(|_| NetworkError::ChannelClosed)?;
         Ok(())
+    }
+}
+
+/// Extract the libp2p PeerId from a multiaddr containing a `/p2p/<peer_id>` component.
+fn extract_peer_id(addr: &Multiaddr) -> Option<Libp2pPeerId> {
+    addr.iter().find_map(|proto| {
+        if let libp2p::multiaddr::Protocol::P2p(peer_id) = proto {
+            Some(peer_id)
+        } else {
+            None
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::NetworkConfig;
+
+    #[test]
+    fn config_defaults_enable_kademlia() {
+        let config = NetworkConfig::default();
+        assert!(config.enable_kademlia);
+        assert!(!config.enable_mdns);
+        assert_eq!(config.max_peers, 50);
+    }
+
+    #[test]
+    fn extract_peer_id_from_valid_multiaddr() {
+        // Generate a valid PeerId from a keypair.
+        let keypair = libp2p::identity::Keypair::generate_ed25519();
+        let peer_id = keypair.public().to_peer_id();
+        let addr: Multiaddr = format!("/ip4/127.0.0.1/tcp/30303/p2p/{peer_id}")
+            .parse()
+            .unwrap();
+        let extracted = extract_peer_id(&addr);
+        assert_eq!(extracted, Some(peer_id));
+    }
+
+    #[test]
+    fn extract_peer_id_missing_returns_none() {
+        let addr: Multiaddr = "/ip4/127.0.0.1/tcp/30303".parse().unwrap();
+        assert!(extract_peer_id(&addr).is_none());
+    }
+
+    #[test]
+    fn routing_table_updated_event_variant() {
+        let event = NetworkEvent::RoutingTableUpdated { peer_count: 42 };
+        match event {
+            NetworkEvent::RoutingTableUpdated { peer_count } => {
+                assert_eq!(peer_count, 42);
+            }
+            _ => panic!("wrong event variant"),
+        }
+    }
+
+    #[test]
+    fn network_config_with_kademlia_disabled() {
+        let config = NetworkConfig {
+            enable_kademlia: false,
+            ..Default::default()
+        };
+        assert!(!config.enable_kademlia);
     }
 }

@@ -59,4 +59,9 @@ pub enum NetworkEvent {
     PeerConnected(PeerId),
     /// A peer disconnected.
     PeerDisconnected(PeerId),
+    /// Kademlia routing table was updated.
+    RoutingTableUpdated {
+        /// Number of peers in the routing table.
+        peer_count: usize,
+    },
 }
