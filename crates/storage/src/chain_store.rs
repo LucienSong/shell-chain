@@ -187,7 +187,7 @@ impl<S: KvStore> ChainStore<S> {
         self.store.put(&Self::receipts_key(block_hash), &data)
     }
 
-    /// Get receipts for a block.
+    /// Get receipts for a block by block hash.
     pub fn get_receipts(
         &self,
         block_hash: &ShellHash,
@@ -200,6 +200,42 @@ impl<S: KvStore> ChainStore<S> {
             }
             None => Ok(None),
         }
+    }
+
+    /// Get all receipts for a block by block number.
+    ///
+    /// Resolves the canonical block hash for `block_number`, then fetches
+    /// the receipts stored under that hash.
+    pub fn get_receipts_by_block(
+        &self,
+        block_number: u64,
+    ) -> Result<Vec<TransactionReceipt>, StorageError> {
+        let hash_bytes = match self.store.get(&Self::number_key(block_number))? {
+            Some(b) => b,
+            None => return Ok(vec![]),
+        };
+        let block_hash = ShellHash::try_from_slice(&hash_bytes)
+            .map_err(|e| StorageError::Codec(e.to_string()))?;
+        Ok(self.get_receipts(&block_hash)?.unwrap_or_default())
+    }
+
+    /// Get a single receipt by transaction hash.
+    ///
+    /// Uses the transaction index to locate the block, then returns the
+    /// matching receipt from that block's receipt list.
+    pub fn get_receipt_by_tx_hash(
+        &self,
+        tx_hash: &ShellHash,
+    ) -> Result<Option<TransactionReceipt>, StorageError> {
+        let (block_hash, tx_idx) = match self.get_tx_location(tx_hash)? {
+            Some(loc) => loc,
+            None => return Ok(None),
+        };
+        let receipts = match self.get_receipts(&block_hash)? {
+            Some(r) => r,
+            None => return Ok(None),
+        };
+        Ok(receipts.into_iter().nth(tx_idx as usize))
     }
 
     // ── Transaction index ──────────────────────────────────────
@@ -504,6 +540,150 @@ mod tests {
         let loaded = cs.get_pubkey(&addr).unwrap().unwrap();
         assert_eq!(loaded.len(), 1952);
         assert_eq!(loaded, fake_pubkey);
+    }
+
+    #[test]
+    fn get_receipts_by_block_number() {
+        let store = Arc::new(MemoryDb::new());
+        let cs = ChainStore::new(store);
+
+        let block = empty_block(7);
+        let hash = block.hash();
+        cs.put_block(&block).unwrap();
+        cs.set_canonical(7, &hash).unwrap();
+
+        let receipts = vec![TransactionReceipt {
+            tx_hash: shell_primitives::keccak256(b"tx-a"),
+            block_number: 7,
+            tx_index: 0,
+            status: 1,
+            gas_used: 21000,
+            cumulative_gas_used: 21000,
+            contract_address: None,
+            logs_bloom: Bytes::new(),
+            logs: vec![],
+        }];
+        cs.put_receipts(&hash, &receipts).unwrap();
+
+        let loaded = cs.get_receipts_by_block(7).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].tx_hash, shell_primitives::keccak256(b"tx-a"));
+
+        // Non-existent block returns empty vec
+        assert!(cs.get_receipts_by_block(999).unwrap().is_empty());
+    }
+
+    #[test]
+    fn get_receipt_by_tx_hash_found() {
+        let store = Arc::new(MemoryDb::new());
+        let cs = ChainStore::new(store);
+
+        let block = empty_block(1);
+        let block_hash = block.hash();
+        cs.put_block(&block).unwrap();
+        cs.set_canonical(1, &block_hash).unwrap();
+
+        let tx_hash = shell_primitives::keccak256(b"some-tx");
+
+        // Manually write a tx index entry (block_hash ++ tx_index_be)
+        let mut index_value = block_hash.as_bytes().to_vec();
+        index_value.extend_from_slice(&0u32.to_be_bytes());
+        cs.store()
+            .put(
+                &[prefix::TX_INDEX, tx_hash.as_bytes()].concat(),
+                &index_value,
+            )
+            .unwrap();
+
+        let receipt = TransactionReceipt {
+            tx_hash,
+            block_number: 1,
+            tx_index: 0,
+            status: 1,
+            gas_used: 21000,
+            cumulative_gas_used: 21000,
+            contract_address: None,
+            logs_bloom: Bytes::new(),
+            logs: vec![],
+        };
+        cs.put_receipts(&block_hash, &[receipt.clone()]).unwrap();
+
+        // Look up by tx hash
+        let found = cs.get_receipt_by_tx_hash(&tx_hash).unwrap().unwrap();
+        assert_eq!(found, receipt);
+
+        // Non-existent tx returns None
+        assert!(cs.get_receipt_by_tx_hash(&ShellHash::ZERO).unwrap().is_none());
+    }
+
+    #[test]
+    fn receipt_storage_with_logs_and_bloom() {
+        let store = Arc::new(MemoryDb::new());
+        let cs = ChainStore::new(store);
+
+        let block = empty_block(3);
+        let hash = block.hash();
+        cs.put_block(&block).unwrap();
+        cs.set_canonical(3, &hash).unwrap();
+
+        let event_sig = shell_primitives::keccak256(
+            b"Transfer(address,address,uint256)",
+        );
+        let log = shell_core::Log::new(
+            Address::from([0xAB; 20]),
+            vec![event_sig],
+            Bytes::from(vec![1, 2, 3, 4]),
+        )
+        .unwrap();
+
+        // Build a non-zero bloom (same algorithm the executor uses)
+        let bloom_bytes = {
+            let mut bloom = [0u8; 256];
+            for item in std::iter::once(log.address.as_bytes() as &[u8])
+                .chain(log.topics.iter().map(|t| t.as_bytes() as &[u8]))
+            {
+                let h = shell_primitives::keccak256(item);
+                let hb = h.as_bytes();
+                for i in 0..3 {
+                    let bit = ((hb[i * 2] as usize) << 8
+                        | hb[i * 2 + 1] as usize)
+                        & 0x7FF;
+                    bloom[bit / 8] |= 1 << (7 - (bit % 8));
+                }
+            }
+            Bytes::from(bloom.to_vec())
+        };
+
+        let receipt = TransactionReceipt {
+            tx_hash: shell_primitives::keccak256(b"logtx"),
+            block_number: 3,
+            tx_index: 0,
+            status: 1,
+            gas_used: 35000,
+            cumulative_gas_used: 35000,
+            contract_address: None,
+            logs_bloom: bloom_bytes.clone(),
+            logs: vec![log.clone()],
+        };
+
+        cs.put_receipts(&hash, &[receipt]).unwrap();
+
+        // Retrieve via block number
+        let loaded = cs.get_receipts_by_block(3).unwrap();
+        assert_eq!(loaded.len(), 1);
+
+        let r = &loaded[0];
+        // Verify logs survived round-trip
+        assert_eq!(r.logs.len(), 1);
+        assert_eq!(r.logs[0].address, Address::from([0xAB; 20]));
+        assert_eq!(r.logs[0].topics.len(), 1);
+        assert_eq!(r.logs[0].topics[0], event_sig);
+        assert_eq!(r.logs[0].data.as_ref(), &[1, 2, 3, 4]);
+
+        // Verify logs_bloom is non-empty and survived round-trip
+        assert_eq!(r.logs_bloom.as_ref().len(), 256);
+        assert_ne!(r.logs_bloom.as_ref(), &[0u8; 256]);
+        assert_eq!(r.logs_bloom, bloom_bytes);
     }
 
     #[test]
