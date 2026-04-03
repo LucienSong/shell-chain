@@ -4,6 +4,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use jsonrpsee::server::{Server, ServerHandle};
+use tracing::{info, warn};
 
 use shell_core::SignedTransaction;
 use shell_crypto::Signer;
@@ -14,6 +15,7 @@ use shell_storage::{ChainStore, KvStore, WorldState};
 use crate::api::{EthApiServer, ShellApiServer, Web3ApiServer, NetApiServer};
 use crate::handler::RpcHandler;
 use crate::subscriptions::{BlockEvent, EthPubSubServer};
+use crate::tls;
 
 /// Configuration for the JSON-RPC server.
 #[derive(Debug, Clone)]
@@ -26,6 +28,12 @@ pub struct RpcConfig {
     /// started on this address and the HTTP server becomes HTTP-only.
     /// When `None`, the main server at `listen_addr` handles both HTTP and WS.
     pub ws_addr: Option<SocketAddr>,
+    /// Path to a PEM-encoded TLS certificate file for WSS/HTTPS transport.
+    /// Both `tls_cert_path` and `tls_key_path` must be set to enable TLS.
+    pub tls_cert_path: Option<String>,
+    /// Path to a PEM-encoded TLS private key file for WSS/HTTPS transport.
+    /// Both `tls_cert_path` and `tls_key_path` must be set to enable TLS.
+    pub tls_key_path: Option<String>,
 }
 
 impl Default for RpcConfig {
@@ -34,6 +42,8 @@ impl Default for RpcConfig {
             listen_addr: SocketAddr::from(([127, 0, 0, 1], 8545)),
             max_connections: 100,
             ws_addr: Some(SocketAddr::from(([127, 0, 0, 1], 8546))),
+            tls_cert_path: None,
+            tls_key_path: None,
         }
     }
 }
@@ -71,6 +81,36 @@ pub async fn start_rpc_server<S: KvStore + 'static>(
     proposer_signer: Option<Arc<dyn Signer>>,
     proposer_address: Option<Address>,
 ) -> Result<RpcServerHandle, Box<dyn std::error::Error + Send + Sync>> {
+    // Validate TLS configuration if provided.
+    match tls::load_tls_config(
+        config.tls_cert_path.as_deref(),
+        config.tls_key_path.as_deref(),
+    ) {
+        Ok(Some(_tls_cfg)) => {
+            // TLS cert/key validated successfully. jsonrpsee's ServerBuilder does
+            // not natively accept a rustls config, so full WSS transport requires
+            // a TLS-terminating reverse proxy (e.g. nginx, caddy) or a custom
+            // hyper-rustls acceptor in front of the RPC server.
+            //
+            // TODO: integrate tokio-rustls TlsAcceptor with a custom hyper
+            // service to serve WSS directly.
+            info!(
+                "TLS certificate and key validated successfully \
+                 (cert={}, key={}). \
+                 NOTE: WSS transport is not yet wired — use a TLS-terminating \
+                 proxy for production WSS until native support is added.",
+                config.tls_cert_path.as_deref().unwrap_or(""),
+                config.tls_key_path.as_deref().unwrap_or(""),
+            );
+        }
+        Ok(None) => {
+            info!("RPC server starting without TLS (plain HTTP/WS)");
+        }
+        Err(e) => {
+            warn!("TLS configuration error: {e}. Starting without TLS.");
+        }
+    }
+
     let mut handler = RpcHandler::new(
         chain_store,
         world_state,

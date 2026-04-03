@@ -67,6 +67,10 @@ libp2p = { version = "0.56", features = ["tcp", "dns", "noise", "yamux", "gossip
 # --- storage (rocksdb) ---
 rocksdb = { version = "0.22", default-features = false, features = ["snappy"] }
 
+# --- tls ---
+rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
+rustls-pemfile = "2"
+
 # --- cli ---
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"

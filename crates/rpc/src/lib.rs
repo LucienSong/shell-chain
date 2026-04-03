@@ -8,8 +8,10 @@ pub mod filter;
 pub mod handler;
 pub mod server;
 pub mod subscriptions;
+pub mod tls;
 pub mod types;
 
 pub use handler::RpcHandler;
 pub use server::{start_rpc_server, RpcConfig, RpcServerHandle};
 pub use subscriptions::BlockEvent;
+pub use tls::TlsConfig;

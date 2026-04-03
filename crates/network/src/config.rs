@@ -3,6 +3,20 @@
 use std::net::SocketAddr;
 
 /// Configuration for the P2P network service.
+///
+/// # Encryption
+///
+/// All P2P connections are **already encrypted** via the
+/// [Noise protocol](https://noiseprotocol.org/) (libp2p-noise).
+/// The Noise handshake is performed on every TCP connection before any
+/// application data is exchanged, providing confidentiality and mutual
+/// peer authentication via ephemeral Diffie-Hellman keys.
+///
+/// A separate `libp2p-tls` transport (X.509 over TLS 1.3) can be layered
+/// on top of or as an alternative to Noise by enabling the `tls` feature
+/// in the `libp2p` dependency.  This is not required for security — Noise
+/// already provides equivalent guarantees — but may simplify interop with
+/// nodes that mandate TLS-based authentication.
 #[derive(Debug, Clone)]
 pub struct NetworkConfig {
     /// Address to listen on for incoming connections.
@@ -136,5 +150,38 @@ mod tests {
     #[test]
     fn reject_empty_string() {
         assert!(!validate_bootnode_multiaddr(""));
+    }
+
+    #[test]
+    fn default_config_all_fields() {
+        let config = NetworkConfig::default();
+        assert_eq!(config.listen_addr, SocketAddr::from(([0, 0, 0, 0], 30303)));
+        assert!(config.boot_nodes.is_empty());
+        assert_eq!(config.blocks_topic, "/shell/blocks/1");
+        assert_eq!(config.txs_topic, "/shell/txs/1");
+        assert_eq!(config.max_peers, 50);
+        assert!(!config.enable_mdns);
+        assert!(config.enable_kademlia);
+        assert!(config.enable_peer_scoring);
+        assert!(config.enable_relay);
+        assert!(config.enable_dcutr);
+        assert!(config.enable_autonat);
+    }
+
+    #[test]
+    fn reject_only_dns_no_transport() {
+        let addr = "/dns4/bootnode.example.com/p2p/12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
+        assert!(!validate_bootnode_multiaddr(addr));
+    }
+
+    #[test]
+    fn reject_ip4_only() {
+        assert!(!validate_bootnode_multiaddr("/ip4/192.168.1.1"));
+    }
+
+    #[test]
+    fn valid_ipv6_full_addr() {
+        let addr = "/ip6/2001:db8::1/tcp/4001/p2p/12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
+        assert!(validate_bootnode_multiaddr(addr));
     }
 }
