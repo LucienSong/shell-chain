@@ -11,6 +11,7 @@ use shell_storage::{ChainStore, KvStore, WorldState};
 
 use crate::api::{EthApiServer, ShellApiServer};
 use crate::handler::RpcHandler;
+use crate::subscriptions::{BlockEvent, EthPubSubServer};
 
 /// Configuration for the JSON-RPC server.
 #[derive(Debug, Clone)]
@@ -64,12 +65,21 @@ pub async fn start_rpc_server<S: KvStore + 'static>(
     tx_pool: Arc<TxPool>,
     chain_id: u64,
     tx_broadcast: Option<tokio::sync::mpsc::UnboundedSender<SignedTransaction>>,
+    block_events: tokio::sync::broadcast::Sender<BlockEvent>,
 ) -> Result<RpcServerHandle, Box<dyn std::error::Error + Send + Sync>> {
-    let handler = RpcHandler::new(chain_store, world_state, tx_pool, chain_id, tx_broadcast);
+    let handler = RpcHandler::new(
+        chain_store,
+        world_state,
+        tx_pool,
+        chain_id,
+        tx_broadcast,
+        block_events,
+    );
 
     let mut module = jsonrpsee::server::RpcModule::new(());
     module.merge(EthApiServer::into_rpc(handler.clone()))?;
-    module.merge(ShellApiServer::into_rpc(handler))?;
+    module.merge(ShellApiServer::into_rpc(handler.clone()))?;
+    module.merge(EthPubSubServer::into_rpc(handler))?;
 
     if let Some(ws_listen) = config.ws_addr {
         // Separate ports: HTTP-only + WS-only.
