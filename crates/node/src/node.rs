@@ -143,6 +143,14 @@ impl<S: KvStore + 'static> Node<S> {
             tokio::sync::broadcast::channel::<BlockEvent>(256);
 
         // Start JSON-RPC server.
+        // Pass the signer to the RPC layer if this node is a validator,
+        // enabling governance RPCs (proposeAddValidator / proposeRemoveValidator).
+        let proposer_signer: Option<Arc<dyn Signer>> =
+            if self.config.proposer_address.is_some() {
+                Some(Arc::clone(&signer))
+            } else {
+                None
+            };
         let _rpc = start_rpc_server(
             self.config.rpc.clone(),
             self.chain_store.clone(),
@@ -151,6 +159,8 @@ impl<S: KvStore + 'static> Node<S> {
             self.config.chain_id,
             Some(tx_broadcast_tx),
             block_event_tx.clone(),
+            proposer_signer,
+            self.config.proposer_address,
         )
         .await
         .map_err(|e| NodeError::Startup(format!("RPC: {e}")))?;

@@ -168,4 +168,22 @@ pub trait ShellApi {
         &self,
         address: String,
     ) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Propose adding a validator via system contract transaction.
+    /// Requires the node to be configured as a validator.
+    /// Returns the transaction hash on success.
+    #[method(name = "proposeAddValidator")]
+    async fn propose_add_validator(
+        &self,
+        address: String,
+    ) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Propose removing a validator via system contract transaction.
+    /// Requires the node to be configured as a validator.
+    /// Returns the transaction hash on success.
+    #[method(name = "proposeRemoveValidator")]
+    async fn propose_remove_validator(
+        &self,
+        address: String,
+    ) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
 }

@@ -6,7 +6,7 @@ use jsonrpsee::types::ErrorObjectOwned;
 
 use shell_core::{Block, BlockHeader, SignedTransaction, Transaction};
 use shell_evm::bloom::BLOOM_SIZE;
-use shell_crypto::DilithiumVerifier;
+use shell_crypto::{DilithiumVerifier, Signer};
 use shell_evm::{ShellEvm, ShellStateDb};
 use shell_mempool::TxPool;
 use shell_primitives::{Address, Bytes, ShellHash, U256};
@@ -31,6 +31,10 @@ pub struct RpcHandler<S: KvStore + 'static> {
     tx_broadcast: Option<tokio::sync::mpsc::UnboundedSender<SignedTransaction>>,
     /// Broadcast sender for block events (used by eth_subscribe).
     block_events: tokio::sync::broadcast::Sender<BlockEvent>,
+    /// Optional signer for governance proposals (set when node is a validator).
+    proposer_signer: Option<Arc<dyn Signer>>,
+    /// Address of the proposer (derived from the signer's public key).
+    proposer_address: Option<Address>,
 }
 
 impl<S: KvStore + 'static> Clone for RpcHandler<S> {
@@ -42,6 +46,8 @@ impl<S: KvStore + 'static> Clone for RpcHandler<S> {
             chain_id: self.chain_id,
             tx_broadcast: self.tx_broadcast.clone(),
             block_events: self.block_events.clone(),
+            proposer_signer: self.proposer_signer.clone(),
+            proposer_address: self.proposer_address,
         }
     }
 }
@@ -63,7 +69,17 @@ impl<S: KvStore + 'static> RpcHandler<S> {
             chain_id,
             tx_broadcast,
             block_events,
+            proposer_signer: None,
+            proposer_address: None,
         }
+    }
+
+    /// Set the proposer signer for governance RPCs.
+    /// When set, enables `shell_proposeAddValidator` and `shell_proposeRemoveValidator`.
+    pub fn with_proposer(mut self, signer: Arc<dyn Signer>, address: Address) -> Self {
+        self.proposer_signer = Some(signer);
+        self.proposer_address = Some(address);
+        self
     }
 
     /// Returns a reference to the block event broadcast sender.
@@ -100,6 +116,56 @@ impl<S: KvStore + 'static> RpcHandler<S> {
         }
 
         Ok(hash)
+    }
+
+    /// Build, sign, and submit a governance transaction to the ValidatorRegistry.
+    /// Returns the transaction hash on success.
+    fn propose_validator_tx(&self, calldata: Vec<u8>) -> Result<ShellHash, ErrorObjectOwned> {
+        let signer = self.proposer_signer.as_ref().ok_or_else(|| {
+            ErrorObjectOwned::owned(
+                -32601,
+                "node is not configured as a validator",
+                None::<()>,
+            )
+        })?;
+        let proposer_addr = self.proposer_address.ok_or_else(|| {
+            ErrorObjectOwned::owned(
+                -32601,
+                "node is not configured as a validator",
+                None::<()>,
+            )
+        })?;
+
+        let nonce = {
+            let ws = self.world_state.read();
+            ws.get_nonce(&proposer_addr).map_err(internal_err)?
+        };
+
+        let tx = Transaction {
+            chain_id: self.chain_id,
+            nonce,
+            to: Some(shell_evm::registry_address()),
+            value: U256::ZERO,
+            data: Bytes::copy_from_slice(&calldata),
+            gas_limit: 100_000,
+            max_fee_per_gas: 0,
+            max_priority_fee_per_gas: 0,
+        };
+
+        let tx_hash = tx.hash();
+        let signature = signer
+            .sign(tx_hash.0.as_slice())
+            .map_err(|e| internal_err(format!("signing failed: {e}")))?;
+
+        let pubkey = signer.public_key().to_vec();
+        let signed_tx = SignedTransaction::with_pubkey(
+            proposer_addr,
+            tx,
+            signature,
+            pubkey,
+        );
+
+        self.submit_tx(signed_tx)
     }
 
     /// Execute a call against a temporary EVM and return (output_bytes, gas_used).
@@ -616,18 +682,20 @@ impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
         // DISABLED (F-039/F-040): Direct WorldState mutation via RPC causes
         // split-brain — validator changes must go through a system contract
         // transaction so all nodes compute the same state_root deterministically.
+        // Use shell_proposeAddValidator instead.
         Err(ErrorObjectOwned::owned(
             -32601,
-            "shell_addValidator is disabled: validator changes require system contract (planned for M3)",
+            "shell_addValidator is disabled: use shell_proposeAddValidator instead",
             None::<()>,
         ))
     }
 
     async fn remove_validator(&self, _address: String) -> Result<bool, ErrorObjectOwned> {
         // DISABLED (F-039/F-040): See add_validator rationale.
+        // Use shell_proposeRemoveValidator instead.
         Err(ErrorObjectOwned::owned(
             -32601,
-            "shell_removeValidator is disabled: validator changes require system contract (planned for M3)",
+            "shell_removeValidator is disabled: use shell_proposeRemoveValidator instead",
             None::<()>,
         ))
     }
@@ -642,6 +710,20 @@ impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
         let addr = parse_address(&address)?;
         let calldata = shell_evm::encode_remove_validator_calldata(&addr);
         Ok(format!("0x{}", hex::encode(calldata)))
+    }
+
+    async fn propose_add_validator(&self, address: String) -> Result<String, ErrorObjectOwned> {
+        let addr = parse_address(&address)?;
+        let calldata = shell_evm::encode_add_validator_calldata(&addr);
+        let hash = self.propose_validator_tx(calldata)?;
+        Ok(format!("0x{}", hex::encode(hash.0)))
+    }
+
+    async fn propose_remove_validator(&self, address: String) -> Result<String, ErrorObjectOwned> {
+        let addr = parse_address(&address)?;
+        let calldata = shell_evm::encode_remove_validator_calldata(&addr);
+        let hash = self.propose_validator_tx(calldata)?;
+        Ok(format!("0x{}", hex::encode(hash.0)))
     }
 }
 
@@ -1310,5 +1392,133 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.message().contains("disabled"));
+    }
+
+    // ── Governance proposal RPCs ─────────────────────────────────
+
+    fn setup_with_proposer() -> (RpcHandler<MemoryDb>, DilithiumSigner, Address) {
+        let db = Arc::new(MemoryDb::new());
+        let chain_store = Arc::new(ChainStore::new(db.clone()));
+        let world_state = Arc::new(parking_lot::RwLock::new(WorldState::new(db)));
+        let tx_pool = Arc::new(TxPool::new(shell_mempool::MempoolConfig {
+            chain_id: 42,
+            ..shell_mempool::MempoolConfig::default()
+        }));
+        let (block_events, _) = tokio::sync::broadcast::channel(16);
+
+        let signer = DilithiumSigner::generate();
+        let pubkey = signer.public_key().to_vec();
+        let addr = Address::from_public_key(&pubkey);
+
+        let handler = RpcHandler::new(
+            chain_store.clone(),
+            world_state,
+            tx_pool,
+            42,
+            None,
+            block_events,
+        )
+        .with_proposer(Arc::new(DilithiumSigner::from_bytes(
+            signer.public_key(),
+            signer.secret_key_bytes(),
+        ).unwrap()), addr);
+
+        // Register pubkey so mempool signature verification passes.
+        handler.chain_store.put_pubkey(&addr, &pubkey).unwrap();
+
+        (handler, signer, addr)
+    }
+
+    #[tokio::test]
+    async fn propose_add_validator_no_signer_returns_error() {
+        let handler = setup();
+        let target = format!("0x{}", "ab".repeat(20));
+        let err = ShellApiServer::propose_add_validator(&handler, target)
+            .await
+            .unwrap_err();
+        assert!(err.message().contains("not configured as a validator"));
+    }
+
+    #[tokio::test]
+    async fn propose_remove_validator_no_signer_returns_error() {
+        let handler = setup();
+        let target = format!("0x{}", "ab".repeat(20));
+        let err = ShellApiServer::propose_remove_validator(&handler, target)
+            .await
+            .unwrap_err();
+        assert!(err.message().contains("not configured as a validator"));
+    }
+
+    #[tokio::test]
+    async fn propose_add_validator_creates_correct_tx() {
+        let (handler, _signer, _addr) = setup_with_proposer();
+        let target = format!("0x{}", "ab".repeat(20));
+        let result = ShellApiServer::propose_add_validator(&handler, target.clone())
+            .await;
+        assert!(result.is_ok(), "proposeAddValidator failed: {:?}", result.err());
+
+        // Verify a transaction was inserted into the mempool.
+        assert_eq!(handler.tx_pool.len(), 1);
+
+        // Verify the transaction has the correct calldata.
+        let target_addr = parse_address(&target).unwrap();
+        let expected_calldata = shell_evm::encode_add_validator_calldata(&target_addr);
+        let pending = handler.tx_pool.pending(100);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].tx.data.as_ref(), expected_calldata.as_slice());
+        assert_eq!(pending[0].tx.to, Some(shell_evm::registry_address()));
+        assert_eq!(pending[0].tx.value, U256::ZERO);
+        assert_eq!(pending[0].tx.chain_id, 42);
+        assert_eq!(pending[0].tx.nonce, 0);
+    }
+
+    #[tokio::test]
+    async fn propose_remove_validator_creates_correct_tx() {
+        let (handler, _signer, _addr) = setup_with_proposer();
+        let target = format!("0x{}", "cc".repeat(20));
+        let result = ShellApiServer::propose_remove_validator(&handler, target.clone())
+            .await;
+        assert!(result.is_ok(), "proposeRemoveValidator failed: {:?}", result.err());
+
+        assert_eq!(handler.tx_pool.len(), 1);
+
+        let target_addr = parse_address(&target).unwrap();
+        let expected_calldata = shell_evm::encode_remove_validator_calldata(&target_addr);
+        let pending = handler.tx_pool.pending(100);
+        assert_eq!(pending[0].tx.data.as_ref(), expected_calldata.as_slice());
+    }
+
+    #[tokio::test]
+    async fn propose_add_validator_uses_correct_nonce() {
+        let (handler, _signer, addr) = setup_with_proposer();
+
+        // Set the proposer nonce to 5.
+        {
+            let mut ws = handler.world_state.write();
+            for _ in 0..5 {
+                ws.increment_nonce(&addr).unwrap();
+            }
+        }
+
+        let target = format!("0x{}", "ab".repeat(20));
+        let result = ShellApiServer::propose_add_validator(&handler, target)
+            .await;
+        assert!(result.is_ok(), "proposeAddValidator failed: {:?}", result.err());
+
+        let pending = handler.tx_pool.pending(100);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].tx.nonce, 5);
+    }
+
+    #[tokio::test]
+    async fn propose_add_validator_returns_tx_hash_hex() {
+        let (handler, _signer, _addr) = setup_with_proposer();
+        let target = format!("0x{}", "ab".repeat(20));
+        let result = ShellApiServer::propose_add_validator(&handler, target)
+            .await
+            .unwrap();
+        // Must be a hex string starting with 0x, 32 bytes = 66 chars.
+        assert!(result.starts_with("0x"));
+        assert_eq!(result.len(), 66);
     }
 }

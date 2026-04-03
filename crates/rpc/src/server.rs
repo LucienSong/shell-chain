@@ -6,7 +6,9 @@ use std::sync::Arc;
 use jsonrpsee::server::{Server, ServerHandle};
 
 use shell_core::SignedTransaction;
+use shell_crypto::Signer;
 use shell_mempool::TxPool;
+use shell_primitives::Address;
 use shell_storage::{ChainStore, KvStore, WorldState};
 
 use crate::api::{EthApiServer, ShellApiServer};
@@ -66,8 +68,10 @@ pub async fn start_rpc_server<S: KvStore + 'static>(
     chain_id: u64,
     tx_broadcast: Option<tokio::sync::mpsc::UnboundedSender<SignedTransaction>>,
     block_events: tokio::sync::broadcast::Sender<BlockEvent>,
+    proposer_signer: Option<Arc<dyn Signer>>,
+    proposer_address: Option<Address>,
 ) -> Result<RpcServerHandle, Box<dyn std::error::Error + Send + Sync>> {
-    let handler = RpcHandler::new(
+    let mut handler = RpcHandler::new(
         chain_store,
         world_state,
         tx_pool,
@@ -75,6 +79,9 @@ pub async fn start_rpc_server<S: KvStore + 'static>(
         tx_broadcast,
         block_events,
     );
+    if let (Some(signer), Some(addr)) = (proposer_signer, proposer_address) {
+        handler = handler.with_proposer(signer, addr);
+    }
 
     let mut module = jsonrpsee::server::RpcModule::new(());
     module.merge(EthApiServer::into_rpc(handler.clone()))?;
