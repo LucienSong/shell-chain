@@ -48,6 +48,9 @@ pub enum ConsensusConfig {
         authorities: Vec<Address>,
         /// Minimum seconds between blocks.
         block_time_secs: u64,
+        /// Number of blocks per epoch. Defaults to 0 (no epochs).
+        #[serde(default)]
+        epoch_length: u64,
     },
 }
 
@@ -147,6 +150,7 @@ mod tests {
             ConsensusConfig::PoA {
                 authorities,
                 block_time_secs,
+                ..
             } => {
                 assert_eq!(authorities.len(), 1);
                 assert_eq!(*block_time_secs, 2);

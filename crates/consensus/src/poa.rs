@@ -14,6 +14,8 @@ pub struct PoaConfig {
     /// Maximum seconds a block timestamp may be ahead of the current wall-clock.
     /// Prevents miners from pre-dating blocks to gain proposer slots.
     pub max_future_secs: u64,
+    /// Number of blocks per epoch. 0 means no epochs (legacy behavior).
+    pub epoch_length: u64,
 }
 
 /// Default maximum future timestamp tolerance (15 seconds).
@@ -25,6 +27,7 @@ impl PoaConfig {
             authorities,
             block_time_secs,
             max_future_secs: DEFAULT_MAX_FUTURE_SECS,
+            epoch_length: 0,
         }
     }
 
@@ -33,14 +36,45 @@ impl PoaConfig {
         self
     }
 
+    pub fn with_epoch_length(mut self, epoch_length: u64) -> Self {
+        self.epoch_length = epoch_length;
+        self
+    }
+
+    /// Returns the epoch number for a given block.
+    pub fn epoch_of(&self, block_number: u64) -> u64 {
+        if self.epoch_length == 0 {
+            return 0;
+        }
+        block_number / self.epoch_length
+    }
+
+    /// Returns true if `block_number` is the first block of a new epoch.
+    pub fn is_epoch_boundary(&self, block_number: u64) -> bool {
+        if self.epoch_length == 0 {
+            return false;
+        }
+        block_number.is_multiple_of(self.epoch_length)
+    }
+
     /// Return the expected proposer for a given block number.
     pub fn proposer_for_block(&self, block_number: u64) -> Address {
-        let idx = block_number as usize % self.authorities.len();
+        let idx = if self.epoch_length > 0 {
+            (block_number % self.epoch_length) as usize % self.authorities.len()
+        } else {
+            block_number as usize % self.authorities.len()
+        };
         self.authorities[idx]
     }
 
     pub fn is_authority(&self, address: &Address) -> bool {
         self.authorities.contains(address)
+    }
+
+    /// Replace the authority set. Panics if the new set is empty.
+    pub fn set_authorities(&mut self, new_authorities: Vec<Address>) {
+        assert!(!new_authorities.is_empty(), "authority set must not be empty");
+        self.authorities = new_authorities;
     }
 }
 
@@ -361,5 +395,137 @@ mod tests {
         let (config, _, _) = test_config();
         let engine = PoaEngine::new(config);
         assert_eq!(engine.engine_type(), EngineType::PoA);
+    }
+
+    // ---- Epoch tests ----
+
+    fn make_addrs(n: usize) -> Vec<Address> {
+        (0..n)
+            .map(|i| {
+                Address::from_public_key(
+                    shell_primitives::keccak256(format!("auth{i}").as_bytes()).as_bytes(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn epoch_of_disabled() {
+        let config = PoaConfig::new(make_addrs(3), 1);
+        assert_eq!(config.epoch_length, 0);
+        for b in 0..20 {
+            assert_eq!(config.epoch_of(b), 0, "epoch_of should always be 0 when disabled");
+        }
+    }
+
+    #[test]
+    fn epoch_of_enabled() {
+        let config = PoaConfig::new(make_addrs(3), 1).with_epoch_length(10);
+        assert_eq!(config.epoch_of(0), 0);
+        assert_eq!(config.epoch_of(9), 0);
+        assert_eq!(config.epoch_of(10), 1);
+        assert_eq!(config.epoch_of(19), 1);
+        assert_eq!(config.epoch_of(20), 2);
+        assert_eq!(config.epoch_of(100), 10);
+    }
+
+    #[test]
+    fn is_epoch_boundary_disabled() {
+        let config = PoaConfig::new(make_addrs(3), 1);
+        for b in 0..20 {
+            assert!(!config.is_epoch_boundary(b), "no boundaries when epoch disabled");
+        }
+    }
+
+    #[test]
+    fn is_epoch_boundary_enabled() {
+        let config = PoaConfig::new(make_addrs(3), 1).with_epoch_length(5);
+        assert!(config.is_epoch_boundary(0));
+        assert!(!config.is_epoch_boundary(1));
+        assert!(!config.is_epoch_boundary(4));
+        assert!(config.is_epoch_boundary(5));
+        assert!(config.is_epoch_boundary(10));
+        assert!(!config.is_epoch_boundary(11));
+    }
+
+    #[test]
+    fn proposer_for_block_no_epoch_backward_compat() {
+        let addrs = make_addrs(3);
+        let config = PoaConfig::new(addrs.clone(), 1);
+        // Must match the old block_number % authority_count behavior exactly.
+        for b in 0u64..12 {
+            let expected_idx = b as usize % addrs.len();
+            assert_eq!(config.proposer_for_block(b), addrs[expected_idx]);
+        }
+    }
+
+    #[test]
+    fn proposer_for_block_with_epoch() {
+        let addrs = make_addrs(3);
+        let config = PoaConfig::new(addrs.clone(), 1).with_epoch_length(5);
+
+        // Within epoch 0 (blocks 0..5): idx = block % 5 % 3
+        assert_eq!(config.proposer_for_block(0), addrs[0]); // 0%5=0, 0%3=0
+        assert_eq!(config.proposer_for_block(1), addrs[1]); // 1%5=1, 1%3=1
+        assert_eq!(config.proposer_for_block(2), addrs[2]); // 2%5=2, 2%3=2
+        assert_eq!(config.proposer_for_block(3), addrs[0]); // 3%5=3, 3%3=0
+        assert_eq!(config.proposer_for_block(4), addrs[1]); // 4%5=4, 4%3=1
+
+        // Epoch 1 starts at block 5 — proposer cycle resets
+        assert_eq!(config.proposer_for_block(5), addrs[0]); // 5%5=0, 0%3=0
+        assert_eq!(config.proposer_for_block(6), addrs[1]); // 6%5=1, 1%3=1
+        assert_eq!(config.proposer_for_block(7), addrs[2]); // 7%5=2, 2%3=2
+    }
+
+    #[test]
+    fn proposer_epoch_length_equals_authority_count() {
+        let addrs = make_addrs(3);
+        let config = PoaConfig::new(addrs.clone(), 1).with_epoch_length(3);
+
+        // Each authority gets exactly one slot per epoch.
+        for epoch in 0..4u64 {
+            for slot in 0..3u64 {
+                let block = epoch * 3 + slot;
+                assert_eq!(config.proposer_for_block(block), addrs[slot as usize]);
+            }
+        }
+    }
+
+    #[test]
+    fn set_authorities_updates_list() {
+        let addrs = make_addrs(3);
+        let mut config = PoaConfig::new(addrs.clone(), 1).with_epoch_length(10);
+        assert_eq!(config.authorities, addrs);
+
+        let new_addrs = make_addrs(2);
+        config.set_authorities(new_addrs.clone());
+        assert_eq!(config.authorities, new_addrs);
+        assert_eq!(config.authorities.len(), 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "authority set must not be empty")]
+    fn set_authorities_panics_on_empty() {
+        let mut config = PoaConfig::new(make_addrs(1), 1);
+        config.set_authorities(vec![]);
+    }
+
+    #[test]
+    fn with_epoch_length_builder() {
+        let config = PoaConfig::new(make_addrs(1), 2).with_epoch_length(100);
+        assert_eq!(config.epoch_length, 100);
+        assert_eq!(config.block_time_secs, 2);
+    }
+
+    #[test]
+    fn epoch_length_one() {
+        let addrs = make_addrs(3);
+        let config = PoaConfig::new(addrs.clone(), 1).with_epoch_length(1);
+        // Every block is an epoch boundary, proposer is always addrs[0].
+        for b in 0..10u64 {
+            assert!(config.is_epoch_boundary(b));
+            assert_eq!(config.epoch_of(b), b);
+            assert_eq!(config.proposer_for_block(b), addrs[0]); // b%1=0, 0%3=0
+        }
     }
 }

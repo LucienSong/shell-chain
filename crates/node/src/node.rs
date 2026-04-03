@@ -97,7 +97,7 @@ impl<S: KvStore + 'static> Node<S> {
             tokio::sync::mpsc::unbounded_channel::<SignedTransaction>();
 
         // Start JSON-RPC server.
-        let (_rpc_addr, _rpc_handle) = start_rpc_server(
+        let _rpc = start_rpc_server(
             self.config.rpc.clone(),
             self.chain_store.clone(),
             self.world_state.clone(),
@@ -151,6 +151,10 @@ impl<S: KvStore + 'static> Node<S> {
                                 let number = block.number();
                                 let tx_count = block.transactions.len();
                                 let gas = block.header.gas_used;
+                                if self.consensus.config().is_epoch_boundary(number) {
+                                    let epoch = self.consensus.config().epoch_of(number);
+                                    info!(epoch, block = number, "new epoch started");
+                                }
                                 eprintln!(
                                     "⛏  Block #{number} produced ({tx_count} txs, {gas} gas)"
                                 );

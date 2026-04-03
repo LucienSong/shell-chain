@@ -50,6 +50,7 @@ pub fn init(
                 consensus: ConsensusConfig::PoA {
                     authorities: vec![authority],
                     block_time_secs: 2,
+                    epoch_length: 0,
                 },
                 alloc,
             }

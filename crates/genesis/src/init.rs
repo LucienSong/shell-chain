@@ -134,6 +134,7 @@ mod tests {
             consensus: ConsensusConfig::PoA {
                 authorities: vec![addr1],
                 block_time_secs: 1,
+                epoch_length: 0,
             },
             alloc,
         }

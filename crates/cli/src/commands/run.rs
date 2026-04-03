@@ -25,6 +25,8 @@ pub struct RunArgs {
     pub keystore: Option<PathBuf>,
     pub chain_id: u64,
     pub db: String,
+    pub ws: bool,
+    pub ws_port: u16,
     pub p2p: bool,
     pub p2p_addr: String,
     pub bootnodes: Vec<String>,
@@ -128,6 +130,7 @@ async fn run_with_store<S: KvStore + 'static>(
             consensus: ConsensusConfig::PoA {
                 authorities: vec![authority],
                 block_time_secs: args.block_time / 1000,
+                epoch_length: 0,
             },
             alloc,
         };
@@ -151,25 +154,33 @@ async fn run_with_store<S: KvStore + 'static>(
         );
     }
 
-    // Extract authorities from genesis.
-    let (authorities, _block_time_secs) = match &genesis_config.consensus {
+    // Extract authorities and epoch_length from genesis.
+    let (authorities, _block_time_secs, epoch_length) = match &genesis_config.consensus {
         ConsensusConfig::PoA {
             authorities,
             block_time_secs,
-        } => (authorities.clone(), *block_time_secs),
+            epoch_length,
+        } => (authorities.clone(), *block_time_secs, *epoch_length),
     };
 
     // Build node configuration.
     let listen_addr: SocketAddr = args.rpc_addr.parse()?;
+    let ws_addr = if args.ws {
+        Some(SocketAddr::from(([127, 0, 0, 1], args.ws_port)))
+    } else {
+        None
+    };
     let node_config = NodeConfig {
         chain_id: genesis_config.chain_id,
-        consensus: PoaConfig::new(authorities, args.block_time / 1000),
+        consensus: PoaConfig::new(authorities, args.block_time / 1000)
+            .with_epoch_length(epoch_length),
         mempool: MempoolConfig {
             chain_id: genesis_config.chain_id,
             ..MempoolConfig::default()
         },
         rpc: RpcConfig {
             listen_addr,
+            ws_addr,
             ..RpcConfig::default()
         },
         network: NetworkConfig::default(),
@@ -197,6 +208,9 @@ async fn run_with_store<S: KvStore + 'static>(
             eprintln!("🚀 Shell-chain node starting...");
             eprintln!("   Chain ID:    {}", genesis_config.chain_id);
             eprintln!("   RPC:         http://{listen_addr}");
+            if let Some(ws) = ws_addr {
+                eprintln!("   WS:          ws://{ws}");
+            }
             eprintln!("   P2P:         {p2p_listen} (libp2p)");
             eprintln!("   Authority:   0x{}", hex::encode(authority.as_bytes()));
             eprintln!("   Block time:  {}ms", args.block_time);
@@ -227,6 +241,9 @@ async fn run_with_store<S: KvStore + 'static>(
         eprintln!("🚀 Shell-chain node starting...");
         eprintln!("   Chain ID:    {}", genesis_config.chain_id);
         eprintln!("   RPC:         http://{listen_addr}");
+        if let Some(ws) = ws_addr {
+            eprintln!("   WS:          ws://{ws}");
+        }
         eprintln!("   Authority:   0x{}", hex::encode(authority.as_bytes()));
         eprintln!("   Block time:  {}ms", args.block_time);
         if resumed {
