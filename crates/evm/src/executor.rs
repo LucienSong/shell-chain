@@ -178,7 +178,7 @@ impl<S: KvStore + 'static> ShellEvm<S> {
             gas_used,
             cumulative_gas_used: new_cumulative,
             contract_address,
-            logs_bloom: shell_primitives::Bytes::new(), // TODO: compute bloom filter
+            logs_bloom: shell_primitives::Bytes::from(crate::bloom::logs_bloom(&shell_logs).to_vec()),
             logs: shell_logs,
         };
 

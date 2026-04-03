@@ -5180,6 +5180,7 @@ dependencies = [
  "alloy-primitives",
  "alloy-rlp",
  "revm",
+ "sha3",
  "shell-core",
  "shell-crypto",
  "shell-primitives",

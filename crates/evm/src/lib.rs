@@ -8,6 +8,7 @@
 //! - [`ShellPrecompiles`]: PQ precompile provider (ecrecover disabled, PQ_DILITHIUM_VERIFY at 0x0100)
 //! - [`validate_tx`]: PQ signature verification + hybrid pubkey registration
 
+pub mod bloom;
 mod executor;
 mod precompiles;
 mod state_db;
