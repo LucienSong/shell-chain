@@ -73,6 +73,22 @@ pub struct RpcLog {
     pub data: String,
 }
 
+/// Full log object returned by `eth_getLogs` with block/tx metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcLogWithMeta {
+    pub address: Address,
+    pub topics: Vec<ShellHash>,
+    pub data: String,
+    pub block_number: String,
+    pub block_hash: ShellHash,
+    pub transaction_hash: ShellHash,
+    pub transaction_index: String,
+    pub log_index: String,
+    /// Always `false` for a non-reorg chain.
+    pub removed: bool,
+}
+
 /// Ethereum `eth_call` / `eth_estimateGas` request object.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]

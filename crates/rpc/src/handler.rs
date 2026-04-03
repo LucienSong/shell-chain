@@ -5,6 +5,7 @@ use std::sync::Arc;
 use jsonrpsee::types::ErrorObjectOwned;
 
 use shell_core::{Block, BlockHeader, SignedTransaction, Transaction};
+use shell_evm::bloom::BLOOM_SIZE;
 use shell_crypto::DilithiumVerifier;
 use shell_evm::{ShellEvm, ShellStateDb};
 use shell_mempool::TxPool;
@@ -12,6 +13,8 @@ use shell_primitives::{Address, Bytes, ShellHash, U256};
 use shell_storage::{ChainStore, KvStore, WorldState};
 
 use crate::api::{EthApiServer, ShellApiServer};
+use crate::filter::{RawLogFilter, MAX_BLOCK_RANGE};
+use crate::subscriptions::BlockEvent;
 use crate::types::*;
 
 /// JSON-RPC handler wired to storage and mempool backends.
@@ -26,6 +29,8 @@ pub struct RpcHandler<S: KvStore + 'static> {
     chain_id: u64,
     /// Optional channel for broadcasting new transactions to the network layer.
     tx_broadcast: Option<tokio::sync::mpsc::UnboundedSender<SignedTransaction>>,
+    /// Broadcast sender for block events (used by eth_subscribe).
+    block_events: tokio::sync::broadcast::Sender<BlockEvent>,
 }
 
 impl<S: KvStore + 'static> Clone for RpcHandler<S> {
@@ -36,6 +41,7 @@ impl<S: KvStore + 'static> Clone for RpcHandler<S> {
             tx_pool: Arc::clone(&self.tx_pool),
             chain_id: self.chain_id,
             tx_broadcast: self.tx_broadcast.clone(),
+            block_events: self.block_events.clone(),
         }
     }
 }
@@ -48,6 +54,7 @@ impl<S: KvStore + 'static> RpcHandler<S> {
         tx_pool: Arc<TxPool>,
         chain_id: u64,
         tx_broadcast: Option<tokio::sync::mpsc::UnboundedSender<SignedTransaction>>,
+        block_events: tokio::sync::broadcast::Sender<BlockEvent>,
     ) -> Self {
         Self {
             chain_store,
@@ -55,7 +62,13 @@ impl<S: KvStore + 'static> RpcHandler<S> {
             tx_pool,
             chain_id,
             tx_broadcast,
+            block_events,
         }
+    }
+
+    /// Returns a reference to the block event broadcast sender.
+    pub fn block_event_sender(&self) -> &tokio::sync::broadcast::Sender<BlockEvent> {
+        &self.block_events
     }
 
     /// Validate and submit a signed transaction to the mempool.
@@ -468,6 +481,97 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
         // Return as zero-padded 32-byte hex string.
         Ok(format!("0x{}", hex::encode(value.as_bytes())))
     }
+
+    async fn get_logs(
+        &self,
+        raw_filter: RawLogFilter,
+    ) -> Result<Vec<RpcLogWithMeta>, ErrorObjectOwned> {
+        // Resolve "latest" block number.
+        let head = self
+            .chain_store
+            .get_head_block()
+            .map_err(internal_err)?;
+        let latest = head.map(|b| b.number()).unwrap_or(0);
+
+        let filter = raw_filter.into_filter(latest);
+
+        let from = filter.from_block.unwrap_or(latest);
+        let to = filter.to_block.unwrap_or(latest);
+
+        if from > to {
+            return Ok(vec![]);
+        }
+
+        // Cap range to prevent DoS.
+        if to - from + 1 > MAX_BLOCK_RANGE {
+            return Err(ErrorObjectOwned::owned(
+                -32005,
+                format!(
+                    "query returned more than {} blocks; cap the range",
+                    MAX_BLOCK_RANGE
+                ),
+                None::<()>,
+            ));
+        }
+
+        let mut results = Vec::new();
+
+        for block_num in from..=to {
+            let block = match self
+                .chain_store
+                .get_block_by_number(block_num)
+                .map_err(internal_err)?
+            {
+                Some(b) => b,
+                None => continue,
+            };
+
+            // Fast path: check block-level bloom filter.
+            if !filter.matches_bloom(block.header.logs_bloom.as_ref()) {
+                continue;
+            }
+
+            let block_hash = block.hash();
+
+            let receipts = self
+                .chain_store
+                .get_receipts(&block_hash)
+                .map_err(internal_err)?
+                .unwrap_or_default();
+
+            // Global log index across all receipts in this block.
+            let mut global_log_index: u64 = 0;
+
+            for (tx_idx, receipt) in receipts.iter().enumerate() {
+                // Per-receipt bloom fast path.
+                if receipt.logs_bloom.len() == BLOOM_SIZE
+                    && !filter.matches_bloom(receipt.logs_bloom.as_ref())
+                {
+                    global_log_index += receipt.logs.len() as u64;
+                    continue;
+                }
+
+                for log in &receipt.logs {
+                    if filter.matches_log(log) {
+                        results.push(RpcLogWithMeta {
+                            address: log.address,
+                            topics: log.topics.clone(),
+                            data: hex_bytes(log.data.as_ref()),
+                            block_number: hex_u64(block_num),
+                            block_hash,
+                            transaction_hash: receipt.tx_hash,
+                            transaction_index: hex_u64(tx_idx as u64),
+                            log_index: hex_u64(global_log_index),
+                            removed: false,
+                        });
+                    }
+                    global_log_index += 1;
+                }
+            }
+        }
+
+        Ok(results)
+    }
 }
 
 #[jsonrpsee::core::async_trait]
@@ -493,6 +597,11 @@ impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
     ) -> Result<ShellHash, ErrorObjectOwned> {
         self.submit_tx(tx)
     }
+
+    async fn get_validators(&self) -> Result<Vec<Address>, ErrorObjectOwned> {
+        let ws = self.world_state.read();
+        ws.get_validators().map_err(internal_err)
+    }
 }
 
 #[cfg(test)]
@@ -511,7 +620,8 @@ mod tests {
             chain_id: 42,
             ..shell_mempool::MempoolConfig::default()
         }));
-        RpcHandler::new(chain_store, world_state, tx_pool, 42, None)
+        let (block_events, _) = tokio::sync::broadcast::channel(16);
+        RpcHandler::new(chain_store, world_state, tx_pool, 42, None, block_events)
     }
 
     fn make_genesis_block() -> Block {
@@ -903,5 +1013,239 @@ mod tests {
         let gas_hex = result.unwrap();
         let gas = u64::from_str_radix(gas_hex.strip_prefix("0x").unwrap(), 16).unwrap();
         assert!(gas >= 21_000, "estimated gas too low: {gas}");
+    }
+
+    // ── eth_getLogs tests ────────────────────────────────────────
+
+    /// Helper: store a block with receipts that contain logs and return the block hash.
+    fn store_block_with_logs(
+        handler: &RpcHandler<MemoryDb>,
+        number: u64,
+        logs_per_receipt: Vec<Vec<shell_core::Log>>,
+    ) -> ShellHash {
+        let bloom = shell_evm::bloom::logs_bloom(
+            &logs_per_receipt.iter().flatten().cloned().collect::<Vec<_>>(),
+        );
+
+        let block = Block {
+            header: BlockHeader {
+                parent_hash: ShellHash::default(),
+                state_root: ShellHash::default(),
+                transactions_root: ShellHash::default(),
+                receipts_root: ShellHash::default(),
+                logs_bloom: Bytes::copy_from_slice(&bloom),
+                number,
+                gas_limit: 30_000_000,
+                gas_used: 21_000 * logs_per_receipt.len() as u64,
+                timestamp: 1_700_000_000 + number,
+                extra_data: Bytes::default(),
+                proposer: Address::from_public_key(b"proposer-key-data"),
+                sig_aggregate_proof: None,
+            },
+            transactions: vec![],
+            proposer_seal: None,
+        };
+        let hash = block.hash();
+        handler.chain_store.put_block(&block).unwrap();
+        handler.chain_store.set_canonical(number, &hash).unwrap();
+        handler.chain_store.set_head(&hash).unwrap();
+
+        let mut cumulative_gas = 0u64;
+        let receipts: Vec<TransactionReceipt> = logs_per_receipt
+            .into_iter()
+            .enumerate()
+            .map(|(i, logs)| {
+                let receipt_bloom = shell_evm::bloom::logs_bloom(&logs);
+                cumulative_gas += 21_000;
+                TransactionReceipt {
+                    tx_hash: ShellHash::from_slice(&[i as u8 + 1; 32]),
+                    block_number: number,
+                    tx_index: i as u32,
+                    status: 1,
+                    gas_used: 21_000,
+                    cumulative_gas_used: cumulative_gas,
+                    contract_address: None,
+                    logs_bloom: Bytes::copy_from_slice(&receipt_bloom),
+                    logs,
+                }
+            })
+            .collect();
+
+        handler.chain_store.put_receipts(&hash, &receipts).unwrap();
+        hash
+    }
+
+    #[tokio::test]
+    async fn get_logs_empty_range_returns_empty() {
+        let handler = setup();
+        let raw: crate::filter::RawLogFilter =
+            serde_json::from_str(r#"{"fromBlock":"0x5","toBlock":"0x1"}"#).unwrap();
+        let result = EthApiServer::get_logs(&handler, raw).await.unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_logs_no_blocks_returns_empty() {
+        let handler = setup();
+        let raw: crate::filter::RawLogFilter =
+            serde_json::from_str(r#"{"fromBlock":"0x0","toBlock":"0x0"}"#).unwrap();
+        let result = EthApiServer::get_logs(&handler, raw).await.unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_logs_matches_specific_address() {
+        let handler = setup();
+        let target = Address::from([0xAA; 20]);
+        let other = Address::from([0xBB; 20]);
+
+        let log_target =
+            shell_core::Log::new(target, vec![], Bytes::new()).unwrap();
+        let log_other =
+            shell_core::Log::new(other, vec![], Bytes::new()).unwrap();
+
+        store_block_with_logs(&handler, 0, vec![vec![log_target, log_other]]);
+
+        let raw: crate::filter::RawLogFilter = serde_json::from_str(&format!(
+            r#"{{"fromBlock":"0x0","toBlock":"0x0","address":"{}"}}"#,
+            target,
+        ))
+        .unwrap();
+
+        let result = EthApiServer::get_logs(&handler, raw).await.unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].address, target);
+        assert!(!result[0].removed);
+    }
+
+    #[tokio::test]
+    async fn get_logs_topic_filtering() {
+        let handler = setup();
+        let topic_a = ShellHash::from_slice(&[0x11; 32]);
+        let topic_b = ShellHash::from_slice(&[0x22; 32]);
+
+        let log_a = shell_core::Log::new(
+            Address::from([0x01; 20]),
+            vec![topic_a],
+            Bytes::new(),
+        )
+        .unwrap();
+        let log_b = shell_core::Log::new(
+            Address::from([0x01; 20]),
+            vec![topic_b],
+            Bytes::new(),
+        )
+        .unwrap();
+
+        store_block_with_logs(&handler, 0, vec![vec![log_a, log_b]]);
+
+        // Filter for topic_a only
+        let raw: crate::filter::RawLogFilter = serde_json::from_str(&format!(
+            r#"{{"fromBlock":"0x0","toBlock":"0x0","topics":["{}"]}}"#,
+            topic_a,
+        ))
+        .unwrap();
+
+        let result = EthApiServer::get_logs(&handler, raw).await.unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].topics[0], topic_a);
+    }
+
+    #[tokio::test]
+    async fn get_logs_bloom_fast_path_skips_block() {
+        let handler = setup();
+        // Block contains log from address 0xBB only.
+        let other = Address::from([0xBB; 20]);
+        let log = shell_core::Log::new(other, vec![], Bytes::new()).unwrap();
+        store_block_with_logs(&handler, 0, vec![vec![log]]);
+
+        // Query for address 0xAA — bloom should reject the block.
+        let target = Address::from([0xAA; 20]);
+        let raw: crate::filter::RawLogFilter = serde_json::from_str(&format!(
+            r#"{{"fromBlock":"0x0","toBlock":"0x0","address":"{}"}}"#,
+            target,
+        ))
+        .unwrap();
+
+        let result = EthApiServer::get_logs(&handler, raw).await.unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_logs_range_too_large_returns_error() {
+        let handler = setup();
+        let raw: crate::filter::RawLogFilter = serde_json::from_str(
+            r#"{"fromBlock":"0x0","toBlock":"0x3e9"}"#, // 0..1001 = 1002 blocks
+        )
+        .unwrap();
+
+        let result = EthApiServer::get_logs(&handler, raw).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.message().contains("cap the range"));
+    }
+
+    #[tokio::test]
+    async fn get_logs_metadata_fields_are_correct() {
+        let handler = setup();
+        let addr = Address::from([0xCC; 20]);
+        let topic = ShellHash::from_slice(&[0xDD; 32]);
+        let log = shell_core::Log::new(
+            addr,
+            vec![topic],
+            Bytes::copy_from_slice(b"\x01\x02"),
+        )
+        .unwrap();
+        let block_hash = store_block_with_logs(&handler, 1, vec![vec![log]]);
+
+        let raw: crate::filter::RawLogFilter =
+            serde_json::from_str(r#"{"fromBlock":"0x1","toBlock":"0x1"}"#).unwrap();
+        let result = EthApiServer::get_logs(&handler, raw).await.unwrap();
+        assert_eq!(result.len(), 1);
+        let entry = &result[0];
+        assert_eq!(entry.block_number, "0x1");
+        assert_eq!(entry.block_hash, block_hash);
+        assert_eq!(entry.transaction_index, "0x0");
+        assert_eq!(entry.log_index, "0x0");
+        assert_eq!(entry.data, "0x0102");
+        assert!(!entry.removed);
+    }
+
+    #[tokio::test]
+    async fn shell_get_validators_empty() {
+        let handler = setup();
+        let result = ShellApiServer::get_validators(&handler).await.unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn shell_get_validators_with_data() {
+        let db = Arc::new(MemoryDb::new());
+        let chain_store = Arc::new(ChainStore::new(db.clone()));
+        let ws = Arc::new(parking_lot::RwLock::new(WorldState::new(db)));
+        let tx_pool = Arc::new(TxPool::new(shell_mempool::MempoolConfig {
+            chain_id: 42,
+            ..shell_mempool::MempoolConfig::default()
+        }));
+        let (block_events, _) = tokio::sync::broadcast::channel(16);
+        let handler = RpcHandler::new(
+            chain_store,
+            Arc::clone(&ws),
+            tx_pool,
+            42,
+            None,
+            block_events,
+        );
+
+        let v1 = Address::from([0x11; 20]);
+        let v2 = Address::from([0x22; 20]);
+        {
+            let mut w = ws.write();
+            w.set_validators(&[v1, v2]).unwrap();
+        }
+        let result = ShellApiServer::get_validators(&handler).await.unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0], v1);
+        assert_eq!(result[1], v2);
     }
 }

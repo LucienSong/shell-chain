@@ -4,9 +4,12 @@
 //! extension `shell_*` endpoints for post-quantum features.
 
 pub mod api;
+pub mod filter;
 pub mod handler;
 pub mod server;
+pub mod subscriptions;
 pub mod types;
 
 pub use handler::RpcHandler;
 pub use server::{start_rpc_server, RpcConfig, RpcServerHandle};
+pub use subscriptions::BlockEvent;

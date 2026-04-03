@@ -3,7 +3,8 @@
 use jsonrpsee::proc_macros::rpc;
 use shell_primitives::{Address, ShellHash};
 
-use crate::types::{RpcBlock, RpcReceipt, RpcTransaction, CallRequest};
+use crate::types::{RpcBlock, RpcLogWithMeta, RpcReceipt, RpcTransaction, CallRequest};
+use crate::filter::RawLogFilter;
 
 /// Ethereum-compatible JSON-RPC API.
 #[rpc(server, namespace = "eth")]
@@ -104,6 +105,13 @@ pub trait EthApi {
         position: String,
         block: Option<String>,
     ) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns logs matching the given filter object.
+    #[method(name = "getLogs")]
+    async fn get_logs(
+        &self,
+        filter: RawLogFilter,
+    ) -> Result<Vec<RpcLogWithMeta>, jsonrpsee::types::ErrorObjectOwned>;
 }
 
 /// Shell-chain extension API for PQ-specific features.
@@ -126,4 +134,10 @@ pub trait ShellApi {
         &self,
         tx: shell_core::SignedTransaction,
     ) -> Result<ShellHash, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns the current validator set from world state.
+    #[method(name = "getValidators")]
+    async fn get_validators(
+        &self,
+    ) -> Result<Vec<Address>, jsonrpsee::types::ErrorObjectOwned>;
 }
