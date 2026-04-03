@@ -918,11 +918,15 @@ impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
         let mut gas_used_total = U256::ZERO;
         let mut avg_block_time: f64 = 0.0;
 
+        // Cap scan to last 1000 blocks to prevent O(N) DoS on large chains.
+        const MAX_SCAN: u64 = 1000;
+        let scan_start = block_height.saturating_sub(MAX_SCAN);
+
         if block_height > 0 {
-            for n in 0..=block_height {
+            for n in scan_start..=block_height {
                 if let Ok(Some(blk)) = self.chain_store.get_block_by_number(n) {
-                    total_txs += blk.transactions.len() as u64;
-                    gas_used_total += U256::from(blk.header.gas_used);
+                    total_txs = total_txs.saturating_add(blk.transactions.len() as u64);
+                    gas_used_total = gas_used_total.saturating_add(U256::from(blk.header.gas_used));
                 }
             }
 

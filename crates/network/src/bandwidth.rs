@@ -53,33 +53,59 @@ impl BandwidthTracker {
     }
 
     /// Record `bytes` of inbound traffic. Returns `false` if the configured
-    /// per-second inbound limit would be exceeded (the bytes are still counted).
+    /// per-second inbound limit would be exceeded (bytes NOT counted when over limit).
     pub fn record_inbound(&self, bytes: u64) -> bool {
-        self.total_inbound.fetch_add(bytes, Ordering::Relaxed);
-        let prev = self.inbound_bytes.fetch_add(bytes, Ordering::Relaxed);
+        // Saturating add for total counter to prevent wrap-around (F-058).
+        let _ = self.total_inbound.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+            Some(v.saturating_add(bytes))
+        });
         if self.max_inbound == 0 {
+            self.inbound_bytes.fetch_add(bytes, Ordering::Relaxed);
             return true;
         }
-        prev + bytes <= self.max_inbound
+        // CAS loop: atomically check-and-increment to prevent race (F-056).
+        self.inbound_bytes
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+                let new = current.saturating_add(bytes);
+                if new <= self.max_inbound {
+                    Some(new)
+                } else {
+                    None // over limit — reject
+                }
+            })
+            .is_ok()
     }
 
     /// Record `bytes` of outbound traffic. Returns `false` if the configured
-    /// per-second outbound limit would be exceeded (the bytes are still counted).
+    /// per-second outbound limit would be exceeded (bytes NOT counted when over limit).
     pub fn record_outbound(&self, bytes: u64) -> bool {
-        self.total_outbound.fetch_add(bytes, Ordering::Relaxed);
-        let prev = self.outbound_bytes.fetch_add(bytes, Ordering::Relaxed);
+        let _ = self.total_outbound.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+            Some(v.saturating_add(bytes))
+        });
         if self.max_outbound == 0 {
+            self.outbound_bytes.fetch_add(bytes, Ordering::Relaxed);
             return true;
         }
-        prev + bytes <= self.max_outbound
+        // CAS loop: atomically check-and-increment to prevent race (F-056).
+        self.outbound_bytes
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+                let new = current.saturating_add(bytes);
+                if new <= self.max_outbound {
+                    Some(new)
+                } else {
+                    None
+                }
+            })
+            .is_ok()
     }
 
     /// Reset per-second counters if at least one second has elapsed.
     pub fn reset_if_needed(&self) {
         let mut last = self.last_reset.lock().expect("lock poisoned");
         if last.elapsed() >= std::time::Duration::from_secs(1) {
-            self.inbound_bytes.store(0, Ordering::Relaxed);
-            self.outbound_bytes.store(0, Ordering::Relaxed);
+            // Use SeqCst to synchronize with concurrent record operations (F-057).
+            self.inbound_bytes.store(0, Ordering::SeqCst);
+            self.outbound_bytes.store(0, Ordering::SeqCst);
             *last = Instant::now();
         }
     }
@@ -119,6 +145,15 @@ mod tests {
         let tracker = BandwidthTracker::new(0, 200);
         assert!(tracker.record_outbound(200));
         assert!(!tracker.record_outbound(1));
+    }
+
+    #[test]
+    fn rejected_bytes_not_counted_in_window() {
+        let tracker = BandwidthTracker::new(100, 0);
+        assert!(tracker.record_inbound(100));
+        assert!(!tracker.record_inbound(50)); // rejected
+        // Window counter stays at 100, not 150
+        assert_eq!(tracker.stats().inbound_bytes_per_sec, 100);
     }
 
     #[test]
@@ -172,6 +207,15 @@ mod tests {
         assert_eq!(s.outbound_bytes_per_sec, 20);
         assert_eq!(s.total_inbound, 60);
         assert_eq!(s.total_outbound, 95);
+    }
+
+    #[test]
+    fn total_counters_saturate_not_wrap() {
+        let tracker = BandwidthTracker::new(0, 0);
+        // Pre-fill near max
+        tracker.total_inbound.store(u64::MAX - 10, Ordering::Relaxed);
+        tracker.record_inbound(100);
+        assert_eq!(tracker.stats().total_inbound, u64::MAX);
     }
 
     #[test]
