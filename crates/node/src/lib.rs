@@ -8,8 +8,10 @@ pub mod builder;
 pub mod config;
 pub mod error;
 pub mod node;
+pub mod pruning;
 
 pub use builder::NodeBuilder;
 pub use config::NodeConfig;
 pub use error::NodeError;
 pub use node::Node;
+pub use pruning::{PruningConfig, StateRootTracker};

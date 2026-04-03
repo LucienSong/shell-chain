@@ -71,6 +71,10 @@ enum Commands {
         /// Enable mDNS local peer discovery (disable in production/cloud).
         #[arg(long)]
         enable_mdns: bool,
+
+        /// Number of recent state roots to retain (0 = archive mode, keeps all).
+        #[arg(long, default_value = "0")]
+        pruning: u64,
     },
 
     /// Initialize genesis block and data directory.
@@ -133,6 +137,7 @@ async fn main() {
             p2p_addr,
             bootnode,
             enable_mdns,
+            pruning,
         } => {
             commands::run(commands::run::RunArgs {
                 datadir: cli.datadir,
@@ -147,6 +152,7 @@ async fn main() {
                 p2p_addr,
                 bootnodes: bootnode,
                 enable_mdns,
+                pruning,
             })
             .await
         }

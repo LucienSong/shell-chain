@@ -19,6 +19,7 @@ use shell_storage::{ChainStore, KvStore, WorldState};
 
 use crate::config::NodeConfig;
 use crate::error::NodeError;
+use crate::pruning::StateRootTracker;
 
 /// A running shell-chain node.
 ///
@@ -33,6 +34,8 @@ pub struct Node<S: KvStore + 'static> {
     pub consensus: Arc<RwLock<PoaEngine>>,
     /// Known authority public keys for seal verification (Address → PQ pubkey).
     pub known_authorities: Arc<RwLock<HashMap<Address, Vec<u8>>>>,
+    /// Tracks recent state roots for pruning decisions.
+    pub state_root_tracker: RwLock<StateRootTracker>,
     shutdown_tx: watch::Sender<bool>,
 }
 
@@ -47,6 +50,7 @@ impl<S: KvStore + 'static> Node<S> {
         consensus: Arc<RwLock<PoaEngine>>,
     ) -> Self {
         let (shutdown_tx, _) = watch::channel(false);
+        let tracker = StateRootTracker::new(config.pruning.clone());
         Self {
             config,
             store,
@@ -55,6 +59,7 @@ impl<S: KvStore + 'static> Node<S> {
             tx_pool,
             consensus,
             known_authorities: Arc::new(RwLock::new(HashMap::new())),
+            state_root_tracker: RwLock::new(tracker),
             shutdown_tx,
         }
     }
@@ -67,6 +72,28 @@ impl<S: KvStore + 'static> Node<S> {
     /// Signal the node to shut down.
     pub fn shutdown(&self) {
         let _ = self.shutdown_tx.send(true);
+    }
+
+    /// Record a finalised state root and evict old entries if pruning is enabled.
+    fn record_finalized_state_root(&self, block_number: u64, state_root: ShellHash) {
+        let mut tracker = self.state_root_tracker.write();
+        if let Some(evicted) = tracker.record(block_number, state_root) {
+            tracing::debug!(
+                block = evicted.block_number,
+                root = %evicted.state_root,
+                "state root eligible for pruning"
+            );
+        }
+        // Periodic status log every 64 blocks.
+        if block_number.is_multiple_of(64) {
+            let oldest = tracker.oldest().map(|e| e.block_number).unwrap_or(0);
+            tracing::info!(
+                tracked = tracker.len(),
+                oldest_block = oldest,
+                archive = tracker.config().is_archive(),
+                "state root history status"
+            );
+        }
     }
 
     /// Get a shutdown receiver for external coordination.
@@ -527,6 +554,9 @@ impl<S: KvStore + 'static> Node<S> {
         let tx_hashes: Vec<ShellHash> = included_txs.iter().map(|tx| tx.hash()).collect();
         self.tx_pool.remove_batch(&tx_hashes);
 
+        // Track the new state root for pruning decisions.
+        self.record_finalized_state_root(block.number(), block.header.state_root);
+
         Ok(block)
     }
 
@@ -693,6 +723,9 @@ impl<S: KvStore + 'static> Node<S> {
             block.transactions.iter().map(|tx| tx.hash()).collect();
         self.tx_pool.remove_batch(&tx_hashes);
 
+        // Track the imported state root for pruning decisions.
+        self.record_finalized_state_root(block.number(), block.header.state_root);
+
         Ok(())
     }
 
@@ -725,6 +758,7 @@ impl<S: KvStore + 'static> Node<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pruning::PruningConfig;
     use shell_consensus::PoaConfig;
     use shell_core::Transaction;
     use shell_crypto::DilithiumSigner;
@@ -1212,5 +1246,113 @@ mod tests {
 
         // Now the validator set should be updated.
         assert_eq!(node.consensus.read().config().authorities.len(), 2);
+    }
+
+    // ── Pruning integration tests ──────────────────────────────────────
+
+    fn setup_node_with_pruning(keep_recent: u64) -> (Node<MemoryDb>, DilithiumSigner) {
+        let signer = DilithiumSigner::generate();
+        let pubkey = signer.public_key().to_vec();
+        let authority = Address::from_public_key(&pubkey);
+
+        let db = Arc::new(MemoryDb::new());
+        let chain_store = Arc::new(ChainStore::new(db.clone()));
+        let world_state = Arc::new(RwLock::new(WorldState::new(db.clone())));
+        let consensus =
+            Arc::new(RwLock::new(PoaEngine::new(PoaConfig::new(vec![authority], 1))));
+        let tx_pool = Arc::new(TxPool::new(MempoolConfig {
+            chain_id: 1337,
+            ..MempoolConfig::default()
+        }));
+
+        let mut config = NodeConfig::dev(authority);
+        config.pruning = PruningConfig::new(keep_recent);
+        let node = Node::new(config, db, chain_store, world_state, tx_pool, consensus);
+        (node, signer)
+    }
+
+    #[test]
+    fn state_root_history_grows_with_blocks() {
+        let (node, signer) = setup_node_with_pruning(128);
+        store_genesis(&node);
+
+        for _ in 0..5 {
+            node.produce_block(&signer, 0).unwrap();
+        }
+
+        let tracker = node.state_root_tracker.read();
+        assert_eq!(tracker.len(), 5, "should track one root per produced block");
+        assert_eq!(tracker.oldest().unwrap().block_number, 1);
+        assert_eq!(tracker.latest().unwrap().block_number, 5);
+    }
+
+    #[test]
+    fn oldest_roots_evicted_when_exceeding_keep_recent() {
+        let keep = 3u64;
+        let (node, signer) = setup_node_with_pruning(keep);
+        store_genesis(&node);
+
+        for _ in 0..6 {
+            node.produce_block(&signer, 0).unwrap();
+        }
+
+        let tracker = node.state_root_tracker.read();
+        assert_eq!(
+            tracker.len(),
+            keep as usize,
+            "history should be capped at keep_recent"
+        );
+        assert_eq!(
+            tracker.oldest().unwrap().block_number, 4,
+            "blocks 1–3 should have been evicted"
+        );
+        assert_eq!(tracker.latest().unwrap().block_number, 6);
+    }
+
+    #[test]
+    fn archive_mode_never_prunes() {
+        let (node, signer) = setup_node_with_pruning(0); // archive
+        store_genesis(&node);
+
+        for _ in 0..10 {
+            node.produce_block(&signer, 0).unwrap();
+        }
+
+        let tracker = node.state_root_tracker.read();
+        assert_eq!(tracker.len(), 10, "archive mode keeps all roots");
+        assert_eq!(tracker.oldest().unwrap().block_number, 1);
+    }
+
+    #[test]
+    fn import_block_tracks_state_root() {
+        let (node, _signer) = setup_node_with_pruning(10);
+        store_genesis(&node);
+
+        let block = Block {
+            header: BlockHeader {
+                parent_hash: node.chain_store.get_head_hash().unwrap().unwrap(),
+                state_root: ShellHash::from([0xAB; 32]),
+                transactions_root: ShellHash::default(),
+                receipts_root: ShellHash::default(),
+                logs_bloom: Bytes::default(),
+                number: 1,
+                gas_limit: 30_000_000,
+                gas_used: 0,
+                timestamp: 1_700_000_001,
+                extra_data: Bytes::default(),
+                proposer: node.config.proposer_address.unwrap(),
+                sig_aggregate_proof: None,
+            },
+            transactions: vec![],
+            proposer_seal: None,
+        };
+
+        let verifier = DilithiumVerifier;
+        node.import_block(block, &verifier).unwrap();
+
+        let tracker = node.state_root_tracker.read();
+        assert_eq!(tracker.len(), 1);
+        assert_eq!(tracker.latest().unwrap().block_number, 1);
+        assert_eq!(tracker.latest().unwrap().state_root, ShellHash::from([0xAB; 32]));
     }
 }

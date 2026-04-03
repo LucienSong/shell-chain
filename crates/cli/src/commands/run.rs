@@ -11,6 +11,7 @@ use shell_keystore::{decrypt, EncryptedKey};
 use shell_mempool::MempoolConfig;
 use shell_network::{NetworkBus, NetworkConfig};
 use shell_node::config::NodeConfig;
+use shell_node::pruning::PruningConfig;
 use shell_primitives::Address;
 use shell_rpc::RpcConfig;
 use shell_storage::{ChainStore, KvStore, MemoryDb};
@@ -31,6 +32,7 @@ pub struct RunArgs {
     pub p2p_addr: String,
     pub bootnodes: Vec<String>,
     pub enable_mdns: bool,
+    pub pruning: u64,
 }
 
 /// Start the node: load genesis, initialize state, and run the event loop.
@@ -187,6 +189,7 @@ async fn run_with_store<S: KvStore + 'static>(
         proposer_address: Some(authority),
         block_time_ms: args.block_time,
         data_dir: args.datadir.to_string_lossy().into(),
+        pruning: PruningConfig::new(args.pruning),
     };
 
     // Build the node (auto-detects existing state via NodeBuilder).
@@ -214,6 +217,11 @@ async fn run_with_store<S: KvStore + 'static>(
             eprintln!("   P2P:         {p2p_listen} (libp2p)");
             eprintln!("   Authority:   0x{}", hex::encode(authority.as_bytes()));
             eprintln!("   Block time:  {}ms", args.block_time);
+            if args.pruning > 0 {
+                eprintln!("   Pruning:     keep last {} state roots", args.pruning);
+            } else {
+                eprintln!("   Pruning:     archive (keep all)");
+            }
             if resumed {
                 eprintln!("   Mode:        resumed from persistent storage");
             }
@@ -246,6 +254,11 @@ async fn run_with_store<S: KvStore + 'static>(
         }
         eprintln!("   Authority:   0x{}", hex::encode(authority.as_bytes()));
         eprintln!("   Block time:  {}ms", args.block_time);
+        if args.pruning > 0 {
+            eprintln!("   Pruning:     keep last {} state roots", args.pruning);
+        } else {
+            eprintln!("   Pruning:     archive (keep all)");
+        }
         if resumed {
             eprintln!("   Mode:        resumed from persistent storage");
         }

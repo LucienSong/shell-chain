@@ -8,6 +8,8 @@ use shell_network::NetworkConfig;
 use shell_primitives::Address;
 use shell_rpc::RpcConfig;
 
+use crate::pruning::PruningConfig;
+
 /// Top-level configuration for a shell-chain node.
 #[derive(Debug, Clone)]
 pub struct NodeConfig {
@@ -27,6 +29,8 @@ pub struct NodeConfig {
     pub block_time_ms: u64,
     /// Data directory for persistent storage.
     pub data_dir: String,
+    /// State-root pruning configuration.
+    pub pruning: PruningConfig,
 }
 
 impl NodeConfig {
@@ -48,6 +52,7 @@ impl NodeConfig {
             proposer_address: Some(authority),
             block_time_ms: 2000,
             data_dir: "shell-data".into(),
+            pruning: PruningConfig::default(),
         }
     }
 }
