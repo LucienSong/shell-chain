@@ -61,6 +61,7 @@ pub fn initialize_genesis<S: KvStore + 'static>(
         extra_data: Bytes::copy_from_slice(config.extra_data.as_bytes()),
         proposer,
         sig_aggregate_proof: None,
+        base_fee_per_gas: 0,
     };
 
     let block = Block {

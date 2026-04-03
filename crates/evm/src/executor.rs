@@ -415,6 +415,7 @@ mod tests {
             extra_data: shell_primitives::Bytes::new(),
             proposer: ShellAddress::ZERO,
             sig_aggregate_proof: None,
+            base_fee_per_gas: 0,
         }
     }
 

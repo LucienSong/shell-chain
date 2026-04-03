@@ -241,6 +241,7 @@ impl<S: KvStore + 'static> RpcHandler<S> {
             extra_data: Bytes::default(),
             proposer: Address::ZERO,
             sig_aggregate_proof: None,
+            base_fee_per_gas: 0,
         };
 
         let result = evm
@@ -315,6 +316,7 @@ fn block_to_rpc(block: &Block) -> RpcBlock {
         receipts_root: block.header.receipts_root,
         transactions: block.transactions.iter().map(|tx| tx.hash()).collect(),
         size: hex_u64(0), // placeholder
+        base_fee_per_gas: hex_u64(block.header.base_fee_per_gas),
     }
 }
 
@@ -798,6 +800,7 @@ mod tests {
                 extra_data: Bytes::default(),
                 proposer: Address::from_public_key(b"proposer-key-data"),
                 sig_aggregate_proof: None,
+                base_fee_per_gas: 0,
             },
             transactions: vec![],
             proposer_seal: None,
@@ -1200,6 +1203,7 @@ mod tests {
                 extra_data: Bytes::default(),
                 proposer: Address::from_public_key(b"proposer-key-data"),
                 sig_aggregate_proof: None,
+                base_fee_per_gas: 0,
             },
             transactions: vec![],
             proposer_seal: None,

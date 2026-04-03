@@ -40,6 +40,7 @@ fn sample_header(number: u64) -> BlockHeader {
         extra_data: ShellBytes::new(),
         proposer: ShellAddress::ZERO,
         sig_aggregate_proof: None,
+        base_fee_per_gas: 0,
     }
 }
 

@@ -23,6 +23,8 @@ pub struct BlockHeader {
     pub proposer: Address,
     /// Aggregated proof for batched signature verification (future use).
     pub sig_aggregate_proof: Option<Bytes>,
+    /// EIP-1559 base fee per gas. 0 for the genesis block.
+    pub base_fee_per_gas: u64,
 }
 
 impl Encodable for BlockHeader {
@@ -50,6 +52,7 @@ impl Encodable for BlockHeader {
                 empty.encode(out);
             }
         }
+        self.base_fee_per_gas.encode(out);
     }
 
     fn length(&self) -> usize {
@@ -76,6 +79,7 @@ impl BlockHeader {
             + self.extra_data.length()
             + self.proposer.length()
             + proof_len
+            + self.base_fee_per_gas.length()
     }
 
     /// Compute the block hash (keccak256 of RLP-encoded header).
@@ -132,6 +136,7 @@ mod tests {
             extra_data: Bytes::new(),
             proposer: Address::ZERO,
             sig_aggregate_proof: None,
+            base_fee_per_gas: 0,
         }
     }
 

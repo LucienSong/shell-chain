@@ -9,7 +9,7 @@ use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
 use shell_consensus::{ConsensusEngine, PoaEngine};
-use shell_core::{Block, BlockHeader, SignedTransaction};
+use shell_core::{Block, BlockHeader, SignedTransaction, calculate_base_fee};
 use shell_crypto::{DilithiumVerifier, Signer, Verifier};
 use shell_evm::{commit_evm_state, ShellEvm, ShellStateDb};
 use shell_mempool::TxPool;
@@ -524,6 +524,13 @@ impl<S: KvStore + 'static> Node<S> {
             .unwrap_or_default()
             .as_secs();
 
+        // Calculate EIP-1559 base fee from parent block.
+        let base_fee = calculate_base_fee(
+            head.header.gas_used,
+            head.header.gas_limit,
+            head.header.base_fee_per_gas,
+        );
+
         // Build a preliminary header for EVM context.
         let mut header = BlockHeader {
             parent_hash: head_hash,
@@ -538,6 +545,7 @@ impl<S: KvStore + 'static> Node<S> {
             extra_data: Bytes::default(),
             proposer: proposer_addr,
             sig_aggregate_proof: None,
+            base_fee_per_gas: base_fee,
         };
 
         let mut included_txs: Vec<SignedTransaction> = Vec::new();
@@ -545,6 +553,11 @@ impl<S: KvStore + 'static> Node<S> {
         let mut cumulative_gas: u64 = 0;
 
         for (idx, tx) in candidates.iter().enumerate() {
+            // EIP-1559: skip transactions that cannot afford the base fee.
+            if tx.tx.max_fee_per_gas < base_fee {
+                continue;
+            }
+
             match evm.execute_tx(tx, &header, idx as u32, cumulative_gas) {
                 Ok(result) => {
                     cumulative_gas += result.gas_used;
@@ -706,6 +719,19 @@ impl<S: KvStore + 'static> Node<S> {
 
         // Verify consensus rules.
         self.consensus.read().verify_header(&block.header)?;
+
+        // Verify EIP-1559 base fee is correct.
+        let expected_base_fee = calculate_base_fee(
+            head.header.gas_used,
+            head.header.gas_limit,
+            head.header.base_fee_per_gas,
+        );
+        if block.header.base_fee_per_gas != expected_base_fee {
+            return Err(NodeError::Startup(format!(
+                "invalid base_fee_per_gas: expected {expected_base_fee}, got {}",
+                block.header.base_fee_per_gas,
+            )));
+        }
 
         // Verify proposer seal (PQ signature).
         match &block.proposer_seal {
@@ -896,6 +922,7 @@ mod tests {
                 extra_data: Bytes::default(),
                 proposer: node.config.proposer_address.unwrap(),
                 sig_aggregate_proof: None,
+                base_fee_per_gas: 0,
             },
             transactions: vec![],
             proposer_seal: None,
@@ -948,13 +975,13 @@ mod tests {
         let receiver = Address::from([0xBB; 20]);
         let transfer_value = U256::from(1_000_000);
 
-        // Fund sender
-        fund_account(&node, &sender, U256::from(10_000_000_000u64));
+        // Fund sender (enough for transfer + gas at INITIAL_BASE_FEE)
+        fund_account(&node, &sender, U256::from(100_000_000_000_000u64));
 
         // Verify initial balances
         {
             let ws = node.world_state.read();
-            assert_eq!(ws.get_balance(&sender).unwrap(), U256::from(10_000_000_000u64));
+            assert_eq!(ws.get_balance(&sender).unwrap(), U256::from(100_000_000_000_000u64));
             assert_eq!(ws.get_balance(&receiver).unwrap(), U256::ZERO);
         }
 
@@ -966,7 +993,7 @@ mod tests {
             value: transfer_value,
             data: shell_primitives::Bytes::new(),
             gas_limit: 21_000,
-            max_fee_per_gas: 0,
+            max_fee_per_gas: shell_core::INITIAL_BASE_FEE,
             max_priority_fee_per_gas: 0,
         };
 
@@ -1007,7 +1034,7 @@ mod tests {
             // Sender balance should have decreased (value transferred + gas)
             let sender_balance = ws.get_balance(&sender).unwrap();
             assert!(
-                sender_balance < U256::from(10_000_000_000u64),
+                sender_balance < U256::from(100_000_000_000_000u64),
                 "sender balance should decrease after transfer"
             );
         }
@@ -1039,6 +1066,7 @@ mod tests {
                 extra_data: Bytes::default(),
                 proposer: node.config.proposer_address.unwrap(),
                 sig_aggregate_proof: None,
+                base_fee_per_gas: shell_core::INITIAL_BASE_FEE,
             },
             transactions: vec![],
             proposer_seal: None,
@@ -1142,6 +1170,7 @@ mod tests {
                 extra_data: Bytes::default(),
                 proposer: node.config.proposer_address.unwrap(),
                 sig_aggregate_proof: None,
+                base_fee_per_gas: shell_core::INITIAL_BASE_FEE,
             },
             transactions: vec![],
             proposer_seal: None,
@@ -1439,6 +1468,7 @@ mod tests {
                 extra_data: Bytes::default(),
                 proposer: node.config.proposer_address.unwrap(),
                 sig_aggregate_proof: None,
+                base_fee_per_gas: shell_core::INITIAL_BASE_FEE,
             },
             transactions: vec![],
             proposer_seal: None,

@@ -336,6 +336,7 @@ mod tests {
                 extra_data: Bytes::new(),
                 proposer: Address::ZERO,
                 sig_aggregate_proof: None,
+                base_fee_per_gas: 0,
             },
             transactions: vec![],
             proposer_seal: None,

@@ -19,6 +19,7 @@ pub struct RpcBlock {
     pub receipts_root: ShellHash,
     pub transactions: Vec<ShellHash>,
     pub size: String,
+    pub base_fee_per_gas: String,
 }
 
 /// Hex-encoded transaction response.

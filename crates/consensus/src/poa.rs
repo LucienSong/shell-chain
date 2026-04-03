@@ -273,6 +273,7 @@ mod tests {
             extra_data: Bytes::new(),
             proposer,
             sig_aggregate_proof: None,
+            base_fee_per_gas: 0,
         }
     }
 

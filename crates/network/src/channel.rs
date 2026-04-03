@@ -143,6 +143,7 @@ mod tests {
                 extra_data: Bytes::default(),
                 proposer: Address::from_public_key(b"test-proposer"),
                 sig_aggregate_proof: None,
+                base_fee_per_gas: 0,
             },
             transactions: vec![],
             proposer_seal: None,
