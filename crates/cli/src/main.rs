@@ -68,6 +68,10 @@ enum Commands {
         #[arg(long)]
         bootnode: Vec<String>,
 
+        /// Comma-separated bootstrap peer multiaddrs.
+        #[arg(long, value_delimiter = ',')]
+        bootnodes: Vec<String>,
+
         /// Enable mDNS local peer discovery (disable in production/cloud).
         #[arg(long)]
         enable_mdns: bool,
@@ -136,9 +140,14 @@ async fn main() {
             p2p,
             p2p_addr,
             bootnode,
+            bootnodes,
             enable_mdns,
             pruning,
         } => {
+            // Merge --bootnode (repeatable) and --bootnodes (comma-separated).
+            let mut all_bootnodes = bootnode;
+            all_bootnodes.extend(bootnodes);
+
             commands::run(commands::run::RunArgs {
                 datadir: cli.datadir,
                 rpc_addr,
@@ -150,7 +159,7 @@ async fn main() {
                 ws_port,
                 p2p,
                 p2p_addr,
-                bootnodes: bootnode,
+                bootnodes: all_bootnodes,
                 enable_mdns,
                 pruning,
             })

@@ -163,6 +163,7 @@ mod tests {
                 epoch_length: 0,
             },
             alloc,
+            boot_nodes: vec![],
         }
     }
 

@@ -18,6 +18,8 @@ pub mod service;
 
 pub use channel::{ChannelNetwork, NetworkBus};
 pub use config::NetworkConfig;
+#[cfg(feature = "libp2p")]
+pub use config::validate_bootnode_multiaddr;
 pub use error::NetworkError;
 #[cfg(feature = "libp2p")]
 pub use libp2p_service::Libp2pNetwork;

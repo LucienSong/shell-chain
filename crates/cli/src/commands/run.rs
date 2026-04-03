@@ -135,6 +135,7 @@ async fn run_with_store<S: KvStore + 'static>(
                 epoch_length: 0,
             },
             alloc,
+            boot_nodes: vec![],
         };
 
         // Persist dev genesis for future restarts.
@@ -201,9 +202,16 @@ async fn run_with_store<S: KvStore + 'static>(
         #[cfg(feature = "libp2p")]
         {
             let p2p_listen: std::net::SocketAddr = args.p2p_addr.parse()?;
+            // Merge CLI boot nodes with genesis boot nodes (CLI takes priority via ordering).
+            let mut boot_nodes = args.bootnodes;
+            for addr in &genesis_config.boot_nodes {
+                if !boot_nodes.contains(addr) {
+                    boot_nodes.push(addr.clone());
+                }
+            }
             let net_config = NetworkConfig {
                 listen_addr: p2p_listen,
-                boot_nodes: args.bootnodes,
+                boot_nodes,
                 enable_mdns: args.enable_mdns,
                 ..NetworkConfig::default()
             };
