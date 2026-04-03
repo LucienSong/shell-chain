@@ -21,6 +21,12 @@ pub struct NetworkConfig {
     pub enable_kademlia: bool,
     /// Enable GossipSub peer scoring for block/transaction topics.
     pub enable_peer_scoring: bool,
+    /// Enable relay client for NAT traversal (connect through relay nodes).
+    pub enable_relay: bool,
+    /// Enable DCUtR (Direct Connection Upgrade through Relay) for hole-punching.
+    pub enable_dcutr: bool,
+    /// Enable autonat for automatic NAT status detection.
+    pub enable_autonat: bool,
 }
 
 impl Default for NetworkConfig {
@@ -34,6 +40,9 @@ impl Default for NetworkConfig {
             enable_mdns: false,
             enable_kademlia: true,
             enable_peer_scoring: true,
+            enable_relay: true,
+            enable_dcutr: true,
+            enable_autonat: true,
         }
     }
 }
