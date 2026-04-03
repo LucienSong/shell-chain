@@ -5,6 +5,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Instant;
 
 use hyper::body::Incoming;
 use hyper::{Method, Request, Response, StatusCode};
@@ -27,6 +28,8 @@ pub struct Metrics {
     pub blocks_imported: IntCounter,
     /// Total number of transactions received.
     pub txs_received: IntCounter,
+    /// Timestamp when the node started, used for uptime calculation.
+    pub uptime_start: Instant,
     registry: Registry,
 }
 
@@ -76,6 +79,7 @@ impl Metrics {
             block_production_ms,
             blocks_imported,
             txs_received,
+            uptime_start: Instant::now(),
             registry,
         })
     }
@@ -99,7 +103,16 @@ impl Default for Metrics {
     }
 }
 
-/// Handle a single HTTP request, routing to `/metrics` or `/health`.
+/// Determine health status based on current metrics.
+fn health_status(metrics: &Metrics) -> &'static str {
+    if metrics.peer_count.get() == 0 {
+        "degraded"
+    } else {
+        "healthy"
+    }
+}
+
+/// Handle a single HTTP request, routing to `/metrics`, `/health`, or `/readiness`.
 fn handle_request(
     req: Request<Incoming>,
     metrics: &Arc<Metrics>,
@@ -113,13 +126,40 @@ fn handle_request(
                 .body(http_body_util::Full::new(hyper::body::Bytes::from(body)))
                 .unwrap()
         }
-        (&Method::GET, "/health") => Response::builder()
-            .status(StatusCode::OK)
-            .header("Content-Type", "application/json")
-            .body(http_body_util::Full::new(hyper::body::Bytes::from(
-                r#"{"status":"ok"}"#,
-            )))
-            .unwrap(),
+        (&Method::GET, "/health") => {
+            let status = health_status(metrics);
+            let body = serde_json::json!({
+                "status": status,
+                "block_height": metrics.block_height.get(),
+                "peer_count": metrics.peer_count.get(),
+                "tx_pool_size": metrics.tx_pool_size.get(),
+                "blocks_imported": metrics.blocks_imported.get(),
+                "uptime_seconds": metrics.uptime_start.elapsed().as_secs(),
+            });
+            Response::builder()
+                .status(StatusCode::OK)
+                .header("Content-Type", "application/json")
+                .body(http_body_util::Full::new(hyper::body::Bytes::from(
+                    body.to_string(),
+                )))
+                .unwrap()
+        }
+        (&Method::GET, "/readiness") => {
+            let ready = metrics.peer_count.get() > 0 && metrics.block_height.get() > 0;
+            let (status_code, status_text) = if ready {
+                (StatusCode::OK, "ready")
+            } else {
+                (StatusCode::SERVICE_UNAVAILABLE, "not ready")
+            };
+            let body = serde_json::json!({ "status": status_text });
+            Response::builder()
+                .status(status_code)
+                .header("Content-Type", "application/json")
+                .body(http_body_util::Full::new(hyper::body::Bytes::from(
+                    body.to_string(),
+                )))
+                .unwrap()
+        }
         _ => Response::builder()
             .status(StatusCode::NOT_FOUND)
             .body(http_body_util::Full::new(hyper::body::Bytes::from(
@@ -172,10 +212,22 @@ pub async fn serve_metrics(metrics: Arc<Metrics>, addr: SocketAddr) {
 mod tests {
     use super::*;
 
+    /// Helper: build a health JSON body from the given metrics.
+    fn build_health_body(metrics: &Metrics) -> serde_json::Value {
+        let status = health_status(metrics);
+        serde_json::json!({
+            "status": status,
+            "block_height": metrics.block_height.get(),
+            "peer_count": metrics.peer_count.get(),
+            "tx_pool_size": metrics.tx_pool_size.get(),
+            "blocks_imported": metrics.blocks_imported.get(),
+            "uptime_seconds": metrics.uptime_start.elapsed().as_secs(),
+        })
+    }
+
     #[test]
     fn metrics_new_creates_valid_instance() {
         let m = Metrics::new().expect("metrics init");
-        // All gauges/counters should start at zero.
         assert_eq!(m.block_height.get(), 0);
         assert_eq!(m.peer_count.get(), 0);
         assert_eq!(m.tx_pool_size.get(), 0);
@@ -217,38 +269,86 @@ mod tests {
     }
 
     #[test]
-    fn health_endpoint_returns_ok_json() {
-        let _metrics = Arc::new(Metrics::new().expect("metrics init"));
-        // Build a request using an empty Full body and convert via handle_request_generic.
-        let resp = handle_health_response();
-        assert_eq!(resp.status(), StatusCode::OK);
+    fn health_body_includes_all_fields() {
+        let m = Metrics::new().expect("metrics init");
+        m.block_height.set(12345);
+        m.peer_count.set(3);
+        m.tx_pool_size.set(42);
+        for _ in 0..500 {
+            m.blocks_imported.inc();
+        }
+
+        let body = build_health_body(&m);
+        assert_eq!(body["status"], "healthy");
+        assert_eq!(body["block_height"], 12345);
+        assert_eq!(body["peer_count"], 3);
+        assert_eq!(body["tx_pool_size"], 42);
+        assert_eq!(body["blocks_imported"], 500);
+        assert!(body["uptime_seconds"].is_u64(), "uptime_seconds should be a number");
     }
 
     #[test]
-    fn unknown_path_returns_404() {
-        let resp = handle_not_found_response();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    fn health_status_healthy_when_peers_connected() {
+        let m = Metrics::new().expect("metrics init");
+        m.peer_count.set(5);
+        assert_eq!(health_status(&m), "healthy");
     }
 
-    /// Helper: simulate GET /health response.
-    fn handle_health_response() -> Response<http_body_util::Full<hyper::body::Bytes>> {
-        Response::builder()
-            .status(StatusCode::OK)
-            .header("Content-Type", "application/json")
-            .body(http_body_util::Full::new(hyper::body::Bytes::from(
-                r#"{"status":"ok"}"#,
-            )))
-            .unwrap()
+    #[test]
+    fn health_status_degraded_when_no_peers() {
+        let m = Metrics::new().expect("metrics init");
+        assert_eq!(m.peer_count.get(), 0);
+        assert_eq!(health_status(&m), "degraded");
     }
 
-    /// Helper: simulate 404 response.
-    fn handle_not_found_response() -> Response<http_body_util::Full<hyper::body::Bytes>> {
-        Response::builder()
-            .status(StatusCode::NOT_FOUND)
-            .body(http_body_util::Full::new(hyper::body::Bytes::from(
-                "Not Found",
-            )))
-            .unwrap()
+    #[test]
+    fn health_status_transitions() {
+        let m = Metrics::new().expect("metrics init");
+        assert_eq!(health_status(&m), "degraded");
+        m.peer_count.set(1);
+        assert_eq!(health_status(&m), "healthy");
+        m.peer_count.set(0);
+        assert_eq!(health_status(&m), "degraded");
+    }
+
+    #[test]
+    fn uptime_is_non_negative() {
+        let m = Metrics::new().expect("metrics init");
+        let elapsed = m.uptime_start.elapsed().as_secs();
+        // Uptime should be 0 or a small positive number (test runs fast).
+        assert!(elapsed < 5, "uptime should be near zero in a test");
+    }
+
+    #[test]
+    fn readiness_not_ready_when_no_peers_or_height() {
+        let m = Metrics::new().expect("metrics init");
+        let ready = m.peer_count.get() > 0 && m.block_height.get() > 0;
+        assert!(!ready, "should not be ready with zero peers and height");
+    }
+
+    #[test]
+    fn readiness_not_ready_when_no_peers() {
+        let m = Metrics::new().expect("metrics init");
+        m.block_height.set(10);
+        let ready = m.peer_count.get() > 0 && m.block_height.get() > 0;
+        assert!(!ready, "should not be ready with zero peers");
+    }
+
+    #[test]
+    fn readiness_not_ready_when_no_height() {
+        let m = Metrics::new().expect("metrics init");
+        m.peer_count.set(2);
+        let ready = m.peer_count.get() > 0 && m.block_height.get() > 0;
+        assert!(!ready, "should not be ready with zero block height");
+    }
+
+    #[test]
+    fn readiness_ready_when_peers_and_height() {
+        let m = Metrics::new().expect("metrics init");
+        m.peer_count.set(2);
+        m.block_height.set(10);
+        let ready = m.peer_count.get() > 0 && m.block_height.get() > 0;
+        assert!(ready, "should be ready with peers and block height");
     }
 
     #[test]
@@ -269,7 +369,6 @@ mod tests {
         m.block_production_ms.observe(1.5);
 
         let output = m.gather();
-        // Histogram should have a count of 3.
         assert!(
             output.contains("shell_block_production_duration_seconds_count 3"),
             "histogram should record 3 observations"
