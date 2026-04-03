@@ -10,6 +10,24 @@ use shell_rpc::RpcConfig;
 
 use crate::pruning::PruningConfig;
 
+/// Configuration for the Prometheus metrics HTTP endpoint.
+#[derive(Debug, Clone)]
+pub struct MetricsConfig {
+    /// Whether the metrics server is enabled.
+    pub enabled: bool,
+    /// Address the metrics HTTP server listens on.
+    pub listen_addr: SocketAddr,
+}
+
+impl Default for MetricsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            listen_addr: SocketAddr::from(([0, 0, 0, 0], 9090)),
+        }
+    }
+}
+
 /// Top-level configuration for a shell-chain node.
 #[derive(Debug, Clone)]
 pub struct NodeConfig {
@@ -31,6 +49,8 @@ pub struct NodeConfig {
     pub data_dir: String,
     /// State-root pruning configuration.
     pub pruning: PruningConfig,
+    /// Prometheus metrics endpoint configuration.
+    pub metrics: MetricsConfig,
 }
 
 impl NodeConfig {
@@ -53,6 +73,7 @@ impl NodeConfig {
             block_time_ms: 2000,
             data_dir: "shell-data".into(),
             pruning: PruningConfig::default(),
+            metrics: MetricsConfig::default(),
         }
     }
 }

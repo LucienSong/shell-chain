@@ -190,6 +190,7 @@ async fn run_with_store<S: KvStore + 'static>(
         block_time_ms: args.block_time,
         data_dir: args.datadir.to_string_lossy().into(),
         pruning: PruningConfig::new(args.pruning),
+        metrics: shell_node::config::MetricsConfig::default(),
     };
 
     // Build the node (auto-detects existing state via NodeBuilder).

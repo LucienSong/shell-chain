@@ -19,6 +19,7 @@ use shell_storage::{ChainStore, KvStore, WorldState};
 
 use crate::config::NodeConfig;
 use crate::error::NodeError;
+use crate::metrics::Metrics;
 use crate::pruning::StateRootTracker;
 
 /// A running shell-chain node.
@@ -36,6 +37,8 @@ pub struct Node<S: KvStore + 'static> {
     pub known_authorities: Arc<RwLock<HashMap<Address, Vec<u8>>>>,
     /// Tracks recent state roots for pruning decisions.
     pub state_root_tracker: RwLock<StateRootTracker>,
+    /// Prometheus metrics.
+    pub metrics: Arc<Metrics>,
     shutdown_tx: watch::Sender<bool>,
 }
 
@@ -51,6 +54,7 @@ impl<S: KvStore + 'static> Node<S> {
     ) -> Self {
         let (shutdown_tx, _) = watch::channel(false);
         let tracker = StateRootTracker::new(config.pruning.clone());
+        let metrics = Arc::new(Metrics::new());
         Self {
             config,
             store,
@@ -60,6 +64,7 @@ impl<S: KvStore + 'static> Node<S> {
             consensus,
             known_authorities: Arc::new(RwLock::new(HashMap::new())),
             state_root_tracker: RwLock::new(tracker),
+            metrics,
             shutdown_tx,
         }
     }
@@ -118,6 +123,13 @@ impl<S: KvStore + 'static> Node<S> {
         use shell_rpc::{start_rpc_server, BlockEvent};
         use tokio::time::{interval, Duration};
 
+        // Spawn the Prometheus metrics HTTP server if enabled.
+        if self.config.metrics.enabled {
+            let metrics = Arc::clone(&self.metrics);
+            let metrics_addr = self.config.metrics.listen_addr;
+            tokio::spawn(crate::metrics::serve_metrics(metrics, metrics_addr));
+        }
+
         // Create a channel for the RPC layer to forward submitted transactions
         // to the network broadcast loop.
         let (tx_broadcast_tx, mut tx_broadcast_rx) =
@@ -147,10 +159,12 @@ impl<S: KvStore + 'static> Node<S> {
         }
 
         let mut block_timer = interval(Duration::from_millis(self.config.block_time_ms));
+        let mut peer_count_timer = interval(Duration::from_secs(10));
         let mut shutdown_rx = self.shutdown_tx.subscribe();
 
         // Skip the first immediate tick.
         block_timer.tick().await;
+        peer_count_timer.tick().await;
 
         // Startup sync: request blocks we don't have from peers.
         // Track whether we are catching up so we don't spam requests.
@@ -179,8 +193,15 @@ impl<S: KvStore + 'static> Node<S> {
             tokio::select! {
                 _ = block_timer.tick() => {
                     if self.config.proposer_address.is_some() {
+                        let start = std::time::Instant::now();
                         match self.produce_block(&*signer, 500) {
                             Ok(block) => {
+                                let elapsed = start.elapsed().as_secs_f64();
+                                self.metrics.block_production_ms.observe(elapsed);
+                                self.metrics.blocks_imported.inc();
+                                self.metrics.block_height.set(block.number() as i64);
+                                self.metrics.tx_pool_size.set(self.tx_pool.len() as i64);
+
                                 let number = block.number();
                                 let tx_count = block.transactions.len();
                                 let gas = block.header.gas_used;
@@ -255,9 +276,13 @@ impl<S: KvStore + 'static> Node<S> {
                                     let verifier = DilithiumVerifier;
                                     let saved_header = block.header.clone();
                                     let saved_hash = block.hash();
+                                    let imported_number = block.number();
                                     match self.import_block(*block, &verifier) {
                                         Ok(()) => {
                                             sync_requested = false;
+                                            self.metrics.blocks_imported.inc();
+                                            self.metrics.block_height.set(imported_number as i64);
+                                            self.metrics.tx_pool_size.set(self.tx_pool.len() as i64);
 
                                             // Notify eth_subscribe listeners.
                                             let receipts = self
@@ -306,7 +331,10 @@ impl<S: KvStore + 'static> Node<S> {
                                     // error if already known, avoiding TOCTOU race.
                                     let verifier = DilithiumVerifier;
                                     match self.handle_incoming_tx(*tx, &verifier) {
-                                        Ok(_hash) => {}
+                                        Ok(_hash) => {
+                                            self.metrics.txs_received.inc();
+                                            self.metrics.tx_pool_size.set(self.tx_pool.len() as i64);
+                                        }
                                         Err(e) => {
                                             // MempoolError::Duplicate is expected for re-broadcast; don't log it as error.
                                             let msg = format!("{e}");
@@ -357,6 +385,8 @@ impl<S: KvStore + 'static> Node<S> {
                                         match self.import_block(block, &verifier) {
                                             Ok(()) => {
                                                 last_ok = num;
+                                                self.metrics.blocks_imported.inc();
+                                                self.metrics.block_height.set(num as i64);
                                                 debug!(number = num, "synced block");
 
                                                 // Notify eth_subscribe listeners.
@@ -417,6 +447,12 @@ impl<S: KvStore + 'static> Node<S> {
                 Some(signed_tx) = tx_broadcast_rx.recv() => {
                     let msg = NetworkMessage::NewTransaction(Box::new(signed_tx));
                     let _ = network.broadcast(msg).await;
+                }
+
+                // Periodically update peer count metric.
+                _ = peer_count_timer.tick() => {
+                    let peers = network.peer_count().await;
+                    self.metrics.peer_count.set(peers as i64);
                 }
 
                 _ = shutdown_rx.changed() => {

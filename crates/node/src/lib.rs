@@ -7,11 +7,13 @@
 pub mod builder;
 pub mod config;
 pub mod error;
+pub mod metrics;
 pub mod node;
 pub mod pruning;
 
 pub use builder::NodeBuilder;
-pub use config::NodeConfig;
+pub use config::{MetricsConfig, NodeConfig};
 pub use error::NodeError;
+pub use metrics::Metrics;
 pub use node::Node;
 pub use pruning::{PruningConfig, StateRootTracker};
