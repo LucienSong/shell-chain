@@ -22,6 +22,7 @@ pub async fn checkpoint_sync<S: KvStore>(
     url: &str,
     chain_store: &ChainStore<S>,
     datadir: &Path,
+    expected_chain_id: u64,
 ) -> Result<u64, NodeError> {
     let snapshot_path = datadir.join("checkpoint_snapshot.jsonl");
 
@@ -37,9 +38,18 @@ pub async fn checkpoint_sync<S: KvStore>(
         metadata.block_number, metadata.chain_id, metadata.entry_count
     );
 
-    // Determine expected chain_id and genesis_hash for validation.
+    // Always validate chain_id against the expected value.
+    if metadata.chain_id != expected_chain_id {
+        let _ = std::fs::remove_file(&snapshot_path);
+        return Err(NodeError::Startup(format!(
+            "snapshot chain_id mismatch: expected {}, got {}",
+            expected_chain_id, metadata.chain_id
+        )));
+    }
+
+    // Determine expected genesis_hash for validation.
     // If the chain store already has a config, use it; otherwise trust the snapshot.
-    let (expected_chain_id, expected_genesis_hash) = match chain_store
+    let (expected_chain_id_for_import, expected_genesis_hash) = match chain_store
         .get_chain_config()
         .map_err(NodeError::Storage)?
     {
@@ -53,7 +63,7 @@ pub async fn checkpoint_sync<S: KvStore>(
         .map_err(|e| NodeError::Startup(format!("open snapshot: {e}")))?;
     let reader = BufReader::new(file);
     let imported = chain_store
-        .import_snapshot(reader, expected_chain_id, &expected_genesis_hash)
+        .import_snapshot(reader, expected_chain_id_for_import, &expected_genesis_hash)
         .map_err(NodeError::Storage)?;
 
     // Verify the imported HEAD block's state_root matches the snapshot metadata.
@@ -89,14 +99,19 @@ pub fn should_checkpoint_sync<S: KvStore>(chain_store: &ChainStore<S>) -> bool {
 
 /// Download a file from `url` to `dest` using `curl`.
 async fn download_snapshot(url: &str, dest: &PathBuf) -> Result<(), NodeError> {
+    let dest_str = dest.to_str()
+        .ok_or_else(|| NodeError::Startup("snapshot path contains invalid UTF-8".into()))?;
+
     let output = tokio::process::Command::new("curl")
         .args([
             "--fail",
             "--silent",
             "--show-error",
-            "--location", // follow redirects
+            "--location",
+            "--max-filesize", "1073741824",  // 1 GB max
+            "--max-time", "600",             // 10 minute timeout
             "--output",
-            dest.to_str().unwrap_or("checkpoint_snapshot.jsonl"),
+            dest_str,
             url,
         ])
         .output()

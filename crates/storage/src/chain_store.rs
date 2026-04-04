@@ -371,6 +371,17 @@ impl<S: KvStore> ChainStore<S> {
             self.store.write_batch(batch)?;
         }
 
+        // Verify state_root: if a head block was imported, its state_root
+        // must match the snapshot metadata to prevent state injection.
+        if let Ok(Some(head)) = self.get_head_block() {
+            if head.header.state_root != metadata.state_root {
+                return Err(StorageError::State(format!(
+                    "snapshot state_root mismatch: block has {:?}, metadata has {:?}",
+                    head.header.state_root, metadata.state_root
+                )));
+            }
+        }
+
         Ok(metadata)
     }
 

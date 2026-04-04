@@ -167,6 +167,7 @@ async fn run_with_store<S: KvStore + 'static>(
                 url,
                 &chain_store,
                 &args.datadir,
+                args.chain_id,
             )
             .await
             .map_err(|e| -> Box<dyn std::error::Error> {

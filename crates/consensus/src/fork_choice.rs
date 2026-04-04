@@ -202,7 +202,14 @@ impl ForkChoice {
     pub fn chain_between(&self, from_hash: &ShellHash, to_hash: &ShellHash) -> Vec<ShellHash> {
         let mut chain = Vec::new();
         let mut current = *from_hash;
+        let max_depth = self.parent_map.len() + 1;
+        let mut iterations = 0;
         while current != *to_hash {
+            iterations += 1;
+            if iterations > max_depth {
+                // Cycle detected or excessively deep chain — bail out.
+                return Vec::new();
+            }
             chain.push(current);
             match self.parent_map.get(&current) {
                 Some(parent) => current = *parent,
@@ -618,5 +625,19 @@ mod tests {
             assert!(became_head, "block {i} should become new head");
             assert_eq!(fc.head(), &hash(i));
         }
+    }
+
+    #[test]
+    fn chain_between_cycle_guard() {
+        let mut fc = ForkChoice::new(hash(0));
+        fc.add_block(hash(1), hash(0), 1, 0, false);
+        fc.add_block(hash(2), hash(1), 2, 0, false);
+
+        // Manually inject a cycle: hash(1) -> hash(2) -> hash(1)
+        fc.parent_map.insert(hash(1), hash(2));
+
+        // Should detect the cycle and return empty instead of looping forever.
+        let chain = fc.chain_between(&hash(2), &hash(99));
+        assert!(chain.is_empty(), "cycle should be detected and return empty vec");
     }
 }
