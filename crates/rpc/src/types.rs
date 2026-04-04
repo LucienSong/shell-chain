@@ -3,6 +3,11 @@
 use serde::{Deserialize, Serialize};
 use shell_primitives::{Address, ShellHash, U256};
 
+/// keccak256 of RLP-encoded empty list (`0xc0`).
+/// Standard Ethereum constant for blocks with no ommers.
+pub const EMPTY_OMMER_HASH: &str =
+    "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347";
+
 /// Hex-encoded block response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -20,6 +25,17 @@ pub struct RpcBlock {
     pub transactions: Vec<ShellHash>,
     pub size: String,
     pub base_fee_per_gas: String,
+    // F-072: standard Ethereum compatibility fields
+    pub total_difficulty: String,
+    #[serde(rename = "sha3Uncles")]
+    pub sha3_uncles: String,
+    pub uncles: Vec<ShellHash>,
+    /// PoA block nonce — always zero (no mining).
+    pub nonce: String,
+    pub difficulty: String,
+    pub mix_hash: ShellHash,
+    pub extra_data: String,
+    pub logs_bloom: String,
 }
 
 /// Hex-encoded transaction response.

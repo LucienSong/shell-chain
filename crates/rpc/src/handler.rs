@@ -1,10 +1,12 @@
 //! RPC handler implementation backed by chain storage, world state, and mempool.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use jsonrpsee::types::ErrorObjectOwned;
 
+use alloy_rlp::Encodable;
 use shell_core::{Block, BlockHeader, SignedTransaction, Transaction};
 use shell_evm::bloom::BLOOM_SIZE;
 use shell_crypto::{DilithiumVerifier, Signer};
@@ -38,6 +40,8 @@ pub struct RpcHandler<S: KvStore + 'static> {
     proposer_address: Option<Address>,
     /// Timestamp when the RPC handler was created, used for uptime calculation.
     start_time: Instant,
+    /// F-073: counter for bloom filter false positives in eth_getLogs.
+    bloom_false_positives: Arc<AtomicU64>,
 }
 
 impl<S: KvStore + 'static> Clone for RpcHandler<S> {
@@ -52,6 +56,7 @@ impl<S: KvStore + 'static> Clone for RpcHandler<S> {
             proposer_signer: self.proposer_signer.clone(),
             proposer_address: self.proposer_address,
             start_time: self.start_time,
+            bloom_false_positives: Arc::clone(&self.bloom_false_positives),
         }
     }
 }
@@ -76,6 +81,7 @@ impl<S: KvStore + 'static> RpcHandler<S> {
             proposer_signer: None,
             proposer_address: None,
             start_time: Instant::now(),
+            bloom_false_positives: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -90,6 +96,12 @@ impl<S: KvStore + 'static> RpcHandler<S> {
     /// Returns a reference to the block event broadcast sender.
     pub fn block_event_sender(&self) -> &tokio::sync::broadcast::Sender<BlockEvent> {
         &self.block_events
+    }
+
+    /// F-073: returns the total number of bloom filter false positives detected
+    /// during `eth_getLogs` calls (blocks that passed bloom but had no matching logs).
+    pub fn bloom_false_positives(&self) -> u64 {
+        self.bloom_false_positives.load(Ordering::Relaxed)
     }
 
     /// Validate and submit a signed transaction to the mempool.
@@ -270,6 +282,26 @@ impl<S: KvStore + 'static> RpcHandler<S> {
 
         Ok((result.output.clone(), result.gas_used))
     }
+
+    /// Parse a block number string with finality awareness.
+    /// Returns `None` for "latest"/"pending" (= head), `Some(n)` for specific numbers.
+    /// "finalized" and "safe" resolve to the shared finalized block number.
+    fn parse_block_number(&self, s: &str) -> Result<Option<u64>, ErrorObjectOwned> {
+        match s {
+            "latest" | "pending" => Ok(None),
+            "earliest" => Ok(Some(0)),
+            "finalized" | "safe" => {
+                let num = *self.finalized_number.read();
+                Ok(Some(num))
+            }
+            hex if hex.starts_with("0x") => {
+                u64::from_str_radix(&hex[2..], 16)
+                    .map(Some)
+                    .map_err(|_| internal_err(format!("invalid block number: {hex}")))
+            }
+            _ => Err(internal_err(format!("invalid block number: {s}"))),
+        }
+    }
 }
 
 /// Convert a storage error into a JSON-RPC internal error.
@@ -313,22 +345,53 @@ fn parse_hex_u256(s: &str) -> Result<U256, ErrorObjectOwned> {
     Ok(U256::from_be_slice(&bytes))
 }
 
-/// Parse a block number string: "latest", "earliest", or "0x..." hex.
-fn parse_block_number(s: &str) -> Result<Option<u64>, ErrorObjectOwned> {
+/// Parsed block number tag.
+enum BlockTag {
+    /// Resolve to the current head block.
+    Latest,
+    /// Construct a pending pseudo-block from mempool.
+    Pending,
+    /// A specific block number.
+    Number(u64),
+}
+
+/// Parse a block number string: "latest", "pending", "earliest", or "0x..." hex.
+fn parse_block_tag(s: &str) -> Result<BlockTag, ErrorObjectOwned> {
     match s {
-        "latest" | "pending" => Ok(None), // None = head
-        "earliest" => Ok(Some(0)),
+        "latest" | "safe" | "finalized" => Ok(BlockTag::Latest),
+        "pending" => Ok(BlockTag::Pending),
+        "earliest" => Ok(BlockTag::Number(0)),
         hex if hex.starts_with("0x") => {
             u64::from_str_radix(&hex[2..], 16)
-                .map(Some)
+                .map(BlockTag::Number)
                 .map_err(|_| internal_err(format!("invalid block number: {hex}")))
         }
         _ => Err(internal_err(format!("invalid block number: {s}"))),
     }
 }
 
+/// Legacy helper used by callers that don't need pending semantics.
+fn parse_block_number(s: &str) -> Result<Option<u64>, ErrorObjectOwned> {
+    match parse_block_tag(s)? {
+        BlockTag::Latest | BlockTag::Pending => Ok(None),
+        BlockTag::Number(n) => Ok(Some(n)),
+    }
+}
+
 /// Convert a core Block to an RpcBlock response.
 fn block_to_rpc(block: &Block) -> RpcBlock {
+    // F-074: approximate block size from RLP-encoded lengths.
+    let header_size = block.header.length();
+    let tx_size: usize = block.transactions.iter().map(|tx| tx.length()).sum();
+    let size = header_size + tx_size;
+
+    // F-072: logsBloom — hex-encode the 256-byte bloom or emit zero bloom.
+    let logs_bloom = if block.header.logs_bloom.len() == BLOOM_SIZE {
+        hex_bytes(block.header.logs_bloom.as_ref())
+    } else {
+        format!("0x{}", "00".repeat(BLOOM_SIZE))
+    };
+
     RpcBlock {
         hash: block.hash(),
         parent_hash: block.header.parent_hash,
@@ -341,8 +404,17 @@ fn block_to_rpc(block: &Block) -> RpcBlock {
         transactions_root: block.header.transactions_root,
         receipts_root: block.header.receipts_root,
         transactions: block.transactions.iter().map(|tx| tx.hash()).collect(),
-        size: hex_u64(0), // placeholder
+        size: hex_u64(size as u64),
         base_fee_per_gas: hex_u64(block.header.base_fee_per_gas),
+        // F-072: standard Ethereum compatibility fields
+        total_difficulty: "0x1".into(),
+        sha3_uncles: crate::types::EMPTY_OMMER_HASH.into(),
+        uncles: vec![],
+        nonce: "0x0000000000000000".into(),
+        difficulty: "0x1".into(),
+        mix_hash: ShellHash::ZERO,
+        extra_data: hex_bytes(block.header.extra_data.as_ref()),
+        logs_bloom,
     }
 }
 
@@ -410,12 +482,61 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
         number: String,
         _full_txs: bool,
     ) -> Result<Option<RpcBlock>, ErrorObjectOwned> {
-        let num = parse_block_number(&number)?;
-        let block = match num {
-            Some(n) => self.chain_store.get_block_by_number(n).map_err(internal_err)?,
-            None => self.chain_store.get_head_block().map_err(internal_err)?,
-        };
-        Ok(block.as_ref().map(block_to_rpc))
+        let tag = parse_block_tag(&number)?;
+        match tag {
+            BlockTag::Number(n) => {
+                let block = self.chain_store.get_block_by_number(n).map_err(internal_err)?;
+                Ok(block.as_ref().map(block_to_rpc))
+            }
+            BlockTag::Latest => {
+                let block = self.chain_store.get_head_block().map_err(internal_err)?;
+                Ok(block.as_ref().map(block_to_rpc))
+            }
+            BlockTag::Pending => {
+                // F-075: construct a pseudo-block from the mempool.
+                let head = self.chain_store.get_head_block().map_err(internal_err)?;
+                let head = match head {
+                    Some(b) => b,
+                    None => return Ok(None),
+                };
+                let pending_txs = self.tx_pool.pending(256);
+                let tx_hashes: Vec<ShellHash> =
+                    pending_txs.iter().map(|tx| tx.hash()).collect();
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+
+                let tx_size: usize = pending_txs.iter().map(|tx| tx.length()).sum();
+                let header_size = head.header.length();
+                let size = header_size + tx_size;
+
+                let pending_block = RpcBlock {
+                    hash: ShellHash::ZERO,
+                    parent_hash: head.hash(),
+                    number: hex_u64(head.header.number + 1),
+                    timestamp: hex_u64(now),
+                    gas_limit: hex_u64(head.header.gas_limit),
+                    gas_used: hex_u64(0),
+                    miner: head.header.proposer,
+                    state_root: head.header.state_root,
+                    transactions_root: ShellHash::ZERO,
+                    receipts_root: ShellHash::ZERO,
+                    transactions: tx_hashes,
+                    size: hex_u64(size as u64),
+                    base_fee_per_gas: hex_u64(head.header.base_fee_per_gas),
+                    total_difficulty: "0x1".into(),
+                    sha3_uncles: crate::types::EMPTY_OMMER_HASH.into(),
+                    uncles: vec![],
+                    nonce: "0x0000000000000000".into(),
+                    difficulty: "0x1".into(),
+                    mix_hash: ShellHash::ZERO,
+                    extra_data: "0x".into(),
+                    logs_bloom: format!("0x{}", "00".repeat(BLOOM_SIZE)),
+                };
+                Ok(Some(pending_block))
+            }
+        }
     }
 
     async fn get_block_by_hash(
@@ -753,6 +874,9 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
                 .map_err(internal_err)?
                 .unwrap_or_default();
 
+            // F-073: track bloom false positives — count results before this block.
+            let results_before = results.len();
+
             // Global log index across all receipts in this block.
             let mut global_log_index: u64 = 0;
 
@@ -781,6 +905,11 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
                     }
                     global_log_index += 1;
                 }
+            }
+
+            // F-073: bloom passed but no logs matched → false positive.
+            if results.len() == results_before {
+                self.bloom_false_positives.fetch_add(1, Ordering::Relaxed);
             }
         }
 
@@ -2270,5 +2399,251 @@ mod tests {
         assert_eq!(result["avgBlockTime"], 3.0);
         assert_eq!(result["gasUsedTotal"], "0x5208"); // 21000
         assert!(result["latestBaseFee"].is_string());
+    }
+
+    // ── F-072: RpcBlock new Ethereum fields ──────────────────────────
+
+    #[tokio::test]
+    async fn rpc_block_has_standard_eth_fields() {
+        let handler = setup();
+        let block = make_genesis_block();
+        let hash = block.hash();
+        handler.chain_store.put_block(&block).unwrap();
+        handler.chain_store.set_canonical(0, &hash).unwrap();
+        handler.chain_store.set_head(&hash).unwrap();
+
+        let rpc = EthApiServer::get_block_by_number(&handler, "0x0".into(), false)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(rpc.total_difficulty, "0x1");
+        assert_eq!(
+            rpc.sha3_uncles,
+            "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347"
+        );
+        assert!(rpc.uncles.is_empty());
+        assert_eq!(rpc.nonce, "0x0000000000000000");
+        assert_eq!(rpc.difficulty, "0x1");
+        assert_eq!(rpc.mix_hash, ShellHash::ZERO);
+        assert_eq!(rpc.extra_data, "0x");
+        // logs_bloom should be 256 zero bytes hex-encoded (514 chars = "0x" + 512 hex chars)
+        assert_eq!(rpc.logs_bloom.len(), 514);
+        assert!(rpc.logs_bloom.starts_with("0x"));
+    }
+
+    #[tokio::test]
+    async fn rpc_block_logs_bloom_reflects_header() {
+        let handler = setup();
+        let mut bloom_bytes = [0u8; 256];
+        bloom_bytes[0] = 0xFF;
+        bloom_bytes[255] = 0xAA;
+
+        let block = Block {
+            header: BlockHeader {
+                parent_hash: ShellHash::default(),
+                state_root: ShellHash::default(),
+                transactions_root: ShellHash::default(),
+                receipts_root: ShellHash::default(),
+                logs_bloom: Bytes::copy_from_slice(&bloom_bytes),
+                number: 0,
+                gas_limit: 30_000_000,
+                gas_used: 0,
+                timestamp: 1_700_000_000,
+                extra_data: Bytes::default(),
+                proposer: Address::from_public_key(b"proposer-key-data"),
+                sig_aggregate_proof: None,
+                base_fee_per_gas: 0,
+            },
+            transactions: vec![],
+            proposer_seal: None,
+        };
+        let hash = block.hash();
+        handler.chain_store.put_block(&block).unwrap();
+        handler.chain_store.set_canonical(0, &hash).unwrap();
+        handler.chain_store.set_head(&hash).unwrap();
+
+        let rpc = EthApiServer::get_block_by_number(&handler, "latest".into(), false)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(rpc.logs_bloom.starts_with("0xff"));
+        assert!(rpc.logs_bloom.ends_with("aa"));
+    }
+
+    #[tokio::test]
+    async fn rpc_block_json_has_sha3uncles_key() {
+        let handler = setup();
+        let block = make_genesis_block();
+        let hash = block.hash();
+        handler.chain_store.put_block(&block).unwrap();
+        handler.chain_store.set_canonical(0, &hash).unwrap();
+        handler.chain_store.set_head(&hash).unwrap();
+
+        let rpc = EthApiServer::get_block_by_number(&handler, "0x0".into(), false)
+            .await
+            .unwrap()
+            .unwrap();
+        let json = serde_json::to_value(&rpc).unwrap();
+        // The JSON key must be "sha3Uncles" (not "sha3_uncles")
+        assert!(json.get("sha3Uncles").is_some());
+        assert!(json.get("totalDifficulty").is_some());
+        assert!(json.get("logsBloom").is_some());
+        assert!(json.get("mixHash").is_some());
+    }
+
+    // ── F-073: bloom false positive metric ──────────────────────────
+
+    #[tokio::test]
+    async fn bloom_false_positive_counter_increments() {
+        let handler = setup();
+        let addr = Address::from([0xBB; 20]);
+        let log = shell_core::Log::new(addr, vec![], Bytes::new()).unwrap();
+        store_block_with_logs(&handler, 0, vec![vec![log]]);
+
+        assert_eq!(handler.bloom_false_positives(), 0);
+
+        // Query for address 0xBB — bloom matches and logs match → no FP.
+        let raw: crate::filter::RawLogFilter = serde_json::from_str(&format!(
+            r#"{{"fromBlock":"0x0","toBlock":"0x0","address":"{}"}}"#,
+            addr,
+        ))
+        .unwrap();
+        let _ = EthApiServer::get_logs(&handler, raw).await.unwrap();
+        assert_eq!(handler.bloom_false_positives(), 0);
+    }
+
+    // ── F-074: non-zero block size ──────────────────────────────────
+
+    #[tokio::test]
+    async fn block_size_is_non_zero() {
+        let handler = setup();
+        let block = make_genesis_block();
+        let hash = block.hash();
+        handler.chain_store.put_block(&block).unwrap();
+        handler.chain_store.set_canonical(0, &hash).unwrap();
+        handler.chain_store.set_head(&hash).unwrap();
+
+        let rpc = EthApiServer::get_block_by_number(&handler, "0x0".into(), false)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let size = u64::from_str_radix(rpc.size.strip_prefix("0x").unwrap(), 16).unwrap();
+        assert!(size > 0, "block size should be non-zero, got: {}", rpc.size);
+    }
+
+    // ── F-075: pending block support ────────────────────────────────
+
+    #[tokio::test]
+    async fn pending_block_returns_next_number() {
+        let handler = setup();
+        let block = make_genesis_block();
+        let hash = block.hash();
+        handler.chain_store.put_block(&block).unwrap();
+        handler.chain_store.set_canonical(0, &hash).unwrap();
+        handler.chain_store.set_head(&hash).unwrap();
+
+        let rpc = EthApiServer::get_block_by_number(&handler, "pending".into(), false)
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Pending block number = head + 1.
+        assert_eq!(rpc.number, "0x1");
+        // Parent hash = head's hash.
+        assert_eq!(rpc.parent_hash, hash);
+        // Hash = zero (not yet mined).
+        assert_eq!(rpc.hash, ShellHash::ZERO);
+        // Empty mempool → no transactions.
+        assert!(rpc.transactions.is_empty());
+        // Still has standard Ethereum fields.
+        assert_eq!(rpc.total_difficulty, "0x1");
+        assert_eq!(rpc.nonce, "0x0000000000000000");
+    }
+
+    #[tokio::test]
+    async fn pending_block_no_head_returns_none() {
+        let handler = setup();
+        let rpc = EthApiServer::get_block_by_number(&handler, "pending".into(), false)
+            .await
+            .unwrap();
+        assert!(rpc.is_none());
+    }
+
+    // ── Finality RPC tests ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn parse_block_number_finalized_and_safe() {
+        let handler = setup();
+        // Default finalized_number is 0.
+        assert_eq!(handler.parse_block_number("finalized").unwrap(), Some(0));
+        assert_eq!(handler.parse_block_number("safe").unwrap(), Some(0));
+
+        // Update the shared finalized number.
+        *handler.finalized_number.write() = 42;
+        assert_eq!(handler.parse_block_number("finalized").unwrap(), Some(42));
+        assert_eq!(handler.parse_block_number("safe").unwrap(), Some(42));
+
+        // Existing tags still work.
+        assert_eq!(handler.parse_block_number("latest").unwrap(), None);
+        assert_eq!(handler.parse_block_number("pending").unwrap(), None);
+        assert_eq!(handler.parse_block_number("earliest").unwrap(), Some(0));
+        assert_eq!(handler.parse_block_number("0xa").unwrap(), Some(10));
+    }
+
+    #[tokio::test]
+    async fn get_finality_info_returns_valid_json() {
+        let handler = setup();
+
+        // Store a genesis block as head.
+        let block = make_genesis_block();
+        let hash = block.hash();
+        handler.chain_store.put_block(&block).unwrap();
+        handler.chain_store.set_canonical(0, &hash).unwrap();
+        handler.chain_store.set_head(&hash).unwrap();
+
+        let result = ShellApiServer::get_finality_info(&handler).await.unwrap();
+        assert_eq!(result["lastFinalizedBlock"], "0x0");
+        assert_eq!(result["currentHead"], "0x0");
+        assert_eq!(result["pendingAttestations"], 0);
+    }
+
+    #[tokio::test]
+    async fn finalized_number_propagates_to_rpc() {
+        let finalized_number = Arc::new(parking_lot::RwLock::new(0u64));
+        let finality = Arc::new(parking_lot::RwLock::new(FinalityState::new()));
+
+        let db = Arc::new(MemoryDb::new());
+        let chain_store = Arc::new(ChainStore::new(db.clone()));
+        let world_state = Arc::new(parking_lot::RwLock::new(WorldState::new(db)));
+        let tx_pool = Arc::new(TxPool::new(shell_mempool::MempoolConfig {
+            chain_id: 42,
+            ..shell_mempool::MempoolConfig::default()
+        }));
+        let (block_events, _) = tokio::sync::broadcast::channel(16);
+
+        let handler = RpcHandler::new(
+            chain_store,
+            world_state,
+            tx_pool,
+            42,
+            None,
+            block_events,
+            finalized_number.clone(),
+            finality.clone(),
+        );
+
+        // Initially 0.
+        assert_eq!(handler.parse_block_number("finalized").unwrap(), Some(0));
+
+        // Simulate finalization by updating the shared number.
+        *finalized_number.write() = 100;
+        assert_eq!(handler.parse_block_number("finalized").unwrap(), Some(100));
+
+        // Verify get_finality_info reflects the update.
+        let result = ShellApiServer::get_finality_info(&handler).await.unwrap();
+        assert_eq!(result["lastFinalizedBlock"], "0x64"); // 100 in hex
     }
 }

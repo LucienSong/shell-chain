@@ -5448,6 +5448,7 @@ name = "shell-rpc"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
+ "alloy-rlp",
  "hex",
  "jsonrpsee",
  "parking_lot",
