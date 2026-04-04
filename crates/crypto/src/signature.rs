@@ -1,6 +1,13 @@
 use serde::{Deserialize, Serialize};
 use alloy_rlp::Encodable;
 
+/// Maximum allowed signature size in bytes.
+/// SPHINCS+-SHA2-256f produces ~49856 bytes; we allow some headroom.
+pub const MAX_SIGNATURE_BYTES: usize = 51_200;
+
+/// Maximum allowed Dilithium3 signature size (3309 bytes + headroom).
+pub const MAX_DILITHIUM_SIG_BYTES: usize = 4_096;
+
 /// Identifies which PQ signature algorithm was used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SignatureType {
@@ -92,5 +99,41 @@ impl alloy_rlp::Decodable for PQSignature {
 impl PQSignature {
     fn fields_len(&self) -> usize {
         self.sig_type.as_u8().length() + self.data.as_slice().length()
+    }
+
+    /// Validate that the signature size is within acceptable bounds.
+    pub fn validate_size(&self) -> Result<(), String> {
+        let max = match self.sig_type {
+            SignatureType::Dilithium3 => MAX_DILITHIUM_SIG_BYTES,
+            SignatureType::SphincsSha2256f => MAX_SIGNATURE_BYTES,
+            _ => MAX_SIGNATURE_BYTES,
+        };
+        if self.data.len() > max {
+            return Err(format!(
+                "signature too large: {} bytes (max {} for {:?})",
+                self.data.len(), max, self.sig_type
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn signature_size_validation() {
+        let small = PQSignature::new(SignatureType::Dilithium3, vec![0u8; 3309]);
+        assert!(small.validate_size().is_ok());
+
+        let big = PQSignature::new(SignatureType::Dilithium3, vec![0u8; 5000]);
+        assert!(big.validate_size().is_err());
+
+        let sphincs = PQSignature::new(SignatureType::SphincsSha2256f, vec![0u8; 49856]);
+        assert!(sphincs.validate_size().is_ok());
+
+        let too_big = PQSignature::new(SignatureType::SphincsSha2256f, vec![0u8; 60000]);
+        assert!(too_big.validate_size().is_err());
     }
 }

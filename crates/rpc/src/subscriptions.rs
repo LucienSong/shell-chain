@@ -106,8 +106,16 @@ impl SubscriptionTracker {
     }
 
     /// Release a subscription slot (called when the forwarding task ends).
+    /// Saturates at zero to prevent underflow from double-release bugs.
     pub fn release(&self) {
-        self.active.fetch_sub(1, Ordering::SeqCst);
+        let _ = self.active.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+            if current > 0 {
+                Some(current - 1)
+            } else {
+                tracing::warn!("subscription tracker release called with zero active count");
+                None
+            }
+        });
     }
 
     /// Returns the current number of active subscriptions.
@@ -998,5 +1006,13 @@ mod tests {
         });
         let filter = LogFilter::from_value(&json);
         assert_eq!(filter.addresses.len(), 2);
+    }
+
+    #[test]
+    fn release_saturates_at_zero() {
+        let tracker = SubscriptionTracker::new(10);
+        // Release without acquire should not underflow
+        tracker.release();
+        assert_eq!(tracker.active_count(), 0);
     }
 }
