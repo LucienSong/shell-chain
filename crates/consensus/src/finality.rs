@@ -134,6 +134,11 @@ impl FinalityState {
         self.attestation_store.get(block_hash)
     }
 
+    /// Total number of pending attestations across all blocks.
+    pub fn total_pending_attestations(&self) -> usize {
+        self.pending_attestations.values().map(|s| s.len()).sum()
+    }
+
     /// Check if a validator has already attested to a block.
     pub fn has_attested(&self, block_hash: &ShellHash, validator: &Address) -> bool {
         self.pending_attestations

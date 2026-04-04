@@ -6,6 +6,7 @@ use std::sync::Arc;
 use jsonrpsee::server::{Server, ServerHandle};
 use tracing::{info, warn};
 
+use shell_consensus::FinalityState;
 use shell_core::SignedTransaction;
 use shell_crypto::Signer;
 use shell_mempool::TxPool;
@@ -80,6 +81,8 @@ pub async fn start_rpc_server<S: KvStore + 'static>(
     block_events: tokio::sync::broadcast::Sender<BlockEvent>,
     proposer_signer: Option<Arc<dyn Signer>>,
     proposer_address: Option<Address>,
+    finalized_number: Arc<parking_lot::RwLock<u64>>,
+    finality: Arc<parking_lot::RwLock<FinalityState>>,
 ) -> Result<RpcServerHandle, Box<dyn std::error::Error + Send + Sync>> {
     // Validate TLS configuration if provided.
     match tls::load_tls_config(
@@ -118,6 +121,8 @@ pub async fn start_rpc_server<S: KvStore + 'static>(
         chain_id,
         tx_broadcast,
         block_events,
+        finalized_number,
+        finality,
     );
     if let (Some(signer), Some(addr)) = (proposer_signer, proposer_address) {
         handler = handler.with_proposer(signer, addr);

@@ -157,6 +157,11 @@ impl<S: KvStore + 'static> Node<S> {
             } else {
                 None
             };
+        // Shared finalized block number for the RPC layer.
+        let finalized_number = Arc::new(parking_lot::RwLock::new(
+            self.finality.read().last_finalized_number(),
+        ));
+
         let _rpc = start_rpc_server(
             self.config.rpc.clone(),
             self.chain_store.clone(),
@@ -167,6 +172,8 @@ impl<S: KvStore + 'static> Node<S> {
             block_event_tx.clone(),
             proposer_signer,
             self.config.proposer_address,
+            finalized_number.clone(),
+            self.finality.clone(),
         )
         .await
         .map_err(|e| NodeError::Startup(format!("RPC: {e}")))?;
@@ -459,6 +466,12 @@ impl<S: KvStore + 'static> Node<S> {
                                     let verifier = DilithiumVerifier;
                                     if let Err(e) = self.handle_attestation(*attestation, &verifier) {
                                         tracing::warn!("attestation error: {e}");
+                                    }
+                                    // Push latest finalized number to the RPC layer.
+                                    let fin = self.finality.read().last_finalized_number();
+                                    let mut fn_w = finalized_number.write();
+                                    if fin > *fn_w {
+                                        *fn_w = fin;
                                     }
                                 }
                                 _ => {

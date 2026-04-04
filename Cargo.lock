@@ -5457,6 +5457,7 @@ dependencies = [
  "rustls-pemfile",
  "serde",
  "serde_json",
+ "shell-consensus",
  "shell-core",
  "shell-crypto",
  "shell-evm",

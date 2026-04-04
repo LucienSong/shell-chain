@@ -7,6 +7,7 @@ use std::time::Instant;
 use jsonrpsee::types::ErrorObjectOwned;
 
 use alloy_rlp::Encodable;
+use shell_consensus::FinalityState;
 use shell_core::{Block, BlockHeader, SignedTransaction, Transaction};
 use shell_evm::bloom::BLOOM_SIZE;
 use shell_crypto::{DilithiumVerifier, Signer};
@@ -42,6 +43,10 @@ pub struct RpcHandler<S: KvStore + 'static> {
     start_time: Instant,
     /// F-073: counter for bloom filter false positives in eth_getLogs.
     bloom_false_positives: Arc<AtomicU64>,
+    /// Last finalized block number, shared with the node's attestation handler.
+    finalized_number: Arc<parking_lot::RwLock<u64>>,
+    /// Finality state for pending attestation queries.
+    finality: Arc<parking_lot::RwLock<FinalityState>>,
 }
 
 impl<S: KvStore + 'static> Clone for RpcHandler<S> {
@@ -57,6 +62,8 @@ impl<S: KvStore + 'static> Clone for RpcHandler<S> {
             proposer_address: self.proposer_address,
             start_time: self.start_time,
             bloom_false_positives: Arc::clone(&self.bloom_false_positives),
+            finalized_number: Arc::clone(&self.finalized_number),
+            finality: Arc::clone(&self.finality),
         }
     }
 }
@@ -70,6 +77,8 @@ impl<S: KvStore + 'static> RpcHandler<S> {
         chain_id: u64,
         tx_broadcast: Option<tokio::sync::mpsc::UnboundedSender<SignedTransaction>>,
         block_events: tokio::sync::broadcast::Sender<BlockEvent>,
+        finalized_number: Arc<parking_lot::RwLock<u64>>,
+        finality: Arc<parking_lot::RwLock<FinalityState>>,
     ) -> Self {
         Self {
             chain_store,
@@ -82,6 +91,8 @@ impl<S: KvStore + 'static> RpcHandler<S> {
             proposer_address: None,
             start_time: Instant::now(),
             bloom_false_positives: Arc::new(AtomicU64::new(0)),
+            finalized_number,
+            finality,
         }
     }
 
@@ -482,6 +493,12 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
         number: String,
         _full_txs: bool,
     ) -> Result<Option<RpcBlock>, ErrorObjectOwned> {
+        // Resolve "finalized"/"safe" to actual finalized number before tag parsing.
+        if number == "finalized" || number == "safe" {
+            let n = *self.finalized_number.read();
+            let block = self.chain_store.get_block_by_number(n).map_err(internal_err)?;
+            return Ok(block.as_ref().map(block_to_rpc));
+        }
         let tag = parse_block_tag(&number)?;
         match tag {
             BlockTag::Number(n) => {
@@ -691,7 +708,7 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
         newest_block: String,
         _reward_percentiles: Option<Vec<f64>>,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let latest = match parse_block_number(&newest_block)? {
+        let latest = match self.parse_block_number(&newest_block)? {
             Some(n) => n,
             None => {
                 // "latest" — get head block number
@@ -1108,6 +1125,23 @@ impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
             "latestBaseFee": hex_u64(base_fee),
         }))
     }
+
+    async fn get_finality_info(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let finalized = *self.finalized_number.read();
+        let current_head = self
+            .chain_store
+            .get_head_block()
+            .map_err(internal_err)?
+            .map(|b| b.number())
+            .unwrap_or(0);
+        let pending = self.finality.read().total_pending_attestations();
+
+        Ok(serde_json::json!({
+            "lastFinalizedBlock": hex_u64(finalized),
+            "currentHead": hex_u64(current_head),
+            "pendingAttestations": pending,
+        }))
+    }
 }
 
 #[jsonrpsee::core::async_trait]
@@ -1230,7 +1264,9 @@ mod tests {
             ..shell_mempool::MempoolConfig::default()
         }));
         let (block_events, _) = tokio::sync::broadcast::channel(16);
-        RpcHandler::new(chain_store, world_state, tx_pool, 42, None, block_events)
+        let finalized_number = Arc::new(parking_lot::RwLock::new(0u64));
+        let finality = Arc::new(parking_lot::RwLock::new(FinalityState::new()));
+        RpcHandler::new(chain_store, world_state, tx_pool, 42, None, block_events, finalized_number, finality)
     }
 
     fn make_genesis_block() -> Block {
@@ -1890,6 +1926,8 @@ mod tests {
             42,
             None,
             block_events,
+            Arc::new(parking_lot::RwLock::new(0u64)),
+            Arc::new(parking_lot::RwLock::new(FinalityState::new())),
         );
 
         let v1 = Address::from([0x11; 20]);
@@ -1949,6 +1987,8 @@ mod tests {
             42,
             None,
             block_events,
+            Arc::new(parking_lot::RwLock::new(0u64)),
+            Arc::new(parking_lot::RwLock::new(FinalityState::new())),
         )
         .with_proposer(Arc::new(DilithiumSigner::from_bytes(
             signer.public_key(),

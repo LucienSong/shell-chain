@@ -275,4 +275,8 @@ pub trait ShellApi {
     /// Returns chain performance statistics for the performance dashboard.
     #[method(name = "getChainStats")]
     async fn get_chain_stats(&self) -> Result<serde_json::Value, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns finality information: last finalized block, current head, and pending attestations.
+    #[method(name = "getFinalityInfo")]
+    async fn get_finality_info(&self) -> Result<serde_json::Value, jsonrpsee::types::ErrorObjectOwned>;
 }
