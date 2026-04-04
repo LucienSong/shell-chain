@@ -2,9 +2,13 @@
 //!
 //! Binary entry point for the post-quantum blockchain node.
 //! Subcommands:
-//! - `run`  — start the node (block production + RPC + network)
-//! - `init` — initialize genesis and data directory
-//! - `key generate` — create a new encrypted keystore file
+//! - `run`           — start the node (block production + RPC + network)
+//! - `init`          — initialize genesis and data directory
+//! - `key generate`  — create a new encrypted keystore file
+//! - `export-state`  — export chain state to a snapshot file
+//! - `import-state`  — import chain state from a snapshot file
+//! - `removedb`      — remove the chain database
+//! - `version`       — print version information
 
 use std::path::PathBuf;
 
@@ -14,7 +18,11 @@ use tracing_subscriber::EnvFilter;
 mod commands;
 
 #[derive(Parser)]
-#[command(name = "shell-node", about = "Shell-chain post-quantum blockchain node")]
+#[command(
+    name = "shell-node",
+    about = "Shell-chain post-quantum blockchain node",
+    version = env!("CARGO_PKG_VERSION"),
+)]
 struct Cli {
     /// Data directory for chain storage and keystore.
     #[arg(long, default_value = "shell-data", global = true)]
@@ -105,6 +113,34 @@ enum Commands {
         #[command(subcommand)]
         action: KeyCommands,
     },
+
+    /// Export chain state to a snapshot file.
+    ExportState {
+        /// Block number to export state at (default: latest).
+        #[arg(long)]
+        block: Option<u64>,
+
+        /// Output file path.
+        #[arg(long, default_value = "snapshot.jsonl")]
+        output: PathBuf,
+    },
+
+    /// Import chain state from a snapshot file.
+    ImportState {
+        /// Path to the snapshot file.
+        #[arg(long)]
+        snapshot: PathBuf,
+    },
+
+    /// Remove the chain database directory.
+    Removedb {
+        /// Remove without confirmation prompt.
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Print version information.
+    Version,
 }
 
 #[derive(Subcommand)]
@@ -197,6 +233,16 @@ async fn main() {
             KeyCommands::Generate { output } => commands::key_generate(output),
             KeyCommands::Inspect { path } => commands::key_inspect(path),
         },
+        Commands::ExportState { block, output } => {
+            commands::export_state(cli.datadir, output, block)
+        }
+        Commands::ImportState { snapshot } => {
+            commands::import_state(cli.datadir, snapshot)
+        }
+        Commands::Removedb { force } => {
+            commands::removedb(cli.datadir, force)
+        }
+        Commands::Version => commands::version(),
     };
 
     if let Err(e) = result {
