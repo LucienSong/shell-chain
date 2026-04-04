@@ -5,6 +5,7 @@
 
 pub mod api;
 pub mod filter;
+pub mod filter_registry;
 pub mod handler;
 pub mod server;
 pub mod subscriptions;

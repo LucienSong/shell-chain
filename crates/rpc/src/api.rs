@@ -157,6 +157,38 @@ pub trait EthApi {
         &self,
         filter: RawLogFilter,
     ) -> Result<Vec<RpcLogWithMeta>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Creates a log filter, returning a filter ID for polling via `eth_getFilterChanges`.
+    #[method(name = "newFilter")]
+    async fn new_filter(
+        &self,
+        filter: RawLogFilter,
+    ) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Creates a block filter that tracks new block hashes.
+    #[method(name = "newBlockFilter")]
+    async fn new_block_filter(&self) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns changes since the last poll for the given filter.
+    #[method(name = "getFilterChanges")]
+    async fn get_filter_changes(
+        &self,
+        id: String,
+    ) -> Result<serde_json::Value, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns all logs matching the filter criteria (for log filters only).
+    #[method(name = "getFilterLogs")]
+    async fn get_filter_logs(
+        &self,
+        id: String,
+    ) -> Result<Vec<RpcLogWithMeta>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Removes a filter. Returns `true` if the filter existed.
+    #[method(name = "uninstallFilter")]
+    async fn uninstall_filter(
+        &self,
+        id: String,
+    ) -> Result<bool, jsonrpsee::types::ErrorObjectOwned>;
 }
 
 /// Debug namespace RPCs (transaction tracing).

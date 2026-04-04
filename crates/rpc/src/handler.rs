@@ -18,6 +18,7 @@ use shell_storage::{ChainStore, KvStore, WorldState};
 
 use crate::api::{EthApiServer, ShellApiServer, Web3ApiServer, NetApiServer, DebugApiServer};
 use crate::filter::{RawLogFilter, MAX_BLOCK_RANGE};
+use crate::filter_registry::{FilterKind, FilterRegistry};
 use crate::subscriptions::BlockEvent;
 use crate::types::*;
 
@@ -47,6 +48,8 @@ pub struct RpcHandler<S: KvStore + 'static> {
     finalized_number: Arc<parking_lot::RwLock<u64>>,
     /// Finality state for pending attestation queries.
     finality: Arc<parking_lot::RwLock<FinalityState>>,
+    /// Registry for poll-based filters (eth_newFilter, eth_newBlockFilter, etc.).
+    filter_registry: Arc<FilterRegistry>,
 }
 
 impl<S: KvStore + 'static> Clone for RpcHandler<S> {
@@ -64,6 +67,7 @@ impl<S: KvStore + 'static> Clone for RpcHandler<S> {
             bloom_false_positives: Arc::clone(&self.bloom_false_positives),
             finalized_number: Arc::clone(&self.finalized_number),
             finality: Arc::clone(&self.finality),
+            filter_registry: Arc::clone(&self.filter_registry),
         }
     }
 }
@@ -93,6 +97,7 @@ impl<S: KvStore + 'static> RpcHandler<S> {
             bloom_false_positives: Arc::new(AtomicU64::new(0)),
             finalized_number,
             finality,
+            filter_registry: Arc::new(FilterRegistry::new()),
         }
     }
 
@@ -931,6 +936,150 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
         }
 
         Ok(results)
+    }
+
+    async fn new_filter(
+        &self,
+        filter: RawLogFilter,
+    ) -> Result<String, ErrorObjectOwned> {
+        let head = self
+            .chain_store
+            .get_head_block()
+            .map_err(internal_err)?;
+        let latest = head.map(|b| b.number()).unwrap_or(0);
+        let id = self
+            .filter_registry
+            .new_filter(FilterKind::Log(filter), latest);
+        Ok(id)
+    }
+
+    async fn new_block_filter(&self) -> Result<String, ErrorObjectOwned> {
+        let head = self
+            .chain_store
+            .get_head_block()
+            .map_err(internal_err)?;
+        let latest = head.map(|b| b.number()).unwrap_or(0);
+        let id = self.filter_registry.new_filter(FilterKind::Block, latest);
+        Ok(id)
+    }
+
+    async fn get_filter_changes(
+        &self,
+        id: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // Determine filter type and last polled block.
+        let (is_log, last_poll_block) =
+            self.filter_registry.get_filter_info(&id).ok_or_else(|| {
+                ErrorObjectOwned::owned(-32000, "filter not found", None::<()>)
+            })?;
+
+        let head = self
+            .chain_store
+            .get_head_block()
+            .map_err(internal_err)?;
+        let latest = head.map(|b| b.number()).unwrap_or(0);
+
+        if is_log {
+            // Log filter: query logs from (last_poll_block + 1) to latest.
+            let from = last_poll_block.saturating_add(1);
+            if from > latest {
+                self.filter_registry.update_last_poll(&id, latest);
+                return Ok(serde_json::json!([]));
+            }
+
+            // Retrieve the original filter criteria.
+            let raw = self.filter_registry.get_log_filter(&id).ok_or_else(|| {
+                ErrorObjectOwned::owned(-32000, "filter not found", None::<()>)
+            })?;
+            let filter = raw.into_filter(latest);
+
+            let mut results = Vec::new();
+            let actual_to = latest.min(from + MAX_BLOCK_RANGE - 1);
+
+            for block_num in from..=actual_to {
+                let block = match self
+                    .chain_store
+                    .get_block_by_number(block_num)
+                    .map_err(internal_err)?
+                {
+                    Some(b) => b,
+                    None => continue,
+                };
+
+                if !filter.matches_bloom(block.header.logs_bloom.as_ref()) {
+                    continue;
+                }
+
+                let block_hash = block.hash();
+                let receipts = self
+                    .chain_store
+                    .get_receipts(&block_hash)
+                    .map_err(internal_err)?
+                    .unwrap_or_default();
+
+                let mut global_log_index: u64 = 0;
+                for (tx_idx, receipt) in receipts.iter().enumerate() {
+                    for log in &receipt.logs {
+                        if filter.matches_log(log) {
+                            results.push(RpcLogWithMeta {
+                                address: log.address,
+                                topics: log.topics.clone(),
+                                data: hex_bytes(log.data.as_ref()),
+                                block_number: hex_u64(block_num),
+                                block_hash,
+                                transaction_hash: receipt.tx_hash,
+                                transaction_index: hex_u64(tx_idx as u64),
+                                log_index: hex_u64(global_log_index),
+                                removed: false,
+                            });
+                        }
+                        global_log_index += 1;
+                    }
+                }
+            }
+
+            self.filter_registry.update_last_poll(&id, actual_to);
+            Ok(serde_json::to_value(&results).unwrap_or(serde_json::json!([])))
+        } else {
+            // Block filter: collect hashes of blocks since last poll.
+            let from = last_poll_block.saturating_add(1);
+            if from > latest {
+                self.filter_registry.update_last_poll(&id, latest);
+                return Ok(serde_json::json!([]));
+            }
+
+            let mut hashes = Vec::new();
+            for block_num in from..=latest {
+                if let Some(block) = self
+                    .chain_store
+                    .get_block_by_number(block_num)
+                    .map_err(internal_err)?
+                {
+                    hashes.push(block.hash());
+                }
+            }
+
+            self.filter_registry.update_last_poll(&id, latest);
+            Ok(serde_json::to_value(&hashes).unwrap_or(serde_json::json!([])))
+        }
+    }
+
+    async fn get_filter_logs(
+        &self,
+        id: String,
+    ) -> Result<Vec<RpcLogWithMeta>, ErrorObjectOwned> {
+        // Only valid for log filters — re-query all matching logs.
+        let raw = self.filter_registry.get_log_filter(&id).ok_or_else(|| {
+            ErrorObjectOwned::owned(-32000, "filter not found", None::<()>)
+        })?;
+        self.get_logs(raw).await
+    }
+
+    async fn uninstall_filter(
+        &self,
+        id: String,
+    ) -> Result<bool, ErrorObjectOwned> {
+        Ok(self.filter_registry.uninstall(&id))
     }
 }
 
@@ -2685,5 +2834,164 @@ mod tests {
         // Verify get_finality_info reflects the update.
         let result = ShellApiServer::get_finality_info(&handler).await.unwrap();
         assert_eq!(result["lastFinalizedBlock"], "0x64"); // 100 in hex
+    }
+
+    // ── Filter RPC tests ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn new_block_filter_returns_hex_id() {
+        let handler = setup();
+        let id = EthApiServer::new_block_filter(&handler).await.unwrap();
+        assert!(id.starts_with("0x"));
+    }
+
+    #[tokio::test]
+    async fn new_filter_returns_hex_id() {
+        let handler = setup();
+        let raw: crate::filter::RawLogFilter =
+            serde_json::from_str(r#"{}"#).unwrap();
+        let id = EthApiServer::new_filter(&handler, raw).await.unwrap();
+        assert!(id.starts_with("0x"));
+    }
+
+    #[tokio::test]
+    async fn block_filter_tracks_new_blocks() {
+        let handler = setup();
+
+        // Store genesis block first so the filter starts at block 0.
+        let genesis = make_genesis_block();
+        let genesis_hash = genesis.hash();
+        handler.chain_store.put_block(&genesis).unwrap();
+        handler.chain_store.set_canonical(0, &genesis_hash).unwrap();
+        handler.chain_store.set_head(&genesis_hash).unwrap();
+
+        // Install a block filter.
+        let filter_id = EthApiServer::new_block_filter(&handler).await.unwrap();
+
+        // No new blocks yet — should return empty.
+        let changes = EthApiServer::get_filter_changes(&handler, filter_id.clone())
+            .await
+            .unwrap();
+        assert_eq!(changes, serde_json::json!([]));
+
+        // Store block 1.
+        let block1 = Block {
+            header: BlockHeader {
+                parent_hash: genesis_hash,
+                number: 1,
+                ..make_genesis_block().header
+            },
+            transactions: vec![],
+            proposer_seal: None,
+        };
+        let hash1 = block1.hash();
+        handler.chain_store.put_block(&block1).unwrap();
+        handler.chain_store.set_canonical(1, &hash1).unwrap();
+        handler.chain_store.set_head(&hash1).unwrap();
+
+        // Now getFilterChanges should return block 1's hash.
+        let changes = EthApiServer::get_filter_changes(&handler, filter_id.clone())
+            .await
+            .unwrap();
+        let arr = changes.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+
+        // Polling again should return empty (already drained).
+        let changes = EthApiServer::get_filter_changes(&handler, filter_id)
+            .await
+            .unwrap();
+        assert_eq!(changes, serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn log_filter_returns_matching_logs() {
+        let handler = setup();
+        let addr = Address::from([0xEE; 20]);
+        let topic = ShellHash::from_slice(&[0xFF; 32]);
+        let log = shell_core::Log::new(addr, vec![topic], Bytes::new()).unwrap();
+
+        // Store a block with a log.
+        store_block_with_logs(&handler, 0, vec![vec![log]]);
+
+        // Install a log filter starting from block 0.
+        let raw: crate::filter::RawLogFilter = serde_json::from_str(&format!(
+            r#"{{"fromBlock":"0x0","address":"{}"}}"#,
+            addr,
+        ))
+        .unwrap();
+        let filter_id = EthApiServer::new_filter(&handler, raw).await.unwrap();
+
+        // Store block 1 with another matching log.
+        let log2 = shell_core::Log::new(addr, vec![topic], Bytes::new()).unwrap();
+        store_block_with_logs(&handler, 1, vec![vec![log2]]);
+
+        // getFilterChanges should return logs from block 1 only (after the install point).
+        let changes = EthApiServer::get_filter_changes(&handler, filter_id.clone())
+            .await
+            .unwrap();
+        let arr = changes.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["blockNumber"], "0x1");
+    }
+
+    #[tokio::test]
+    async fn get_filter_logs_returns_all_matching_logs() {
+        let handler = setup();
+        let addr = Address::from([0xDD; 20]);
+        let log = shell_core::Log::new(addr, vec![], Bytes::new()).unwrap();
+        store_block_with_logs(&handler, 0, vec![vec![log]]);
+
+        let raw: crate::filter::RawLogFilter = serde_json::from_str(&format!(
+            r#"{{"fromBlock":"0x0","toBlock":"0x0","address":"{}"}}"#,
+            addr,
+        ))
+        .unwrap();
+        let filter_id = EthApiServer::new_filter(&handler, raw).await.unwrap();
+
+        let logs = EthApiServer::get_filter_logs(&handler, filter_id)
+            .await
+            .unwrap();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].address, addr);
+    }
+
+    #[tokio::test]
+    async fn uninstall_filter_removes_filter() {
+        let handler = setup();
+        let filter_id = EthApiServer::new_block_filter(&handler).await.unwrap();
+
+        // Uninstall should succeed.
+        let removed = EthApiServer::uninstall_filter(&handler, filter_id.clone())
+            .await
+            .unwrap();
+        assert!(removed);
+
+        // Second uninstall should return false.
+        let removed = EthApiServer::uninstall_filter(&handler, filter_id.clone())
+            .await
+            .unwrap();
+        assert!(!removed);
+
+        // getFilterChanges on uninstalled filter should fail.
+        let result = EthApiServer::get_filter_changes(&handler, filter_id).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn get_filter_changes_nonexistent_returns_error() {
+        let handler = setup();
+        let result = EthApiServer::get_filter_changes(&handler, "0xdead".into()).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.message().contains("filter not found"));
+    }
+
+    #[tokio::test]
+    async fn get_filter_logs_on_block_filter_returns_error() {
+        let handler = setup();
+        let filter_id = EthApiServer::new_block_filter(&handler).await.unwrap();
+        let result = EthApiServer::get_filter_logs(&handler, filter_id).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message().contains("filter not found"));
     }
 }

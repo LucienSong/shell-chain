@@ -91,7 +91,7 @@ impl LogFilter {
 // ── JSON deserialization for the RPC parameter ──────────────────
 
 /// Raw JSON representation received from the client.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RawLogFilter {
     pub from_block: Option<String>,
@@ -105,7 +105,7 @@ pub struct RawLogFilter {
 }
 
 /// A topic entry is either a single hash or an array of hashes.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(untagged)]
 pub enum TopicEntry {
     Single(ShellHash),
