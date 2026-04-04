@@ -5,6 +5,7 @@ mod trie_adapter;
 mod merkle_trie;
 mod world_state;
 mod chain_store;
+mod snapshot;
 
 #[cfg(feature = "rocksdb")]
 mod rocks_db;
@@ -16,6 +17,7 @@ pub use trie_adapter::KvStoreTrieDb;
 pub use merkle_trie::MerkleTrie;
 pub use world_state::{WorldState, validator_registry_addr};
 pub use chain_store::{ChainConfig, ChainStore};
+pub use snapshot::{SnapshotEntry, SnapshotMetadata, SnapshotReader, SnapshotWriter};
 
 #[cfg(feature = "rocksdb")]
 pub use rocks_db::{

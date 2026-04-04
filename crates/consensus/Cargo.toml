@@ -11,3 +11,4 @@ shell-core.workspace = true
 shell-crypto.workspace = true
 async-trait.workspace = true
 thiserror.workspace = true
+serde.workspace = true

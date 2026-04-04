@@ -1,4 +1,4 @@
-use shell_primitives::Address;
+use shell_primitives::{Address, ShellHash};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -23,4 +23,17 @@ pub enum ConsensusError {
 
     #[error("internal error: {0}")]
     Internal(String),
+
+    #[error("equivocation detected: validator {validator} attested to conflicting block {conflicting_hash} at height {height}")]
+    Equivocation {
+        validator: Address,
+        conflicting_hash: ShellHash,
+        height: u64,
+    },
+
+    #[error("attestation for unknown block: {0}")]
+    UnknownBlock(ShellHash),
+
+    #[error("cannot reorg past finalized block {0}")]
+    ReorgPastFinalized(u64),
 }

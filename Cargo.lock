@@ -5292,6 +5292,7 @@ name = "shell-consensus"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "serde",
  "shell-core",
  "shell-crypto",
  "shell-primitives",
@@ -5469,6 +5470,7 @@ name = "shell-storage"
 version = "0.1.0"
 dependencies = [
  "alloy-rlp",
+ "base64",
  "eth_trie",
  "ethereum-types",
  "rocksdb",
