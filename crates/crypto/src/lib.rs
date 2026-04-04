@@ -3,7 +3,7 @@ mod verifier;
 mod dilithium;
 mod sphincs;
 mod multi;
-pub mod signature;
+mod signature;
 mod keypair;
 mod error;
 

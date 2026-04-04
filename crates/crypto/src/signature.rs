@@ -173,4 +173,59 @@ mod tests {
         let too_big = PQSignature::new(SignatureType::SphincsSha2256f, vec![0u8; 60000]);
         assert!(too_big.validate_size().is_err());
     }
+
+    // ── F-157: RLP/JSON deserialization size bounds ──────────────
+
+    #[test]
+    fn rlp_decode_rejects_oversized_dilithium_signature() {
+        use alloy_rlp::Decodable;
+        // Build an oversized signature manually without going through PQSignature::new
+        // (which doesn't enforce size at construction).
+        let oversized = PQSignature { sig_type: SignatureType::Dilithium3, data: vec![0u8; 5000] };
+        let mut encoded = Vec::new();
+        oversized.encode(&mut encoded);
+
+        let result = PQSignature::decode(&mut encoded.as_slice());
+        assert!(result.is_err(), "RLP decode should reject oversized Dilithium sig");
+    }
+
+    #[test]
+    fn rlp_decode_accepts_valid_size() {
+        use alloy_rlp::Decodable;
+        let valid = PQSignature::new(SignatureType::Dilithium3, vec![0u8; 3309]);
+        let mut encoded = Vec::new();
+        valid.encode(&mut encoded);
+
+        let decoded = PQSignature::decode(&mut encoded.as_slice()).unwrap();
+        assert_eq!(decoded, valid);
+    }
+
+    #[test]
+    fn json_decode_rejects_oversized_signature() {
+        // Manually construct JSON with an oversized data field
+        let oversized_data: Vec<u8> = vec![0u8; 5000];
+        let json = format!(
+            r#"{{"sig_type":"Dilithium3","data":{}}}"#,
+            serde_json::to_string(&oversized_data).unwrap()
+        );
+        let result: Result<PQSignature, _> = serde_json::from_str(&json);
+        assert!(result.is_err(), "JSON decode should reject oversized Dilithium sig");
+    }
+
+    #[test]
+    fn json_decode_accepts_valid_size() {
+        let valid = PQSignature::new(SignatureType::Dilithium3, vec![0u8; 3309]);
+        let json = serde_json::to_string(&valid).unwrap();
+        let decoded: PQSignature = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, valid);
+    }
+
+    // ── F-170: Algorithm allowlist ──────────────────────────────
+
+    #[test]
+    fn allowed_algorithms_contains_expected() {
+        assert!(ALLOWED_ALGORITHMS.contains(&SignatureType::Dilithium3));
+        assert!(ALLOWED_ALGORITHMS.contains(&SignatureType::SphincsSha2256f));
+        assert!(!ALLOWED_ALGORITHMS.contains(&SignatureType::MlDsa65));
+    }
 }

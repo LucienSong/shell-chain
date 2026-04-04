@@ -116,7 +116,7 @@ pub fn validate_tx<S: KvStore + 'static, V: Verifier>(
     let pubkey = resolve_pubkey(signed_tx, chain_store)?;
 
     // 3b. Algorithm allowlist check (F-170)
-    if !shell_crypto::signature::ALLOWED_ALGORITHMS.contains(&signed_tx.signature.sig_type) {
+    if !shell_crypto::ALLOWED_ALGORITHMS.contains(&signed_tx.signature.sig_type) {
         return Err(TxValidationError::DisallowedAlgorithm(signed_tx.signature.sig_type));
     }
 
