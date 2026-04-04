@@ -6,7 +6,7 @@ use chacha20poly1305::XChaCha20Poly1305;
 use rand::RngCore;
 use zeroize::Zeroize;
 
-use shell_crypto::{DilithiumSigner, Signer};
+use shell_crypto::{DilithiumSigner, SphincsSigner, Signer};
 use shell_primitives::Address;
 
 use crate::types::{CipherParams, EncryptedKey, KdfParams, KeystoreError};
@@ -34,7 +34,7 @@ pub fn encrypt(signer: &DilithiumSigner, password: &[u8]) -> Result<EncryptedKey
 
     // Encrypt the secret key bytes.
     let cipher = XChaCha20Poly1305::new((&derived_key).into());
-    let plaintext = signer.secret_key_bytes();
+    let plaintext: &[u8] = signer.secret_key_bytes();
 
     let ciphertext = cipher
         .encrypt((&nonce).into(), plaintext)
@@ -47,6 +47,7 @@ pub fn encrypt(signer: &DilithiumSigner, password: &[u8]) -> Result<EncryptedKey
     Ok(EncryptedKey {
         version: 1,
         address: hex::encode(address.as_bytes()),
+        key_type: "dilithium3".into(),
         kdf: "argon2id".into(),
         kdf_params,
         cipher: "xchacha20-poly1305".into(),
@@ -115,6 +116,97 @@ fn derive_key(
         .map_err(|e| KeystoreError::Encryption(format!("argon2 hash: {e}")))?;
 
     Ok(key)
+}
+
+/// Encrypt a SPHINCS+-SHA2-256f-simple signer with a password.
+///
+/// Same scheme as [`encrypt`] (argon2id + XChaCha20-Poly1305) but stores
+/// `key_type = "sphincs-sha2-256f"` in the output so [`decrypt_sphincs`]
+/// can reconstruct the correct signer type.
+pub fn encrypt_sphincs(signer: &SphincsSigner, password: &[u8]) -> Result<EncryptedKey, KeystoreError> {
+    let mut salt = [0u8; 32];
+    let mut nonce = [0u8; 24];
+    rand::thread_rng().fill_bytes(&mut salt);
+    rand::thread_rng().fill_bytes(&mut nonce);
+
+    let kdf_params = KdfParams {
+        m_cost: 65536,
+        t_cost: 3,
+        p_cost: 4,
+        salt: hex::encode(salt),
+    };
+
+    let mut derived_key = derive_key(password, &salt, &kdf_params)?;
+
+    let cipher = XChaCha20Poly1305::new((&derived_key).into());
+    let plaintext: &[u8] = signer.secret_key_bytes();
+
+    let ciphertext = cipher
+        .encrypt((&nonce).into(), plaintext)
+        .map_err(|e| KeystoreError::Encryption(e.to_string()))?;
+
+    derived_key.zeroize();
+
+    let address = Address::from_public_key(signer.public_key());
+
+    Ok(EncryptedKey {
+        version: 1,
+        address: hex::encode(address.as_bytes()),
+        key_type: "sphincs-sha2-256f".into(),
+        kdf: "argon2id".into(),
+        kdf_params,
+        cipher: "xchacha20-poly1305".into(),
+        cipher_params: CipherParams {
+            nonce: hex::encode(nonce),
+        },
+        ciphertext: hex::encode(&ciphertext),
+        public_key: hex::encode(signer.public_key()),
+    })
+}
+
+/// Decrypt an encrypted key with a password, returning a SphincsSigner.
+///
+/// The stored `key_type` must be `"sphincs-sha2-256f"`.
+pub fn decrypt_sphincs(encrypted: &EncryptedKey, password: &[u8]) -> Result<SphincsSigner, KeystoreError> {
+    if encrypted.key_type != "sphincs-sha2-256f" {
+        return Err(KeystoreError::InvalidKey(format!(
+            "expected key_type sphincs-sha2-256f, got {}",
+            encrypted.key_type
+        )));
+    }
+
+    let salt = hex::decode(&encrypted.kdf_params.salt)
+        .map_err(|e| KeystoreError::InvalidKey(format!("bad salt hex: {e}")))?;
+    let nonce_bytes = hex::decode(&encrypted.cipher_params.nonce)
+        .map_err(|e| KeystoreError::InvalidKey(format!("bad nonce hex: {e}")))?;
+    let ciphertext = hex::decode(&encrypted.ciphertext)
+        .map_err(|e| KeystoreError::InvalidKey(format!("bad ciphertext hex: {e}")))?;
+    let public_key = hex::decode(&encrypted.public_key)
+        .map_err(|e| KeystoreError::InvalidKey(format!("bad pubkey hex: {e}")))?;
+
+    if nonce_bytes.len() != 24 {
+        return Err(KeystoreError::InvalidKey(format!(
+            "nonce must be 24 bytes, got {}",
+            nonce_bytes.len()
+        )));
+    }
+
+    let mut derived_key = derive_key(password, &salt, &encrypted.kdf_params)?;
+
+    let cipher = XChaCha20Poly1305::new((&derived_key).into());
+    let nonce: [u8; 24] = nonce_bytes.try_into().unwrap();
+
+    let mut secret_key = cipher
+        .decrypt((&nonce).into(), ciphertext.as_ref())
+        .map_err(|_| KeystoreError::Decryption)?;
+
+    derived_key.zeroize();
+
+    let signer = SphincsSigner::from_bytes(&public_key, &secret_key)?;
+
+    secret_key.zeroize();
+
+    Ok(signer)
 }
 
 #[cfg(test)]
@@ -299,5 +391,87 @@ mod tests {
         // And vice-versa: sign with original, verify with recovered pk
         let sig2 = signer.sign(msg).unwrap();
         assert!(verifier.verify(recovered.public_key(), msg, &sig2).unwrap());
+    }
+
+    // ── SPHINCS+ keystore tests (F-166) ─────────────────────────
+
+    #[test]
+    fn sphincs_encrypt_decrypt_roundtrip() {
+        let signer = SphincsSigner::generate();
+        let password = b"sphincs-test-password";
+
+        let encrypted = encrypt_sphincs(&signer, password).unwrap();
+        assert_eq!(encrypted.version, 1);
+        assert_eq!(encrypted.key_type, "sphincs-sha2-256f");
+        assert_eq!(encrypted.kdf, "argon2id");
+        assert_eq!(encrypted.cipher, "xchacha20-poly1305");
+
+        let recovered = decrypt_sphincs(&encrypted, password).unwrap();
+        assert_eq!(recovered.public_key(), signer.public_key());
+
+        // Verify signing still works
+        let msg = b"sphincs roundtrip";
+        let sig = recovered.sign(msg).unwrap();
+        let verifier = shell_crypto::SphincsVerifier;
+        use shell_crypto::Verifier;
+        assert!(verifier
+            .verify(recovered.public_key(), msg, &sig)
+            .unwrap());
+    }
+
+    #[test]
+    fn sphincs_wrong_password_fails() {
+        let signer = SphincsSigner::generate();
+        let encrypted = encrypt_sphincs(&signer, b"correct").unwrap();
+
+        let result = decrypt_sphincs(&encrypted, b"wrong");
+        assert!(matches!(result, Err(KeystoreError::Decryption)));
+    }
+
+    #[test]
+    fn sphincs_json_roundtrip() {
+        let signer = SphincsSigner::generate();
+        let encrypted = encrypt_sphincs(&signer, b"sphincs-json").unwrap();
+
+        let json = serde_json::to_string_pretty(&encrypted).unwrap();
+        let loaded: EncryptedKey = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.key_type, "sphincs-sha2-256f");
+
+        let recovered = decrypt_sphincs(&loaded, b"sphincs-json").unwrap();
+        assert_eq!(recovered.public_key(), signer.public_key());
+    }
+
+    #[test]
+    fn decrypt_sphincs_rejects_dilithium_key() {
+        let signer = DilithiumSigner::generate();
+        let encrypted = encrypt(&signer, b"mismatch-test").unwrap();
+
+        let result = decrypt_sphincs(&encrypted, b"mismatch-test");
+        assert!(matches!(result, Err(KeystoreError::InvalidKey(_))));
+    }
+
+    #[test]
+    fn dilithium_key_type_set() {
+        let signer = DilithiumSigner::generate();
+        let encrypted = encrypt(&signer, b"type-test").unwrap();
+        assert_eq!(encrypted.key_type, "dilithium3");
+    }
+
+    #[test]
+    fn legacy_json_without_key_type_defaults_to_dilithium() {
+        let signer = DilithiumSigner::generate();
+        let encrypted = encrypt(&signer, b"legacy-test").unwrap();
+
+        // Simulate a legacy JSON without key_type field
+        let json = serde_json::to_string(&encrypted).unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        value.as_object_mut().unwrap().remove("key_type");
+        let legacy_json = serde_json::to_string(&value).unwrap();
+
+        let loaded: EncryptedKey = serde_json::from_str(&legacy_json).unwrap();
+        assert_eq!(loaded.key_type, "dilithium3");
+
+        let recovered = decrypt(&loaded, b"legacy-test").unwrap();
+        assert_eq!(recovered.public_key(), signer.public_key());
     }
 }

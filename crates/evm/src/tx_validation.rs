@@ -36,11 +36,20 @@ pub enum TxValidationError {
     #[error("gas limit below intrinsic: {0}")]
     GasTooLow(u64),
 
+    #[error("pubkey conflict: address already registered with a different pubkey")]
+    PubkeyConflict,
+
+    #[error("disallowed signature algorithm: {0:?}")]
+    DisallowedAlgorithm(shell_crypto::SignatureType),
+
     #[error("crypto error: {0}")]
     Crypto(#[from] shell_crypto::CryptoError),
 
     #[error("storage: {0}")]
     Storage(#[from] StorageError),
+
+    #[error("invalid access list: {0}")]
+    InvalidAccessList(String),
 }
 
 /// Minimum gas for a plain transfer (no data).
@@ -88,6 +97,11 @@ pub fn validate_tx<S: KvStore + 'static, V: Verifier>(
         });
     }
 
+    // 1b. Access list size validation
+    if let Err(msg) = tx.validate_access_list() {
+        return Err(TxValidationError::InvalidAccessList(msg.to_string()));
+    }
+
     // 2. Intrinsic gas check
     let intrinsic = compute_intrinsic_gas(
         tx.data.as_ref(),
@@ -100,6 +114,22 @@ pub fn validate_tx<S: KvStore + 'static, V: Verifier>(
 
     // 3. Resolve PQ public key (hybrid model)
     let pubkey = resolve_pubkey(signed_tx, chain_store)?;
+
+    // 3b. Algorithm allowlist check (F-170)
+    if !shell_crypto::signature::ALLOWED_ALGORITHMS.contains(&signed_tx.signature.sig_type) {
+        return Err(TxValidationError::DisallowedAlgorithm(signed_tx.signature.sig_type));
+    }
+
+    // 3c. Pubkey binding check (F-154): reject if a DIFFERENT pubkey is
+    //     already registered for this address. Same pubkey re-registration
+    //     is allowed (idempotent).
+    if signed_tx.sender_pubkey.is_some() {
+        if let Some(registered) = chain_store.get_pubkey(&signed_tx.from)? {
+            if registered != pubkey {
+                return Err(TxValidationError::PubkeyConflict);
+            }
+        }
+    }
 
     // 4. Address derivation: from must match keccak256(pubkey)[12..]
     let derived = Address::from_public_key(&pubkey);
@@ -484,6 +514,85 @@ mod tests {
         assert!(
             matches!(result, Err(TxValidationError::InsufficientBalance { .. })),
             "overflow should be caught, got: {:?}",
+            result
+        );
+    }
+
+    // ── F-154: Pubkey binding tests ───────────────────────────
+
+    #[test]
+    fn validate_pubkey_conflict_rejected() {
+        let signer1 = make_signer();
+        let signer2 = DilithiumSigner::generate();
+        let (mut ws, cs) = setup_stores();
+        let from = Address::from_public_key(signer1.public_key());
+        fund_account(&mut ws, &from, U256::from(1_000_000));
+
+        // Pre-register signer1's pubkey
+        cs.put_pubkey(&from, signer1.public_key()).unwrap();
+
+        // Try to send tx with signer2's pubkey for the same address
+        let tx = simple_transfer(test_chain_id(), 0);
+        let tx_hash = tx.hash();
+        let sig = signer1.sign(tx_hash.as_bytes()).unwrap();
+        let signed = SignedTransaction::with_pubkey(
+            from,
+            tx,
+            sig,
+            signer2.public_key().to_vec(),
+        );
+
+        let verifier = DilithiumVerifier;
+        let result = validate_tx(&signed, &ws, &cs, &verifier, test_chain_id());
+        // Should fail with either PubkeyConflict or AddressMismatch
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_same_pubkey_reregistration_ok() {
+        let signer = make_signer();
+        let (mut ws, cs) = setup_stores();
+        let from = Address::from_public_key(signer.public_key());
+        fund_account(&mut ws, &from, U256::from(1_000_000));
+
+        // Pre-register same pubkey
+        cs.put_pubkey(&from, signer.public_key()).unwrap();
+
+        // Send tx with same pubkey — should succeed (idempotent)
+        let tx = simple_transfer(test_chain_id(), 0);
+        let signed = sign_tx(&signer, tx, true);
+
+        let verifier = DilithiumVerifier;
+        let result = validate_tx(&signed, &ws, &cs, &verifier, test_chain_id());
+        assert!(result.is_ok());
+    }
+
+    // ── F-170: Algorithm allowlist tests ──────────────────────
+
+    #[test]
+    fn validate_disallowed_algorithm_rejected() {
+        let signer = make_signer();
+        let (mut ws, cs) = setup_stores();
+        let from = Address::from_public_key(signer.public_key());
+        fund_account(&mut ws, &from, U256::from(1_000_000));
+
+        let tx = simple_transfer(test_chain_id(), 0);
+        let tx_hash = tx.hash();
+        // Create a signature with reserved MlDsa65 algorithm type
+        let real_sig = signer.sign(tx_hash.as_bytes()).unwrap();
+        let bad_algo_sig = PQSignature::new(SignatureType::MlDsa65, real_sig.data.clone());
+        let signed = SignedTransaction::with_pubkey(
+            from,
+            tx,
+            bad_algo_sig,
+            signer.public_key().to_vec(),
+        );
+
+        let verifier = DilithiumVerifier;
+        let result = validate_tx(&signed, &ws, &cs, &verifier, test_chain_id());
+        assert!(
+            matches!(result, Err(TxValidationError::DisallowedAlgorithm(_))),
+            "MlDsa65 should be rejected, got: {:?}",
             result
         );
     }

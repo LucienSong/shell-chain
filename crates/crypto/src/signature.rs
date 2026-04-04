@@ -1,5 +1,17 @@
 use serde::{Deserialize, Serialize};
+use serde::de::Error as DeError;
 use alloy_rlp::Encodable;
+
+/// Currently accepted PQ signature algorithms.
+///
+/// Transactions using algorithms not in this list will be rejected by
+/// the validation pipeline. Both algorithms are accepted during the
+/// initial post-quantum migration; the list can be narrowed later to
+/// deprecate or block weaker algorithms.
+pub const ALLOWED_ALGORITHMS: &[SignatureType] = &[
+    SignatureType::Dilithium3,
+    SignatureType::SphincsSha2256f,
+];
 
 /// Maximum allowed signature size in bytes.
 /// SPHINCS+-SHA2-256f produces ~49856 bytes; we allow some headroom.
@@ -41,10 +53,31 @@ impl SignatureType {
 }
 
 /// Container for a post-quantum signature.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PQSignature {
     pub sig_type: SignatureType,
     pub data: Vec<u8>,
+}
+
+/// Serde helper for deserializing PQSignature with size validation (F-157).
+impl<'de> Deserialize<'de> for PQSignature {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Raw {
+            sig_type: SignatureType,
+            data: Vec<u8>,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        let sig = PQSignature {
+            sig_type: raw.sig_type,
+            data: raw.data,
+        };
+        sig.validate_size().map_err(D::Error::custom)?;
+        Ok(sig)
+    }
 }
 
 impl PQSignature {
@@ -92,7 +125,11 @@ impl alloy_rlp::Decodable for PQSignature {
             .ok_or(alloy_rlp::Error::Custom("unknown signature type"))?;
         let data = alloy_rlp::Header::decode_bytes(&mut payload, false)?.to_vec();
         *buf = &buf[header.payload_length..];
-        Ok(Self { sig_type, data })
+        let sig = Self { sig_type, data };
+        // F-157: Reject oversized signatures during deserialization.
+        sig.validate_size()
+            .map_err(|_| alloy_rlp::Error::Custom("signature exceeds size limit"))?;
+        Ok(sig)
     }
 }
 

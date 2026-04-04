@@ -64,11 +64,12 @@ impl DilithiumSigner {
         )
     }
 
-    /// Export raw secret key bytes for keystore encryption.
+    /// Return a reference to the zeroize-protected secret key bytes.
     ///
-    /// The caller MUST handle the returned bytes securely and zeroize
-    /// them after use. Prefer using the [`Signer`] trait for signing.
-    pub fn secret_key_bytes(&self) -> &[u8] {
+    /// Returns `&Zeroizing<Vec<u8>>` rather than raw `&[u8]` so the
+    /// caller cannot accidentally copy the bytes out of the zeroize
+    /// wrapper. Use `Deref` / `AsRef` when `&[u8]` is needed briefly.
+    pub fn secret_key_bytes(&self) -> &zeroize::Zeroizing<Vec<u8>> {
         &self.secret_key_bytes
     }
 

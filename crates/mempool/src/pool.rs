@@ -10,6 +10,12 @@ use shell_primitives::{Address, ShellHash, U256};
 
 use crate::{MempoolConfig, MempoolError};
 
+/// Maximum serialized transaction size accepted by the mempool (128 KB).
+///
+/// Protects against oversized SPHINCS+ signatures (~49 KB) and large
+/// access lists flooding the pool.
+pub const MAX_TX_SIZE: usize = 128 * 1024;
+
 /// Thread-safe transaction pool.
 ///
 /// Accepts validated transactions, orders them by priority fee, enforces
@@ -323,6 +329,20 @@ impl TxPool {
         if !valid {
             return Err(MempoolError::InvalidSignature(
                 "PQ signature verification failed".into(),
+            ));
+        }
+
+        // Access list size limits
+        if let Err(msg) = tx.tx.validate_access_list() {
+            return Err(MempoolError::InvalidTransaction(msg.to_string()));
+        }
+
+        // Per-tx serialized size limit — protects against oversized PQ
+        // signatures and access lists.
+        let tx_size = serde_json::to_vec(tx).map(|v| v.len()).unwrap_or(0);
+        if tx_size > MAX_TX_SIZE {
+            return Err(MempoolError::InvalidTransaction(
+                format!("transaction too large: {} bytes (max {})", tx_size, MAX_TX_SIZE),
             ));
         }
 

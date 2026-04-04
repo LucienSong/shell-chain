@@ -53,6 +53,8 @@ impl Encodable for Transaction {
         self.gas_limit.encode(out);
         self.max_fee_per_gas.encode(out);
         self.max_priority_fee_per_gas.encode(out);
+        // EIP-2930 access list (encoded as list of [address, [keys...]])
+        self.encode_access_list(out);
     }
 
     fn length(&self) -> usize {
@@ -61,7 +63,91 @@ impl Encodable for Transaction {
     }
 }
 
+/// Maximum number of entries in an access list.
+pub const MAX_ACCESS_LIST_ENTRIES: usize = 256;
+/// Maximum number of storage keys per access list entry.
+pub const MAX_ACCESS_LIST_STORAGE_KEYS: usize = 512;
+
 impl Transaction {
+    /// RLP-encode the access list as a list of [address, [key, key, ...]].
+    fn encode_access_list(&self, out: &mut dyn alloy_rlp::BufMut) {
+        match &self.access_list {
+            None => {
+                // Empty list
+                let header = alloy_rlp::Header { list: true, payload_length: 0 };
+                header.encode(out);
+            }
+            Some(items) => {
+                // Calculate total payload length
+                let payload: usize = items.iter().map(|item| {
+                    let keys_payload: usize = item.storage_keys.iter()
+                        .map(|k| k.length())
+                        .sum();
+                    let keys_list_len = alloy_rlp::Header {
+                        list: true,
+                        payload_length: keys_payload,
+                    }.length() + keys_payload;
+                    let entry_payload = item.address.length() + keys_list_len;
+                    alloy_rlp::Header {
+                        list: true,
+                        payload_length: entry_payload,
+                    }.length() + entry_payload
+                }).sum();
+                let header = alloy_rlp::Header { list: true, payload_length: payload };
+                header.encode(out);
+                for item in items {
+                    let keys_payload: usize = item.storage_keys.iter()
+                        .map(|k| k.length())
+                        .sum();
+                    let keys_list_len = alloy_rlp::Header {
+                        list: true,
+                        payload_length: keys_payload,
+                    }.length() + keys_payload;
+                    let entry_payload = item.address.length() + keys_list_len;
+                    let entry_header = alloy_rlp::Header {
+                        list: true,
+                        payload_length: entry_payload,
+                    };
+                    entry_header.encode(out);
+                    item.address.encode(out);
+                    let keys_header = alloy_rlp::Header {
+                        list: true,
+                        payload_length: keys_payload,
+                    };
+                    keys_header.encode(out);
+                    for key in &item.storage_keys {
+                        key.encode(out);
+                    }
+                }
+            }
+        }
+    }
+
+    fn access_list_rlp_len(&self) -> usize {
+        match &self.access_list {
+            None => {
+                alloy_rlp::Header { list: true, payload_length: 0 }.length()
+            }
+            Some(items) => {
+                let payload: usize = items.iter().map(|item| {
+                    let keys_payload: usize = item.storage_keys.iter()
+                        .map(|k| k.length())
+                        .sum();
+                    let keys_list_len = alloy_rlp::Header {
+                        list: true,
+                        payload_length: keys_payload,
+                    }.length() + keys_payload;
+                    let entry_payload = item.address.length() + keys_list_len;
+                    alloy_rlp::Header {
+                        list: true,
+                        payload_length: entry_payload,
+                    }.length() + entry_payload
+                }).sum();
+                alloy_rlp::Header { list: true, payload_length: payload }.length() + payload
+            }
+        }
+    }
+
     fn fields_len(&self) -> usize {
         let to_len = match &self.to {
             Some(addr) => addr.length(),
@@ -75,6 +161,22 @@ impl Transaction {
             + self.gas_limit.length()
             + self.max_fee_per_gas.length()
             + self.max_priority_fee_per_gas.length()
+            + self.access_list_rlp_len()
+    }
+
+    /// Validate access list size limits.
+    pub fn validate_access_list(&self) -> Result<(), &'static str> {
+        if let Some(ref items) = self.access_list {
+            if items.len() > MAX_ACCESS_LIST_ENTRIES {
+                return Err("access list exceeds maximum entry count");
+            }
+            for item in items {
+                if item.storage_keys.len() > MAX_ACCESS_LIST_STORAGE_KEYS {
+                    return Err("access list entry exceeds maximum storage key count");
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Compute the signing hash (keccak256 of the RLP-encoded transaction).

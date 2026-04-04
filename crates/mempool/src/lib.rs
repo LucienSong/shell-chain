@@ -18,4 +18,4 @@ mod pool;
 
 pub use config::MempoolConfig;
 pub use error::MempoolError;
-pub use pool::TxPool;
+pub use pool::{TxPool, MAX_TX_SIZE};

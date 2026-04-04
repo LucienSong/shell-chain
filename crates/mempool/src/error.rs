@@ -39,4 +39,7 @@ pub enum MempoolError {
 
     #[error("crypto error: {0}")]
     Crypto(#[from] shell_crypto::CryptoError),
+
+    #[error("invalid transaction: {0}")]
+    InvalidTransaction(String),
 }

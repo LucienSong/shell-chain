@@ -56,13 +56,16 @@ pub struct CipherParams {
 ///
 /// Compatible with a PQ-adapted variant of the Web3 Secret Storage
 /// definition. The `address` field uses the same keccak256(pubkey)[12:]
-/// derivation as Ethereum but from a Dilithium3 public key.
+/// derivation as Ethereum but from a PQ public key.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EncryptedKey {
     /// Format version (always 1).
     pub version: u32,
     /// Shell-chain address derived from the public key.
     pub address: String,
+    /// PQ algorithm type ("dilithium3" or "sphincs-sha2-256f").
+    #[serde(default = "default_key_type")]
+    pub key_type: String,
     /// KDF algorithm identifier.
     pub kdf: String,
     /// KDF parameters.
@@ -75,4 +78,8 @@ pub struct EncryptedKey {
     pub ciphertext: String,
     /// Public key (hex-encoded) for address verification on decrypt.
     pub public_key: String,
+}
+
+fn default_key_type() -> String {
+    "dilithium3".into()
 }

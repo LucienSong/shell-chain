@@ -29,9 +29,23 @@ impl Verifier for MultiVerifier {
     }
 
     /// `MultiVerifier` handles all supported algorithms; returns
-    /// `Dilithium3` as the canonical default.
+    /// `Dilithium3` as the canonical default for the trait method.
+    /// Use [`MultiVerifier::detect_algorithm`] to inspect a specific
+    /// signature's algorithm tag.
     fn sig_type(&self) -> SignatureType {
         SignatureType::Dilithium3
+    }
+}
+
+impl MultiVerifier {
+    /// Detect the algorithm used by a given signature by reading its
+    /// embedded `sig_type` tag byte.
+    ///
+    /// This is the correct way to determine which PQ algorithm was used
+    /// for a specific signature, rather than relying on `Verifier::sig_type()`
+    /// which returns a static default.
+    pub fn detect_algorithm(signature: &PQSignature) -> SignatureType {
+        signature.sig_type
     }
 }
 
@@ -104,5 +118,25 @@ mod tests {
     #[test]
     fn multi_verifier_is_zero_sized() {
         assert_eq!(std::mem::size_of::<MultiVerifier>(), 0);
+    }
+
+    #[test]
+    fn detect_algorithm_dilithium() {
+        let signer = DilithiumSigner::generate();
+        let sig = signer.sign(b"detect-dil").unwrap();
+        assert_eq!(
+            MultiVerifier::detect_algorithm(&sig),
+            SignatureType::Dilithium3
+        );
+    }
+
+    #[test]
+    fn detect_algorithm_sphincs() {
+        let signer = SphincsSigner::generate();
+        let sig = signer.sign(b"detect-sph").unwrap();
+        assert_eq!(
+            MultiVerifier::detect_algorithm(&sig),
+            SignatureType::SphincsSha2256f
+        );
     }
 }

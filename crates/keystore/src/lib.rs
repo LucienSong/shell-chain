@@ -1,6 +1,6 @@
 //! Post-quantum keystore for shell-chain.
 //!
-//! Encrypts and decrypts Dilithium3 private keys using:
+//! Encrypts and decrypts Dilithium3 and SPHINCS+-SHA2-256f private keys using:
 //! - **KDF**: argon2id (m=64 MiB, t=3, p=4) — memory-hard, side-channel resistant
 //! - **AEAD**: XChaCha20-Poly1305 — 24-byte nonce safe for random generation
 //!
@@ -24,5 +24,5 @@
 mod crypto;
 mod types;
 
-pub use crypto::{decrypt, encrypt};
+pub use crypto::{decrypt, decrypt_sphincs, encrypt, encrypt_sphincs};
 pub use types::{EncryptedKey, KeystoreError, KdfParams, CipherParams};
