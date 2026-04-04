@@ -33,6 +33,7 @@ pub struct RunArgs {
     pub bootnodes: Vec<String>,
     pub enable_mdns: bool,
     pub pruning: u64,
+    pub checkpoint_url: Option<String>,
 }
 
 /// Start the node: load genesis, initialize state, and run the event loop.
@@ -155,6 +156,26 @@ async fn run_with_store<S: KvStore + 'static>(
             genesis_block.number(),
             genesis_block.header.state_root
         );
+    }
+
+    // Checkpoint sync: download and import snapshot if --checkpoint-url is set
+    // and the chain has no blocks beyond genesis.
+    if let Some(ref url) = args.checkpoint_url {
+        if shell_node::checkpoint::should_checkpoint_sync(&chain_store) {
+            info!("Chain is empty, starting checkpoint sync");
+            let block_num = shell_node::checkpoint::checkpoint_sync(
+                url,
+                &chain_store,
+                &args.datadir,
+            )
+            .await
+            .map_err(|e| -> Box<dyn std::error::Error> {
+                format!("checkpoint sync failed: {e}").into()
+            })?;
+            info!("Checkpoint sync complete at block #{block_num}");
+        } else {
+            info!("Chain already has blocks, skipping checkpoint sync");
+        }
     }
 
     // Extract authorities and epoch_length from genesis.

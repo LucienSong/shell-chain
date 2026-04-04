@@ -95,6 +95,10 @@ enum Commands {
         /// Number of recent state roots to retain (0 = archive mode, keeps all).
         #[arg(long, default_value = "0")]
         pruning: u64,
+
+        /// Checkpoint sync: download snapshot from URL on first start.
+        #[arg(long)]
+        checkpoint_url: Option<String>,
     },
 
     /// Initialize genesis block and data directory.
@@ -204,6 +208,7 @@ async fn main() {
             bootnodes,
             enable_mdns,
             pruning,
+            checkpoint_url,
         } => {
             // Merge --bootnode (repeatable) and --bootnodes (comma-separated).
             let mut all_bootnodes = bootnode;
@@ -223,6 +228,7 @@ async fn main() {
                 bootnodes: all_bootnodes,
                 enable_mdns,
                 pruning,
+                checkpoint_url,
             })
             .await
         }

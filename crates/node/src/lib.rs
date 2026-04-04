@@ -5,6 +5,7 @@
 //! and network message handling.
 
 pub mod builder;
+pub mod checkpoint;
 pub mod config;
 pub mod error;
 pub mod metrics;
