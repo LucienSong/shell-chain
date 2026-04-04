@@ -30,6 +30,7 @@ use crate::service::NetworkService;
 enum TopicKind {
     Blocks,
     Transactions,
+    Attestation,
 }
 
 /// Commands sent to the Swarm background task.
@@ -125,11 +126,12 @@ impl Libp2pNetwork {
 
         let blocks_topic = IdentTopic::new(&config.blocks_topic);
         let txs_topic = IdentTopic::new(&config.txs_topic);
+        let attestation_topic = IdentTopic::new(&config.attestation_topic);
         let pc = peer_count.clone();
         let bw = bandwidth.clone();
 
         tokio::spawn(swarm_loop(
-            swarm, cmd_rx, event_tx, pc, blocks_topic, txs_topic, bw,
+            swarm, cmd_rx, event_tx, pc, blocks_topic, txs_topic, attestation_topic, bw,
         ));
 
         Ok(Self {
@@ -167,6 +169,7 @@ fn build_swarm(config: &NetworkConfig) -> Result<Swarm<ShellBehaviour>, NetworkE
     let enable_autonat = config.enable_autonat;
     let blocks_topic_name = config.blocks_topic.clone();
     let txs_topic_name = config.txs_topic.clone();
+    let attestation_topic_name = config.attestation_topic.clone();
 
     // Build libp2p connection limits from config.
     let mut conn_limits = connection_limits::ConnectionLimits::default();
@@ -246,12 +249,29 @@ fn build_swarm(config: &NetworkConfig) -> Result<Swarm<ShellBehaviour>, NetworkE
                 ..Default::default()
             };
 
+            let attestation_topic_params = TopicScoreParams {
+                topic_weight: 0.8,
+                time_in_mesh_weight: 0.4,
+                time_in_mesh_quantum: Duration::from_secs(1),
+                time_in_mesh_cap: 3600.0,
+                first_message_deliveries_weight: 3.0,
+                first_message_deliveries_cap: 200.0,
+                first_message_deliveries_decay: 0.99,
+                invalid_message_deliveries_weight: -80.0,
+                invalid_message_deliveries_decay: 0.5,
+                mesh_message_deliveries_weight: 0.0,
+                mesh_failure_penalty_weight: 0.0,
+                ..Default::default()
+            };
+
             let blocks_hash = IdentTopic::new(&blocks_topic_name).hash();
             let txs_hash = IdentTopic::new(&txs_topic_name).hash();
+            let attestation_hash = IdentTopic::new(&attestation_topic_name).hash();
 
             let mut topic_scores = HashMap::new();
             topic_scores.insert(blocks_hash, blocks_topic_params);
             topic_scores.insert(txs_hash, txs_topic_params);
+            topic_scores.insert(attestation_hash, attestation_topic_params);
 
             let peer_score_params = PeerScoreParams {
                 topics: topic_scores,
@@ -403,6 +423,7 @@ async fn swarm_loop(
     peer_count: Arc<AtomicUsize>,
     blocks_topic: IdentTopic,
     txs_topic: IdentTopic,
+    attestation_topic: IdentTopic,
     bandwidth: Arc<BandwidthTracker>,
 ) {
     // Subscribe to gossipsub topics.
@@ -411,6 +432,9 @@ async fn swarm_loop(
     }
     if let Err(e) = swarm.behaviour_mut().gossipsub.subscribe(&txs_topic) {
         warn!("Failed to subscribe to txs topic: {e}");
+    }
+    if let Err(e) = swarm.behaviour_mut().gossipsub.subscribe(&attestation_topic) {
+        warn!("Failed to subscribe to attestation topic: {e}");
     }
 
     // Periodic Kademlia bootstrap refresh (every 5 minutes).
@@ -435,6 +459,7 @@ async fn swarm_loop(
                         let ident = match topic {
                             TopicKind::Blocks => blocks_topic.clone(),
                             TopicKind::Transactions => txs_topic.clone(),
+                            TopicKind::Attestation => attestation_topic.clone(),
                         };
                         // F-065: skip publish when outbound bandwidth exceeded.
                         if !bandwidth.record_outbound(data_len) {
@@ -746,6 +771,7 @@ impl NetworkService for Libp2pNetwork {
             | NetworkMessage::Ping
             | NetworkMessage::Pong => TopicKind::Blocks,
             NetworkMessage::NewTransaction(_) => TopicKind::Transactions,
+            NetworkMessage::NewAttestation(_) => TopicKind::Attestation,
         };
 
         let data =
@@ -993,6 +1019,7 @@ mod tests {
         let config = NetworkConfig {
             blocks_topic: "/custom/blocks/2".into(),
             txs_topic: "/custom/txs/2".into(),
+            attestation_topic: "/custom/attestation/2".into(),
             enable_mdns: false,
             enable_kademlia: false,
             enable_peer_scoring: true,

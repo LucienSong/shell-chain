@@ -12,6 +12,7 @@ libp2p = ["dep:libp2p", "dep:tracing", "dep:blake3"]
 [dependencies]
 shell-primitives.workspace = true
 shell-core.workspace = true
+shell-consensus.workspace = true
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true

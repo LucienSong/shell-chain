@@ -1,6 +1,7 @@
 //! Network message types for block and transaction propagation.
 
 use serde::{Deserialize, Serialize};
+use shell_consensus::Attestation;
 use shell_core::{Block, SignedTransaction};
 
 /// Unique identifier for a network peer.
@@ -32,6 +33,8 @@ pub enum NetworkMessage {
     NewBlock(Box<Block>),
     /// Announce a new transaction for mempool inclusion.
     NewTransaction(Box<SignedTransaction>),
+    /// Announce a block attestation (validator confirmation).
+    NewAttestation(Box<Attestation>),
     /// Request a range of blocks by number.
     BlockRequest {
         start_number: u64,
@@ -232,5 +235,25 @@ mod tests {
         let original = PeerId::from("cloneable");
         let cloned = original.clone();
         assert_eq!(original, cloned);
+    }
+
+    #[test]
+    fn serde_roundtrip_new_attestation() {
+        let attestation = Attestation {
+            block_hash: ShellHash::default(),
+            block_number: 99,
+            validator: Address::from_public_key(b"validator-key"),
+            signature: vec![1, 2, 3, 4],
+        };
+        let msg = NetworkMessage::NewAttestation(Box::new(attestation));
+        let json = serde_json::to_vec(&msg).unwrap();
+        let decoded: NetworkMessage = serde_json::from_slice(&json).unwrap();
+        match decoded {
+            NetworkMessage::NewAttestation(a) => {
+                assert_eq!(a.block_number, 99);
+                assert_eq!(a.signature, vec![1, 2, 3, 4]);
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
     }
 }

@@ -27,6 +27,8 @@ pub struct NetworkConfig {
     pub blocks_topic: String,
     /// Gossipsub topic name for transaction announcements.
     pub txs_topic: String,
+    /// Gossipsub topic name for attestation announcements.
+    pub attestation_topic: String,
     /// Maximum number of peers to maintain.
     pub max_peers: usize,
     /// Enable mDNS local peer discovery (disable in production/cloud).
@@ -62,6 +64,7 @@ impl Default for NetworkConfig {
             boot_nodes: vec![],
             blocks_topic: "/shell/blocks/1".into(),
             txs_topic: "/shell/txs/1".into(),
+            attestation_topic: "/shell/attestation/1".into(),
             max_peers: 50,
             enable_mdns: false,
             enable_kademlia: true,
@@ -177,6 +180,7 @@ mod tests {
         assert!(config.boot_nodes.is_empty());
         assert_eq!(config.blocks_topic, "/shell/blocks/1");
         assert_eq!(config.txs_topic, "/shell/txs/1");
+        assert_eq!(config.attestation_topic, "/shell/attestation/1");
         assert_eq!(config.max_peers, 50);
         assert!(!config.enable_mdns);
         assert!(config.enable_kademlia);

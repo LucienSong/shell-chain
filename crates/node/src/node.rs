@@ -449,6 +449,9 @@ impl<S: KvStore + 'static> Node<S> {
                                 NetworkMessage::Pong => {
                                     debug!(%peer, "received Pong");
                                 }
+                                _ => {
+                                    debug!(%peer, "received unhandled network message");
+                                }
                             }
                         }
                         Some(_) => {} // PeerConnected / PeerDisconnected
