@@ -95,7 +95,7 @@ impl<S: KvStore + 'static> RpcHandler<S> {
     ) -> Self {
         let (pending_tx_events, _) = tokio::sync::broadcast::channel(256);
         let (sync_events, _) = tokio::sync::broadcast::channel(16);
-        Self {
+        let handler = Self {
             chain_store,
             world_state,
             tx_pool,
@@ -112,7 +112,9 @@ impl<S: KvStore + 'static> RpcHandler<S> {
             finalized_number,
             finality,
             filter_registry: Arc::new(FilterRegistry::new()),
-        }
+        };
+        FilterRegistry::start_cleanup(Arc::clone(&handler.filter_registry));
+        handler
     }
 
     /// Set the proposer signer for governance RPCs.
@@ -335,19 +337,13 @@ impl<S: KvStore + 'static> RpcHandler<S> {
     /// Returns `None` for "latest"/"pending" (= head), `Some(n)` for specific numbers.
     /// "finalized" and "safe" resolve to the shared finalized block number.
     fn parse_block_number(&self, s: &str) -> Result<Option<u64>, ErrorObjectOwned> {
-        match s {
-            "latest" | "pending" => Ok(None),
-            "earliest" => Ok(Some(0)),
-            "finalized" | "safe" => {
+        match parse_block_tag(s)? {
+            BlockTag::Latest | BlockTag::Pending => Ok(None),
+            BlockTag::Finalized => {
                 let num = *self.finalized_number.read();
                 Ok(Some(num))
             }
-            hex if hex.starts_with("0x") => {
-                u64::from_str_radix(&hex[2..], 16)
-                    .map(Some)
-                    .map_err(|_| internal_err(format!("invalid block number: {hex}")))
-            }
-            _ => Err(internal_err(format!("invalid block number: {s}"))),
+            BlockTag::Number(n) => Ok(Some(n)),
         }
     }
 }
@@ -399,14 +395,18 @@ enum BlockTag {
     Latest,
     /// Construct a pending pseudo-block from mempool.
     Pending,
+    /// Resolve to the last finalized (or "safe") block.
+    Finalized,
     /// A specific block number.
     Number(u64),
 }
 
-/// Parse a block number string: "latest", "pending", "earliest", or "0x..." hex.
+/// Parse a block number string: "latest", "pending", "earliest",
+/// "finalized", "safe", or "0x..." hex.
 fn parse_block_tag(s: &str) -> Result<BlockTag, ErrorObjectOwned> {
     match s {
-        "latest" | "safe" | "finalized" => Ok(BlockTag::Latest),
+        "latest" => Ok(BlockTag::Latest),
+        "safe" | "finalized" => Ok(BlockTag::Finalized),
         "pending" => Ok(BlockTag::Pending),
         "earliest" => Ok(BlockTag::Number(0)),
         hex if hex.starts_with("0x") => {
@@ -419,15 +419,21 @@ fn parse_block_tag(s: &str) -> Result<BlockTag, ErrorObjectOwned> {
 }
 
 /// Legacy helper used by callers that don't need pending semantics.
+/// `Finalized` is treated the same as `Latest` (resolves to head) because
+/// the caller has no access to the shared finalized-number state.
 fn parse_block_number(s: &str) -> Result<Option<u64>, ErrorObjectOwned> {
     match parse_block_tag(s)? {
-        BlockTag::Latest | BlockTag::Pending => Ok(None),
+        BlockTag::Latest | BlockTag::Pending | BlockTag::Finalized => Ok(None),
         BlockTag::Number(n) => Ok(Some(n)),
     }
 }
 
 /// Convert a core Block to an RpcBlock response.
-fn block_to_rpc(block: &Block) -> RpcBlock {
+///
+/// When `full_txs` is true the `transactions` array contains full
+/// [`RpcTransaction`] objects (as required by `eth_getBlockByNumber` /
+/// `eth_getBlockByHash`).  When false it contains only transaction hashes.
+fn block_to_rpc(block: &Block, full_txs: bool) -> RpcBlock {
     // F-074: approximate block size from RLP-encoded lengths.
     let header_size = block.header.length();
     let tx_size: usize = block.transactions.iter().map(|tx| tx.length()).sum();
@@ -438,6 +444,24 @@ fn block_to_rpc(block: &Block) -> RpcBlock {
         hex_bytes(block.header.logs_bloom.as_ref())
     } else {
         format!("0x{}", "00".repeat(BLOOM_SIZE))
+    };
+
+    let transactions = if full_txs {
+        serde_json::to_value(
+            block.transactions.iter().enumerate().map(|(i, tx)| {
+                tx_to_rpc(
+                    tx,
+                    Some(block.hash()),
+                    Some(block.header.number),
+                    Some(i as u32),
+                    Some(block.header.base_fee_per_gas),
+                )
+            }).collect::<Vec<_>>()
+        ).unwrap_or_default()
+    } else {
+        serde_json::to_value(
+            block.transactions.iter().map(|tx| tx.hash()).collect::<Vec<ShellHash>>()
+        ).unwrap_or_default()
     };
 
     RpcBlock {
@@ -451,7 +475,7 @@ fn block_to_rpc(block: &Block) -> RpcBlock {
         state_root: block.header.state_root,
         transactions_root: block.header.transactions_root,
         receipts_root: block.header.receipts_root,
-        transactions: block.transactions.iter().map(|tx| tx.hash()).collect(),
+        transactions,
         size: hex_u64(size as u64),
         base_fee_per_gas: hex_u64(block.header.base_fee_per_gas),
         // F-072: standard Ethereum compatibility fields
@@ -528,23 +552,22 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
     async fn get_block_by_number(
         &self,
         number: String,
-        _full_txs: bool,
+        full_txs: bool,
     ) -> Result<Option<RpcBlock>, ErrorObjectOwned> {
-        // Resolve "finalized"/"safe" to actual finalized number before tag parsing.
-        if number == "finalized" || number == "safe" {
-            let n = *self.finalized_number.read();
-            let block = self.chain_store.get_block_by_number(n).map_err(internal_err)?;
-            return Ok(block.as_ref().map(block_to_rpc));
-        }
         let tag = parse_block_tag(&number)?;
         match tag {
+            BlockTag::Finalized => {
+                let n = *self.finalized_number.read();
+                let block = self.chain_store.get_block_by_number(n).map_err(internal_err)?;
+                Ok(block.as_ref().map(|b| block_to_rpc(b, full_txs)))
+            }
             BlockTag::Number(n) => {
                 let block = self.chain_store.get_block_by_number(n).map_err(internal_err)?;
-                Ok(block.as_ref().map(block_to_rpc))
+                Ok(block.as_ref().map(|b| block_to_rpc(b, full_txs)))
             }
             BlockTag::Latest => {
                 let block = self.chain_store.get_head_block().map_err(internal_err)?;
-                Ok(block.as_ref().map(block_to_rpc))
+                Ok(block.as_ref().map(|b| block_to_rpc(b, full_txs)))
             }
             BlockTag::Pending => {
                 // F-075: construct a pseudo-block from the mempool.
@@ -554,8 +577,6 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
                     None => return Ok(None),
                 };
                 let pending_txs = self.tx_pool.pending(256);
-                let tx_hashes: Vec<ShellHash> =
-                    pending_txs.iter().map(|tx| tx.hash()).collect();
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
@@ -564,6 +585,18 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
                 let tx_size: usize = pending_txs.iter().map(|tx| tx.length()).sum();
                 let header_size = head.header.length();
                 let size = header_size + tx_size;
+
+                let transactions = if full_txs {
+                    serde_json::to_value(
+                        pending_txs.iter().map(|tx| {
+                            tx_to_rpc(tx, None, Some(head.header.number + 1), None, None)
+                        }).collect::<Vec<_>>()
+                    ).unwrap_or_default()
+                } else {
+                    serde_json::to_value(
+                        pending_txs.iter().map(|tx| tx.hash()).collect::<Vec<ShellHash>>()
+                    ).unwrap_or_default()
+                };
 
                 let pending_block = RpcBlock {
                     hash: ShellHash::ZERO,
@@ -576,7 +609,7 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
                     state_root: head.header.state_root,
                     transactions_root: ShellHash::ZERO,
                     receipts_root: ShellHash::ZERO,
-                    transactions: tx_hashes,
+                    transactions,
                     size: hex_u64(size as u64),
                     base_fee_per_gas: hex_u64(head.header.base_fee_per_gas),
                     total_difficulty: "0x1".into(),
@@ -596,13 +629,13 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
     async fn get_block_by_hash(
         &self,
         hash: ShellHash,
-        _full_txs: bool,
+        full_txs: bool,
     ) -> Result<Option<RpcBlock>, ErrorObjectOwned> {
         let block = self
             .chain_store
             .get_block_by_hash(&hash)
             .map_err(internal_err)?;
-        Ok(block.as_ref().map(block_to_rpc))
+        Ok(block.as_ref().map(|b| block_to_rpc(b, full_txs)))
     }
 
     async fn get_transaction_by_hash(
@@ -981,7 +1014,8 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
         let latest = head.map(|b| b.number()).unwrap_or(0);
         let id = self
             .filter_registry
-            .new_filter(FilterKind::Log(filter), latest);
+            .new_filter(FilterKind::Log(filter), latest)
+            .ok_or_else(|| internal_err("filter limit reached"))?;
         Ok(id)
     }
 
@@ -991,7 +1025,8 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
             .get_head_block()
             .map_err(internal_err)?;
         let latest = head.map(|b| b.number()).unwrap_or(0);
-        let id = self.filter_registry.new_filter(FilterKind::Block, latest);
+        let id = self.filter_registry.new_filter(FilterKind::Block, latest)
+            .ok_or_else(|| internal_err("filter limit reached"))?;
         Ok(id)
     }
 
@@ -2778,7 +2813,7 @@ mod tests {
         // Hash = zero (not yet mined).
         assert_eq!(rpc.hash, ShellHash::ZERO);
         // Empty mempool → no transactions.
-        assert!(rpc.transactions.is_empty());
+        assert_eq!(rpc.transactions, serde_json::json!([]));
         // Still has standard Ethereum fields.
         assert_eq!(rpc.total_difficulty, "0x1");
         assert_eq!(rpc.nonce, "0x0000000000000000");
