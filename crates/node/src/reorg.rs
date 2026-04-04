@@ -97,9 +97,13 @@ impl ReorgEngine {
             "restored world state to ancestor"
         );
 
-        // Step 3: Apply new chain blocks and update canonical mappings
+        // Step 3: Apply new chain blocks — restore world state per block.
+        // Full EVM re-execution is not performed here; instead we trust the
+        // stored state roots which were validated at block import time.
+        // The world state is set to the tip block's state root.
         let mut applied = 0;
         let mut new_head = ancestor_hash;
+        let mut tip_state_root = ancestor_block.header.state_root;
         for hash in new_chain {
             let block =
                 chain_store
@@ -109,9 +113,14 @@ impl ReorgEngine {
                     })?;
 
             chain_store.set_canonical(block.number(), hash)?;
+            tip_state_root = block.header.state_root;
             new_head = *hash;
             applied += 1;
         }
+
+        // Restore world state to the new chain tip's state root.
+        let tip_ws = WorldState::at_root(Arc::clone(store), &tip_state_root)?;
+        *world_state.write() = tip_ws;
 
         // Step 4: Update head pointer
         chain_store.set_head(&new_head)?;

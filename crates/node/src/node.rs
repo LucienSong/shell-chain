@@ -928,13 +928,16 @@ impl<S: KvStore + 'static> Node<S> {
         // Check for equivocation.
         let mut finality = self.finality.write();
         if let Some(conflicting) = finality.detect_equivocation(&block_hash, block_number, &validator) {
-            tracing::warn!(
+            tracing::error!(
                 %validator,
                 %block_hash,
                 %conflicting,
                 height = block_number,
-                "equivocation detected"
+                "equivocation detected — rejecting attestation"
             );
+            return Err(NodeError::Startup(format!(
+                "equivocation: validator {validator:?} already attested to {conflicting:?} at height {block_number}"
+            )));
         }
 
         // Record the attestation.
@@ -1928,5 +1931,38 @@ mod tests {
         assert_eq!(tracker.len(), 1);
         assert_eq!(tracker.latest().unwrap().block_number, 1);
         assert_eq!(tracker.latest().unwrap().state_root, ShellHash::from([0xAB; 32]));
+    }
+
+    #[test]
+    fn handle_attestation_rejects_equivocation() {
+        let (node, signer) = setup_node();
+        store_genesis(&node);
+
+        let proposer = node.config.proposer_address.unwrap();
+        let pubkey = signer.public_key().to_vec();
+        node.register_authority_pubkey(proposer, pubkey);
+
+        let verifier = MultiVerifier;
+
+        // Produce a block so we have height 1.
+        let block1 = node.produce_block(&signer, 100).unwrap();
+        let hash1 = block1.hash();
+        let height = block1.header.number;
+
+        // Directly record an attestation for hash1 into the finality tracker
+        // (bypassing handle_attestation avoids triggering finality + prune
+        // since we only have 1 validator).
+        let att1 = node.create_attestation(hash1, height, &signer).unwrap();
+        node.finality.write().record_attestation(att1);
+
+        // Create a second attestation from the same validator for a different
+        // hash at the same height — this is equivocation.
+        let fake_hash = ShellHash::from([0xDE; 32]);
+        let att2 = node.create_attestation(fake_hash, height, &signer).unwrap();
+        let result = node.handle_attestation(att2, &verifier);
+
+        assert!(result.is_err(), "equivocation must be rejected");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("equivocation"), "error should mention equivocation: {err_msg}");
     }
 }
