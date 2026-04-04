@@ -1,8 +1,13 @@
 //! Ethereum PubSub (eth_subscribe / eth_unsubscribe) implementation.
 //!
-//! Supports two subscription types:
+//! Supports four subscription types:
 //! - `newHeads` — pushes new block headers when blocks are produced or imported.
 //! - `logs` — pushes matching logs (filtered by address / topics).
+//! - `newPendingTransactions` — pushes tx hashes as transactions enter the mempool.
+//! - `syncing` — pushes sync status changes (started / stopped syncing).
+
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 
 use jsonrpsee::core::SubscriptionResult;
 use jsonrpsee::proc_macros::rpc;
@@ -15,6 +20,12 @@ use tokio::sync::broadcast;
 
 use crate::handler::RpcHandler;
 use crate::types::{hex_bytes, hex_u64};
+
+/// Maximum number of concurrent subscriptions across all connections.
+const MAX_SUBSCRIPTIONS: u32 = 1024;
+
+/// Auto-disconnect a subscriber after this many consecutive lag events (F-042).
+const MAX_CONSECUTIVE_LAGS: u32 = 3;
 
 /// Parse a hex address string like "0xaaaa..." into an `Address`.
 fn parse_address_hex(s: &str) -> Option<Address> {
@@ -42,6 +53,73 @@ pub enum BlockEvent {
         header: BlockHeader,
         receipts: Vec<TransactionReceipt>,
     },
+}
+
+/// Sync status emitted by the `syncing` subscription.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SyncStatus {
+    /// Node is actively syncing.
+    Syncing {
+        starting_block: u64,
+        current_block: u64,
+        highest_block: u64,
+    },
+    /// Node is fully synced and not downloading blocks.
+    NotSyncing,
+}
+
+// ---------------------------------------------------------------------------
+// Subscription tracker (global limit enforcement)
+// ---------------------------------------------------------------------------
+
+/// Tracks the number of active subscriptions and enforces a global limit.
+#[derive(Debug, Clone)]
+pub struct SubscriptionTracker {
+    active: Arc<AtomicU32>,
+    max: u32,
+}
+
+impl SubscriptionTracker {
+    /// Create a tracker with the given maximum subscription count.
+    pub fn new(max: u32) -> Self {
+        Self {
+            active: Arc::new(AtomicU32::new(0)),
+            max,
+        }
+    }
+
+    /// Try to acquire a subscription slot. Returns `true` on success.
+    pub fn try_acquire(&self) -> bool {
+        loop {
+            let current = self.active.load(Ordering::SeqCst);
+            if current >= self.max {
+                return false;
+            }
+            if self
+                .active
+                .compare_exchange(current, current + 1, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                return true;
+            }
+        }
+    }
+
+    /// Release a subscription slot (called when the forwarding task ends).
+    pub fn release(&self) {
+        self.active.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    /// Returns the current number of active subscriptions.
+    pub fn active_count(&self) -> u32 {
+        self.active.load(Ordering::SeqCst)
+    }
+}
+
+impl Default for SubscriptionTracker {
+    fn default() -> Self {
+        Self::new(MAX_SUBSCRIPTIONS)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -150,7 +228,7 @@ impl LogFilter {
 /// Ethereum PubSub RPC trait.
 #[rpc(server, namespace = "eth")]
 pub trait EthPubSub {
-    /// Subscribe to live events (`newHeads` or `logs`).
+    /// Subscribe to live events (`newHeads`, `logs`, `newPendingTransactions`, or `syncing`).
     #[subscription(name = "subscribe" => "subscription", unsubscribe = "unsubscribe", item = serde_json::Value)]
     async fn subscribe(
         &self,
@@ -171,22 +249,70 @@ impl<S: KvStore + 'static> EthPubSubServer for RpcHandler<S> {
         sub_type: String,
         params: Option<serde_json::Value>,
     ) -> SubscriptionResult {
-        let rx = self.block_event_sender().subscribe();
+        let tracker = self.subscription_tracker();
+
+        // Enforce global subscription limit.
+        if !tracker.try_acquire() {
+            pending
+                .reject(jsonrpsee::types::ErrorObject::owned(
+                    -32005,
+                    format!(
+                        "too many active subscriptions (max {})",
+                        tracker.active_count()
+                    ),
+                    None::<()>,
+                ))
+                .await;
+            return Ok(());
+        }
 
         match sub_type.as_str() {
             "newHeads" => {
+                let rx = self.block_event_sender().subscribe();
                 let sink = pending.accept().await?;
-                tokio::spawn(forward_new_heads(rx, sink));
+                let t = tracker.clone();
+                tokio::spawn(async move {
+                    forward_new_heads(rx, sink).await;
+                    t.release();
+                });
             }
             "logs" => {
+                let rx = self.block_event_sender().subscribe();
                 let filter = params
                     .as_ref()
                     .map(LogFilter::from_value)
                     .unwrap_or_default();
                 let sink = pending.accept().await?;
-                tokio::spawn(forward_logs(rx, sink, filter));
+                let t = tracker.clone();
+                tokio::spawn(async move {
+                    forward_logs(rx, sink, filter).await;
+                    t.release();
+                });
+            }
+            "newPendingTransactions" => {
+                let rx = self.pending_tx_event_sender().subscribe();
+                let full_txs = params
+                    .as_ref()
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let sink = pending.accept().await?;
+                let t = tracker.clone();
+                tokio::spawn(async move {
+                    forward_pending_txs(rx, sink, full_txs).await;
+                    t.release();
+                });
+            }
+            "syncing" => {
+                let rx = self.sync_event_sender().subscribe();
+                let sink = pending.accept().await?;
+                let t = tracker.clone();
+                tokio::spawn(async move {
+                    forward_syncing(rx, sink).await;
+                    t.release();
+                });
             }
             _ => {
+                tracker.release();
                 pending
                     .reject(jsonrpsee::types::ErrorObject::owned(
                         -32602,
@@ -264,8 +390,7 @@ async fn forward_new_heads(
             Err(broadcast::error::RecvError::Lagged(n)) => {
                 consecutive_lags += 1;
                 tracing::warn!(skipped = n, consecutive_lags, "newHeads subscriber lagged");
-                // F-042: auto-disconnect after 3 consecutive lags.
-                if consecutive_lags >= 3 {
+                if consecutive_lags >= MAX_CONSECUTIVE_LAGS {
                     tracing::error!("newHeads subscriber too slow — disconnecting");
                     break;
                 }
@@ -309,14 +434,109 @@ async fn forward_logs(
             Err(broadcast::error::RecvError::Lagged(n)) => {
                 consecutive_lags += 1;
                 tracing::warn!(skipped = n, consecutive_lags, "logs subscriber lagged");
-                // F-042: auto-disconnect after 3 consecutive lags.
-                if consecutive_lags >= 3 {
+                if consecutive_lags >= MAX_CONSECUTIVE_LAGS {
                     tracing::error!("logs subscriber too slow — disconnecting");
                     return;
                 }
             }
             Err(broadcast::error::RecvError::Closed) => return,
         }
+    }
+}
+
+/// Forward pending transaction hashes (or full tx hashes) to subscribers.
+/// When `full_txs` is false (default), sends just the tx hash string.
+async fn forward_pending_txs(
+    mut rx: broadcast::Receiver<ShellHash>,
+    sink: jsonrpsee::SubscriptionSink,
+    _full_txs: bool,
+) {
+    let mut consecutive_lags: u32 = 0;
+    loop {
+        match rx.recv().await {
+            Ok(tx_hash) => {
+                consecutive_lags = 0;
+                let value = serde_json::json!(tx_hash);
+                let msg = SubscriptionMessage::from_json(&value)
+                    .expect("hash serialization cannot fail");
+                if sink.send(msg).await.is_err() {
+                    break;
+                }
+            }
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                consecutive_lags += 1;
+                tracing::warn!(
+                    skipped = n,
+                    consecutive_lags,
+                    "newPendingTransactions subscriber lagged"
+                );
+                if consecutive_lags >= MAX_CONSECUTIVE_LAGS {
+                    tracing::error!(
+                        "newPendingTransactions subscriber too slow — disconnecting"
+                    );
+                    break;
+                }
+            }
+            Err(broadcast::error::RecvError::Closed) => break,
+        }
+    }
+}
+
+/// Forward sync status changes to subscribers.
+/// Sends an initial "not syncing" event, then relays any subsequent changes.
+async fn forward_syncing(
+    mut rx: broadcast::Receiver<SyncStatus>,
+    sink: jsonrpsee::SubscriptionSink,
+) {
+    // Emit initial status: node is not syncing (no formal sync states yet).
+    let initial = serde_json::json!(false);
+    let msg =
+        SubscriptionMessage::from_json(&initial).expect("bool serialization cannot fail");
+    if sink.send(msg).await.is_err() {
+        return;
+    }
+
+    let mut consecutive_lags: u32 = 0;
+    loop {
+        match rx.recv().await {
+            Ok(status) => {
+                consecutive_lags = 0;
+                let value = sync_status_to_json(&status);
+                let msg = SubscriptionMessage::from_json(&value)
+                    .expect("sync status serialization cannot fail");
+                if sink.send(msg).await.is_err() {
+                    break;
+                }
+            }
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                consecutive_lags += 1;
+                tracing::warn!(skipped = n, consecutive_lags, "syncing subscriber lagged");
+                if consecutive_lags >= MAX_CONSECUTIVE_LAGS {
+                    tracing::error!("syncing subscriber too slow — disconnecting");
+                    break;
+                }
+            }
+            Err(broadcast::error::RecvError::Closed) => break,
+        }
+    }
+}
+
+/// Convert a `SyncStatus` into the JSON shape expected by `eth_subscription`.
+fn sync_status_to_json(status: &SyncStatus) -> serde_json::Value {
+    match status {
+        SyncStatus::Syncing {
+            starting_block,
+            current_block,
+            highest_block,
+        } => serde_json::json!({
+            "syncing": true,
+            "status": {
+                "startingBlock": hex_u64(*starting_block),
+                "currentBlock": hex_u64(*current_block),
+                "highestBlock": hex_u64(*highest_block),
+            }
+        }),
+        SyncStatus::NotSyncing => serde_json::json!(false),
     }
 }
 
@@ -538,5 +758,234 @@ mod tests {
         assert!(filter.matches(&matching_receipt.logs[0]));
         // The non-matching receipt's log should NOT pass.
         assert!(!filter.matches(&non_matching_receipt.logs[0]));
+    }
+
+    // -------------------------------------------------------------------
+    // newPendingTransactions subscription tests
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn pending_tx_channel_delivers_hash() {
+        let (tx, mut rx) = broadcast::channel::<ShellHash>(16);
+        let hash = shell_primitives::keccak256(b"tx-1");
+
+        tx.send(hash).unwrap();
+        let received = rx.recv().await.unwrap();
+        assert_eq!(received, hash);
+    }
+
+    #[tokio::test]
+    async fn pending_tx_channel_multiple_subscribers() {
+        let (tx, _) = broadcast::channel::<ShellHash>(16);
+        let mut rx1 = tx.subscribe();
+        let mut rx2 = tx.subscribe();
+
+        let hash = shell_primitives::keccak256(b"tx-2");
+        tx.send(hash).unwrap();
+
+        assert_eq!(rx1.recv().await.unwrap(), hash);
+        assert_eq!(rx2.recv().await.unwrap(), hash);
+    }
+
+    #[tokio::test]
+    async fn pending_tx_channel_delivers_multiple_hashes() {
+        let (tx, mut rx) = broadcast::channel::<ShellHash>(16);
+        let h1 = shell_primitives::keccak256(b"tx-a");
+        let h2 = shell_primitives::keccak256(b"tx-b");
+        let h3 = shell_primitives::keccak256(b"tx-c");
+
+        tx.send(h1).unwrap();
+        tx.send(h2).unwrap();
+        tx.send(h3).unwrap();
+
+        assert_eq!(rx.recv().await.unwrap(), h1);
+        assert_eq!(rx.recv().await.unwrap(), h2);
+        assert_eq!(rx.recv().await.unwrap(), h3);
+    }
+
+    // -------------------------------------------------------------------
+    // syncing subscription tests
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn sync_status_channel_delivers_events() {
+        let (tx, mut rx) = broadcast::channel::<SyncStatus>(16);
+
+        tx.send(SyncStatus::Syncing {
+            starting_block: 0,
+            current_block: 50,
+            highest_block: 100,
+        })
+        .unwrap();
+
+        match rx.recv().await.unwrap() {
+            SyncStatus::Syncing {
+                starting_block,
+                current_block,
+                highest_block,
+            } => {
+                assert_eq!(starting_block, 0);
+                assert_eq!(current_block, 50);
+                assert_eq!(highest_block, 100);
+            }
+            _ => panic!("expected Syncing variant"),
+        }
+    }
+
+    #[tokio::test]
+    async fn sync_status_not_syncing() {
+        let (tx, mut rx) = broadcast::channel::<SyncStatus>(16);
+        tx.send(SyncStatus::NotSyncing).unwrap();
+
+        assert_eq!(rx.recv().await.unwrap(), SyncStatus::NotSyncing);
+    }
+
+    #[test]
+    fn sync_status_to_json_syncing() {
+        let status = SyncStatus::Syncing {
+            starting_block: 0,
+            current_block: 256,
+            highest_block: 512,
+        };
+        let json = sync_status_to_json(&status);
+        assert_eq!(json["syncing"], true);
+        assert_eq!(json["status"]["startingBlock"], "0x0");
+        assert_eq!(json["status"]["currentBlock"], "0x100");
+        assert_eq!(json["status"]["highestBlock"], "0x200");
+    }
+
+    #[test]
+    fn sync_status_to_json_not_syncing() {
+        let json = sync_status_to_json(&SyncStatus::NotSyncing);
+        assert_eq!(json, serde_json::json!(false));
+    }
+
+    // -------------------------------------------------------------------
+    // Subscription tracker tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn subscription_tracker_enforces_limit() {
+        let tracker = SubscriptionTracker::new(2);
+        assert!(tracker.try_acquire());
+        assert!(tracker.try_acquire());
+        // Third should fail.
+        assert!(!tracker.try_acquire());
+        assert_eq!(tracker.active_count(), 2);
+    }
+
+    #[test]
+    fn subscription_tracker_release_frees_slot() {
+        let tracker = SubscriptionTracker::new(1);
+        assert!(tracker.try_acquire());
+        assert!(!tracker.try_acquire());
+        tracker.release();
+        assert!(tracker.try_acquire());
+    }
+
+    #[test]
+    fn subscription_tracker_default_allows_many() {
+        let tracker = SubscriptionTracker::default();
+        // Default allows MAX_SUBSCRIPTIONS (1024).
+        for _ in 0..100 {
+            assert!(tracker.try_acquire());
+        }
+        assert_eq!(tracker.active_count(), 100);
+        for _ in 0..100 {
+            tracker.release();
+        }
+        assert_eq!(tracker.active_count(), 0);
+    }
+
+    #[test]
+    fn subscription_tracker_clone_shares_state() {
+        let tracker = SubscriptionTracker::new(2);
+        let tracker2 = tracker.clone();
+        assert!(tracker.try_acquire());
+        assert!(tracker2.try_acquire());
+        // Both clones see the shared count — third should fail.
+        assert!(!tracker.try_acquire());
+        assert!(!tracker2.try_acquire());
+    }
+
+    // -------------------------------------------------------------------
+    // Log filter combined address+topic test
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn log_filter_address_and_topic_combined() {
+        let addr = Address::from([0xAA; 20]);
+        let topic = shell_primitives::keccak256(b"Transfer(address,address,uint256)");
+        let filter = LogFilter {
+            addresses: vec![addr],
+            topics: vec![vec![topic]],
+        };
+
+        // Correct address, correct topic → match.
+        let log_match = Log {
+            address: addr,
+            topics: vec![topic],
+            data: Bytes::new(),
+        };
+        assert!(filter.matches(&log_match));
+
+        // Correct address, wrong topic → no match.
+        let log_wrong_topic = Log {
+            address: addr,
+            topics: vec![shell_primitives::keccak256(b"Other")],
+            data: Bytes::new(),
+        };
+        assert!(!filter.matches(&log_wrong_topic));
+
+        // Wrong address, correct topic → no match.
+        let log_wrong_addr = Log {
+            address: Address::from([0xBB; 20]),
+            topics: vec![topic],
+            data: Bytes::new(),
+        };
+        assert!(!filter.matches(&log_wrong_addr));
+    }
+
+    #[test]
+    fn log_filter_multiple_addresses() {
+        let addr_a = Address::from([0xAA; 20]);
+        let addr_b = Address::from([0xBB; 20]);
+        let filter = LogFilter {
+            addresses: vec![addr_a, addr_b],
+            topics: vec![],
+        };
+
+        let log_a = Log {
+            address: addr_a,
+            topics: vec![],
+            data: Bytes::new(),
+        };
+        let log_b = Log {
+            address: addr_b,
+            topics: vec![],
+            data: Bytes::new(),
+        };
+        let log_c = Log {
+            address: Address::from([0xCC; 20]),
+            topics: vec![],
+            data: Bytes::new(),
+        };
+
+        assert!(filter.matches(&log_a));
+        assert!(filter.matches(&log_b));
+        assert!(!filter.matches(&log_c));
+    }
+
+    #[test]
+    fn log_filter_from_json_array_of_addresses() {
+        let json = serde_json::json!({
+            "address": [
+                "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            ],
+            "topics": []
+        });
+        let filter = LogFilter::from_value(&json);
+        assert_eq!(filter.addresses.len(), 2);
     }
 }

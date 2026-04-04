@@ -14,5 +14,5 @@ pub mod types;
 
 pub use handler::RpcHandler;
 pub use server::{start_rpc_server, RpcConfig, RpcServerHandle};
-pub use subscriptions::BlockEvent;
+pub use subscriptions::{BlockEvent, SubscriptionTracker, SyncStatus};
 pub use tls::TlsConfig;

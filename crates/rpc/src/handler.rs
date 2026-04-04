@@ -19,7 +19,7 @@ use shell_storage::{ChainStore, KvStore, WorldState};
 use crate::api::{EthApiServer, ShellApiServer, Web3ApiServer, NetApiServer, DebugApiServer};
 use crate::filter::{RawLogFilter, MAX_BLOCK_RANGE};
 use crate::filter_registry::{FilterKind, FilterRegistry};
-use crate::subscriptions::BlockEvent;
+use crate::subscriptions::{BlockEvent, SubscriptionTracker, SyncStatus};
 use crate::types::*;
 
 /// JSON-RPC handler wired to storage and mempool backends.
@@ -36,6 +36,12 @@ pub struct RpcHandler<S: KvStore + 'static> {
     tx_broadcast: Option<tokio::sync::mpsc::UnboundedSender<SignedTransaction>>,
     /// Broadcast sender for block events (used by eth_subscribe).
     block_events: tokio::sync::broadcast::Sender<BlockEvent>,
+    /// Broadcast sender for pending transaction hashes (eth_subscribe newPendingTransactions).
+    pending_tx_events: tokio::sync::broadcast::Sender<ShellHash>,
+    /// Broadcast sender for sync status changes (eth_subscribe syncing).
+    sync_events: tokio::sync::broadcast::Sender<SyncStatus>,
+    /// Tracks active subscriptions and enforces a global limit.
+    subscription_tracker: SubscriptionTracker,
     /// Optional signer for governance proposals (set when node is a validator).
     proposer_signer: Option<Arc<dyn Signer>>,
     /// Address of the proposer (derived from the signer's public key).
@@ -61,6 +67,9 @@ impl<S: KvStore + 'static> Clone for RpcHandler<S> {
             chain_id: self.chain_id,
             tx_broadcast: self.tx_broadcast.clone(),
             block_events: self.block_events.clone(),
+            pending_tx_events: self.pending_tx_events.clone(),
+            sync_events: self.sync_events.clone(),
+            subscription_tracker: self.subscription_tracker.clone(),
             proposer_signer: self.proposer_signer.clone(),
             proposer_address: self.proposer_address,
             start_time: self.start_time,
@@ -84,6 +93,8 @@ impl<S: KvStore + 'static> RpcHandler<S> {
         finalized_number: Arc<parking_lot::RwLock<u64>>,
         finality: Arc<parking_lot::RwLock<FinalityState>>,
     ) -> Self {
+        let (pending_tx_events, _) = tokio::sync::broadcast::channel(256);
+        let (sync_events, _) = tokio::sync::broadcast::channel(16);
         Self {
             chain_store,
             world_state,
@@ -91,6 +102,9 @@ impl<S: KvStore + 'static> RpcHandler<S> {
             chain_id,
             tx_broadcast,
             block_events,
+            pending_tx_events,
+            sync_events,
+            subscription_tracker: SubscriptionTracker::default(),
             proposer_signer: None,
             proposer_address: None,
             start_time: Instant::now(),
@@ -112,6 +126,21 @@ impl<S: KvStore + 'static> RpcHandler<S> {
     /// Returns a reference to the block event broadcast sender.
     pub fn block_event_sender(&self) -> &tokio::sync::broadcast::Sender<BlockEvent> {
         &self.block_events
+    }
+
+    /// Returns a reference to the pending transaction hash broadcast sender.
+    pub fn pending_tx_event_sender(&self) -> &tokio::sync::broadcast::Sender<ShellHash> {
+        &self.pending_tx_events
+    }
+
+    /// Returns a reference to the sync status broadcast sender.
+    pub fn sync_event_sender(&self) -> &tokio::sync::broadcast::Sender<SyncStatus> {
+        &self.sync_events
+    }
+
+    /// Returns a reference to the subscription tracker.
+    pub fn subscription_tracker(&self) -> &SubscriptionTracker {
+        &self.subscription_tracker
     }
 
     /// F-073: returns the total number of bloom filter false positives detected
@@ -162,6 +191,9 @@ impl<S: KvStore + 'static> RpcHandler<S> {
         if let (Some(sender), Some(tx)) = (&self.tx_broadcast, tx_for_broadcast) {
             let _ = sender.send(tx);
         }
+
+        // Notify pending-tx subscribers about the new transaction hash.
+        let _ = self.pending_tx_events.send(hash);
 
         Ok(hash)
     }
