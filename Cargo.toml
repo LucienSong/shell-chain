@@ -40,6 +40,7 @@ shell-core = { path = "crates/core" }
 shell-storage = { path = "crates/storage" }
 shell-consensus = { path = "crates/consensus" }
 pqcrypto-dilithium = "0.5"
+pqcrypto-sphincsplus = "0.7"
 pqcrypto-traits = "0.3"
 zeroize = { version = "1", features = ["derive"] }
 

@@ -192,4 +192,112 @@ mod tests {
 
         assert_eq!(encrypted.address, hex::encode(expected.as_bytes()));
     }
+
+    // ── B. Extended keystore tests ──────────────────────────────
+
+    #[test]
+    fn keystore_missing_fields_rejected() {
+        // Incomplete JSON missing required fields should fail deserialization
+        let incomplete = r#"{"version": 1, "address": "abc"}"#;
+        let result = serde_json::from_str::<EncryptedKey>(incomplete);
+        assert!(result.is_err(), "missing fields should fail deserialization");
+
+        // Missing ciphertext
+        let no_ciphertext = r#"{
+            "version": 1,
+            "address": "deadbeef",
+            "kdf": "argon2id",
+            "kdf_params": {"m_cost": 65536, "t_cost": 3, "p_cost": 4, "salt": "aa"},
+            "cipher": "xchacha20-poly1305",
+            "cipher_params": {"nonce": "bb"},
+            "public_key": "cc"
+        }"#;
+        let result = serde_json::from_str::<EncryptedKey>(no_ciphertext);
+        assert!(result.is_err(), "missing ciphertext should fail deserialization");
+    }
+
+    #[test]
+    fn kdf_deterministic_same_password_same_key() {
+        let password = b"deterministic-test";
+        let salt = [42u8; 32];
+        let params = KdfParams {
+            m_cost: 65536,
+            t_cost: 3,
+            p_cost: 4,
+            salt: hex::encode(salt),
+        };
+
+        let key1 = derive_key(password, &salt, &params).unwrap();
+        let key2 = derive_key(password, &salt, &params).unwrap();
+        assert_eq!(key1, key2, "same password+salt must produce same derived key");
+
+        // Different password must produce different key
+        let key3 = derive_key(b"different", &salt, &params).unwrap();
+        assert_ne!(key1, key3);
+    }
+
+    #[test]
+    fn tampered_nonce_fails() {
+        let signer = DilithiumSigner::generate();
+        let mut encrypted = encrypt(&signer, b"nonce-test").unwrap();
+
+        // Corrupt the nonce
+        let mut nonce = hex::decode(&encrypted.cipher_params.nonce).unwrap();
+        nonce[0] ^= 0xFF;
+        encrypted.cipher_params.nonce = hex::encode(&nonce);
+
+        let result = decrypt(&encrypted, b"nonce-test");
+        assert!(result.is_err(), "tampered nonce should cause decryption failure");
+    }
+
+    #[test]
+    fn tampered_salt_fails() {
+        let signer = DilithiumSigner::generate();
+        let mut encrypted = encrypt(&signer, b"salt-test").unwrap();
+
+        // Corrupt the salt → derives a different key → AEAD tag mismatch
+        let mut salt = hex::decode(&encrypted.kdf_params.salt).unwrap();
+        salt[0] ^= 0xFF;
+        encrypted.kdf_params.salt = hex::encode(&salt);
+
+        let result = decrypt(&encrypted, b"salt-test");
+        assert!(result.is_err(), "tampered salt should cause decryption failure");
+    }
+
+    #[test]
+    fn multiple_encryptions_produce_different_ciphertexts() {
+        let signer = DilithiumSigner::generate();
+        let password = b"nonce-uniqueness";
+
+        let enc1 = encrypt(&signer, password).unwrap();
+        let enc2 = encrypt(&signer, password).unwrap();
+
+        // Random salt and nonce guarantee different ciphertexts
+        assert_ne!(enc1.ciphertext, enc2.ciphertext);
+        assert_ne!(enc1.kdf_params.salt, enc2.kdf_params.salt);
+        assert_ne!(enc1.cipher_params.nonce, enc2.cipher_params.nonce);
+
+        // Both must still decrypt correctly
+        let r1 = decrypt(&enc1, password).unwrap();
+        let r2 = decrypt(&enc2, password).unwrap();
+        assert_eq!(r1.public_key(), r2.public_key());
+    }
+
+    #[test]
+    fn decrypt_preserves_signing_capability() {
+        let signer = DilithiumSigner::generate();
+        let encrypted = encrypt(&signer, b"sign-after-decrypt").unwrap();
+        let recovered = decrypt(&encrypted, b"sign-after-decrypt").unwrap();
+
+        // Sign with recovered signer and verify with original public key
+        let msg = b"post-decrypt signing";
+        let sig = recovered.sign(msg).unwrap();
+        let verifier = shell_crypto::DilithiumVerifier;
+        use shell_crypto::Verifier;
+        assert!(verifier.verify(signer.public_key(), msg, &sig).unwrap());
+
+        // And vice-versa: sign with original, verify with recovered pk
+        let sig2 = signer.sign(msg).unwrap();
+        assert!(verifier.verify(recovered.public_key(), msg, &sig2).unwrap());
+    }
 }

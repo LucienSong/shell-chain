@@ -10,7 +10,7 @@ use tracing::{debug, info, warn};
 
 use shell_consensus::{Attestation, ConsensusEngine, FinalityState, ForkChoice, PoaEngine};
 use shell_core::{Block, BlockHeader, SignedTransaction, calculate_base_fee};
-use shell_crypto::{DilithiumVerifier, Signer, Verifier};
+use shell_crypto::{MultiVerifier, Signer, Verifier};
 use shell_evm::{commit_evm_state, ShellEvm, ShellStateDb};
 use shell_mempool::TxPool;
 use shell_network::NetworkService;
@@ -302,7 +302,7 @@ impl<S: KvStore + 'static> Node<S> {
                         Some(NetworkEvent::MessageReceived { peer, message }) => {
                             match message {
                                 NetworkMessage::NewBlock(block) => {
-                                    let verifier = DilithiumVerifier;
+                                    let verifier = MultiVerifier;
                                     let saved_header = block.header.clone();
                                     let saved_hash = block.hash();
                                     let imported_number = block.number();
@@ -358,7 +358,7 @@ impl<S: KvStore + 'static> Node<S> {
                                 NetworkMessage::NewTransaction(tx) => {
                                     // F-043: Use insert() directly — it returns Duplicate
                                     // error if already known, avoiding TOCTOU race.
-                                    let verifier = DilithiumVerifier;
+                                    let verifier = MultiVerifier;
                                     match self.handle_incoming_tx(*tx, &verifier) {
                                         Ok(_hash) => {
                                             self.metrics.txs_received.inc();
@@ -405,7 +405,7 @@ impl<S: KvStore + 'static> Node<S> {
                                         count = blocks.len(),
                                         "received BlockResponse, importing blocks"
                                     );
-                                    let verifier = DilithiumVerifier;
+                                    let verifier = MultiVerifier;
                                     let mut last_ok = 0u64;
                                     for block in blocks {
                                         let num = block.number();
@@ -463,7 +463,7 @@ impl<S: KvStore + 'static> Node<S> {
                                     debug!(%peer, "received Pong");
                                 }
                                 NetworkMessage::NewAttestation(attestation) => {
-                                    let verifier = DilithiumVerifier;
+                                    let verifier = MultiVerifier;
                                     if let Err(e) = self.handle_attestation(*attestation, &verifier) {
                                         tracing::warn!("attestation error: {e}");
                                     }
@@ -769,7 +769,7 @@ impl<S: KvStore + 'static> Node<S> {
                 let proposer = &block.header.proposer;
                 let known = self.known_authorities.read();
                 if let Some(pubkey) = known.get(proposer) {
-                    let verifier = DilithiumVerifier;
+                    let verifier = MultiVerifier;
                     self.consensus.read().verify_seal(
                         &block.header,
                         seal,
@@ -780,7 +780,7 @@ impl<S: KvStore + 'static> Node<S> {
                     // Try chain store as fallback.
                     drop(known);
                     if let Ok(Some(pubkey)) = self.chain_store.get_pubkey(proposer) {
-                        let verifier = DilithiumVerifier;
+                        let verifier = MultiVerifier;
                         self.consensus.read().verify_seal(
                             &block.header,
                             seal,
@@ -896,7 +896,7 @@ impl<S: KvStore + 'static> Node<S> {
             world_state_guard.get_balance(addr).unwrap_or(U256::ZERO)
         };
 
-        let dv = DilithiumVerifier;
+        let dv = MultiVerifier;
         let hash = self
             .tx_pool
             .insert(tx, &dv, &known_pubkeys, &balance_of)
@@ -1103,7 +1103,7 @@ mod tests {
         );
 
         // Insert into mempool with real verification
-        let verifier = DilithiumVerifier;
+        let verifier = MultiVerifier;
         let known_pubkeys = |_: &Address| -> Option<Vec<u8>> { None };
         let balance_of = |addr: &Address| -> U256 {
             node.world_state.read().get_balance(addr).unwrap_or(U256::ZERO)
@@ -1164,7 +1164,7 @@ mod tests {
             proposer_seal: None,
         };
 
-        let verifier = DilithiumVerifier;
+        let verifier = MultiVerifier;
         node.import_block(block, &verifier).unwrap();
 
         let head = node.chain_store.get_head_block().unwrap().unwrap();
@@ -1200,7 +1200,7 @@ mod tests {
         // Register authority pubkey on node2.
         node2.register_authority_pubkey(proposer, signer.public_key().to_vec());
 
-        let verifier = DilithiumVerifier;
+        let verifier = MultiVerifier;
         node2.import_block(block, &verifier).unwrap();
 
         let head = node2.chain_store.get_head_block().unwrap().unwrap();
@@ -1237,7 +1237,7 @@ mod tests {
         store_genesis(&node2);
         node2.register_authority_pubkey(proposer, signer.public_key().to_vec());
 
-        let verifier = DilithiumVerifier;
+        let verifier = MultiVerifier;
         let result = node2.import_block(block, &verifier);
         assert!(result.is_err(), "block with invalid seal should be rejected");
     }
@@ -1268,7 +1268,7 @@ mod tests {
             proposer_seal: None,
         };
 
-        let verifier = DilithiumVerifier;
+        let verifier = MultiVerifier;
         // Should succeed despite missing seal (M1b tolerance).
         node.import_block(block, &verifier).unwrap();
         let head = node.chain_store.get_head_block().unwrap().unwrap();
@@ -1547,7 +1547,7 @@ mod tests {
     fn import_multiple_sequential_blocks() {
         let (node, _signer) = setup_node();
         store_genesis(&node);
-        let verifier = DilithiumVerifier;
+        let verifier = MultiVerifier;
         let proposer = node.config.proposer_address.unwrap();
 
         let mut parent_hash = node.chain_store.get_head_hash().unwrap().unwrap();
@@ -1601,7 +1601,7 @@ mod tests {
     fn import_block_with_gap_fails() {
         let (node, _signer) = setup_node();
         store_genesis(&node);
-        let verifier = DilithiumVerifier;
+        let verifier = MultiVerifier;
         let proposer = node.config.proposer_address.unwrap();
 
         // Skip block 1, try to import block 2 directly.
@@ -1640,7 +1640,7 @@ mod tests {
     fn import_fork_block_at_same_height_skipped() {
         let (node, _signer) = setup_node();
         store_genesis(&node);
-        let verifier = DilithiumVerifier;
+        let verifier = MultiVerifier;
         let proposer = node.config.proposer_address.unwrap();
 
         // Import block 1 normally.
@@ -1703,7 +1703,7 @@ mod tests {
     fn import_block_out_of_order_then_correct_order() {
         let (node, signer) = setup_node();
         store_genesis(&node);
-        let verifier = DilithiumVerifier;
+        let verifier = MultiVerifier;
 
         // Produce block 1 to get a valid block.
         let block1 = node.produce_block(&signer, 100).unwrap();
@@ -1742,7 +1742,7 @@ mod tests {
     fn import_duplicate_block_is_idempotent() {
         let (node, _signer) = setup_node();
         store_genesis(&node);
-        let verifier = DilithiumVerifier;
+        let verifier = MultiVerifier;
         let proposer = node.config.proposer_address.unwrap();
 
         let parent_hash = node.chain_store.get_head_hash().unwrap().unwrap();
@@ -1850,7 +1850,7 @@ mod tests {
             tx_signer.public_key().to_vec(),
         );
 
-        let verifier = DilithiumVerifier;
+        let verifier = MultiVerifier;
         let known_pubkeys = |_: &Address| -> Option<Vec<u8>> { None };
         let balance_of = |addr: &Address| -> U256 {
             node.world_state.read().get_balance(addr).unwrap_or(U256::ZERO)
@@ -1921,7 +1921,7 @@ mod tests {
             proposer_seal: None,
         };
 
-        let verifier = DilithiumVerifier;
+        let verifier = MultiVerifier;
         node.import_block(block, &verifier).unwrap();
 
         let tracker = node.state_root_tracker.read();

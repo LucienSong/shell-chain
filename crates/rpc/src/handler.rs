@@ -10,7 +10,7 @@ use alloy_rlp::Encodable;
 use shell_consensus::FinalityState;
 use shell_core::{Block, BlockHeader, SignedTransaction, Transaction};
 use shell_evm::bloom::BLOOM_SIZE;
-use shell_crypto::{DilithiumVerifier, Signer};
+use shell_crypto::{MultiVerifier, Signer};
 use shell_evm::{ShellEvm, ShellStateDb};
 use shell_mempool::TxPool;
 use shell_primitives::{Address, Bytes, ShellHash, U256};
@@ -181,7 +181,7 @@ impl<S: KvStore + 'static> RpcHandler<S> {
         // Clone before insert (which consumes the value) so we can broadcast on success.
         let tx_for_broadcast = self.tx_broadcast.as_ref().map(|_| signed_tx.clone());
 
-        let verifier = DilithiumVerifier;
+        let verifier = MultiVerifier;
         let hash = self
             .tx_pool
             .insert(signed_tx, &verifier, &known_pubkeys, &balance_of)

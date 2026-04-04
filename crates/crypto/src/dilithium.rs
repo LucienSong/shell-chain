@@ -241,4 +241,142 @@ mod tests {
     fn dilithium_verifier_is_zero_sized() {
         assert_eq!(std::mem::size_of::<DilithiumVerifier>(), 0);
     }
+
+    // ── A. Comprehensive Dilithium3 tests ───────────────────────
+
+    #[test]
+    fn batch_sign_verify_1000_random_messages() {
+        let signer = DilithiumSigner::generate();
+        let verifier = DilithiumVerifier;
+        for i in 0u32..1000 {
+            let msg = format!("msg-{i}-{}", i.wrapping_mul(2654435761));
+            let sig = signer.sign(msg.as_bytes()).unwrap();
+            assert!(
+                verifier.verify(signer.public_key(), msg.as_bytes(), &sig).unwrap(),
+                "verification failed for message #{i}"
+            );
+        }
+    }
+
+    #[test]
+    fn sign_empty_message() {
+        let signer = DilithiumSigner::generate();
+        let verifier = DilithiumVerifier;
+
+        let sig = signer.sign(b"").unwrap();
+        assert!(verifier.verify(signer.public_key(), b"", &sig).unwrap());
+    }
+
+    #[test]
+    fn sign_large_message_1mb() {
+        let signer = DilithiumSigner::generate();
+        let verifier = DilithiumVerifier;
+
+        let msg = vec![0xABu8; 1024 * 1024]; // 1 MiB
+        let sig = signer.sign(&msg).unwrap();
+        assert!(verifier.verify(signer.public_key(), &msg, &sig).unwrap());
+    }
+
+    #[test]
+    fn single_bit_flip_in_signature_fails() {
+        let signer = DilithiumSigner::generate();
+        let verifier = DilithiumVerifier;
+        let msg = b"bit-flip-sig-test";
+
+        let sig = signer.sign(msg).unwrap();
+
+        // Flip one bit in the middle of the signature
+        let mut bad_data = sig.data.clone();
+        let mid = bad_data.len() / 2;
+        bad_data[mid] ^= 0x01;
+        let bad_sig = PQSignature::new(SignatureType::Dilithium3, bad_data);
+
+        let result = verifier.verify(signer.public_key(), msg, &bad_sig).unwrap();
+        assert!(!result, "signature with flipped bit should not verify");
+    }
+
+    #[test]
+    fn single_bit_flip_in_message_fails() {
+        let signer = DilithiumSigner::generate();
+        let verifier = DilithiumVerifier;
+        let msg = b"bit-flip-msg-test".to_vec();
+
+        let sig = signer.sign(&msg).unwrap();
+
+        let mut bad_msg = msg.clone();
+        bad_msg[0] ^= 0x01;
+        assert!(!verifier.verify(signer.public_key(), &bad_msg, &sig).unwrap());
+    }
+
+    #[test]
+    fn single_bit_flip_in_pubkey_fails() {
+        let signer = DilithiumSigner::generate();
+        let verifier = DilithiumVerifier;
+        let msg = b"bit-flip-pk-test";
+
+        let sig = signer.sign(msg).unwrap();
+
+        let mut bad_pk = signer.public_key().to_vec();
+        bad_pk[0] ^= 0x01;
+        // May return Ok(false) or Err depending on how the bit flip affects parsing
+        match verifier.verify(&bad_pk, msg, &sig) {
+            Ok(valid) => assert!(!valid),
+            Err(_) => {} // also acceptable — corrupted key may fail parsing
+        }
+    }
+
+    // ── C. Performance / size validation ────────────────────────
+
+    #[test]
+    fn dilithium3_key_sizes_match_spec() {
+        assert_eq!(dilithium3::public_key_bytes(), 1952, "Dilithium3 pk size");
+        assert_eq!(dilithium3::secret_key_bytes(), 4032, "Dilithium3 sk size");
+        assert_eq!(dilithium3::signature_bytes(), 3309, "Dilithium3 sig size");
+
+        // Also verify against an actual generated keypair
+        let signer = DilithiumSigner::generate();
+        assert_eq!(signer.public_key().len(), 1952);
+        assert_eq!(signer.secret_key_bytes().len(), 4032);
+
+        let sig = signer.sign(b"size-check").unwrap();
+        assert_eq!(sig.data.len(), 3309);
+    }
+
+    #[test]
+    fn sign_verify_latency_under_10ms() {
+        let signer = DilithiumSigner::generate();
+        let verifier = DilithiumVerifier;
+        let msg = b"latency-test";
+
+        let start = std::time::Instant::now();
+        let sig = signer.sign(msg).unwrap();
+        let _ = verifier.verify(signer.public_key(), msg, &sig).unwrap();
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed.as_millis() < 10,
+            "sign+verify took {}ms, expected <10ms",
+            elapsed.as_millis()
+        );
+    }
+
+    #[test]
+    fn sequential_100_sign_verify_under_1s() {
+        let signer = DilithiumSigner::generate();
+        let verifier = DilithiumVerifier;
+
+        let start = std::time::Instant::now();
+        for i in 0u32..100 {
+            let msg = format!("perf-{i}");
+            let sig = signer.sign(msg.as_bytes()).unwrap();
+            assert!(verifier.verify(signer.public_key(), msg.as_bytes(), &sig).unwrap());
+        }
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed.as_secs() < 1,
+            "100 sign+verify took {:.2}s, expected <1s",
+            elapsed.as_secs_f64()
+        );
+    }
 }

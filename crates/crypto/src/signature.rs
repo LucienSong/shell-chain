@@ -10,6 +10,8 @@ pub enum SignatureType {
     /// FIPS 204 ML-DSA-65. Reserved for future migration when a compliant
     /// Rust implementation is available and verified.
     MlDsa65,
+    /// SPHINCS+-SHA2-256f-simple (stateless hash-based, 256-bit PQ security).
+    SphincsSha2256f,
 }
 
 impl SignatureType {
@@ -17,6 +19,7 @@ impl SignatureType {
         match self {
             SignatureType::Dilithium3 => 0,
             SignatureType::MlDsa65 => 1,
+            SignatureType::SphincsSha2256f => 2,
         }
     }
 
@@ -24,6 +27,7 @@ impl SignatureType {
         match v {
             0 => Some(SignatureType::Dilithium3),
             1 => Some(SignatureType::MlDsa65),
+            2 => Some(SignatureType::SphincsSha2256f),
             _ => None,
         }
     }
