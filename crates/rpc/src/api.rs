@@ -159,6 +159,18 @@ pub trait EthApi {
     ) -> Result<Vec<RpcLogWithMeta>, jsonrpsee::types::ErrorObjectOwned>;
 }
 
+/// Debug namespace RPCs (transaction tracing).
+#[rpc(server, namespace = "debug")]
+pub trait DebugApi {
+    /// Traces the execution of a transaction, returning call frames.
+    #[method(name = "traceTransaction")]
+    async fn trace_transaction(
+        &self,
+        tx_hash: String,
+        opts: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, jsonrpsee::types::ErrorObjectOwned>;
+}
+
 /// Shell-chain extension API for PQ-specific features.
 #[rpc(server, namespace = "shell")]
 pub trait ShellApi {

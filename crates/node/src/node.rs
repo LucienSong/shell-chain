@@ -8,7 +8,7 @@ use parking_lot::RwLock;
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
-use shell_consensus::{ConsensusEngine, PoaEngine};
+use shell_consensus::{Attestation, ConsensusEngine, FinalityState, ForkChoice, PoaEngine};
 use shell_core::{Block, BlockHeader, SignedTransaction, calculate_base_fee};
 use shell_crypto::{DilithiumVerifier, Signer, Verifier};
 use shell_evm::{commit_evm_state, ShellEvm, ShellStateDb};
@@ -37,6 +37,10 @@ pub struct Node<S: KvStore + 'static> {
     pub known_authorities: Arc<RwLock<HashMap<Address, Vec<u8>>>>,
     /// Tracks recent state roots for pruning decisions.
     pub state_root_tracker: RwLock<StateRootTracker>,
+    /// Finality tracking: collects attestations and detects quorum.
+    pub finality: Arc<RwLock<FinalityState>>,
+    /// Fork-choice rule: selects the canonical head based on attestations and finality.
+    pub fork_choice: Arc<RwLock<ForkChoice>>,
     /// Prometheus metrics.
     pub metrics: Arc<Metrics>,
     shutdown_tx: watch::Sender<bool>,
@@ -66,6 +70,8 @@ impl<S: KvStore + 'static> Node<S> {
             consensus,
             known_authorities: Arc::new(RwLock::new(HashMap::new())),
             state_root_tracker: RwLock::new(tracker),
+            finality: Arc::new(RwLock::new(FinalityState::new())),
+            fork_choice: Arc::new(RwLock::new(ForkChoice::new(ShellHash::ZERO))),
             metrics,
             shutdown_tx,
         }
@@ -449,6 +455,12 @@ impl<S: KvStore + 'static> Node<S> {
                                 NetworkMessage::Pong => {
                                     debug!(%peer, "received Pong");
                                 }
+                                NetworkMessage::NewAttestation(attestation) => {
+                                    let verifier = DilithiumVerifier;
+                                    if let Err(e) = self.handle_attestation(*attestation, &verifier) {
+                                        tracing::warn!("attestation error: {e}");
+                                    }
+                                }
                                 _ => {
                                     debug!(%peer, "received unhandled network message");
                                 }
@@ -575,13 +587,11 @@ impl<S: KvStore + 'static> Node<S> {
                         // System contract tx: state was applied directly to
                         // the EVM's WorldState. Sync validator set to the
                         // persistent WorldState so state_root is consistent.
+                        // Propagate errors to abort block production (F-068).
                         let local_ws = evm.state_db_mut().world_state_mut();
-                        if let Ok(validators) = local_ws.get_validators() {
-                            let mut ws = self.world_state.write();
-                            if let Err(e) = ws.set_validators(&validators) {
-                                tracing::error!(error = %e, "failed to sync system contract state");
-                            }
-                        }
+                        let validators = local_ws.get_validators()?;
+                        let mut ws = self.world_state.write();
+                        ws.set_validators(&validators)?;
                     } else {
                         // Normal EVM tx: commit EvmState changeset.
                         commit_evm_state(
@@ -806,13 +816,11 @@ impl<S: KvStore + 'static> Node<S> {
                         receipts.push(result.receipt);
 
                         if result.is_system_tx {
+                            // Propagate errors to abort block import (F-068).
                             let local_ws = evm.state_db_mut().world_state_mut();
-                            if let Ok(validators) = local_ws.get_validators() {
-                                let mut ws = self.world_state.write();
-                                if let Err(e) = ws.set_validators(&validators) {
-                                    tracing::error!(error = %e, "failed to sync system contract state on import");
-                                }
-                            }
+                            let validators = local_ws.get_validators()?;
+                            let mut ws = self.world_state.write();
+                            ws.set_validators(&validators)?;
                         } else {
                             commit_evm_state(
                                 &result.state_changes,
@@ -882,6 +890,70 @@ impl<S: KvStore + 'static> Node<S> {
             .map_err(|e| NodeError::Startup(e.to_string()))?;
 
         Ok(hash)
+    }
+
+    /// Process an incoming attestation from the network.
+    pub fn handle_attestation(&self, attestation: Attestation, verifier: &dyn Verifier) -> Result<(), NodeError> {
+        let block_hash = attestation.block_hash;
+        let block_number = attestation.block_number;
+        let validator = attestation.validator;
+
+        // Verify the attesting validator is a known authority.
+        let known = self.known_authorities.read();
+        let pubkey = known.get(&validator)
+            .ok_or_else(|| NodeError::Startup(format!("unknown attestation validator: {:?}", validator)))?;
+
+        // Verify the attestation signature.
+        let msg = Attestation::signing_message(&block_hash, block_number);
+        let sig = shell_crypto::PQSignature::new(shell_crypto::SignatureType::Dilithium3, attestation.signature.clone());
+        let valid = verifier.verify(pubkey, &msg, &sig)
+            .map_err(|_| NodeError::Startup("invalid attestation signature".into()))?;
+        if !valid {
+            return Err(NodeError::Startup("attestation signature verification failed".into()));
+        }
+
+        // Check for equivocation.
+        let mut finality = self.finality.write();
+        if let Some(conflicting) = finality.detect_equivocation(&block_hash, block_number, &validator) {
+            tracing::warn!(
+                %validator,
+                %block_hash,
+                %conflicting,
+                height = block_number,
+                "equivocation detected"
+            );
+        }
+
+        // Record the attestation.
+        if !finality.record_attestation(attestation) {
+            return Ok(()); // duplicate, already recorded
+        }
+
+        // Check if this block reached finality.
+        let total_validators = self.consensus.read().config().authorities.len();
+        if finality.check_finality(&block_hash, block_number, total_validators) {
+            tracing::info!(
+                block = block_number,
+                hash = %block_hash,
+                "block finalized"
+            );
+            let _ = self.chain_store.set_finalized_number(block_number);
+            self.fork_choice.write().mark_finalized(&block_hash);
+        }
+
+        Ok(())
+    }
+
+    /// Create and return an attestation for a block (called after producing/importing a block).
+    pub fn create_attestation(&self, block_hash: ShellHash, block_number: u64, signer: &dyn Signer) -> Result<Attestation, NodeError> {
+        let proposer_addr = self.config.proposer_address
+            .ok_or(NodeError::NotProposer)?;
+
+        let msg = Attestation::signing_message(&block_hash, block_number);
+        let sig = signer.sign(&msg)
+            .map_err(|e| NodeError::Startup(format!("failed to sign attestation: {e}")))?;
+
+        Ok(Attestation::new(block_hash, block_number, proposer_addr, sig.data))
     }
 }
 

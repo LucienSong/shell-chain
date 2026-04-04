@@ -51,6 +51,7 @@ struct ShellBehaviour {
     mdns: Toggle<mdns::tokio::Behaviour>,
     identify: identify::Behaviour,
     relay_client: Toggle<relay::client::Behaviour>,
+    relay_server: Toggle<relay::Behaviour>,
     dcutr: Toggle<dcutr::Behaviour>,
     autonat: Toggle<autonat::Behaviour>,
     connection_limits: connection_limits::Behaviour,
@@ -98,6 +99,14 @@ impl Libp2pNetwork {
 
         // Dial boot nodes and seed Kademlia routing table.
         for addr_str in &config.boot_nodes {
+            // Validate bootnode multiaddr structure before dialing (F-069).
+            if !crate::config::validate_bootnode_multiaddr(addr_str) {
+                warn!(
+                    "Skipping invalid boot node address '{addr_str}': \
+                     must contain IP, transport, and peer ID components"
+                );
+                continue;
+            }
             match addr_str.parse::<Multiaddr>() {
                 Ok(addr) => {
                     info!("Dialing boot node: {addr}");
@@ -173,9 +182,19 @@ fn build_swarm(config: &NetworkConfig) -> Result<Swarm<ShellBehaviour>, NetworkE
 
     // Build libp2p connection limits from config.
     let mut conn_limits = connection_limits::ConnectionLimits::default();
-    if config.max_connections > 0 {
-        conn_limits = conn_limits.with_max_established(Some(config.max_connections));
+
+    // Enforce max_peers as an upper bound on total established connections (F-070).
+    // When both max_peers and max_connections are set, use the stricter limit.
+    let effective_max_established = match (config.max_connections > 0, config.max_peers > 0) {
+        (true, true) => Some(std::cmp::min(config.max_connections, config.max_peers as u32)),
+        (true, false) => Some(config.max_connections),
+        (false, true) => Some(config.max_peers as u32),
+        (false, false) => None,
+    };
+    if let Some(limit) = effective_max_established {
+        conn_limits = conn_limits.with_max_established(Some(limit));
     }
+
     if config.max_pending_incoming > 0 {
         conn_limits = conn_limits.with_max_pending_incoming(Some(config.max_pending_incoming));
     }
@@ -331,12 +350,27 @@ fn build_swarm(config: &NetworkConfig) -> Result<Swarm<ShellBehaviour>, NetworkE
             None
         };
 
+        // Relay server with amplification limits (F-071).
+        let relay_server_behaviour: Option<relay::Behaviour> = if relay_behaviour.is_some() {
+            let relay_cfg = relay::Config {
+                max_reservations: 128,
+                max_circuits: 16,
+                max_circuit_duration: Duration::from_secs(300),
+                max_circuit_bytes: 1024 * 1024, // 1 MB per circuit
+                ..Default::default()
+            };
+            Some(relay::Behaviour::new(peer_id, relay_cfg))
+        } else {
+            None
+        };
+
         Ok(ShellBehaviour {
             gossipsub,
             kademlia: kademlia.into(),
             mdns: mdns.into(),
             identify,
             relay_client: relay_behaviour.into(),
+            relay_server: relay_server_behaviour.into(),
             dcutr: dcutr_behaviour.into(),
             autonat: autonat_behaviour.into(),
             connection_limits: connection_limits::Behaviour::new(conn_limits),
@@ -649,6 +683,10 @@ async fn handle_swarm_event(
                 }
             }
             debug!("Relay client event: {event:?}");
+        }
+        // Relay server events.
+        SwarmEvent::Behaviour(ShellBehaviourEvent::RelayServer(event)) => {
+            debug!("Relay server event: {event:?}");
         }
         // DCUtR hole-punch events.
         SwarmEvent::Behaviour(ShellBehaviourEvent::Dcutr(event)) => {

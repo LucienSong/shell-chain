@@ -5334,6 +5334,8 @@ dependencies = [
  "alloy-rlp",
  "hex",
  "revm",
+ "serde",
+ "serde_json",
  "sha3",
  "shell-core",
  "shell-crypto",

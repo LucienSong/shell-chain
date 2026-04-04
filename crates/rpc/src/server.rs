@@ -12,7 +12,7 @@ use shell_mempool::TxPool;
 use shell_primitives::Address;
 use shell_storage::{ChainStore, KvStore, WorldState};
 
-use crate::api::{EthApiServer, ShellApiServer, Web3ApiServer, NetApiServer};
+use crate::api::{EthApiServer, ShellApiServer, Web3ApiServer, NetApiServer, DebugApiServer};
 use crate::handler::RpcHandler;
 use crate::subscriptions::{BlockEvent, EthPubSubServer};
 use crate::tls;
@@ -128,6 +128,7 @@ pub async fn start_rpc_server<S: KvStore + 'static>(
     module.merge(ShellApiServer::into_rpc(handler.clone()))?;
     module.merge(Web3ApiServer::into_rpc(handler.clone()))?;
     module.merge(NetApiServer::into_rpc(handler.clone()))?;
+    module.merge(DebugApiServer::into_rpc(handler.clone()))?;
     module.merge(EthPubSubServer::into_rpc(handler))?;
 
     if let Some(ws_listen) = config.ws_addr {

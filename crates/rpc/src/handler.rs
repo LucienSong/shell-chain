@@ -13,7 +13,7 @@ use shell_mempool::TxPool;
 use shell_primitives::{Address, Bytes, ShellHash, U256};
 use shell_storage::{ChainStore, KvStore, WorldState};
 
-use crate::api::{EthApiServer, ShellApiServer, Web3ApiServer, NetApiServer};
+use crate::api::{EthApiServer, ShellApiServer, Web3ApiServer, NetApiServer, DebugApiServer};
 use crate::filter::{RawLogFilter, MAX_BLOCK_RANGE};
 use crate::subscriptions::BlockEvent;
 use crate::types::*;
@@ -1014,6 +1014,73 @@ impl<S: KvStore + 'static> NetApiServer for RpcHandler<S> {
     async fn peer_count(&self) -> Result<String, ErrorObjectOwned> {
         // No peer tracking yet; report 0 peers.
         Ok(hex_u64(0))
+    }
+}
+
+#[jsonrpsee::core::async_trait]
+impl<S: KvStore + 'static> DebugApiServer for RpcHandler<S> {
+    async fn trace_transaction(
+        &self,
+        tx_hash: String,
+        _opts: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // Parse the hex-encoded transaction hash.
+        let hex_str = tx_hash.strip_prefix("0x").unwrap_or(&tx_hash);
+        let hash_bytes = hex::decode(hex_str)
+            .map_err(|e| internal_err(format!("invalid tx hash hex: {e}")))?;
+        let hash = ShellHash::try_from_slice(&hash_bytes)
+            .map_err(|e| internal_err(format!("invalid tx hash length: {e}")))?;
+
+        // Find the transaction's on-chain location.
+        let (block_hash, tx_index) = self
+            .chain_store
+            .get_tx_location(&hash)
+            .map_err(internal_err)?
+            .ok_or_else(|| internal_err("transaction not found"))?;
+
+        let block = self
+            .chain_store
+            .get_block_by_hash(&block_hash)
+            .map_err(internal_err)?
+            .ok_or_else(|| internal_err("block not found"))?;
+
+        let tx = block
+            .transactions
+            .get(tx_index as usize)
+            .ok_or_else(|| internal_err("transaction not in block"))?;
+
+        let receipts = self
+            .chain_store
+            .get_receipts(&block_hash)
+            .map_err(internal_err)?
+            .ok_or_else(|| internal_err("receipts not found"))?;
+
+        let receipt = receipts
+            .get(tx_index as usize)
+            .ok_or_else(|| internal_err("receipt not found"))?;
+
+        let to_addr = tx.tx.to.unwrap_or(Address::ZERO);
+        let call_type = if tx.tx.to.is_none() { "CREATE" } else { "CALL" };
+
+        let mut frame = shell_evm::CallFrame::new(
+            call_type,
+            tx.sender(),
+            to_addr,
+            tx.tx.gas_limit,
+            tx.tx.data.clone(),
+        );
+        frame.gas_used = receipt.gas_used;
+
+        if !receipt.succeeded() {
+            frame.error = Some("execution reverted".to_string());
+        }
+
+        let trace = shell_evm::TraceResult {
+            frame,
+            failed: !receipt.succeeded(),
+        };
+
+        serde_json::to_value(&trace).map_err(|e| internal_err(format!("serialization error: {e}")))
     }
 }
 

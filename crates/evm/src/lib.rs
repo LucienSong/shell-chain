@@ -13,6 +13,7 @@ mod executor;
 mod precompiles;
 mod state_db;
 pub mod system_contracts;
+pub mod tracer;
 mod tx_validation;
 
 pub use executor::{commit_evm_state, ExecutorError, ShellEvm, TxExecutionResult};
@@ -23,4 +24,5 @@ pub use system_contracts::{
     registry_address, system_contract_code_hash, SystemContractError, SYSTEM_CALL_BASE_GAS,
     SYSTEM_CALL_OP_GAS, VALIDATOR_REGISTRY_ADDR,
 };
+pub use tracer::{CallFrame, TraceResult, decode_revert_reason};
 pub use tx_validation::{compute_intrinsic_gas, validate_tx, TxValidationError};
