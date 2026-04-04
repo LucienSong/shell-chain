@@ -362,4 +362,241 @@ mod tests {
         assert_eq!(state.last_finalized_number(), 0);
         assert_eq!(state.last_finalized_hash(), &ShellHash::ZERO);
     }
+
+    // ---- Additional comprehensive tests ----
+
+    #[test]
+    fn quorum_exactly_at_threshold() {
+        // Verify quorum detection at exact threshold for various validator counts
+        for total in [3, 4, 5, 6, 7, 10, 13, 20] {
+            let quorum = FinalityState::quorum_threshold(total);
+            let hash = make_hash(total as u8);
+            let mut state = FinalityState::new();
+
+            // Add exactly quorum - 1 attestations → should NOT finalize
+            for i in 0..quorum - 1 {
+                state.record_attestation(Attestation::new(hash, 100, make_addr(i as u8), vec![]));
+            }
+            assert!(
+                !state.check_finality(&hash, 100, total),
+                "N={total}: {0} attestations (quorum={quorum}) should NOT finalize",
+                quorum - 1
+            );
+
+            // Add one more → exactly at quorum → should finalize
+            state.record_attestation(Attestation::new(hash, 100, make_addr(quorum as u8), vec![]));
+            // Reset finalized state so block 100 > 0 finalized
+            let mut state2 = FinalityState::new();
+            for i in 0..quorum {
+                state2.record_attestation(Attestation::new(hash, 100, make_addr(i as u8), vec![]));
+            }
+            assert!(
+                state2.check_finality(&hash, 100, total),
+                "N={total}: {quorum} attestations should finalize"
+            );
+        }
+    }
+
+    #[test]
+    fn below_quorum_does_not_finalize() {
+        let mut state = FinalityState::new();
+        let hash = make_hash(1);
+
+        // 5 of 10 validators → quorum is 6
+        for i in 0..5 {
+            state.record_attestation(Attestation::new(hash, 50, make_addr(i), vec![]));
+        }
+        assert!(!state.check_finality(&hash, 50, 10));
+        assert_eq!(state.last_finalized_number(), 0, "should not have advanced finality");
+    }
+
+    #[test]
+    fn multiple_finalization_rounds() {
+        let mut state = FinalityState::new();
+
+        // Round 1: finalize block 10
+        let hash10 = make_hash(10);
+        for i in 0..3 {
+            state.record_attestation(Attestation::new(hash10, 10, make_addr(i), vec![]));
+        }
+        assert!(state.check_finality(&hash10, 10, 4)); // quorum = 3 for N=4
+        assert_eq!(state.last_finalized_number(), 10);
+
+        // Round 2: finalize block 20
+        let hash20 = make_hash(20);
+        for i in 0..3 {
+            state.record_attestation(Attestation::new(hash20, 20, make_addr(100 + i), vec![]));
+        }
+        assert!(state.check_finality(&hash20, 20, 4));
+        assert_eq!(state.last_finalized_number(), 20);
+        assert_eq!(state.last_finalized_hash(), &hash20);
+
+        // Round 3: finalize block 30
+        let hash30 = make_hash(30);
+        for i in 0..3 {
+            state.record_attestation(Attestation::new(hash30, 30, make_addr(200 + i), vec![]));
+        }
+        assert!(state.check_finality(&hash30, 30, 4));
+        assert_eq!(state.last_finalized_number(), 30);
+    }
+
+    #[test]
+    fn large_validator_set_quorum() {
+        let mut state = FinalityState::new();
+        let hash = make_hash(1);
+        let total: usize = 100;
+        let quorum = FinalityState::quorum_threshold(total); // 51
+
+        assert_eq!(quorum, 51);
+
+        // Add 50 attestations → not enough
+        for i in 0..50u8 {
+            state.record_attestation(Attestation::new(hash, 500, make_addr(i), vec![]));
+        }
+        assert!(!state.check_finality(&hash, 500, total));
+
+        // Add 1 more → exactly 51 → quorum
+        state.record_attestation(Attestation::new(hash, 500, make_addr(50), vec![]));
+        assert!(state.check_finality(&hash, 500, total));
+        assert_eq!(state.last_finalized_number(), 500);
+    }
+
+    #[test]
+    fn finalization_monotonically_advances() {
+        let mut state = FinalityState::new();
+
+        // Finalize block 20 first
+        let hash20 = make_hash(20);
+        for i in 0..3 {
+            state.record_attestation(Attestation::new(hash20, 20, make_addr(i), vec![]));
+        }
+        assert!(state.check_finality(&hash20, 20, 4));
+        assert_eq!(state.last_finalized_number(), 20);
+
+        // Try to finalize block 15 (lower) — should fail
+        let hash15 = make_hash(15);
+        for i in 10..13 {
+            state.record_attestation(Attestation::new(hash15, 15, make_addr(i), vec![]));
+        }
+        assert!(!state.check_finality(&hash15, 15, 4));
+        assert_eq!(state.last_finalized_number(), 20, "finality must not go backwards");
+
+        // Finalize block 25 (higher) — should succeed
+        let hash25 = make_hash(25);
+        for i in 20..23 {
+            state.record_attestation(Attestation::new(hash25, 25, make_addr(i), vec![]));
+        }
+        assert!(state.check_finality(&hash25, 25, 4));
+        assert_eq!(state.last_finalized_number(), 25);
+    }
+
+    #[test]
+    fn prune_preserves_above_finalized() {
+        let mut state = FinalityState::new();
+        let hash_low = make_hash(1);
+        let hash_high = make_hash(2);
+        let hash_future = make_hash(3);
+
+        // Attestation at height 5
+        state.record_attestation(Attestation::new(hash_low, 5, make_addr(1), vec![]));
+        // Attestation at height 10
+        state.record_attestation(Attestation::new(hash_high, 10, make_addr(2), vec![]));
+        state.record_attestation(Attestation::new(hash_high, 10, make_addr(3), vec![]));
+        // Attestation at height 20
+        state.record_attestation(Attestation::new(hash_future, 20, make_addr(4), vec![]));
+
+        // Finalize at height 10 → prune heights <= 10
+        assert!(state.check_finality(&hash_high, 10, 3));
+
+        // Height 5 should be pruned
+        assert_eq!(state.attestation_count(&hash_low), 0);
+        // Height 10 also pruned (it's <= finalized)
+        assert_eq!(state.attestation_count(&hash_high), 0);
+        // Height 20 should survive
+        assert_eq!(state.attestation_count(&hash_future), 1);
+    }
+
+    #[test]
+    fn total_pending_attestations_tracking() {
+        let mut state = FinalityState::new();
+        assert_eq!(state.total_pending_attestations(), 0);
+
+        let hash1 = make_hash(1);
+        let hash2 = make_hash(2);
+
+        state.record_attestation(Attestation::new(hash1, 10, make_addr(1), vec![]));
+        assert_eq!(state.total_pending_attestations(), 1);
+
+        state.record_attestation(Attestation::new(hash1, 10, make_addr(2), vec![]));
+        assert_eq!(state.total_pending_attestations(), 2);
+
+        state.record_attestation(Attestation::new(hash2, 11, make_addr(3), vec![]));
+        assert_eq!(state.total_pending_attestations(), 3);
+
+        // Duplicate should not increase count
+        state.record_attestation(Attestation::new(hash1, 10, make_addr(1), vec![]));
+        assert_eq!(state.total_pending_attestations(), 3);
+    }
+
+    #[test]
+    fn with_finalized_constructor() {
+        let hash = make_hash(42);
+        let state = FinalityState::with_finalized(100, hash);
+        assert_eq!(state.last_finalized_number(), 100);
+        assert_eq!(state.last_finalized_hash(), &hash);
+        assert_eq!(state.total_pending_attestations(), 0);
+    }
+
+    #[test]
+    fn equivocation_not_detected_same_hash() {
+        let mut state = FinalityState::new();
+        let hash = make_hash(1);
+        let validator = make_addr(1);
+
+        state.record_attestation(Attestation::new(hash, 10, validator, vec![]));
+
+        // Same hash, same validator — not equivocation (just a duplicate)
+        let conflict = state.detect_equivocation(&hash, 10, &validator);
+        assert_eq!(conflict, None, "same hash should not be equivocation");
+    }
+
+    #[test]
+    fn concurrent_blocks_at_same_height() {
+        let mut state = FinalityState::new();
+        let hash_a = make_hash(1);
+        let hash_b = make_hash(2);
+
+        // Different validators attest to different blocks at height 10
+        state.record_attestation(Attestation::new(hash_a, 10, make_addr(1), vec![]));
+        state.record_attestation(Attestation::new(hash_a, 10, make_addr(2), vec![]));
+        state.record_attestation(Attestation::new(hash_b, 10, make_addr(3), vec![]));
+
+        // hash_a has 2 attestations, hash_b has 1
+        assert_eq!(state.attestation_count(&hash_a), 2);
+        assert_eq!(state.attestation_count(&hash_b), 1);
+
+        // With 3 total validators, quorum = 2: hash_a should finalize
+        assert!(state.check_finality(&hash_a, 10, 3));
+        assert_eq!(state.last_finalized_hash(), &hash_a);
+    }
+
+    #[test]
+    fn finality_requires_quorum_not_just_any_count() {
+        let mut state = FinalityState::new();
+        let hash = make_hash(1);
+
+        // 1 of 10 validators
+        state.record_attestation(Attestation::new(hash, 10, make_addr(1), vec![]));
+        assert!(!state.check_finality(&hash, 10, 10)); // quorum = 6
+
+        // 5 of 10 validators
+        for i in 2..=5 {
+            state.record_attestation(Attestation::new(hash, 10, make_addr(i), vec![]));
+        }
+        assert!(!state.check_finality(&hash, 10, 10)); // still only 5 < 6
+
+        // 6 of 10 validators → exactly quorum
+        state.record_attestation(Attestation::new(hash, 10, make_addr(6), vec![]));
+        assert!(state.check_finality(&hash, 10, 10));
+    }
 }

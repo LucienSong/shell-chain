@@ -534,4 +534,192 @@ mod tests {
             assert_eq!(config.proposer_for_block(b), addrs[0]); // b%1=0, 0%3=0
         }
     }
+
+    // ---- Additional comprehensive tests ----
+
+    #[test]
+    fn round_robin_seven_validators() {
+        let addrs = make_addrs(7);
+        let config = PoaConfig::new(addrs.clone(), 1);
+
+        // Verify full cycle and wrap-around
+        for block in 0u64..21 {
+            let expected = addrs[block as usize % 7];
+            assert_eq!(
+                config.proposer_for_block(block),
+                expected,
+                "block {block} should map to validator {}",
+                block as usize % 7
+            );
+        }
+    }
+
+    #[test]
+    fn non_proposer_authority_rejected() {
+        // A valid authority at the wrong slot yields InvalidProposer (not UnknownProposer).
+        let addrs = make_addrs(3);
+        let config = PoaConfig::new(addrs.clone(), 1);
+        let engine = PoaEngine::new(config);
+
+        // Block 0 expects addrs[0]; submit header with addrs[1]
+        let header = sample_header(0, addrs[1], 1000);
+        let err = engine.verify_header(&header).unwrap_err();
+        assert!(
+            matches!(err, ConsensusError::InvalidProposer { .. }),
+            "expected InvalidProposer, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn invalid_seal_wrong_signer() {
+        let (config, addr, _correct_signer) = test_config();
+        let engine = PoaEngine::new(config);
+
+        let header = sample_header(0, addr, 1000);
+        let mut block = Block {
+            header,
+            transactions: vec![],
+            proposer_seal: None,
+        };
+
+        // Sign with a different signer
+        let wrong_signer = DilithiumSigner::generate();
+        engine.sign_block(&mut block, &wrong_signer).unwrap();
+
+        // Verify with the wrong signer's public key should succeed (key matches sig)
+        // but verify with the correct signer's public key should fail
+        let verifier = DilithiumVerifier;
+        let seal = block.proposer_seal.as_ref().unwrap();
+        let result = engine.verify_seal(
+            &block.header,
+            seal,
+            _correct_signer.public_key(),
+            &verifier,
+        );
+        assert!(result.is_err(), "seal signed by wrong key should fail verification with correct key");
+    }
+
+    #[test]
+    fn corrupted_seal_rejected() {
+        let (config, addr, signer) = test_config();
+        let engine = PoaEngine::new(config);
+
+        let header = sample_header(0, addr, 1000);
+        let mut block = Block {
+            header,
+            transactions: vec![],
+            proposer_seal: None,
+        };
+
+        engine.sign_block(&mut block, &signer).unwrap();
+
+        // Corrupt the seal data
+        let mut corrupted_seal = block.proposer_seal.clone().unwrap();
+        if !corrupted_seal.data.is_empty() {
+            corrupted_seal.data[0] ^= 0xFF;
+        }
+
+        let verifier = DilithiumVerifier;
+        let result = engine.verify_seal(
+            &block.header,
+            &corrupted_seal,
+            signer.public_key(),
+            &verifier,
+        );
+        assert!(result.is_err(), "corrupted seal should fail verification");
+    }
+
+    #[test]
+    fn sign_block_rejects_non_proposer() {
+        let addrs = make_addrs(3);
+        let config = PoaConfig::new(addrs.clone(), 1);
+        let engine = PoaEngine::new(config);
+        let signer = DilithiumSigner::generate();
+
+        // Block 0 expects addrs[0]; set proposer to addrs[1]
+        let header = sample_header(0, addrs[1], 1000);
+        let mut block = Block {
+            header,
+            transactions: vec![],
+            proposer_seal: None,
+        };
+
+        let err = engine.sign_block(&mut block, &signer).unwrap_err();
+        assert!(matches!(err, ConsensusError::InvalidProposer { .. }));
+    }
+
+    #[test]
+    fn verify_header_with_parent_full_roundtrip() {
+        let (config, addr, signer) = test_config();
+        let engine = PoaEngine::new(config);
+
+        let parent = sample_header(0, addr, 1000);
+        let mut child_header = sample_header(1, addr, 1001);
+        child_header.parent_hash = parent.hash();
+
+        let mut block = Block {
+            header: child_header,
+            transactions: vec![],
+            proposer_seal: None,
+        };
+        engine.sign_block(&mut block, &signer).unwrap();
+
+        let verifier = DilithiumVerifier;
+        let seal = block.proposer_seal.as_ref().unwrap();
+        let result = engine.verify_header_with_parent(
+            &block.header,
+            &parent,
+            seal,
+            signer.public_key(),
+            &verifier,
+            2000, // current time well in the future
+        );
+        assert!(result.is_ok(), "full header verification should pass: {result:?}");
+    }
+
+    #[test]
+    fn authority_rotation_across_epoch() {
+        let addrs_v1 = make_addrs(3);
+        let mut config = PoaConfig::new(addrs_v1.clone(), 1).with_epoch_length(5);
+
+        // Epoch 0: original authorities
+        assert_eq!(config.proposer_for_block(0), addrs_v1[0]);
+        assert_eq!(config.proposer_for_block(2), addrs_v1[2]);
+
+        // Rotate authorities at epoch boundary
+        let addrs_v2: Vec<Address> = (10..12)
+            .map(|i| {
+                Address::from_public_key(
+                    shell_primitives::keccak256(format!("new_auth{i}").as_bytes()).as_bytes(),
+                )
+            })
+            .collect();
+        config.set_authorities(addrs_v2.clone());
+
+        // Epoch 1 uses new authorities
+        assert_eq!(config.proposer_for_block(5), addrs_v2[0]);
+        assert_eq!(config.proposer_for_block(6), addrs_v2[1]);
+        assert_eq!(config.proposer_for_block(7), addrs_v2[0]); // wraps with 2 authorities
+    }
+
+    #[test]
+    fn single_validator_all_slots() {
+        let signer = DilithiumSigner::generate();
+        let addr = Address::from_public_key(signer.public_key());
+        let config = PoaConfig::new(vec![addr], 1);
+        let engine = PoaEngine::new(config);
+
+        for block_num in 0..50u64 {
+            assert!(
+                engine.is_proposer(block_num, &addr),
+                "single validator should be proposer for every slot"
+            );
+
+            let header = sample_header(block_num, addr, 1000 + block_num);
+            assert!(
+                engine.verify_header(&header).is_ok(),
+                "single validator header should always be valid"
+            );
+        }
+    }
 }

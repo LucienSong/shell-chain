@@ -423,4 +423,200 @@ mod tests {
         fc.recalculate_head();
         assert_eq!(fc.head(), &hash(1));
     }
+
+    // ---- Additional comprehensive tests ----
+
+    #[test]
+    fn equal_attestations_higher_block_wins() {
+        let mut fc = ForkChoice::new(hash(0));
+        // Fork A: height 3, 5 attestations
+        fc.add_block(hash(1), hash(0), 1, 0, false);
+        fc.add_block(hash(2), hash(1), 2, 0, false);
+        fc.add_block(hash(3), hash(2), 3, 5, false);
+
+        // Fork B: height 2, 5 attestations (same attestation count, lower height)
+        fc.add_block(hash(4), hash(0), 1, 0, false);
+        fc.add_block(hash(5), hash(4), 2, 5, false);
+
+        // hash(3) should win: same attestations but higher block number
+        assert_eq!(fc.head(), &hash(3));
+    }
+
+    #[test]
+    fn equal_score_hash_tiebreaker() {
+        let mut fc = ForkChoice::new(hash(0));
+
+        // Two blocks at same height, same attestations, not finalized
+        // hash(10) has bytes [10, 0, ..., 1]
+        // hash(20) has bytes [20, 0, ..., 1]
+        fc.add_block(hash(10), hash(0), 1, 3, false);
+        fc.add_block(hash(20), hash(0), 1, 3, false);
+
+        // hash(20) > hash(10) as bytes, so hash(20) wins
+        assert_eq!(fc.head(), &hash(20));
+    }
+
+    #[test]
+    fn deep_fork_performance() {
+        let mut fc = ForkChoice::new(hash(0));
+
+        // Build a main chain of 150 blocks
+        for i in 1..=150u8 {
+            let parent = if i == 1 { hash(0) } else { hash(i - 1) };
+            fc.add_block(hash(i), parent, i as u64, 0, true);
+        }
+        assert_eq!(fc.head(), &hash(150));
+        assert_eq!(fc.block_count(), 151); // genesis + 150
+
+        // Build a competing fork from block 50
+        // Use a different hash scheme for the fork
+        for i in 0..100u8 {
+            let fork_hash = {
+                let mut bytes = [0u8; 32];
+                bytes[0] = i;
+                bytes[1] = 0xFF; // differentiate from main chain
+                bytes[31] = 1;
+                ShellHash::from(bytes)
+            };
+            let parent = if i == 0 {
+                hash(50)
+            } else {
+                let mut bytes = [0u8; 32];
+                bytes[0] = i - 1;
+                bytes[1] = 0xFF;
+                bytes[31] = 1;
+                ShellHash::from(bytes)
+            };
+            fc.add_block(fork_hash, parent, 51 + i as u64, 0, false);
+        }
+
+        // Main chain (finalized) should still be head
+        assert_eq!(fc.head(), &hash(150));
+
+        // Common ancestor should be hash(50)
+        let fork_tip = {
+            let mut bytes = [0u8; 32];
+            bytes[0] = 99;
+            bytes[1] = 0xFF;
+            bytes[31] = 1;
+            ShellHash::from(bytes)
+        };
+        let ancestor = fc.find_common_ancestor(&hash(150), &fork_tip);
+        assert_eq!(ancestor, Some(hash(50)));
+    }
+
+    #[test]
+    fn chain_between_broken_chain() {
+        let mut fc = ForkChoice::new(hash(0));
+        fc.add_block(hash(1), hash(0), 1, 0, false);
+        // hash(5) is disconnected — not in the tree
+        let chain = fc.chain_between(&hash(5), &hash(0));
+        assert!(chain.is_empty(), "broken chain should return empty vec");
+    }
+
+    #[test]
+    fn chain_between_same_block() {
+        let mut fc = ForkChoice::new(hash(0));
+        fc.add_block(hash(1), hash(0), 1, 0, false);
+        let chain = fc.chain_between(&hash(1), &hash(1));
+        assert!(chain.is_empty(), "chain from block to itself should be empty");
+    }
+
+    #[test]
+    fn common_ancestor_unknown_block() {
+        let mut fc = ForkChoice::new(hash(0));
+        fc.add_block(hash(1), hash(0), 1, 0, false);
+
+        // hash(99) is not in the tree
+        let ancestor = fc.find_common_ancestor(&hash(1), &hash(99));
+        assert_eq!(ancestor, None);
+    }
+
+    #[test]
+    fn multiple_competing_forks() {
+        let mut fc = ForkChoice::new(hash(0));
+
+        // Fork A: 3 blocks deep, 2 attestations on tip
+        fc.add_block(hash(1), hash(0), 1, 0, false);
+        fc.add_block(hash(2), hash(1), 2, 0, false);
+        fc.add_block(hash(3), hash(2), 3, 2, false);
+
+        // Fork B: 2 blocks deep, 5 attestations on tip
+        fc.add_block(hash(4), hash(0), 1, 0, false);
+        fc.add_block(hash(5), hash(4), 2, 5, false);
+
+        // Fork C: 4 blocks deep, 1 attestation on tip
+        fc.add_block(hash(6), hash(0), 1, 0, false);
+        fc.add_block(hash(7), hash(6), 2, 0, false);
+        fc.add_block(hash(8), hash(7), 3, 0, false);
+        fc.add_block(hash(9), hash(8), 4, 1, false);
+
+        // Fork B wins: 5 attestations > 2 > 1
+        assert_eq!(fc.head(), &hash(5));
+    }
+
+    #[test]
+    fn update_attestations_unknown_block() {
+        let mut fc = ForkChoice::new(hash(0));
+        // Updating an unknown block should be a no-op
+        let changed = fc.update_attestations(&hash(99), 100);
+        assert!(!changed);
+        assert_eq!(fc.head(), &hash(0));
+    }
+
+    #[test]
+    fn mark_finalized_unknown_block() {
+        let mut fc = ForkChoice::new(hash(0));
+        fc.add_block(hash(1), hash(0), 1, 0, false);
+        // Marking an unknown block as finalized should be a no-op
+        let changed = fc.mark_finalized(&hash(99));
+        assert!(!changed);
+    }
+
+    #[test]
+    fn prune_preserves_genesis_and_finalized() {
+        let mut fc = ForkChoice::new(hash(0));
+        fc.add_block(hash(1), hash(0), 1, 0, false);
+        fc.add_block(hash(2), hash(1), 2, 0, true); // on finalized chain
+        fc.add_block(hash(3), hash(2), 3, 0, false);
+        fc.add_block(hash(4), hash(0), 1, 0, false); // fork, not finalized
+
+        fc.mark_finalized(&hash(2));
+        fc.prune_below(3);
+
+        assert!(fc.contains(&hash(0)), "genesis must survive pruning");
+        assert!(fc.contains(&hash(2)), "finalized block must survive pruning");
+        assert!(fc.contains(&hash(3)), "block above finalized must survive");
+        assert!(!fc.contains(&hash(4)), "non-finalized fork block below finalized should be pruned");
+        assert!(!fc.contains(&hash(1)), "non-finalized block below finalized should be pruned");
+    }
+
+    #[test]
+    fn add_block_becomes_head_then_superseded() {
+        let mut fc = ForkChoice::new(hash(0));
+
+        // Add block 1 → becomes head
+        assert!(fc.add_block(hash(1), hash(0), 1, 0, false));
+        assert_eq!(fc.head(), &hash(1));
+
+        // Add block 2 → becomes head
+        assert!(fc.add_block(hash(2), hash(1), 2, 0, false));
+        assert_eq!(fc.head(), &hash(2));
+
+        // Add block at same height with fewer attestations → does NOT become head
+        assert!(!fc.add_block(hash(3), hash(0), 1, 0, false));
+        assert_eq!(fc.head(), &hash(2));
+    }
+
+    #[test]
+    fn linear_chain_head_always_latest() {
+        let mut fc = ForkChoice::new(hash(0));
+
+        for i in 1..=20u8 {
+            let parent = if i == 1 { hash(0) } else { hash(i - 1) };
+            let became_head = fc.add_block(hash(i), parent, i as u64, 0, true);
+            assert!(became_head, "block {i} should become new head");
+            assert_eq!(fc.head(), &hash(i));
+        }
+    }
 }
