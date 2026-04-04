@@ -484,6 +484,10 @@ async fn forward_pending_txs(
 
 /// Forward sync status changes to subscribers.
 /// Sends an initial "not syncing" event, then relays any subsequent changes.
+///
+/// An idle timeout closes the subscription if no sync events arrive within
+/// 10 minutes.  This prevents dead subscriptions from consuming global
+/// subscription slots when the sync protocol has no active senders.
 async fn forward_syncing(
     mut rx: broadcast::Receiver<SyncStatus>,
     sink: jsonrpsee::SubscriptionSink,
@@ -497,9 +501,11 @@ async fn forward_syncing(
     }
 
     let mut consecutive_lags: u32 = 0;
+    // Idle timeout: close subscription if no sync events arrive within 10 minutes.
+    let idle_timeout = tokio::time::Duration::from_secs(600);
     loop {
-        match rx.recv().await {
-            Ok(status) => {
+        match tokio::time::timeout(idle_timeout, rx.recv()).await {
+            Ok(Ok(status)) => {
                 consecutive_lags = 0;
                 let value = sync_status_to_json(&status);
                 let msg = SubscriptionMessage::from_json(&value)
@@ -508,7 +514,7 @@ async fn forward_syncing(
                     break;
                 }
             }
-            Err(broadcast::error::RecvError::Lagged(n)) => {
+            Ok(Err(broadcast::error::RecvError::Lagged(n))) => {
                 consecutive_lags += 1;
                 tracing::warn!(skipped = n, consecutive_lags, "syncing subscriber lagged");
                 if consecutive_lags >= MAX_CONSECUTIVE_LAGS {
@@ -516,7 +522,12 @@ async fn forward_syncing(
                     break;
                 }
             }
-            Err(broadcast::error::RecvError::Closed) => break,
+            Ok(Err(broadcast::error::RecvError::Closed)) => break,
+            Err(_) => {
+                // Idle timeout — no sync events for 10 minutes.
+                tracing::debug!("syncing subscription idle timeout — closing");
+                break;
+            }
         }
     }
 }

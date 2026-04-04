@@ -22,7 +22,7 @@ pub struct RpcBlock {
     pub state_root: ShellHash,
     pub transactions_root: ShellHash,
     pub receipts_root: ShellHash,
-    pub transactions: Vec<ShellHash>,
+    pub transactions: serde_json::Value,
     pub size: String,
     pub base_fee_per_gas: String,
     // F-072: standard Ethereum compatibility fields

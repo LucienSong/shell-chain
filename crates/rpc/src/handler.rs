@@ -421,6 +421,7 @@ fn parse_block_tag(s: &str) -> Result<BlockTag, ErrorObjectOwned> {
 /// Legacy helper used by callers that don't need pending semantics.
 /// `Finalized` is treated the same as `Latest` (resolves to head) because
 /// the caller has no access to the shared finalized-number state.
+#[allow(dead_code)]
 fn parse_block_number(s: &str) -> Result<Option<u64>, ErrorObjectOwned> {
     match parse_block_tag(s)? {
         BlockTag::Latest | BlockTag::Pending | BlockTag::Finalized => Ok(None),
