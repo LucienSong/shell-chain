@@ -3,8 +3,6 @@ use pqcrypto_traits::sign::{
     DetachedSignature, PublicKey, SecretKey,
 };
 
-use zeroize::Zeroize;
-
 use crate::{
     CryptoError, KeyPair, PQSignature, SignatureType, Signer, Verifier,
 };
@@ -79,14 +77,12 @@ impl SphincsSigner {
 
 impl Signer for SphincsSigner {
     fn sign(&self, message: &[u8]) -> Result<PQSignature, CryptoError> {
-        let mut sk = self.secret_key();
+        let sk = self.secret_key();
         let sig = sphincssha2256fsimple::detached_sign(message, &sk);
-        // Zero the temporary SecretKey in place.
-        unsafe {
-            let ptr = &mut sk as *mut sphincssha2256fsimple::SecretKey as *mut u8;
-            let len = std::mem::size_of::<sphincssha2256fsimple::SecretKey>();
-            std::slice::from_raw_parts_mut(ptr, len).zeroize();
-        }
+        // The temporary SecretKey is dropped here. The canonical key material
+        // is held in `self.secret_key_bytes` which is wrapped in `Zeroizing`
+        // and will be securely erased when this signer is dropped.
+        drop(sk);
         Ok(PQSignature::new(
             SignatureType::SphincsSha2256f,
             sig.as_bytes().to_vec(),

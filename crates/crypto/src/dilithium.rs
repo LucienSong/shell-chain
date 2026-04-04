@@ -3,8 +3,6 @@ use pqcrypto_traits::sign::{
     DetachedSignature, PublicKey, SecretKey,
 };
 
-use zeroize::Zeroize;
-
 use crate::{
     CryptoError, KeyPair, PQSignature, SignatureType, Signer, Verifier,
 };
@@ -83,17 +81,12 @@ impl DilithiumSigner {
 
 impl Signer for DilithiumSigner {
     fn sign(&self, message: &[u8]) -> Result<PQSignature, CryptoError> {
-        let mut sk = self.secret_key();
+        let sk = self.secret_key();
         let sig = dilithium3::detached_sign(message, &sk);
-        // SECURITY(F-001): Zero the temporary SecretKey in place.
-        // pqcrypto's SecretKey does not implement Zeroize, so we manually
-        // zero the underlying bytes via raw pointer to prevent key material
-        // from lingering on the stack after this function returns.
-        unsafe {
-            let ptr = &mut sk as *mut dilithium3::SecretKey as *mut u8;
-            let len = std::mem::size_of::<dilithium3::SecretKey>();
-            std::slice::from_raw_parts_mut(ptr, len).zeroize();
-        }
+        // The temporary SecretKey is dropped here. The canonical key material
+        // is held in `self.secret_key_bytes` which is wrapped in `Zeroizing`
+        // and will be securely erased when this signer is dropped.
+        drop(sk);
         Ok(PQSignature::new(
             SignatureType::Dilithium3,
             sig.as_bytes().to_vec(),
