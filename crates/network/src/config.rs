@@ -58,7 +58,7 @@ pub struct NetworkConfig {
 impl Default for NetworkConfig {
     fn default() -> Self {
         Self {
-            listen_addr: SocketAddr::from(([0, 0, 0, 0], 30303)),
+            listen_addr: SocketAddr::from(([127, 0, 0, 1], 30303)),
             boot_nodes: vec![],
             blocks_topic: "/shell/blocks/1".into(),
             txs_topic: "/shell/txs/1".into(),
@@ -173,7 +173,7 @@ mod tests {
     #[test]
     fn default_config_all_fields() {
         let config = NetworkConfig::default();
-        assert_eq!(config.listen_addr, SocketAddr::from(([0, 0, 0, 0], 30303)));
+        assert_eq!(config.listen_addr, SocketAddr::from(([127, 0, 0, 1], 30303)));
         assert!(config.boot_nodes.is_empty());
         assert_eq!(config.blocks_topic, "/shell/blocks/1");
         assert_eq!(config.txs_topic, "/shell/txs/1");

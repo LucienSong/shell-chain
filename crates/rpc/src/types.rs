@@ -56,13 +56,20 @@ pub struct RpcTransaction {
 #[serde(rename_all = "camelCase")]
 pub struct RpcReceipt {
     pub transaction_hash: ShellHash,
+    pub block_hash: ShellHash,
     pub block_number: String,
     pub transaction_index: String,
+    pub from: Address,
+    pub to: Option<Address>,
     pub status: String,
     pub gas_used: String,
     pub cumulative_gas_used: String,
+    pub effective_gas_price: String,
     pub contract_address: Option<Address>,
     pub logs: Vec<RpcLog>,
+    pub logs_bloom: String,
+    #[serde(rename = "type")]
+    pub tx_type: String,
 }
 
 /// Hex-encoded log response.

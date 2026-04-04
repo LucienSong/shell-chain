@@ -195,6 +195,7 @@ fn build_swarm(config: &NetworkConfig) -> Result<Swarm<ShellBehaviour>, NetworkE
     let gs_config = gossipsub::ConfigBuilder::default()
         .heartbeat_interval(Duration::from_secs(1))
         .validation_mode(gossipsub::ValidationMode::Strict)
+        .validate_messages() // F-062: hold messages until application validates
         .message_id_fn(message_id_fn)
         .max_transmit_size(4 * 1024 * 1024) // 4 MiB — PQ blocks can be large
         .build()
@@ -435,13 +436,13 @@ async fn swarm_loop(
                             TopicKind::Blocks => blocks_topic.clone(),
                             TopicKind::Transactions => txs_topic.clone(),
                         };
+                        // F-065: skip publish when outbound bandwidth exceeded.
                         if !bandwidth.record_outbound(data_len) {
                             warn!(
                                 bytes = data_len,
-                                "Outbound bandwidth limit exceeded"
+                                "Outbound bandwidth limit exceeded — skipping publish"
                             );
-                        }
-                        if let Err(e) = swarm
+                        } else if let Err(e) = swarm
                             .behaviour_mut()
                             .gossipsub
                             .publish(ident, data)
@@ -497,21 +498,34 @@ async fn handle_swarm_event(
         SwarmEvent::Behaviour(ShellBehaviourEvent::Gossipsub(
             gossipsub::Event::Message {
                 propagation_source,
+                message_id,
                 message,
-                ..
             },
         )) => {
             let data_len = message.data.len() as u64;
+            // F-065: drop message when bandwidth limit exceeded.
             if !bandwidth.record_inbound(data_len) {
                 warn!(
                     bytes = data_len,
                     peer = %propagation_source,
-                    "Inbound bandwidth limit exceeded"
+                    "Inbound bandwidth limit exceeded — dropping message"
                 );
+                swarm.behaviour_mut().gossipsub.report_message_validation_result(
+                    &message_id,
+                    &propagation_source,
+                    gossipsub::MessageAcceptance::Ignore,
+                );
+                return;
             }
             let peer = PeerId(propagation_source.to_string());
             match serde_json::from_slice::<NetworkMessage>(&message.data) {
                 Ok(msg) => {
+                    // F-062: accept valid message so gossipsub propagates it.
+                    swarm.behaviour_mut().gossipsub.report_message_validation_result(
+                        &message_id,
+                        &propagation_source,
+                        gossipsub::MessageAcceptance::Accept,
+                    );
                     let _ = event_tx
                         .send(NetworkEvent::MessageReceived {
                             peer,
@@ -520,7 +534,13 @@ async fn handle_swarm_event(
                         .await;
                 }
                 Err(e) => {
+                    // F-062: reject invalid message — penalize sender.
                     debug!("Failed to deserialize gossipsub message: {e}");
+                    swarm.behaviour_mut().gossipsub.report_message_validation_result(
+                        &message_id,
+                        &propagation_source,
+                        gossipsub::MessageAcceptance::Reject,
+                    );
                 }
             }
         }
@@ -529,11 +549,9 @@ async fn handle_swarm_event(
             kad::Event::RoutingUpdated { peer, .. },
         )) => {
             debug!("Kademlia routing updated: {peer}");
-            // Add newly discovered peer to GossipSub mesh.
-            swarm
-                .behaviour_mut()
-                .gossipsub
-                .add_explicit_peer(&peer);
+            // F-064: Do NOT auto-add Kademlia-discovered peers to GossipSub mesh.
+            // Peers join gossipsub mesh naturally via subscription protocol;
+            // explicit add bypasses peer scoring and enables Eclipse attacks.
             let _ = event_tx
                 .send(NetworkEvent::PeerConnected(PeerId(peer.to_string())))
                 .await;

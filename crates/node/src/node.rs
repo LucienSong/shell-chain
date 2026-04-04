@@ -226,7 +226,11 @@ impl<S: KvStore + 'static> Node<S> {
                                     }
                                 }
                                 // Reload validators at epoch boundaries (F-041: handle errors).
-                                if self.consensus.read().config().is_epoch_boundary(number) {
+                                // F-061: Scope read lock explicitly to prevent deadlock.
+                                let is_epoch = {
+                                    self.consensus.read().config().is_epoch_boundary(number)
+                                };
+                                if is_epoch {
                                     let validators = {
                                         let ws = self.world_state.read();
                                         ws.get_validators()

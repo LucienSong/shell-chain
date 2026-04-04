@@ -295,8 +295,14 @@ fn parse_hex_u64(s: &str) -> Result<u64, ErrorObjectOwned> {
 /// Parse a hex string "0x..." into U256.
 fn parse_hex_u256(s: &str) -> Result<U256, ErrorObjectOwned> {
     let s = s.strip_prefix("0x").unwrap_or(s);
+    // F-066: reject oversized input to prevent silent truncation.
+    if s.len() > 64 {
+        return Err(internal_err(format!(
+            "hex string too long for U256: {} chars (max 64)",
+            s.len()
+        )));
+    }
     let bytes = hex::decode(
-        // left-pad to 64 hex chars so from_be_slice works for short values
         if s.len() < 64 {
             format!("{:0>64}", s)
         } else {
@@ -470,19 +476,40 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
             .map_err(internal_err)?;
 
         if let Some((block_hash, tx_index)) = location {
+            let block = self
+                .chain_store
+                .get_block_by_hash(&block_hash)
+                .map_err(internal_err)?;
             let receipts = self
                 .chain_store
                 .get_receipts(&block_hash)
                 .map_err(internal_err)?;
-            if let Some(receipts) = receipts {
+            if let (Some(block), Some(receipts)) = (block, receipts) {
                 if let Some(receipt) = receipts.get(tx_index as usize) {
+                    // F-067: populate from/to/effective_gas_price from the transaction.
+                    let (from, to, eff_gas_price) =
+                        if let Some(tx) = block.transactions.get(tx_index as usize) {
+                            let price = shell_core::effective_gas_price(
+                                tx.tx.max_fee_per_gas,
+                                tx.tx.max_priority_fee_per_gas,
+                                block.header.base_fee_per_gas,
+                            );
+                            (tx.sender(), tx.tx.to, price)
+                        } else {
+                            (Address::ZERO, None, 0)
+                        };
+
                     return Ok(Some(RpcReceipt {
                         transaction_hash: receipt.tx_hash,
+                        block_hash,
                         block_number: hex_u64(receipt.block_number),
                         transaction_index: hex_u64(tx_index as u64),
+                        from,
+                        to,
                         status: hex_u64(receipt.status as u64),
                         gas_used: hex_u64(receipt.gas_used),
                         cumulative_gas_used: hex_u64(receipt.cumulative_gas_used),
+                        effective_gas_price: hex_u64(eff_gas_price),
                         contract_address: receipt.contract_address,
                         logs: receipt
                             .logs
@@ -493,6 +520,8 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
                                 data: hex_bytes(log.data.as_ref()),
                             })
                             .collect(),
+                        logs_bloom: hex_bytes(receipt.logs_bloom.as_ref()),
+                        tx_type: "0x2".into(),
                     }));
                 }
             }
