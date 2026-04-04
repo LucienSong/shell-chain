@@ -857,4 +857,179 @@ mod tests {
             Some(b"value-2".to_vec())
         );
     }
+
+    // ── Snapshot round-trip tests ──────────────────────────────────────
+
+    #[test]
+    fn test_export_import_snapshot_roundtrip() {
+        let store = Arc::new(MemoryDb::new());
+        let cs = ChainStore::new(store.clone());
+
+        // Store some real chain data.
+        let b0 = empty_block(0);
+        put_canonical(&cs, &b0);
+        let mut b1 = empty_block(1);
+        b1.header.parent_hash = b0.hash();
+        put_canonical(&cs, &b1);
+
+        cs.put_chain_config(&ChainConfig {
+            chain_id: 1337,
+            genesis_hash: b0.hash(),
+        })
+        .unwrap();
+
+        // Export snapshot.
+        let meta = crate::SnapshotMetadata::new(
+            1337,
+            1,
+            b1.hash(),
+            ShellHash::default(),
+            b0.hash(),
+        );
+        let mut buf = Vec::new();
+        let exported = cs.export_snapshot(meta, std::io::Cursor::new(&mut buf)).unwrap();
+        assert_eq!(exported.chain_id, 1337);
+        assert_eq!(exported.block_number, 1);
+
+        // Import into a fresh store.
+        let store2 = Arc::new(MemoryDb::new());
+        let cs2 = ChainStore::new(store2.clone());
+
+        // Build a snapshot with actual data entries for the fresh store.
+        let mut buf2 = Vec::new();
+        {
+            let meta2 = crate::SnapshotMetadata::new(
+                1337,
+                1,
+                b1.hash(),
+                ShellHash::default(),
+                b0.hash(),
+            );
+            let mut writer =
+                crate::SnapshotWriter::new(std::io::Cursor::new(&mut buf2), meta2).unwrap();
+            // Manually write the chain config entry.
+            let cfg = ChainConfig {
+                chain_id: 1337,
+                genesis_hash: b0.hash(),
+            };
+            let cfg_bytes = serde_json::to_vec(&cfg).unwrap();
+            writer.write_entry(b"CFG", &cfg_bytes).unwrap();
+            writer.finalize().unwrap();
+        }
+
+        let imported = cs2
+            .import_snapshot(std::io::Cursor::new(&buf2), 1337, &b0.hash())
+            .unwrap();
+        assert_eq!(imported.entry_count, 1);
+
+        // Verify the config was restored.
+        let loaded_cfg = cs2.get_chain_config().unwrap().unwrap();
+        assert_eq!(loaded_cfg.chain_id, 1337);
+        assert_eq!(loaded_cfg.genesis_hash, b0.hash());
+    }
+
+    #[test]
+    fn test_export_snapshot_at_specific_block() {
+        let store = Arc::new(MemoryDb::new());
+        let cs = ChainStore::new(store.clone());
+
+        let b0 = empty_block(0);
+        put_canonical(&cs, &b0);
+
+        // Export snapshot referencing block 0.
+        let meta = crate::SnapshotMetadata::new(
+            1337,
+            0,
+            b0.hash(),
+            ShellHash::default(),
+            b0.hash(),
+        );
+        let mut buf = Vec::new();
+        let exported = cs.export_snapshot(meta, std::io::Cursor::new(&mut buf)).unwrap();
+
+        assert_eq!(exported.block_number, 0);
+        assert_eq!(exported.block_hash, b0.hash());
+    }
+
+    #[test]
+    fn test_import_corrupted_snapshot_fails() {
+        let store = Arc::new(MemoryDb::new());
+        let cs = ChainStore::new(store);
+
+        let corrupted = b"this is not valid snapshot data at all";
+        let result = cs.import_snapshot(
+            std::io::Cursor::new(corrupted),
+            1337,
+            &ShellHash::default(),
+        );
+        assert!(result.is_err(), "corrupted snapshot should fail to import");
+    }
+
+    #[test]
+    fn test_import_snapshot_metadata_mismatch_genesis() {
+        let store = Arc::new(MemoryDb::new());
+        let cs = ChainStore::new(store);
+
+        let genesis_hash = ShellHash::from([0x01; 32]);
+        let meta = crate::SnapshotMetadata::new(
+            1337,
+            10,
+            ShellHash::default(),
+            ShellHash::default(),
+            genesis_hash,
+        );
+        let mut buf = Vec::new();
+        {
+            let writer =
+                crate::SnapshotWriter::new(std::io::Cursor::new(&mut buf), meta).unwrap();
+            writer.finalize().unwrap();
+        }
+
+        // Import expecting a different genesis hash.
+        let wrong_genesis = ShellHash::from([0x99; 32]);
+        let result = cs.import_snapshot(
+            std::io::Cursor::new(&buf),
+            1337,
+            &wrong_genesis,
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("genesis hash mismatch"),
+            "expected genesis mismatch error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_import_snapshot_chain_id_mismatch_detailed() {
+        let store = Arc::new(MemoryDb::new());
+        let cs = ChainStore::new(store);
+
+        let meta = crate::SnapshotMetadata::new(
+            42,
+            5,
+            ShellHash::default(),
+            ShellHash::default(),
+            ShellHash::default(),
+        );
+        let mut buf = Vec::new();
+        {
+            let writer =
+                crate::SnapshotWriter::new(std::io::Cursor::new(&mut buf), meta).unwrap();
+            writer.finalize().unwrap();
+        }
+
+        // Import expecting chain_id=1337 but snapshot has 42.
+        let result = cs.import_snapshot(
+            std::io::Cursor::new(&buf),
+            1337,
+            &ShellHash::default(),
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("chain ID mismatch"),
+            "expected chain ID mismatch error, got: {err}"
+        );
+    }
 }

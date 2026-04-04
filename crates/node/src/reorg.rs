@@ -356,4 +356,215 @@ mod tests {
         // TX exists in new chain, so it should be filtered from reverted
         assert_eq!(result.reverted_txs.len(), 0);
     }
+
+    // ── Extended reorg tests ───────────────────────────────────────────
+
+    #[test]
+    fn test_short_reorg_one_block() {
+        let (store, chain_store, world_state, root) = setup_chain();
+
+        // Build canonical chain: genesis → block5 → old_block6
+        let ancestor = make_block(5, make_hash(0), root);
+        chain_store.put_block(&ancestor).unwrap();
+        let ancestor_hash = ancestor.hash();
+
+        let old_block = make_block(6, ancestor_hash, root);
+        chain_store.put_block(&old_block).unwrap();
+        let old_hash = old_block.hash();
+        chain_store.set_canonical(6, &old_hash).unwrap();
+        chain_store.set_head(&old_hash).unwrap();
+
+        // Create fork block at height 6 with different timestamp.
+        let mut fork_block = make_block(6, ancestor_hash, root);
+        fork_block.header.timestamp += 100;
+        chain_store.put_block(&fork_block).unwrap();
+        let fork_hash = fork_block.hash();
+
+        let result = ReorgEngine::execute(
+            &chain_store,
+            &world_state,
+            &store,
+            ancestor_hash,
+            5,
+            &[old_hash],
+            &[fork_hash],
+            0,
+        )
+        .unwrap();
+
+        assert_eq!(result.rolled_back, 1);
+        assert_eq!(result.applied, 1);
+        assert_eq!(result.new_head, fork_hash);
+        assert_eq!(
+            chain_store.get_head_hash().unwrap().unwrap(),
+            fork_hash
+        );
+    }
+
+    #[test]
+    fn test_medium_reorg_three_blocks() {
+        let (store, chain_store, world_state, root) = setup_chain();
+
+        let ancestor = make_block(5, make_hash(0), root);
+        chain_store.put_block(&ancestor).unwrap();
+        let ancestor_hash = ancestor.hash();
+
+        // Old chain: 3 blocks (6, 7, 8)
+        let old6 = make_block(6, ancestor_hash, root);
+        chain_store.put_block(&old6).unwrap();
+        let oh6 = old6.hash();
+        let old7 = make_block(7, oh6, root);
+        chain_store.put_block(&old7).unwrap();
+        let oh7 = old7.hash();
+        let old8 = make_block(8, oh7, root);
+        chain_store.put_block(&old8).unwrap();
+        let oh8 = old8.hash();
+        chain_store.set_head(&oh8).unwrap();
+
+        // New fork chain: 3 blocks (6', 7', 8') with different timestamps
+        let mut new6 = make_block(6, ancestor_hash, root);
+        new6.header.timestamp += 50;
+        chain_store.put_block(&new6).unwrap();
+        let nh6 = new6.hash();
+        let mut new7 = make_block(7, nh6, root);
+        new7.header.timestamp += 50;
+        chain_store.put_block(&new7).unwrap();
+        let nh7 = new7.hash();
+        let mut new8 = make_block(8, nh7, root);
+        new8.header.timestamp += 50;
+        chain_store.put_block(&new8).unwrap();
+        let nh8 = new8.hash();
+
+        let result = ReorgEngine::execute(
+            &chain_store,
+            &world_state,
+            &store,
+            ancestor_hash,
+            5,
+            &[oh6, oh7, oh8],
+            &[nh6, nh7, nh8],
+            0,
+        )
+        .unwrap();
+
+        assert_eq!(result.rolled_back, 3);
+        assert_eq!(result.applied, 3);
+        assert_eq!(result.ancestor_number, 5);
+        assert_eq!(result.new_head, nh8);
+
+        // Canonical mappings should point to new chain.
+        let canon6 = chain_store.get_block_by_number(6).unwrap().unwrap();
+        assert_eq!(canon6.hash(), nh6);
+        let canon7 = chain_store.get_block_by_number(7).unwrap().unwrap();
+        assert_eq!(canon7.hash(), nh7);
+    }
+
+    #[test]
+    fn test_reorg_blocked_by_finalized() {
+        let (store, chain_store, world_state, root) = setup_chain();
+
+        let ancestor = make_block(3, make_hash(0), root);
+        chain_store.put_block(&ancestor).unwrap();
+        let ancestor_hash = ancestor.hash();
+
+        // Ancestor is at block 3, but finalized is at 5 → reorg should be rejected.
+        let result = ReorgEngine::execute(
+            &chain_store,
+            &world_state,
+            &store,
+            ancestor_hash,
+            3,
+            &[],
+            &[],
+            5,
+        );
+
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("cannot reorg past finalized"),
+            "expected finalization safety error, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn test_reorg_preserves_unique_reverted_txs() {
+        let (store, chain_store, world_state, root) = setup_chain();
+
+        let ancestor = make_block(5, make_hash(0), root);
+        chain_store.put_block(&ancestor).unwrap();
+        let ancestor_hash = ancestor.hash();
+
+        // Old chain: 2 blocks, each with 1 unique tx.
+        let tx_a = make_tx();
+        let mut tx_b = make_tx();
+        tx_b.tx.nonce = 99; // different tx
+
+        let mut old6 = make_block(6, ancestor_hash, root);
+        old6.transactions.push(tx_a.clone());
+        chain_store.put_block(&old6).unwrap();
+
+        let mut old7 = make_block(7, old6.hash(), root);
+        old7.transactions.push(tx_b.clone());
+        chain_store.put_block(&old7).unwrap();
+
+        // New chain: 1 block, no transactions.
+        let mut new6 = make_block(6, ancestor_hash, root);
+        new6.header.timestamp += 1;
+        chain_store.put_block(&new6).unwrap();
+
+        let result = ReorgEngine::execute(
+            &chain_store,
+            &world_state,
+            &store,
+            ancestor_hash,
+            5,
+            &[old6.hash(), old7.hash()],
+            &[new6.hash()],
+            0,
+        )
+        .unwrap();
+
+        // Both txs should be in reverted list since they aren't in the new chain.
+        assert_eq!(result.reverted_txs.len(), 2);
+    }
+
+    #[test]
+    fn test_reorg_updates_canonical_mappings() {
+        let (store, chain_store, world_state, root) = setup_chain();
+
+        let ancestor = make_block(5, make_hash(0), root);
+        chain_store.put_block(&ancestor).unwrap();
+        let ancestor_hash = ancestor.hash();
+
+        // Set canonical for old block 6.
+        let old6 = make_block(6, ancestor_hash, root);
+        chain_store.put_block(&old6).unwrap();
+        let old_hash = old6.hash();
+        chain_store.set_canonical(6, &old_hash).unwrap();
+
+        // Create new fork block 6.
+        let mut new6 = make_block(6, ancestor_hash, root);
+        new6.header.timestamp += 42;
+        chain_store.put_block(&new6).unwrap();
+        let new_hash = new6.hash();
+
+        let result = ReorgEngine::execute(
+            &chain_store,
+            &world_state,
+            &store,
+            ancestor_hash,
+            5,
+            &[old_hash],
+            &[new_hash],
+            0,
+        )
+        .unwrap();
+
+        assert_eq!(result.new_head, new_hash);
+
+        // Canonical mapping at height 6 should now point to the new block.
+        let canon = chain_store.get_block_by_number(6).unwrap().unwrap();
+        assert_eq!(canon.hash(), new_hash);
+    }
 }
