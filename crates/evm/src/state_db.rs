@@ -62,6 +62,13 @@ impl<S: KvStore + 'static> ShellStateDb<S> {
         &self.chain_store
     }
 
+    /// Returns mutable WorldState and shared ChainStore in one borrow,
+    /// avoiding the split-borrow issue with separate accessors.
+    #[cfg(test)]
+    pub(crate) fn world_state_and_chain_store(&mut self) -> (&mut WorldState<S>, &ChainStore<S>) {
+        (&mut self.world_state, &self.chain_store)
+    }
+
     /// Convert a shell-chain Account to revm AccountInfo.
     ///
     /// Maps `Option<ShellHash>` code_hash to B256, defaulting to

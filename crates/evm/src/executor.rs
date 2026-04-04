@@ -825,4 +825,680 @@ mod tests {
         let tx_result = evm.execute_tx(&signed, &header, 0, 0).unwrap();
         assert!(tx_result.state_changes.is_empty());
     }
+
+    // ── Helpers for advanced EVM tests ────────────────────────
+
+    fn commit_state(evm: &mut ShellEvm<MemoryDb>, state: &EvmState) {
+        let (ws, cs) = evm.state_db_mut().world_state_and_chain_store();
+        commit_evm_state(state, ws, cs).unwrap();
+    }
+
+    fn deploy_contract(
+        evm: &mut ShellEvm<MemoryDb>,
+        from: &ShellAddress,
+        init_code: Vec<u8>,
+        value: U256,
+        nonce: u64,
+    ) -> (TxExecutionResult, ShellAddress) {
+        let tx = Transaction {
+            chain_id: 1337,
+            nonce,
+            to: None,
+            value,
+            data: shell_primitives::Bytes::from(init_code),
+            gas_limit: 5_000_000,
+            max_fee_per_gas: 0,
+            max_priority_fee_per_gas: 0,
+        };
+        let sig = PQSignature::new(SignatureType::Dilithium3, vec![0xCC; 100]);
+        let signed = SignedTransaction::new(*from, tx, sig);
+        let header = sample_header();
+        let result = evm.execute_tx(&signed, &header, 0, 0).unwrap();
+        let addr = result.receipt.contract_address.unwrap();
+        commit_state(evm, &result.state_changes);
+        (result, addr)
+    }
+
+    fn call_contract(
+        evm: &mut ShellEvm<MemoryDb>,
+        from: &ShellAddress,
+        to: &ShellAddress,
+        calldata: Vec<u8>,
+        value: U256,
+        nonce: u64,
+        gas_limit: u64,
+    ) -> TxExecutionResult {
+        let tx = Transaction {
+            chain_id: 1337,
+            nonce,
+            to: Some(*to),
+            value,
+            data: shell_primitives::Bytes::from(calldata),
+            gas_limit,
+            max_fee_per_gas: 0,
+            max_priority_fee_per_gas: 0,
+        };
+        let sig = PQSignature::new(SignatureType::Dilithium3, vec![0xDD; 100]);
+        let signed = SignedTransaction::new(*from, tx, sig);
+        let header = sample_header();
+        let result = evm.execute_tx(&signed, &header, 0, 0).unwrap();
+        commit_state(evm, &result.state_changes);
+        result
+    }
+
+    /// Build init code that deploys `runtime` as contract code.
+    /// Uses CODECOPY to copy the runtime bytes appended after the prefix.
+    fn make_init_code(runtime: &[u8]) -> Vec<u8> {
+        let runtime_len = runtime.len();
+        assert!(runtime_len <= 0xFFFF, "runtime too large for PUSH2");
+        let mut init = Vec::new();
+        if runtime_len <= 255 {
+            // PUSH1 len, PUSH1 offset, PUSH1 0, CODECOPY, PUSH1 len, PUSH1 0, RETURN
+            let prefix_len: u8 = 12;
+            init.extend_from_slice(&[
+                0x60, runtime_len as u8,
+                0x60, prefix_len,
+                0x60, 0x00,
+                0x39, // CODECOPY
+                0x60, runtime_len as u8,
+                0x60, 0x00,
+                0xF3, // RETURN
+            ]);
+        } else {
+            // PUSH2 len, PUSH2 offset, PUSH1 0, CODECOPY, PUSH2 len, PUSH1 0, RETURN
+            let prefix_len: u16 = 15;
+            init.extend_from_slice(&[
+                0x61, (runtime_len >> 8) as u8, (runtime_len & 0xFF) as u8,
+                0x61, (prefix_len >> 8) as u8, (prefix_len & 0xFF) as u8,
+                0x60, 0x00,
+                0x39, // CODECOPY
+                0x61, (runtime_len >> 8) as u8, (runtime_len & 0xFF) as u8,
+                0x60, 0x00,
+                0xF3, // RETURN
+            ]);
+        }
+        init.extend_from_slice(runtime);
+        init
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  CREATE2 tests
+    // ════════════════════════════════════════════════════════════
+
+    #[test]
+    fn create2_deploy_and_verify_address() {
+        use alloy_primitives::keccak256;
+
+        let mut evm = setup_evm();
+        let deployer = ShellAddress::from([0x42; 20]);
+        fund_account(&mut evm, &deployer, U256::from(100_000_000_000u64));
+
+        // Child init code: returns 1-byte runtime 0x42
+        let child_init: Vec<u8> = vec![
+            0x60, 0x42, 0x60, 0x00, 0x52, 0x60, 0x01, 0x60, 0x1f, 0xf3,
+        ];
+
+        // Factory runtime: store child_init in memory → CREATE2(val=0, off, sz, salt=1)
+        // → return created address
+        let mut factory_rt = Vec::new();
+        factory_rt.push(0x69); // PUSH10
+        factory_rt.extend_from_slice(&child_init);
+        factory_rt.extend_from_slice(&[
+            0x60, 0x00, 0x52,       // MSTORE (right-aligned at mem[22..32])
+            0x60, 0x01,             // PUSH1 1 (salt)
+            0x60, 0x0a,             // PUSH1 10 (size)
+            0x60, 0x16,             // PUSH1 22 (offset = 32-10)
+            0x60, 0x00,             // PUSH1 0 (value)
+            0xf5,                   // CREATE2
+            0x60, 0x00, 0x52,       // store addr at mem[0]
+            0x60, 0x20, 0x60, 0x00, 0xf3, // RETURN 32 bytes
+        ]);
+
+        let factory_init = make_init_code(&factory_rt);
+        let (_, factory_addr) = deploy_contract(&mut evm, &deployer, factory_init, U256::ZERO, 0);
+
+        // Call factory to trigger CREATE2
+        let result = call_contract(
+            &mut evm, &deployer, &factory_addr, vec![], U256::ZERO, 1, 5_000_000,
+        );
+        assert_eq!(result.receipt.status, 1, "CREATE2 call failed");
+        assert_eq!(result.output.len(), 32);
+        let created_addr = ShellAddress::from_slice(&result.output[12..32]);
+
+        // Verify via CREATE2 formula: keccak256(0xff ++ factory ++ salt ++ keccak256(init))
+        let init_hash = keccak256(&child_init);
+        let salt = B256::from(U256::from(1));
+        let mut pre = vec![0xff];
+        pre.extend_from_slice(factory_addr.as_bytes());
+        pre.extend_from_slice(salt.as_ref());
+        pre.extend_from_slice(init_hash.as_ref());
+        let expected = ShellAddress::from_slice(&keccak256(&pre)[12..]);
+        assert_eq!(created_addr, expected, "CREATE2 address mismatch");
+    }
+
+    #[test]
+    fn create2_same_salt_collision_returns_zero() {
+        let mut evm = setup_evm();
+        let deployer = ShellAddress::from([0x42; 20]);
+        fund_account(&mut evm, &deployer, U256::from(100_000_000_000u64));
+
+        let child_init: Vec<u8> = vec![
+            0x60, 0x42, 0x60, 0x00, 0x52, 0x60, 0x01, 0x60, 0x1f, 0xf3,
+        ];
+        let mut factory_rt = Vec::new();
+        factory_rt.push(0x69); // PUSH10
+        factory_rt.extend_from_slice(&child_init);
+        factory_rt.extend_from_slice(&[
+            0x60, 0x00, 0x52,
+            0x60, 0x00,             // salt = 0
+            0x60, 0x0a, 0x60, 0x16, 0x60, 0x00, 0xf5,
+            0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xf3,
+        ]);
+        let factory_init = make_init_code(&factory_rt);
+        let (_, factory_addr) = deploy_contract(&mut evm, &deployer, factory_init, U256::ZERO, 0);
+
+        // First CREATE2
+        let r1 = call_contract(&mut evm, &deployer, &factory_addr, vec![], U256::ZERO, 1, 5_000_000);
+        assert_eq!(r1.receipt.status, 1);
+        assert_ne!(&r1.output[12..32], &[0u8; 20], "first deploy should succeed");
+
+        // Second CREATE2 with same salt → address collision, returns address(0)
+        let r2 = call_contract(&mut evm, &deployer, &factory_addr, vec![], U256::ZERO, 2, 5_000_000);
+        assert_eq!(r2.receipt.status, 1, "outer call should succeed");
+        assert_eq!(&r2.output[12..32], &[0u8; 20], "collision should return zero");
+    }
+
+    #[test]
+    fn create2_deterministic_address() {
+        use alloy_primitives::keccak256;
+
+        let mut evm = setup_evm();
+        let deployer = ShellAddress::from([0x42; 20]);
+        fund_account(&mut evm, &deployer, U256::from(100_000_000_000u64));
+
+        let child_init: Vec<u8> = vec![
+            0x60, 0xAA, 0x60, 0x00, 0x52, 0x60, 0x01, 0x60, 0x1f, 0xf3,
+        ];
+        let mut factory_rt = Vec::new();
+        factory_rt.push(0x69);
+        factory_rt.extend_from_slice(&child_init);
+        factory_rt.extend_from_slice(&[
+            0x60, 0x00, 0x52,
+            0x60, 0x42,             // salt = 0x42
+            0x60, 0x0a, 0x60, 0x16, 0x60, 0x00, 0xf5,
+            0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xf3,
+        ]);
+        let factory_init = make_init_code(&factory_rt);
+        let (_, factory_addr) = deploy_contract(&mut evm, &deployer, factory_init, U256::ZERO, 0);
+
+        let r = call_contract(&mut evm, &deployer, &factory_addr, vec![], U256::ZERO, 1, 5_000_000);
+        assert_eq!(r.receipt.status, 1);
+        let created = ShellAddress::from_slice(&r.output[12..32]);
+
+        let init_hash = keccak256(&child_init);
+        let salt = B256::from(U256::from(0x42));
+        let mut pre = vec![0xff];
+        pre.extend_from_slice(factory_addr.as_bytes());
+        pre.extend_from_slice(salt.as_ref());
+        pre.extend_from_slice(init_hash.as_ref());
+        let expected = ShellAddress::from_slice(&keccak256(&pre)[12..]);
+        assert_eq!(created, expected);
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  SELFDESTRUCT tests
+    // ════════════════════════════════════════════════════════════
+
+    #[test]
+    fn selfdestruct_transfers_balance() {
+        let mut evm = setup_evm();
+        let deployer = ShellAddress::from([0x42; 20]);
+        let beneficiary = ShellAddress::from([0xBB; 20]);
+        fund_account(&mut evm, &deployer, U256::from(100_000_000_000u64));
+
+        // Runtime: PUSH20 <beneficiary> SELFDESTRUCT
+        let mut runtime = vec![0x73]; // PUSH20
+        runtime.extend_from_slice(beneficiary.as_bytes());
+        runtime.push(0xFF); // SELFDESTRUCT
+
+        let init_code = make_init_code(&runtime);
+        let deposit = U256::from(1_000_000_000u64);
+        let (_, contract_addr) = deploy_contract(&mut evm, &deployer, init_code, deposit, 0);
+
+        let result = call_contract(
+            &mut evm, &deployer, &contract_addr, vec![], U256::ZERO, 1, 100_000,
+        );
+        assert_eq!(result.receipt.status, 1, "selfdestruct tx failed");
+
+        let ben_bal = evm.state_db_mut().world_state_mut()
+            .get_balance(&beneficiary).unwrap();
+        assert!(ben_bal >= deposit, "beneficiary should receive balance");
+    }
+
+    #[test]
+    fn selfdestruct_to_self_zeroes_balance() {
+        let mut evm = setup_evm();
+        let deployer = ShellAddress::from([0x42; 20]);
+        fund_account(&mut evm, &deployer, U256::from(100_000_000_000u64));
+
+        // Runtime: ADDRESS SELFDESTRUCT
+        let runtime = vec![0x30, 0xFF];
+        let init_code = make_init_code(&runtime);
+        let deposit = U256::from(5_000_000u64);
+        let (_, contract_addr) = deploy_contract(&mut evm, &deployer, init_code, deposit, 0);
+
+        let result = call_contract(
+            &mut evm, &deployer, &contract_addr, vec![], U256::ZERO, 1, 100_000,
+        );
+        assert_eq!(result.receipt.status, 1);
+
+        let balance = evm.state_db_mut().world_state_mut()
+            .get_balance(&contract_addr).unwrap();
+        assert_eq!(balance, U256::ZERO, "self-destruct to self should zero balance");
+    }
+
+    #[test]
+    fn selfdestruct_post_shanghai_code_remains() {
+        // Post-Shanghai (EIP-6780): SELFDESTRUCT in a separate tx only
+        // transfers balance; code/storage remain.
+        let mut evm = setup_evm();
+        let deployer = ShellAddress::from([0x42; 20]);
+        let beneficiary = ShellAddress::from([0xBB; 20]);
+        fund_account(&mut evm, &deployer, U256::from(100_000_000_000u64));
+
+        // Runtime: SSTORE(0, 0x42) then SELFDESTRUCT to beneficiary
+        let mut runtime = vec![
+            0x60, 0x42, 0x60, 0x00, 0x55, // SSTORE(0, 0x42)
+            0x73,
+        ];
+        runtime.extend_from_slice(beneficiary.as_bytes());
+        runtime.push(0xFF);
+
+        let init_code = make_init_code(&runtime);
+        let (_, contract_addr) = deploy_contract(&mut evm, &deployer, init_code, U256::from(1_000_000u64), 0);
+
+        // Trigger SELFDESTRUCT in a separate transaction
+        let result = call_contract(
+            &mut evm, &deployer, &contract_addr, vec![], U256::ZERO, 1, 200_000,
+        );
+        assert_eq!(result.receipt.status, 1);
+
+        // Post-Shanghai: code hash should still exist
+        let code_hash = evm.state_db_mut().world_state_mut()
+            .get_code_hash(&contract_addr).unwrap();
+        assert!(code_hash.is_some(), "code should remain post-Shanghai SELFDESTRUCT");
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  DELEGATECALL tests
+    // ════════════════════════════════════════════════════════════
+
+    #[test]
+    fn delegatecall_storage_writes_to_proxy() {
+        let mut evm = setup_evm();
+        let deployer = ShellAddress::from([0x42; 20]);
+        fund_account(&mut evm, &deployer, U256::from(100_000_000_000u64));
+
+        // Logic: PUSH1 0xAA  PUSH1 0  SSTORE  STOP
+        let logic_rt = vec![0x60, 0xAA, 0x60, 0x00, 0x55, 0x00];
+        let (_, logic_addr) = deploy_contract(&mut evm, &deployer, make_init_code(&logic_rt), U256::ZERO, 0);
+
+        // Proxy: DELEGATECALL(gas, logic_addr, 0, 0, 0, 0) POP STOP
+        let mut proxy_rt = vec![
+            0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x00, // retSz retOff argsSz argsOff
+            0x73,
+        ];
+        proxy_rt.extend_from_slice(logic_addr.as_bytes());
+        proxy_rt.extend_from_slice(&[0x5A, 0xF4, 0x50, 0x00]);
+        let (_, proxy_addr) = deploy_contract(&mut evm, &deployer, make_init_code(&proxy_rt), U256::ZERO, 1);
+
+        let result = call_contract(&mut evm, &deployer, &proxy_addr, vec![], U256::ZERO, 2, 500_000);
+        assert_eq!(result.receipt.status, 1, "delegatecall failed");
+
+        // Storage written in proxy's context
+        let slot = ShellHash::ZERO;
+        let proxy_val = evm.state_db_mut().world_state_mut()
+            .get_storage(&proxy_addr, &slot).unwrap();
+        let mut expected = [0u8; 32];
+        expected[31] = 0xAA;
+        assert_eq!(proxy_val.as_bytes(), &expected);
+
+        // Logic contract's storage untouched
+        let logic_val = evm.state_db_mut().world_state_mut()
+            .get_storage(&logic_addr, &slot).unwrap();
+        assert_eq!(logic_val, ShellHash::ZERO);
+    }
+
+    #[test]
+    fn delegatecall_preserves_msg_sender() {
+        let mut evm = setup_evm();
+        let deployer = ShellAddress::from([0x42; 20]);
+        fund_account(&mut evm, &deployer, U256::from(100_000_000_000u64));
+
+        // Logic: CALLER PUSH1 0 SSTORE STOP
+        let logic_rt = vec![0x33, 0x60, 0x00, 0x55, 0x00];
+        let (_, logic_addr) = deploy_contract(&mut evm, &deployer, make_init_code(&logic_rt), U256::ZERO, 0);
+
+        // Proxy: DELEGATECALL to logic
+        let mut proxy_rt = vec![
+            0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x00,
+            0x73,
+        ];
+        proxy_rt.extend_from_slice(logic_addr.as_bytes());
+        proxy_rt.extend_from_slice(&[0x5A, 0xF4, 0x50, 0x00]);
+        let (_, proxy_addr) = deploy_contract(&mut evm, &deployer, make_init_code(&proxy_rt), U256::ZERO, 1);
+
+        let result = call_contract(&mut evm, &deployer, &proxy_addr, vec![], U256::ZERO, 2, 500_000);
+        assert_eq!(result.receipt.status, 1);
+
+        // slot 0 in proxy should hold the original caller (deployer)
+        let slot = ShellHash::ZERO;
+        let stored = evm.state_db_mut().world_state_mut()
+            .get_storage(&proxy_addr, &slot).unwrap();
+        let mut expected = [0u8; 32];
+        expected[12..32].copy_from_slice(deployer.as_bytes());
+        assert_eq!(stored.as_bytes(), &expected, "msg.sender should be preserved");
+    }
+
+    #[test]
+    fn delegatecall_return_data_forwarded() {
+        let mut evm = setup_evm();
+        let deployer = ShellAddress::from([0x42; 20]);
+        fund_account(&mut evm, &deployer, U256::from(100_000_000_000u64));
+
+        // Logic: PUSH1 0xBE PUSH1 0 MSTORE PUSH1 1 PUSH1 31 RETURN
+        let logic_rt = vec![0x60, 0xBE, 0x60, 0x00, 0x52, 0x60, 0x01, 0x60, 0x1f, 0xf3];
+        let (_, logic_addr) = deploy_contract(&mut evm, &deployer, make_init_code(&logic_rt), U256::ZERO, 0);
+
+        // Proxy: DELEGATECALL → RETURNDATASIZE → RETURNDATACOPY → RETURN
+        let mut proxy_rt = vec![
+            0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x00,
+            0x73,
+        ];
+        proxy_rt.extend_from_slice(logic_addr.as_bytes());
+        proxy_rt.extend_from_slice(&[
+            0x5A, 0xF4, 0x50,       // DELEGATECALL, POP success
+            0x3D,                   // RETURNDATASIZE
+            0x60, 0x00, 0x60, 0x00, // offset=0, destOffset=0
+            0x3E,                   // RETURNDATACOPY
+            0x3D,                   // RETURNDATASIZE
+            0x60, 0x00,             // offset=0
+            0xF3,                   // RETURN
+        ]);
+        let (_, proxy_addr) = deploy_contract(&mut evm, &deployer, make_init_code(&proxy_rt), U256::ZERO, 1);
+
+        let result = call_contract(&mut evm, &deployer, &proxy_addr, vec![], U256::ZERO, 2, 500_000);
+        assert_eq!(result.receipt.status, 1);
+        assert_eq!(result.output, vec![0xBE], "should forward return data");
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  Call depth limit test
+    // ════════════════════════════════════════════════════════════
+
+    #[test]
+    fn call_depth_limit_1024() {
+        // Contract recursively CALLs itself; EVM depth limit = 1024.
+        let mut evm = setup_evm();
+        let deployer = ShellAddress::from([0x42; 20]);
+        fund_account(&mut evm, &deployer, U256::from(100_000_000_000u64));
+
+        // Runtime: CALL(gas, self, 0, 0, 0, 0, 0) → store result → RETURN
+        let runtime = vec![
+            0x60, 0x00, // retSize
+            0x60, 0x00, // retOffset
+            0x60, 0x00, // argsSize
+            0x60, 0x00, // argsOffset
+            0x60, 0x00, // value
+            0x30,       // ADDRESS (self)
+            0x5A,       // GAS
+            0xF1,       // CALL
+            0x60, 0x00, 0x52, // MSTORE result
+            0x60, 0x20, 0x60, 0x00, 0xF3, // RETURN 32 bytes
+        ];
+        let (_, contract_addr) = deploy_contract(&mut evm, &deployer, make_init_code(&runtime), U256::ZERO, 0);
+
+        let result = call_contract(
+            &mut evm, &deployer, &contract_addr, vec![], U256::ZERO, 1, 30_000_000,
+        );
+        // Outer call succeeds; deep recursion eventually hits depth limit
+        assert_eq!(result.receipt.status, 1, "outer call should succeed");
+        assert_eq!(result.output.len(), 32);
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  Code size limit tests (EIP-170)
+    // ════════════════════════════════════════════════════════════
+
+    #[test]
+    fn code_size_over_24kb_fails() {
+        let mut evm = setup_evm();
+        let deployer = ShellAddress::from([0x42; 20]);
+        fund_account(&mut evm, &deployer, U256::from(100_000_000_000u64));
+
+        // 24577 bytes of STOP opcodes — 1 byte over limit
+        let oversized = vec![0x00u8; 24577];
+        let init_code = make_init_code(&oversized);
+
+        let tx = Transaction {
+            chain_id: 1337, nonce: 0, to: None, value: U256::ZERO,
+            data: shell_primitives::Bytes::from(init_code),
+            gas_limit: 29_000_000, max_fee_per_gas: 0, max_priority_fee_per_gas: 0,
+        };
+        let sig = PQSignature::new(SignatureType::Dilithium3, vec![0xCC; 100]);
+        let signed = SignedTransaction::new(deployer, tx, sig);
+        let result = evm.execute_tx(&signed, &sample_header(), 0, 0).unwrap();
+
+        assert_eq!(result.receipt.status, 0, "deploying >24KB should fail");
+        assert!(result.receipt.contract_address.is_none());
+    }
+
+    #[test]
+    fn code_size_exactly_24kb_succeeds() {
+        let mut evm = setup_evm();
+        let deployer = ShellAddress::from([0x42; 20]);
+        fund_account(&mut evm, &deployer, U256::from(100_000_000_000u64));
+
+        let exact = vec![0x00u8; 24576];
+        let init_code = make_init_code(&exact);
+
+        let tx = Transaction {
+            chain_id: 1337, nonce: 0, to: None, value: U256::ZERO,
+            data: shell_primitives::Bytes::from(init_code),
+            gas_limit: 29_000_000, max_fee_per_gas: 0, max_priority_fee_per_gas: 0,
+        };
+        let sig = PQSignature::new(SignatureType::Dilithium3, vec![0xCC; 100]);
+        let signed = SignedTransaction::new(deployer, tx, sig);
+        let result = evm.execute_tx(&signed, &sample_header(), 0, 0).unwrap();
+
+        assert_eq!(result.receipt.status, 1, "deploying exactly 24KB should succeed");
+        assert!(result.receipt.contract_address.is_some());
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  Gas limit tests
+    // ════════════════════════════════════════════════════════════
+
+    #[test]
+    fn gas_exact_for_simple_transfer() {
+        let mut evm = setup_evm();
+        let from = ShellAddress::from([0x42; 20]);
+        fund_account(&mut evm, &from, U256::from(10_000_000_000u64));
+
+        let tx = Transaction {
+            chain_id: 1337, nonce: 0,
+            to: Some(ShellAddress::from([0x01; 20])),
+            value: U256::from(100),
+            data: shell_primitives::Bytes::new(),
+            gas_limit: 21_000, max_fee_per_gas: 0, max_priority_fee_per_gas: 0,
+        };
+        let sig = PQSignature::new(SignatureType::Dilithium3, vec![0xAA; 100]);
+        let signed = SignedTransaction::new(from, tx, sig);
+
+        let result = evm.execute_tx(&signed, &sample_header(), 0, 0).unwrap();
+        assert_eq!(result.receipt.status, 1);
+        assert_eq!(result.gas_used, 21_000);
+    }
+
+    #[test]
+    fn gas_insufficient_for_sstore_reverts() {
+        let mut evm = setup_evm();
+        let deployer = ShellAddress::from([0x42; 20]);
+        fund_account(&mut evm, &deployer, U256::from(100_000_000_000u64));
+
+        // Contract: PUSH1 1 PUSH1 0 SSTORE STOP
+        let runtime = vec![0x60, 0x01, 0x60, 0x00, 0x55, 0x00];
+        let (_, addr) = deploy_contract(&mut evm, &deployer, make_init_code(&runtime), U256::ZERO, 0);
+
+        // Call with barely enough for intrinsic gas but not for SSTORE
+        let tx = Transaction {
+            chain_id: 1337, nonce: 1,
+            to: Some(addr), value: U256::ZERO,
+            data: shell_primitives::Bytes::new(),
+            gas_limit: 21_100, max_fee_per_gas: 0, max_priority_fee_per_gas: 0,
+        };
+        let sig = PQSignature::new(SignatureType::Dilithium3, vec![0xDD; 100]);
+        let signed = SignedTransaction::new(deployer, tx, sig);
+
+        let result = evm.execute_tx(&signed, &sample_header(), 0, 0).unwrap();
+        assert_eq!(result.receipt.status, 0, "should revert on insufficient gas");
+    }
+
+    #[test]
+    fn gas_refund_from_clearing_storage() {
+        let mut evm = setup_evm();
+        let deployer = ShellAddress::from([0x42; 20]);
+        fund_account(&mut evm, &deployer, U256::from(100_000_000_000u64));
+
+        // Contract: SSTORE(0, calldataload(0)) STOP
+        let runtime = vec![
+            0x60, 0x00, 0x35, // PUSH1 0, CALLDATALOAD
+            0x60, 0x00, 0x55, // PUSH1 0, SSTORE
+            0x00,             // STOP
+        ];
+        let (_, addr) = deploy_contract(&mut evm, &deployer, make_init_code(&runtime), U256::ZERO, 0);
+
+        // Set storage to non-zero
+        let mut set_data = [0u8; 32];
+        set_data[31] = 0x01;
+        let r1 = call_contract(&mut evm, &deployer, &addr, set_data.to_vec(), U256::ZERO, 1, 500_000);
+        assert_eq!(r1.receipt.status, 1);
+        let gas_set = r1.gas_used;
+
+        // Clear storage to zero (earns refund)
+        let r2 = call_contract(&mut evm, &deployer, &addr, vec![0u8; 32], U256::ZERO, 2, 500_000);
+        assert_eq!(r2.receipt.status, 1);
+        let gas_clear = r2.gas_used;
+
+        assert!(gas_clear < gas_set,
+            "clearing storage (gas={gas_clear}) should cost less than setting (gas={gas_set})");
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  Additional EVM operation tests
+    // ════════════════════════════════════════════════════════════
+
+    #[test]
+    fn contract_to_contract_call() {
+        let mut evm = setup_evm();
+        let deployer = ShellAddress::from([0x42; 20]);
+        fund_account(&mut evm, &deployer, U256::from(100_000_000_000u64));
+
+        // Callee: returns 0xFF in a 32-byte word
+        let callee_rt = vec![0x60, 0xFF, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xf3];
+        let (_, callee_addr) = deploy_contract(&mut evm, &deployer, make_init_code(&callee_rt), U256::ZERO, 0);
+
+        // Caller: CALL(gas, callee, 0, 0, 0, 0, 32) → RETURN mem[0..32]
+        let mut caller_rt = vec![
+            0x60, 0x20, 0x60, 0x00, // retSize=32, retOff=0
+            0x60, 0x00, 0x60, 0x00, // argsSz=0, argsOff=0
+            0x60, 0x00,             // value=0
+            0x73,
+        ];
+        caller_rt.extend_from_slice(callee_addr.as_bytes());
+        caller_rt.extend_from_slice(&[
+            0x5A, 0xF1, 0x50,       // GAS, CALL, POP
+            0x60, 0x20, 0x60, 0x00, 0xF3, // RETURN 32 bytes
+        ]);
+        let (_, caller_addr) = deploy_contract(&mut evm, &deployer, make_init_code(&caller_rt), U256::ZERO, 1);
+
+        let result = call_contract(&mut evm, &deployer, &caller_addr, vec![], U256::ZERO, 2, 500_000);
+        assert_eq!(result.receipt.status, 1);
+        assert_eq!(result.output.len(), 32);
+        assert_eq!(result.output[31], 0xFF);
+    }
+
+    #[test]
+    fn revert_preserves_revert_data() {
+        let mut evm = setup_evm();
+        let deployer = ShellAddress::from([0x42; 20]);
+        fund_account(&mut evm, &deployer, U256::from(100_000_000_000u64));
+
+        // Runtime: PUSH4 0xDEADBEEF PUSH1 0 MSTORE PUSH1 4 PUSH1 28 REVERT
+        let runtime = vec![
+            0x63, 0xDE, 0xAD, 0xBE, 0xEF, // PUSH4
+            0x60, 0x00, 0x52,               // MSTORE
+            0x60, 0x04, 0x60, 0x1c, 0xFD,   // PUSH1 4, PUSH1 28, REVERT
+        ];
+        let (_, addr) = deploy_contract(&mut evm, &deployer, make_init_code(&runtime), U256::ZERO, 0);
+
+        let result = call_contract(&mut evm, &deployer, &addr, vec![], U256::ZERO, 1, 100_000);
+        assert_eq!(result.receipt.status, 0, "should revert");
+        assert_eq!(&result.output, &[0xDE, 0xAD, 0xBE, 0xEF]);
+    }
+
+    #[test]
+    fn create_opcode_basic() {
+        let mut evm = setup_evm();
+        let deployer = ShellAddress::from([0x42; 20]);
+        fund_account(&mut evm, &deployer, U256::from(100_000_000_000u64));
+
+        // Child init: returns 1-byte runtime 0xBB
+        let child_init: Vec<u8> = vec![
+            0x60, 0xBB, 0x60, 0x00, 0x52, 0x60, 0x01, 0x60, 0x1f, 0xf3,
+        ];
+        let mut factory_rt = Vec::new();
+        factory_rt.push(0x69); // PUSH10
+        factory_rt.extend_from_slice(&child_init);
+        factory_rt.extend_from_slice(&[
+            0x60, 0x00, 0x52,       // MSTORE
+            0x60, 0x0a,             // PUSH1 10 (size)
+            0x60, 0x16,             // PUSH1 22 (offset = 32-10)
+            0x60, 0x00,             // PUSH1 0 (value)
+            0xF0,                   // CREATE
+            0x60, 0x00, 0x52,       // MSTORE
+            0x60, 0x20, 0x60, 0x00, 0xf3,
+        ]);
+        let (_, factory_addr) = deploy_contract(&mut evm, &deployer, make_init_code(&factory_rt), U256::ZERO, 0);
+
+        let result = call_contract(&mut evm, &deployer, &factory_addr, vec![], U256::ZERO, 1, 5_000_000);
+        assert_eq!(result.receipt.status, 1);
+        assert_ne!(&result.output[12..32], &[0u8; 20], "CREATE should return non-zero address");
+    }
+
+    #[test]
+    fn sstore_sload_roundtrip() {
+        let mut evm = setup_evm();
+        let deployer = ShellAddress::from([0x42; 20]);
+        fund_account(&mut evm, &deployer, U256::from(100_000_000_000u64));
+
+        // Runtime: SSTORE(0, calldataload(0)), SLOAD(0), MSTORE, RETURN 32
+        let runtime = vec![
+            0x60, 0x00, 0x35,       // CALLDATALOAD(0)
+            0x60, 0x00, 0x55,       // SSTORE(0, ...)
+            0x60, 0x00, 0x54,       // SLOAD(0)
+            0x60, 0x00, 0x52,       // MSTORE
+            0x60, 0x20, 0x60, 0x00, 0xF3, // RETURN
+        ];
+        let (_, addr) = deploy_contract(&mut evm, &deployer, make_init_code(&runtime), U256::ZERO, 0);
+
+        let mut calldata = [0u8; 32];
+        calldata[30] = 0x12;
+        calldata[31] = 0x34;
+        let result = call_contract(&mut evm, &deployer, &addr, calldata.to_vec(), U256::ZERO, 1, 500_000);
+        assert_eq!(result.receipt.status, 1);
+        assert_eq!(result.output.len(), 32);
+        assert_eq!(result.output[30], 0x12);
+        assert_eq!(result.output[31], 0x34);
+    }
 }
