@@ -6,10 +6,10 @@
 //! Filters expire after a configurable TTL (default 5 minutes) of inactivity.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use parking_lot::RwLock;
+use rand::Rng;
 use shell_primitives::ShellHash;
 
 use crate::filter::RawLogFilter;
@@ -48,10 +48,9 @@ pub struct FilterEntry {
 
 /// Thread-safe registry of active filters.
 ///
-/// Filter IDs are monotonically increasing hex strings.
+/// Filter IDs are cryptographically random hex strings to prevent enumeration.
 pub struct FilterRegistry {
     filters: RwLock<HashMap<String, FilterEntry>>,
-    next_id: AtomicU64,
     ttl_secs: u64,
 }
 
@@ -60,7 +59,6 @@ impl FilterRegistry {
     pub fn new() -> Self {
         Self {
             filters: RwLock::new(HashMap::new()),
-            next_id: AtomicU64::new(1),
             ttl_secs: DEFAULT_TTL_SECS,
         }
     }
@@ -70,7 +68,6 @@ impl FilterRegistry {
     pub fn with_ttl(ttl_secs: u64) -> Self {
         Self {
             filters: RwLock::new(HashMap::new()),
-            next_id: AtomicU64::new(1),
             ttl_secs,
         }
     }
@@ -82,8 +79,8 @@ impl FilterRegistry {
         if filters.len() >= MAX_FILTERS {
             return None;
         }
-        let id_num = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let id = format!("{:#x}", id_num);
+        // F-126: generate a random 128-bit hex ID to prevent enumeration.
+        let id = format!("0x{:032x}", rand::thread_rng().gen::<u128>());
         let entry = FilterEntry {
             kind,
             last_poll_block: current_block,
@@ -184,13 +181,15 @@ mod tests {
     }
 
     #[test]
-    fn filter_ids_are_monotonic() {
+    fn filter_ids_are_random_and_unique() {
         let reg = FilterRegistry::new();
         let id1 = reg.new_filter(FilterKind::Block, 0).unwrap();
         let id2 = reg.new_filter(FilterKind::Block, 0).unwrap();
-        let n1 = u64::from_str_radix(id1.trim_start_matches("0x"), 16).unwrap();
-        let n2 = u64::from_str_radix(id2.trim_start_matches("0x"), 16).unwrap();
-        assert!(n2 > n1);
+        assert!(id1.starts_with("0x"));
+        assert!(id2.starts_with("0x"));
+        assert_ne!(id1, id2);
+        // Random IDs should be long hex strings (0x + 32 hex chars).
+        assert!(id1.len() >= 34);
     }
 
     #[test]

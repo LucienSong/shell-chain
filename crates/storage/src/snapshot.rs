@@ -189,6 +189,9 @@ impl<W: Write> SnapshotWriter<W> {
 }
 
 /// Snapshot reader: imports key-value data from a snapshot file.
+///
+/// Uses `BufReader` for line-by-line parsing to avoid loading the entire
+/// snapshot into a single contiguous `String` (F-079).
 pub struct SnapshotReader {
     lines: Vec<String>,
     metadata: SnapshotMetadata,
@@ -197,13 +200,16 @@ pub struct SnapshotReader {
 
 impl SnapshotReader {
     /// Open a snapshot for reading. Reads metadata from the footer.
-    pub fn new<R: Read>(mut reader: R) -> Result<Self, StorageError> {
-        let mut content = String::new();
-        reader
-            .read_to_string(&mut content)
+    ///
+    /// Uses `BufRead::lines()` to parse line-by-line instead of
+    /// `read_to_string()`, avoiding a redundant full-file buffer.
+    pub fn new<R: Read>(reader: R) -> Result<Self, StorageError> {
+        use std::io::BufRead;
+        let buf_reader = std::io::BufReader::new(reader);
+        let lines: Vec<String> = buf_reader
+            .lines()
+            .collect::<Result<_, _>>()
             .map_err(|e| StorageError::Database(format!("read snapshot: {e}")))?;
-
-        let lines: Vec<String> = content.lines().map(String::from).collect();
 
         if lines.is_empty() {
             return Err(StorageError::Serialization(

@@ -5,7 +5,7 @@ use shell_evm::bloom::{bloom_contains, Bloom, BLOOM_SIZE};
 use shell_primitives::{Address, ShellHash};
 
 /// Maximum number of blocks that can be queried in a single `eth_getLogs` call.
-pub const MAX_BLOCK_RANGE: u64 = 1000;
+pub const MAX_BLOCK_RANGE: u64 = 10_000;
 
 /// Ethereum-compatible log filter used by `eth_getLogs`.
 ///

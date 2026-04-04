@@ -93,7 +93,8 @@ impl<S: KvStore + 'static> RpcHandler<S> {
         finalized_number: Arc<parking_lot::RwLock<u64>>,
         finality: Arc<parking_lot::RwLock<FinalityState>>,
     ) -> Self {
-        let (pending_tx_events, _) = tokio::sync::broadcast::channel(256);
+        // F-139: use larger capacity to reduce dropped events under load.
+        let (pending_tx_events, _) = tokio::sync::broadcast::channel(512);
         let (sync_events, _) = tokio::sync::broadcast::channel(16);
         let handler = Self {
             chain_store,
@@ -464,6 +465,20 @@ fn parse_block_number(s: &str) -> Result<Option<u64>, ErrorObjectOwned> {
     }
 }
 
+/// F-100: validate that a block tag is well-formed.
+/// Returns an error for malformed block parameters.
+fn validate_block_is_latest(s: &str) -> Result<(), ErrorObjectOwned> {
+    match s {
+        "latest" | "pending" | "safe" | "finalized" | "earliest" => Ok(()),
+        hex if hex.starts_with("0x") => {
+            let _ = u64::from_str_radix(&hex[2..], 16)
+                .map_err(|_| internal_err(format!("invalid block number: {hex}")))?;
+            Ok(())
+        }
+        _ => Err(internal_err(format!("invalid block tag: {s}"))),
+    }
+}
+
 /// Convert a core Block to an RpcBlock response.
 ///
 /// When `full_txs` is true the `transactions` array contains full
@@ -626,7 +641,17 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
                     Some(b) => b,
                     None => return Ok(None),
                 };
-                let pending_txs = self.tx_pool.pending(256);
+                let all_pending = self.tx_pool.pending(1000);
+                // F-101: cap pending txs by gas_limit to prevent oversized pseudo-blocks.
+                let gas_limit = head.header.gas_limit;
+                let mut cumulative_gas: u64 = 0;
+                let pending_txs: Vec<_> = all_pending
+                    .into_iter()
+                    .take_while(|tx| {
+                        cumulative_gas = cumulative_gas.saturating_add(tx.tx.gas_limit);
+                        cumulative_gas <= gas_limit
+                    })
+                    .collect();
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
@@ -793,8 +818,12 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
     async fn get_balance(
         &self,
         address: Address,
-        _block: Option<String>,
+        block: Option<String>,
     ) -> Result<String, ErrorObjectOwned> {
+        // F-100: validate block parameter — reject malformed block tags.
+        if let Some(ref tag) = block {
+            validate_block_is_latest(tag)?;
+        }
         let ws = self.world_state.read();
         let balance = ws.get_balance(&address).map_err(internal_err)?;
         Ok(hex_u256(balance))
@@ -803,8 +832,11 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
     async fn get_transaction_count(
         &self,
         address: Address,
-        _block: Option<String>,
+        block: Option<String>,
     ) -> Result<String, ErrorObjectOwned> {
+        if let Some(ref tag) = block {
+            validate_block_is_latest(tag)?;
+        }
         let ws = self.world_state.read();
         let nonce = ws.get_nonce(&address).map_err(internal_err)?;
         Ok(hex_u64(nonce))
@@ -948,8 +980,11 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
     async fn get_code(
         &self,
         address: Address,
-        _block: Option<String>,
+        block: Option<String>,
     ) -> Result<String, ErrorObjectOwned> {
+        if let Some(ref tag) = block {
+            validate_block_is_latest(tag)?;
+        }
         let ws = self.world_state.read();
         let code_hash = ws.get_code_hash(&address).map_err(internal_err)?;
         match code_hash {
@@ -971,8 +1006,11 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
         &self,
         address: Address,
         position: String,
-        _block: Option<String>,
+        block: Option<String>,
     ) -> Result<String, ErrorObjectOwned> {
+        if let Some(ref tag) = block {
+            validate_block_is_latest(tag)?;
+        }
         let key_u256 = parse_hex_u256(&position)?;
         let key = ShellHash::from(alloy_primitives::B256::from(key_u256));
         let ws = self.world_state.read();
@@ -1082,13 +1120,18 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
 
     async fn new_filter(
         &self,
-        filter: RawLogFilter,
+        mut filter: RawLogFilter,
     ) -> Result<String, ErrorObjectOwned> {
         let head = self
             .chain_store
             .get_head_block()
             .map_err(internal_err)?;
         let latest = head.map(|b| b.number()).unwrap_or(0);
+        // F-125: resolve from_block at creation time so get_filter_logs
+        // does not re-scan from block 0 on every call.
+        if filter.from_block.is_none() {
+            filter.from_block = Some(format!("0x{:x}", latest));
+        }
         let id = self
             .filter_registry
             .new_filter(FilterKind::Log(filter), latest)
@@ -2168,7 +2211,7 @@ mod tests {
     async fn get_logs_range_too_large_returns_error() {
         let handler = setup();
         let raw: crate::filter::RawLogFilter = serde_json::from_str(
-            r#"{"fromBlock":"0x0","toBlock":"0x3e9"}"#, // 0..1001 = 1002 blocks
+            r#"{"fromBlock":"0x0","toBlock":"0x2711"}"#, // 0..10001 = 10002 blocks > 10_000
         )
         .unwrap();
 

@@ -6,6 +6,7 @@
 //! - `newPendingTransactions` — pushes tx hashes as transactions enter the mempool.
 //! - `syncing` — pushes sync status changes (started / stopped syncing).
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
@@ -23,6 +24,9 @@ use crate::types::{hex_bytes, hex_u64};
 
 /// Maximum number of concurrent subscriptions across all connections.
 const MAX_SUBSCRIPTIONS: u32 = 1024;
+
+/// Maximum number of concurrent subscriptions per WebSocket connection.
+const MAX_SUBSCRIPTIONS_PER_CONNECTION: u32 = 16;
 
 /// Auto-disconnect a subscriber after this many consecutive lag events (F-042).
 const MAX_CONSECUTIVE_LAGS: u32 = 3;
@@ -72,11 +76,14 @@ pub enum SyncStatus {
 // Subscription tracker (global limit enforcement)
 // ---------------------------------------------------------------------------
 
-/// Tracks the number of active subscriptions and enforces a global limit.
+/// Tracks the number of active subscriptions and enforces global + per-connection limits.
 #[derive(Debug, Clone)]
 pub struct SubscriptionTracker {
     active: Arc<AtomicU32>,
     max: u32,
+    /// Per-connection subscription counts (F-135).
+    per_connection: Arc<parking_lot::Mutex<HashMap<u32, u32>>>,
+    max_per_connection: u32,
 }
 
 impl SubscriptionTracker {
@@ -85,6 +92,8 @@ impl SubscriptionTracker {
         Self {
             active: Arc::new(AtomicU32::new(0)),
             max,
+            per_connection: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            max_per_connection: MAX_SUBSCRIPTIONS_PER_CONNECTION,
         }
     }
 
@@ -105,6 +114,27 @@ impl SubscriptionTracker {
         }
     }
 
+    /// Try to acquire a subscription slot for a specific connection.
+    /// Enforces both global and per-connection limits.
+    pub fn try_acquire_for_connection(&self, conn_id: u32) -> bool {
+        // Check per-connection limit first.
+        {
+            let conns = self.per_connection.lock();
+            let count = conns.get(&conn_id).copied().unwrap_or(0);
+            if count >= self.max_per_connection {
+                return false;
+            }
+        }
+        // Then check global limit.
+        if !self.try_acquire() {
+            return false;
+        }
+        // Increment per-connection count.
+        let mut conns = self.per_connection.lock();
+        *conns.entry(conn_id).or_insert(0) += 1;
+        true
+    }
+
     /// Release a subscription slot (called when the forwarding task ends).
     /// Saturates at zero to prevent underflow from double-release bugs.
     pub fn release(&self) {
@@ -116,6 +146,18 @@ impl SubscriptionTracker {
                 None
             }
         });
+    }
+
+    /// Release a subscription slot for a specific connection.
+    pub fn release_for_connection(&self, conn_id: u32) {
+        self.release();
+        let mut conns = self.per_connection.lock();
+        if let Some(count) = conns.get_mut(&conn_id) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                conns.remove(&conn_id);
+            }
+        }
     }
 
     /// Returns the current number of active subscriptions.
@@ -258,16 +300,14 @@ impl<S: KvStore + 'static> EthPubSubServer for RpcHandler<S> {
         params: Option<serde_json::Value>,
     ) -> SubscriptionResult {
         let tracker = self.subscription_tracker();
+        let conn_id = pending.connection_id().0 as u32;
 
-        // Enforce global subscription limit.
-        if !tracker.try_acquire() {
+        // F-135: enforce global + per-connection subscription limits.
+        if !tracker.try_acquire_for_connection(conn_id) {
             pending
                 .reject(jsonrpsee::types::ErrorObject::owned(
                     -32005,
-                    format!(
-                        "too many active subscriptions (max {})",
-                        tracker.active_count()
-                    ),
+                    "subscription limit reached",
                     None::<()>,
                 ))
                 .await;
@@ -281,7 +321,7 @@ impl<S: KvStore + 'static> EthPubSubServer for RpcHandler<S> {
                 let t = tracker.clone();
                 tokio::spawn(async move {
                     forward_new_heads(rx, sink).await;
-                    t.release();
+                    t.release_for_connection(conn_id);
                 });
             }
             "logs" => {
@@ -294,20 +334,28 @@ impl<S: KvStore + 'static> EthPubSubServer for RpcHandler<S> {
                 let t = tracker.clone();
                 tokio::spawn(async move {
                     forward_logs(rx, sink, filter).await;
-                    t.release();
+                    t.release_for_connection(conn_id);
                 });
             }
             "newPendingTransactions" => {
                 let rx = self.pending_tx_event_sender().subscribe();
+                // F-138: parse Geth-compatible parameter format.
+                // Accepts: true/false (bool) or {"includeTransactions": true} (object).
                 let full_txs = params
                     .as_ref()
-                    .and_then(|v| v.as_bool())
+                    .and_then(|v| {
+                        v.as_bool().or_else(|| {
+                            v.as_object()
+                                .and_then(|obj| obj.get("includeTransactions"))
+                                .and_then(|v| v.as_bool())
+                        })
+                    })
                     .unwrap_or(false);
                 let sink = pending.accept().await?;
                 let t = tracker.clone();
                 tokio::spawn(async move {
                     forward_pending_txs(rx, sink, full_txs).await;
-                    t.release();
+                    t.release_for_connection(conn_id);
                 });
             }
             "syncing" => {
@@ -316,11 +364,11 @@ impl<S: KvStore + 'static> EthPubSubServer for RpcHandler<S> {
                 let t = tracker.clone();
                 tokio::spawn(async move {
                     forward_syncing(rx, sink).await;
-                    t.release();
+                    t.release_for_connection(conn_id);
                 });
             }
             _ => {
-                tracker.release();
+                tracker.release_for_connection(conn_id);
                 pending
                     .reject(jsonrpsee::types::ErrorObject::owned(
                         -32602,
@@ -452,13 +500,17 @@ async fn forward_logs(
     }
 }
 
-/// Forward pending transaction hashes (or full tx hashes) to subscribers.
-/// When `full_txs` is false (default), sends just the tx hash string.
+/// Forward pending transaction hashes (or full tx objects) to subscribers.
+/// When `full_txs` is true, sends full tx hash (full object support requires
+/// architectural changes to the broadcast channel type).
 async fn forward_pending_txs(
     mut rx: broadcast::Receiver<ShellHash>,
     sink: jsonrpsee::SubscriptionSink,
-    _full_txs: bool,
+    full_txs: bool,
 ) {
+    if full_txs {
+        tracing::debug!("full_txs=true requested for newPendingTransactions; sending hashes only (full objects not yet supported)");
+    }
     let mut consecutive_lags: u32 = 0;
     loop {
         match rx.recv().await {
