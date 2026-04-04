@@ -67,6 +67,17 @@ pub struct RpcTransaction {
     pub r: String,
     /// Legacy ECDSA compat stub — always "0x0".
     pub s: String,
+    /// EIP-2930 access list.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub access_list: Option<Vec<RpcAccessListItem>>,
+}
+
+/// EIP-2930 access list item for RPC responses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcAccessListItem {
+    pub address: String,
+    pub storage_keys: Vec<String>,
 }
 
 /// Hex-encoded transaction receipt response.
@@ -129,6 +140,8 @@ pub struct CallRequest {
     pub value: Option<String>,
     /// Hex-encoded gas limit.
     pub gas: Option<String>,
+    /// EIP-2930 access list.
+    pub access_list: Option<Vec<RpcAccessListItem>>,
 }
 
 /// Format a u64 as "0x..." hex string.

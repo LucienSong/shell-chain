@@ -134,6 +134,14 @@ pub trait EthApi {
         tx: CallRequest,
     ) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
 
+    /// Creates an EIP-2930 access list for a transaction.
+    #[method(name = "createAccessList")]
+    async fn create_access_list(
+        &self,
+        tx: CallRequest,
+        block: Option<String>,
+    ) -> Result<serde_json::Value, jsonrpsee::types::ErrorObjectOwned>;
+
     /// Returns the bytecode at a given address.
     #[method(name = "getCode")]
     async fn get_code(

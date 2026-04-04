@@ -232,6 +232,7 @@ impl<S: KvStore + 'static> RpcHandler<S> {
             gas_limit: 100_000,
             max_fee_per_gas: 0,
             max_priority_fee_per_gas: 0,
+            access_list: None,
         };
 
         let tx_hash = tx.hash();
@@ -293,6 +294,37 @@ impl<S: KvStore + 'static> RpcHandler<S> {
             .map_err(|e| internal_err(format!("invalid call data hex: {e}")))?
             .unwrap_or_default();
 
+        let access_list = req
+            .access_list
+            .as_ref()
+            .map(|list| {
+                list.iter()
+                    .map(|item| {
+                        let addr_str = item.address.strip_prefix("0x").unwrap_or(&item.address);
+                        let addr_bytes = hex::decode(addr_str).unwrap_or_default();
+                        let address = if addr_bytes.len() == 20 {
+                            Address::from_slice(&addr_bytes)
+                        } else {
+                            Address::ZERO
+                        };
+                        let storage_keys = item
+                            .storage_keys
+                            .iter()
+                            .map(|k| {
+                                let k_str = k.strip_prefix("0x").unwrap_or(k);
+                                let k_bytes = hex::decode(k_str).unwrap_or_default();
+                                let mut hash = ShellHash::ZERO;
+                                if k_bytes.len() == 32 {
+                                    hash = ShellHash::from_slice(&k_bytes);
+                                }
+                                hash
+                            })
+                            .collect();
+                        shell_core::AccessListItem { address, storage_keys }
+                    })
+                    .collect()
+            });
+
         let tx = Transaction {
             chain_id: self.chain_id,
             nonce: 0,
@@ -302,6 +334,7 @@ impl<S: KvStore + 'static> RpcHandler<S> {
             to: req.to,
             value,
             data,
+            access_list,
         };
 
         let sig = shell_crypto::PQSignature::new(
@@ -531,6 +564,18 @@ fn tx_to_rpc(
         v: "0x0".into(),
         r: "0x0".into(),
         s: "0x0".into(),
+        access_list: tx.tx.access_list.as_ref().map(|list| {
+            list.iter()
+                .map(|item| RpcAccessListItem {
+                    address: format!("{}", item.address),
+                    storage_keys: item
+                        .storage_keys
+                        .iter()
+                        .map(|k| format!("{}", k))
+                        .collect(),
+                })
+                .collect()
+        }),
     }
 }
 
@@ -873,6 +918,31 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
         // Add a 20% buffer to the estimated gas, with a minimum of 21000.
         let estimate = std::cmp::max((gas_used as f64 * 1.2) as u64, 21_000);
         Ok(hex_u64(estimate))
+    }
+
+    async fn create_access_list(
+        &self,
+        tx: crate::types::CallRequest,
+        _block: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let (_output, gas_used) = self.execute_call(&tx)?;
+        // Simplified implementation: return the provided access list (or empty)
+        // and the estimated gas.
+        let access_list = tx
+            .access_list
+            .unwrap_or_default()
+            .into_iter()
+            .map(|item| {
+                serde_json::json!({
+                    "address": item.address,
+                    "storageKeys": item.storage_keys,
+                })
+            })
+            .collect::<Vec<_>>();
+        Ok(serde_json::json!({
+            "accessList": access_list,
+            "gasUsed": hex_u64(gas_used),
+        }))
     }
 
     async fn get_code(
@@ -1703,6 +1773,7 @@ mod tests {
                     to: None,
                     value: U256::ZERO,
                     data: Bytes::default(),
+                    access_list: None,
                 },
                 shell_crypto::PQSignature::new(
                     shell_crypto::SignatureType::Dilithium3,
@@ -1744,6 +1815,7 @@ mod tests {
             to: None,
             value: U256::ZERO,
             data: Bytes::default(),
+            access_list: None,
         };
 
         let signature = signer.sign(tx.hash().0.as_slice()).unwrap();
@@ -1780,6 +1852,7 @@ mod tests {
             to: None,
             value: U256::ZERO,
             data: Bytes::default(),
+            access_list: None,
         };
         let signature = signer.sign(tx.hash().0.as_slice()).unwrap();
         let signed = SignedTransaction::new(addr, tx, signature);
@@ -1899,6 +1972,7 @@ mod tests {
             data: None,
             value: Some("0x3e8".into()), // 1000
             gas: Some("0x5208".into()),  // 21000
+            access_list: None,
         };
         let result = EthApiServer::call(&handler, req, None).await;
         assert!(result.is_ok(), "eth_call failed: {:?}", result.err());
@@ -1922,6 +1996,7 @@ mod tests {
             data: None,
             value: Some("0x3e8".into()),
             gas: None,
+            access_list: None,
         };
         let result = EthApiServer::estimate_gas(&handler, req).await;
         assert!(result.is_ok(), "estimateGas failed: {:?}", result.err());

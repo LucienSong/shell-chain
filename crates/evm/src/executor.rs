@@ -7,6 +7,7 @@
 use alloy_primitives::{Bytes as AlBytes, B256, U256};
 use revm::context::result::ExecutionResult;
 use revm::context::{BlockEnv, CfgEnv, Context, Evm, TxEnv};
+use revm::context_interface::transaction::{AccessList, AccessListItem as RevmAccessListItem};
 use revm::handler::instructions::EthInstructions;
 use revm::handler::{ExecuteEvm, MainnetContext};
 use revm::primitives::hardfork::SpecId;
@@ -115,6 +116,7 @@ impl<S: KvStore + 'static> ShellEvm<S> {
             .data(AlBytes::from(tx.data.as_ref().to_vec()))
             .nonce(tx.nonce)
             .chain_id(Some(self.chain_id))
+            .access_list(Self::convert_access_list(&tx.access_list))
             .build_fill();
 
         // Build revm BlockEnv
@@ -226,6 +228,27 @@ impl<S: KvStore + 'static> ShellEvm<S> {
     /// Access the underlying state database mutably.
     pub fn state_db_mut(&mut self) -> &mut ShellStateDb<S> {
         &mut self.state_db
+    }
+
+    /// Convert shell-chain access list to revm's AccessList format.
+    fn convert_access_list(
+        access_list: &Option<Vec<shell_core::AccessListItem>>,
+    ) -> AccessList {
+        match access_list {
+            Some(list) => AccessList(
+                list.iter()
+                    .map(|item| RevmAccessListItem {
+                        address: item.address.into(),
+                        storage_keys: item
+                            .storage_keys
+                            .iter()
+                            .map(|k| B256::from(*k))
+                            .collect(),
+                    })
+                    .collect(),
+            ),
+            None => AccessList::default(),
+        }
     }
 
     /// Execute a transaction targeting the ValidatorRegistry system contract.
@@ -460,6 +483,7 @@ mod tests {
             gas_limit: 21_000,
             max_fee_per_gas: 10,
             max_priority_fee_per_gas: 1,
+            access_list: None,
         };
 
         let sig = PQSignature::new(SignatureType::Dilithium3, vec![0xAA; 100]);
@@ -493,6 +517,7 @@ mod tests {
             gas_limit: 100, // way too low
             max_fee_per_gas: 10,
             max_priority_fee_per_gas: 1,
+            access_list: None,
         };
 
         let sig = PQSignature::new(SignatureType::Dilithium3, vec![0xBB; 100]);
@@ -532,6 +557,7 @@ mod tests {
             gas_limit: 100_000,
             max_fee_per_gas: 10,
             max_priority_fee_per_gas: 1,
+            access_list: None,
         };
 
         let sig = PQSignature::new(SignatureType::Dilithium3, vec![0xCC; 100]);
@@ -562,6 +588,7 @@ mod tests {
             gas_limit: 100_000,
             max_fee_per_gas: 0,
             max_priority_fee_per_gas: 0,
+            access_list: None,
         };
         let sig = PQSignature::new(SignatureType::Dilithium3, vec![0xDD; 100]);
         SignedTransaction::new(from, tx, sig)
@@ -663,6 +690,7 @@ mod tests {
             gas_limit: 21_000,
             max_fee_per_gas: 10,
             max_priority_fee_per_gas: 1,
+            access_list: None,
         };
         let sig = PQSignature::new(SignatureType::Dilithium3, vec![0xAA; 100]);
         let signed = SignedTransaction::new(from, tx, sig);
@@ -855,6 +883,7 @@ mod tests {
             gas_limit: 5_000_000,
             max_fee_per_gas: 0,
             max_priority_fee_per_gas: 0,
+            access_list: None,
         };
         let sig = PQSignature::new(SignatureType::Dilithium3, vec![0xCC; 100]);
         let signed = SignedTransaction::new(*from, tx, sig);
@@ -883,6 +912,7 @@ mod tests {
             gas_limit,
             max_fee_per_gas: 0,
             max_priority_fee_per_gas: 0,
+            access_list: None,
         };
         let sig = PQSignature::new(SignatureType::Dilithium3, vec![0xDD; 100]);
         let signed = SignedTransaction::new(*from, tx, sig);
@@ -1292,6 +1322,7 @@ mod tests {
             chain_id: 1337, nonce: 0, to: None, value: U256::ZERO,
             data: shell_primitives::Bytes::from(init_code),
             gas_limit: 29_000_000, max_fee_per_gas: 0, max_priority_fee_per_gas: 0,
+            access_list: None,
         };
         let sig = PQSignature::new(SignatureType::Dilithium3, vec![0xCC; 100]);
         let signed = SignedTransaction::new(deployer, tx, sig);
@@ -1314,6 +1345,7 @@ mod tests {
             chain_id: 1337, nonce: 0, to: None, value: U256::ZERO,
             data: shell_primitives::Bytes::from(init_code),
             gas_limit: 29_000_000, max_fee_per_gas: 0, max_priority_fee_per_gas: 0,
+            access_list: None,
         };
         let sig = PQSignature::new(SignatureType::Dilithium3, vec![0xCC; 100]);
         let signed = SignedTransaction::new(deployer, tx, sig);
@@ -1339,6 +1371,7 @@ mod tests {
             value: U256::from(100),
             data: shell_primitives::Bytes::new(),
             gas_limit: 21_000, max_fee_per_gas: 0, max_priority_fee_per_gas: 0,
+            access_list: None,
         };
         let sig = PQSignature::new(SignatureType::Dilithium3, vec![0xAA; 100]);
         let signed = SignedTransaction::new(from, tx, sig);
@@ -1364,6 +1397,7 @@ mod tests {
             to: Some(addr), value: U256::ZERO,
             data: shell_primitives::Bytes::new(),
             gas_limit: 21_100, max_fee_per_gas: 0, max_priority_fee_per_gas: 0,
+            access_list: None,
         };
         let sig = PQSignature::new(SignatureType::Dilithium3, vec![0xDD; 100]);
         let signed = SignedTransaction::new(deployer, tx, sig);
@@ -1652,5 +1686,141 @@ mod tests {
             account_after.code_hash.is_some(),
             "Cancun: contract code must NOT be deleted by SELFDESTRUCT in separate tx"
         );
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  EIP-2930 access list tests
+    // ════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_access_list_gas_accounting() {
+        use shell_core::AccessListItem;
+
+        // 2 addresses, 3 storage keys each → 2*2400 + 6*1900 = 16200 extra gas
+        let access_list = Some(vec![
+            AccessListItem {
+                address: ShellAddress::from([0xAA; 20]),
+                storage_keys: vec![
+                    ShellHash::from([0x01; 32]),
+                    ShellHash::from([0x02; 32]),
+                    ShellHash::from([0x03; 32]),
+                ],
+            },
+            AccessListItem {
+                address: ShellAddress::from([0xBB; 20]),
+                storage_keys: vec![
+                    ShellHash::from([0x04; 32]),
+                    ShellHash::from([0x05; 32]),
+                    ShellHash::from([0x06; 32]),
+                ],
+            },
+        ]);
+
+        let base = crate::tx_validation::compute_intrinsic_gas(&[], false, &None);
+        let with_al = crate::tx_validation::compute_intrinsic_gas(&[], false, &access_list);
+        assert_eq!(with_al - base, 16_200, "access list should add 2*2400 + 6*1900 = 16200 gas");
+    }
+
+    #[test]
+    fn test_access_list_pre_warms_storage() {
+        let mut evm = setup_evm();
+        let deployer = ShellAddress::from([0x42; 20]);
+        fund_account(&mut evm, &deployer, U256::from(100_000_000_000u64));
+
+        // Contract: SLOAD(0) STOP — reads storage slot 0
+        let runtime = vec![
+            0x60, 0x00, // PUSH1 0
+            0x54,       // SLOAD
+            0x50,       // POP
+            0x00,       // STOP
+        ];
+        let (_, addr) = deploy_contract(
+            &mut evm,
+            &deployer,
+            make_init_code(&runtime),
+            U256::ZERO,
+            0,
+        );
+
+        // Execute without access list
+        let tx_no_al = Transaction {
+            chain_id: 1337,
+            nonce: 1,
+            to: Some(addr),
+            value: U256::ZERO,
+            data: shell_primitives::Bytes::new(),
+            gas_limit: 500_000,
+            max_fee_per_gas: 0,
+            max_priority_fee_per_gas: 0,
+            access_list: None,
+        };
+        let sig = PQSignature::new(SignatureType::Dilithium3, vec![0xDD; 100]);
+        let signed_no_al = SignedTransaction::new(deployer, tx_no_al, sig);
+        let result_no_al = evm.execute_tx(&signed_no_al, &sample_header(), 0, 0).unwrap();
+        assert_eq!(result_no_al.receipt.status, 1);
+
+        // Execute with access list pre-warming the storage slot
+        let tx_with_al = Transaction {
+            chain_id: 1337,
+            nonce: 2,
+            to: Some(addr),
+            value: U256::ZERO,
+            data: shell_primitives::Bytes::new(),
+            gas_limit: 500_000,
+            max_fee_per_gas: 0,
+            max_priority_fee_per_gas: 0,
+            access_list: Some(vec![shell_core::AccessListItem {
+                address: ShellAddress::from(addr),
+                storage_keys: vec![ShellHash::ZERO],
+            }]),
+        };
+        let sig2 = PQSignature::new(SignatureType::Dilithium3, vec![0xEE; 100]);
+        let signed_with_al = SignedTransaction::new(deployer, tx_with_al, sig2);
+        let result_with_al = evm.execute_tx(&signed_with_al, &sample_header(), 0, 0).unwrap();
+        assert_eq!(result_with_al.receipt.status, 1);
+    }
+
+    #[test]
+    fn test_empty_access_list() {
+        let mut evm = setup_evm();
+        let from = ShellAddress::from([0x42; 20]);
+        let to = ShellAddress::from([0x01; 20]);
+        fund_account(&mut evm, &from, U256::from(10_000_000_000u64));
+
+        // Transaction with empty access list
+        let tx_empty_al = Transaction {
+            chain_id: 1337,
+            nonce: 0,
+            to: Some(to),
+            value: U256::from(100),
+            data: shell_primitives::Bytes::new(),
+            gas_limit: 21_000,
+            max_fee_per_gas: 10,
+            max_priority_fee_per_gas: 1,
+            access_list: Some(vec![]),
+        };
+        let sig = PQSignature::new(SignatureType::Dilithium3, vec![0xAA; 100]);
+        let signed = SignedTransaction::new(from, tx_empty_al, sig);
+        let result = evm.execute_tx(&signed, &sample_header(), 0, 0).unwrap();
+        assert_eq!(result.receipt.status, 1);
+        assert_eq!(result.gas_used, 21_000);
+
+        // Transaction with no access list (None)
+        let tx_none_al = Transaction {
+            chain_id: 1337,
+            nonce: 1,
+            to: Some(to),
+            value: U256::from(100),
+            data: shell_primitives::Bytes::new(),
+            gas_limit: 21_000,
+            max_fee_per_gas: 10,
+            max_priority_fee_per_gas: 1,
+            access_list: None,
+        };
+        let sig2 = PQSignature::new(SignatureType::Dilithium3, vec![0xBB; 100]);
+        let signed2 = SignedTransaction::new(from, tx_none_al, sig2);
+        let result2 = evm.execute_tx(&signed2, &sample_header(), 0, 0).unwrap();
+        assert_eq!(result2.receipt.status, 1);
+        assert_eq!(result2.gas_used, 21_000);
     }
 }

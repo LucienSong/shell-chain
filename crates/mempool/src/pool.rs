@@ -384,6 +384,7 @@ mod tests {
             gas_limit: 21_000,
             max_fee_per_gas: priority_fee + 10,
             max_priority_fee_per_gas: priority_fee,
+            access_list: None,
         };
 
         let sig = signer.sign(tx.hash().as_bytes()).unwrap();
@@ -408,6 +409,7 @@ mod tests {
             gas_limit: 21_000,
             max_fee_per_gas: priority_fee + 10,
             max_priority_fee_per_gas: priority_fee,
+            access_list: None,
         };
         let sig = signer.sign(tx.hash().as_bytes()).unwrap();
         SignedTransaction::with_pubkey(from, tx, sig, pubkey.to_vec())
@@ -470,6 +472,7 @@ mod tests {
             gas_limit: 21_000,
             max_fee_per_gas: 100,
             max_priority_fee_per_gas: 50,
+            access_list: None,
         };
         let sig = signer.sign(tx.hash().as_bytes()).unwrap();
         let signed = SignedTransaction::with_pubkey(from, tx, sig, pubkey);
@@ -495,6 +498,7 @@ mod tests {
             gas_limit: 21_000,
             max_fee_per_gas: 0, // below min_gas_price=1
             max_priority_fee_per_gas: 0,
+            access_list: None,
         };
         let sig = signer.sign(tx.hash().as_bytes()).unwrap();
         let signed = SignedTransaction::with_pubkey(from, tx, sig, pubkey);
@@ -520,6 +524,7 @@ mod tests {
             gas_limit: 21_000,
             max_fee_per_gas: 100,
             max_priority_fee_per_gas: 50,
+            access_list: None,
         };
         // Sign a different message to produce invalid sig
         let bad_sig = signer.sign(b"wrong-message").unwrap();
@@ -546,6 +551,7 @@ mod tests {
             gas_limit: 21_000,
             max_fee_per_gas: 100,
             max_priority_fee_per_gas: 50,
+            access_list: None,
         };
         let sig = signer.sign(tx.hash().as_bytes()).unwrap();
         let signed = SignedTransaction::with_pubkey(wrong_from, tx, sig, pubkey);
@@ -571,6 +577,7 @@ mod tests {
             gas_limit: 21_000,
             max_fee_per_gas: 100,
             max_priority_fee_per_gas: 50,
+            access_list: None,
         };
         let sig = signer.sign(tx.hash().as_bytes()).unwrap();
         // No pubkey attached, and lookup returns None
@@ -734,6 +741,7 @@ mod tests {
             gas_limit: 21_000,
             max_fee_per_gas: 100,
             max_priority_fee_per_gas: 50,
+            access_list: None,
         };
         let sig = signer.sign(tx.hash().as_bytes()).unwrap();
         // NO pubkey in transaction — rely on lookup

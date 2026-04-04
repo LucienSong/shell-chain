@@ -88,6 +88,7 @@ fn e2e_transfer_with_real_dilithium_sig() {
         gas_limit: 21_000,
         max_fee_per_gas: 10,
         max_priority_fee_per_gas: 1,
+        access_list: None,
     };
 
     let hash = tx_signing_hash(&tx);
@@ -133,6 +134,7 @@ fn e2e_reject_invalid_signature() {
         gas_limit: 21_000,
         max_fee_per_gas: 10,
         max_priority_fee_per_gas: 1,
+        access_list: None,
     };
 
     let bad_sig = PQSignature::new(SignatureType::Dilithium3, vec![0xFF; 3293]);
@@ -169,6 +171,7 @@ fn e2e_contract_deployment() {
         gas_limit: 100_000,
         max_fee_per_gas: 10,
         max_priority_fee_per_gas: 1,
+        access_list: None,
     };
 
     let sig = PQSignature::new(SignatureType::Dilithium3, vec![0xAA; 100]);
@@ -209,6 +212,7 @@ fn e2e_hybrid_pubkey_second_tx_from_registry() {
         gas_limit: 21_000,
         max_fee_per_gas: 10,
         max_priority_fee_per_gas: 1,
+        access_list: None,
     };
 
     let hash1 = tx_signing_hash(&tx1);
@@ -250,6 +254,7 @@ fn e2e_hybrid_pubkey_second_tx_from_registry() {
         gas_limit: 21_000,
         max_fee_per_gas: 10,
         max_priority_fee_per_gas: 1,
+        access_list: None,
     };
 
     let hash2 = tx_signing_hash(&tx2);
@@ -311,6 +316,7 @@ fn e2e_cumulative_gas_tracking() {
         gas_limit: 21_000,
         max_fee_per_gas: 10,
         max_priority_fee_per_gas: 1,
+        access_list: None,
     };
     let sig1 = PQSignature::new(SignatureType::Dilithium3, vec![0xAA; 100]);
     let signed1 = SignedTransaction::new(from, tx1, sig1);
@@ -328,6 +334,7 @@ fn e2e_cumulative_gas_tracking() {
         gas_limit: 21_000,
         max_fee_per_gas: 10,
         max_priority_fee_per_gas: 1,
+        access_list: None,
     };
     let sig2 = PQSignature::new(SignatureType::Dilithium3, vec![0xBB; 100]);
     let signed2 = SignedTransaction::new(from, tx2, sig2);

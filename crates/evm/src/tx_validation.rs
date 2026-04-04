@@ -51,6 +51,10 @@ const GAS_PER_NONZERO_BYTE: u64 = 16;
 const GAS_PER_ZERO_BYTE: u64 = 4;
 /// Extra gas for contract creation.
 const GAS_CONTRACT_CREATION: u64 = 32_000;
+/// EIP-2930: gas cost per address in the access list.
+const ACCESS_LIST_ADDRESS_COST: u64 = 2400;
+/// EIP-2930: gas cost per storage key in the access list.
+const ACCESS_LIST_STORAGE_KEY_COST: u64 = 1900;
 
 /// Validate a signed transaction before EVM execution.
 ///
@@ -85,7 +89,11 @@ pub fn validate_tx<S: KvStore + 'static, V: Verifier>(
     }
 
     // 2. Intrinsic gas check
-    let intrinsic = compute_intrinsic_gas(tx.data.as_ref(), tx.is_contract_creation());
+    let intrinsic = compute_intrinsic_gas(
+        tx.data.as_ref(),
+        tx.is_contract_creation(),
+        &tx.access_list,
+    );
     if tx.gas_limit < intrinsic {
         return Err(TxValidationError::GasTooLow(tx.gas_limit));
     }
@@ -171,8 +179,13 @@ fn resolve_pubkey<S: KvStore>(
 /// Compute intrinsic gas cost for a transaction.
 ///
 /// Base cost (21,000) + calldata cost (4/byte zero, 16/byte nonzero) +
-/// contract creation surcharge (32,000).
-pub fn compute_intrinsic_gas(data: &[u8], is_create: bool) -> u64 {
+/// contract creation surcharge (32,000) +
+/// EIP-2930 access list cost (2,400/address + 1,900/storage key).
+pub fn compute_intrinsic_gas(
+    data: &[u8],
+    is_create: bool,
+    access_list: &Option<Vec<shell_core::AccessListItem>>,
+) -> u64 {
     let mut gas = INTRINSIC_GAS_TX;
     if is_create {
         gas += GAS_CONTRACT_CREATION;
@@ -182,6 +195,12 @@ pub fn compute_intrinsic_gas(data: &[u8], is_create: bool) -> u64 {
             gas += GAS_PER_ZERO_BYTE;
         } else {
             gas += GAS_PER_NONZERO_BYTE;
+        }
+    }
+    if let Some(ref list) = access_list {
+        for item in list {
+            gas += ACCESS_LIST_ADDRESS_COST;
+            gas += ACCESS_LIST_STORAGE_KEY_COST * item.storage_keys.len() as u64;
         }
     }
     gas
@@ -235,6 +254,7 @@ mod tests {
             gas_limit: 21_000,
             max_fee_per_gas: 10,
             max_priority_fee_per_gas: 1,
+            access_list: None,
         }
     }
 
@@ -257,19 +277,19 @@ mod tests {
 
     #[test]
     fn intrinsic_gas_plain_transfer() {
-        assert_eq!(compute_intrinsic_gas(&[], false), 21_000);
+        assert_eq!(compute_intrinsic_gas(&[], false, &None), 21_000);
     }
 
     #[test]
     fn intrinsic_gas_with_data() {
         let data = vec![0x00, 0xFF, 0x00, 0x42];
         // 21000 + 4 + 16 + 4 + 16 = 21040
-        assert_eq!(compute_intrinsic_gas(&data, false), 21_040);
+        assert_eq!(compute_intrinsic_gas(&data, false, &None), 21_040);
     }
 
     #[test]
     fn intrinsic_gas_contract_creation() {
-        assert_eq!(compute_intrinsic_gas(&[], true), 21_000 + 32_000);
+        assert_eq!(compute_intrinsic_gas(&[], true, &None), 21_000 + 32_000);
     }
 
     // ── Happy path ────────────────────────────────────────────
@@ -454,6 +474,7 @@ mod tests {
             gas_limit: u64::MAX,
             max_fee_per_gas: u64::MAX,
             max_priority_fee_per_gas: 0,
+            access_list: None,
         };
         let signed = sign_tx(&signer, tx, true);
 

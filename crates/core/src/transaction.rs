@@ -4,6 +4,15 @@ use shell_crypto::{PQSignature, SignatureType};
 use alloy_rlp::Encodable;
 use std::sync::OnceLock;
 
+/// EIP-2930 access list entry: an address and its pre-warmed storage keys.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct AccessListItem {
+    /// Account address to pre-warm.
+    pub address: Address,
+    /// Storage keys to pre-warm for this address.
+    pub storage_keys: Vec<ShellHash>,
+}
+
 /// An unsigned transaction.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Transaction {
@@ -16,6 +25,10 @@ pub struct Transaction {
     pub gas_limit: u64,
     pub max_fee_per_gas: u64,
     pub max_priority_fee_per_gas: u64,
+    /// EIP-2930 access list. Pre-warms account and storage slot access.
+    /// None means no access list (legacy behavior).
+    #[serde(default)]
+    pub access_list: Option<Vec<AccessListItem>>,
 }
 
 impl Encodable for Transaction {
@@ -222,6 +235,7 @@ mod tests {
             gas_limit: 21000,
             max_fee_per_gas: 20,
             max_priority_fee_per_gas: 1,
+            access_list: None,
         }
     }
 
@@ -263,6 +277,7 @@ mod tests {
             gas_limit: 1_000_000,
             max_fee_per_gas: 20,
             max_priority_fee_per_gas: 1,
+            access_list: None,
         };
         assert!(tx.is_contract_creation());
 
@@ -295,6 +310,7 @@ mod tests {
             gas_limit: 21000,
             max_fee_per_gas: 20,
             max_priority_fee_per_gas: 1,
+            access_list: None,
         };
         let mut buf_none = Vec::new();
         tx_none.encode(&mut buf_none);

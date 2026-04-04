@@ -1094,6 +1094,7 @@ mod tests {
             gas_limit: 21_000,
             max_fee_per_gas: shell_core::INITIAL_BASE_FEE,
             max_priority_fee_per_gas: 0,
+            access_list: None,
         };
 
         // Sign with real Dilithium key
@@ -1857,6 +1858,7 @@ mod tests {
             gas_limit: 21_000,
             max_fee_per_gas: shell_core::INITIAL_BASE_FEE,
             max_priority_fee_per_gas: 0,
+            access_list: None,
         };
 
         let tx_hash = {

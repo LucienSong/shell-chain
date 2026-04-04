@@ -222,6 +222,7 @@ mod tests {
                 to: None,
                 value: U256::ZERO,
                 data: Bytes::default(),
+                access_list: None,
             },
             PQSignature::new(SignatureType::Dilithium3, vec![1, 2, 3]),
         )
