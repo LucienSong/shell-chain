@@ -118,6 +118,16 @@ impl ReorgEngine {
             applied += 1;
         }
 
+        // F-084/F-090: Remove stale canonical mappings if old chain was longer
+        // than the new chain to prevent orphaned state.
+        if old_chain.len() > new_chain.len() {
+            let new_tip_number = ancestor_number + new_chain.len() as u64;
+            let old_tip_number = ancestor_number + old_chain.len() as u64;
+            for n in (new_tip_number + 1)..=old_tip_number {
+                chain_store.delete_canonical(n)?;
+            }
+        }
+
         // Restore world state to the new chain tip's state root.
         let tip_ws = WorldState::at_root(Arc::clone(store), &tip_state_root)?;
         *world_state.write() = tip_ws;
@@ -578,5 +588,66 @@ mod tests {
         // Canonical mapping at height 6 should now point to the new block.
         let canon = chain_store.get_block_by_number(6).unwrap().unwrap();
         assert_eq!(canon.hash(), new_hash);
+    }
+
+    #[test]
+    fn test_reorg_cleans_stale_canonical_mappings() {
+        let (store, chain_store, world_state, root) = setup_chain();
+
+        let ancestor = make_block(5, make_hash(0), root);
+        chain_store.put_block(&ancestor).unwrap();
+        let ancestor_hash = ancestor.hash();
+
+        // Old chain: 3 blocks at heights 6, 7, 8
+        let old6 = make_block(6, ancestor_hash, root);
+        chain_store.put_block(&old6).unwrap();
+        let oh6 = old6.hash();
+        chain_store.set_canonical(6, &oh6).unwrap();
+
+        let old7 = make_block(7, oh6, root);
+        chain_store.put_block(&old7).unwrap();
+        let oh7 = old7.hash();
+        chain_store.set_canonical(7, &oh7).unwrap();
+
+        let old8 = make_block(8, oh7, root);
+        chain_store.put_block(&old8).unwrap();
+        let oh8 = old8.hash();
+        chain_store.set_canonical(8, &oh8).unwrap();
+        chain_store.set_head(&oh8).unwrap();
+
+        // New chain: only 1 block at height 6
+        let mut new6 = make_block(6, ancestor_hash, root);
+        new6.header.timestamp += 100;
+        chain_store.put_block(&new6).unwrap();
+        let nh6 = new6.hash();
+
+        let result = ReorgEngine::execute(
+            &chain_store,
+            &world_state,
+            &store,
+            ancestor_hash,
+            5,
+            &[oh6, oh7, oh8],
+            &[nh6],
+            0,
+        )
+        .unwrap();
+
+        assert_eq!(result.rolled_back, 3);
+        assert_eq!(result.applied, 1);
+
+        // Height 6 should point to new block
+        let canon6 = chain_store.get_block_by_number(6).unwrap().unwrap();
+        assert_eq!(canon6.hash(), nh6);
+
+        // Heights 7 and 8 should have stale canonical mappings removed
+        assert!(
+            chain_store.get_block_by_number(7).unwrap().is_none(),
+            "stale canonical mapping at height 7 should be removed"
+        );
+        assert!(
+            chain_store.get_block_by_number(8).unwrap().is_none(),
+            "stale canonical mapping at height 8 should be removed"
+        );
     }
 }

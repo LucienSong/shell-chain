@@ -4,7 +4,7 @@ use shell_primitives::{Address, ShellHash};
 
 /// An attestation is a validator's signed confirmation that they accept a block.
 /// Validators broadcast attestations after importing a valid block.
-/// When a quorum (ceil(N/2)+1) of validators attest to a block, it becomes finalized.
+/// When a BFT quorum (ceil(2N/3)) of validators attest to a block, it becomes finalized.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attestation {
     /// Hash of the attested block.
@@ -82,7 +82,7 @@ impl FinalityState {
     }
 
     /// Check if a block has reached finality given the total validator count.
-    /// Quorum = ceil(N/2) + 1 for N validators (strictly more than half).
+    /// BFT quorum = ceil(2N/3) to tolerate up to f Byzantine validators.
     pub fn check_finality(&mut self, block_hash: &ShellHash, block_number: u64, total_validators: usize) -> bool {
         let quorum = Self::quorum_threshold(total_validators);
         let count = self.pending_attestations
@@ -101,14 +101,14 @@ impl FinalityState {
         }
     }
 
-    /// Calculate the quorum threshold: strictly more than half.
-    /// For N validators: ceil(N/2) + 1 when N is even, (N+1)/2 when N is odd.
+    /// Calculate the quorum threshold for BFT consensus: ceil(2N/3).
+    /// Tolerates up to f Byzantine validators where 2f+1 = ceil(2N/3).
     /// Special case: N <= 1 returns 1.
     pub fn quorum_threshold(total_validators: usize) -> usize {
         if total_validators <= 1 {
             return 1;
         }
-        (total_validators / 2) + 1
+        (total_validators * 2 + 2) / 3
     }
 
     /// Last finalized block number.
@@ -227,13 +227,14 @@ mod tests {
 
     #[test]
     fn test_quorum_threshold() {
+        // BFT quorum: ceil(2N/3) = (2N+2)/3 (integer division)
         assert_eq!(FinalityState::quorum_threshold(1), 1);
         assert_eq!(FinalityState::quorum_threshold(2), 2);
-        assert_eq!(FinalityState::quorum_threshold(3), 2);
-        assert_eq!(FinalityState::quorum_threshold(4), 3);
-        assert_eq!(FinalityState::quorum_threshold(5), 3);
-        assert_eq!(FinalityState::quorum_threshold(7), 4);
-        assert_eq!(FinalityState::quorum_threshold(10), 6);
+        assert_eq!(FinalityState::quorum_threshold(3), 2); // ceil(6/3) = 2
+        assert_eq!(FinalityState::quorum_threshold(4), 3); // ceil(8/3) = 3
+        assert_eq!(FinalityState::quorum_threshold(5), 4); // ceil(10/3) = 4
+        assert_eq!(FinalityState::quorum_threshold(7), 5); // ceil(14/3) = 5
+        assert_eq!(FinalityState::quorum_threshold(10), 7); // ceil(20/3) = 7
     }
 
     #[test]
@@ -346,14 +347,14 @@ mod tests {
         let mut state = FinalityState::new();
         let hash = make_hash(1);
 
-        // 7 validators, quorum = 4
-        for i in 0..3 {
+        // 7 validators, BFT quorum = ceil(14/3) = 5
+        for i in 0..4 {
             state.record_attestation(Attestation::new(hash, 10, make_addr(i), vec![]));
         }
-        assert!(!state.check_finality(&hash, 10, 7)); // 3 < 4
+        assert!(!state.check_finality(&hash, 10, 7)); // 4 < 5
 
-        state.record_attestation(Attestation::new(hash, 10, make_addr(3), vec![]));
-        assert!(state.check_finality(&hash, 10, 7)); // 4 >= 4
+        state.record_attestation(Attestation::new(hash, 10, make_addr(4), vec![]));
+        assert!(state.check_finality(&hash, 10, 7)); // 5 >= 5
     }
 
     #[test]
@@ -445,18 +446,18 @@ mod tests {
         let mut state = FinalityState::new();
         let hash = make_hash(1);
         let total: usize = 100;
-        let quorum = FinalityState::quorum_threshold(total); // 51
+        let quorum = FinalityState::quorum_threshold(total); // ceil(200/3) = 67
 
-        assert_eq!(quorum, 51);
+        assert_eq!(quorum, 67);
 
-        // Add 50 attestations → not enough
-        for i in 0..50u8 {
+        // Add 66 attestations → not enough
+        for i in 0..66u8 {
             state.record_attestation(Attestation::new(hash, 500, make_addr(i), vec![]));
         }
         assert!(!state.check_finality(&hash, 500, total));
 
-        // Add 1 more → exactly 51 → quorum
-        state.record_attestation(Attestation::new(hash, 500, make_addr(50), vec![]));
+        // Add 1 more → exactly 67 → quorum
+        state.record_attestation(Attestation::new(hash, 500, make_addr(66), vec![]));
         assert!(state.check_finality(&hash, 500, total));
         assert_eq!(state.last_finalized_number(), 500);
     }
@@ -587,16 +588,64 @@ mod tests {
 
         // 1 of 10 validators
         state.record_attestation(Attestation::new(hash, 10, make_addr(1), vec![]));
-        assert!(!state.check_finality(&hash, 10, 10)); // quorum = 6
+        assert!(!state.check_finality(&hash, 10, 10)); // BFT quorum = 7
 
-        // 5 of 10 validators
-        for i in 2..=5 {
+        // 6 of 10 validators
+        for i in 2..=6 {
             state.record_attestation(Attestation::new(hash, 10, make_addr(i), vec![]));
         }
-        assert!(!state.check_finality(&hash, 10, 10)); // still only 5 < 6
+        assert!(!state.check_finality(&hash, 10, 10)); // still only 6 < 7
 
-        // 6 of 10 validators → exactly quorum
-        state.record_attestation(Attestation::new(hash, 10, make_addr(6), vec![]));
+        // 7 of 10 validators → exactly quorum
+        state.record_attestation(Attestation::new(hash, 10, make_addr(7), vec![]));
         assert!(state.check_finality(&hash, 10, 10));
+    }
+
+    #[test]
+    fn attestation_with_real_dilithium_signature() {
+        use shell_crypto::{DilithiumSigner, DilithiumVerifier, Signer, Verifier};
+        use shell_primitives::Address;
+
+        let signer = DilithiumSigner::generate();
+        let pubkey = signer.public_key().to_vec();
+        let validator_addr = Address::from_public_key(&pubkey);
+        let block_hash = make_hash(42);
+        let block_number: u64 = 100;
+
+        // Sign the attestation message with a real Dilithium key.
+        let msg = Attestation::signing_message(&block_hash, block_number);
+        let sig = signer.sign(&msg).expect("signing must succeed");
+        assert!(!sig.data.is_empty(), "signature must not be empty");
+
+        // Verify the signature using the Dilithium verifier.
+        let verifier = DilithiumVerifier;
+        let valid = verifier.verify(&pubkey, &msg, &sig).expect("verify must succeed");
+        assert!(valid, "real Dilithium signature must verify");
+
+        // Record the attestation with the real signature.
+        let attestation = Attestation::new(
+            block_hash,
+            block_number,
+            validator_addr,
+            sig.data.clone(),
+        );
+        let mut state = FinalityState::new();
+        assert!(state.record_attestation(attestation));
+        assert_eq!(state.attestation_count(&block_hash), 1);
+
+        // Verify the stored attestation signature is valid.
+        let stored = state.get_attestations(&block_hash).unwrap();
+        assert_eq!(stored.len(), 1);
+        let stored_sig = shell_crypto::PQSignature::new(
+            shell_crypto::SignatureType::Dilithium3,
+            stored[0].signature.clone(),
+        );
+        let stored_valid = verifier.verify(&pubkey, &msg, &stored_sig).unwrap();
+        assert!(stored_valid, "stored attestation signature must verify");
+
+        // Verify a tampered message does not pass.
+        let wrong_msg = Attestation::signing_message(&block_hash, block_number + 1);
+        let wrong_valid = verifier.verify(&pubkey, &wrong_msg, &stored_sig).unwrap();
+        assert!(!wrong_valid, "signature must not verify for wrong message");
     }
 }

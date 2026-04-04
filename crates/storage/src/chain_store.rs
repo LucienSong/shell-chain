@@ -111,6 +111,11 @@ impl<S: KvStore> ChainStore<S> {
         self.store.put(&Self::number_key(number), hash.as_bytes())
     }
 
+    /// Remove a canonical chain mapping for the given block number.
+    pub fn delete_canonical(&self, number: u64) -> Result<(), StorageError> {
+        self.store.delete(&Self::number_key(number))
+    }
+
     /// Set the HEAD pointer to the given block hash.
     pub fn set_head(&self, hash: &ShellHash) -> Result<(), StorageError> {
         self.store.put(prefix::HEAD_BLOCK, hash.as_bytes())
