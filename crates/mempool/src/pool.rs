@@ -339,7 +339,11 @@ impl TxPool {
 
         // Per-tx serialized size limit — protects against oversized PQ
         // signatures and access lists.
-        let tx_size = serde_json::to_vec(tx).map(|v| v.len()).unwrap_or(0);
+        let tx_size = serde_json::to_vec(tx)
+            .map(|v| v.len())
+            .map_err(|e| MempoolError::InvalidTransaction(
+                format!("tx serialization failed: {e}")
+            ))?;
         if tx_size > MAX_TX_SIZE {
             return Err(MempoolError::InvalidTransaction(
                 format!("transaction too large: {} bytes (max {})", tx_size, MAX_TX_SIZE),

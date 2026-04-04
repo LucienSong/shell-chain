@@ -25,4 +25,4 @@ pub use system_contracts::{
     SYSTEM_CALL_OP_GAS, VALIDATOR_REGISTRY_ADDR,
 };
 pub use tracer::{CallFrame, TraceResult, decode_revert_reason};
-pub use tx_validation::{compute_intrinsic_gas, validate_tx, TxValidationError};
+pub use tx_validation::{compute_intrinsic_gas, validate_tx, validate_tx_for_import, TxValidationError};

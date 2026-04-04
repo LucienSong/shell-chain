@@ -11,7 +11,7 @@ use tracing::{debug, info, warn};
 use shell_consensus::{Attestation, ConsensusEngine, FinalityState, ForkChoice, PoaEngine};
 use shell_core::{Block, BlockHeader, SignedTransaction, calculate_base_fee};
 use shell_crypto::{MultiVerifier, Signer, Verifier};
-use shell_evm::{commit_evm_state, ShellEvm, ShellStateDb};
+use shell_evm::{commit_evm_state, ShellEvm, ShellStateDb, validate_tx_for_import};
 use shell_mempool::TxPool;
 use shell_network::NetworkService;
 use shell_primitives::{Address, Bytes, ShellHash, U256};
@@ -61,6 +61,28 @@ impl<S: KvStore + 'static> Node<S> {
         let metrics = Arc::new(
             Metrics::new().expect("failed to register Prometheus metrics"),
         );
+
+        // F-094: Recover finalized state from persistent storage on restart.
+        let (fin_number, fin_hash) = {
+            let stored = chain_store.get_finalized_number().ok().flatten().unwrap_or(0);
+            if stored > 0 {
+                let hash = chain_store
+                    .get_block_by_number(stored)
+                    .ok()
+                    .flatten()
+                    .map(|b| b.hash())
+                    .unwrap_or(ShellHash::ZERO);
+                (stored, hash)
+            } else {
+                (0, ShellHash::ZERO)
+            }
+        };
+        let finality_state = if fin_number > 0 {
+            FinalityState::with_finalized(fin_number, fin_hash)
+        } else {
+            FinalityState::new()
+        };
+
         Self {
             config,
             store,
@@ -70,7 +92,7 @@ impl<S: KvStore + 'static> Node<S> {
             consensus,
             known_authorities: Arc::new(RwLock::new(HashMap::new())),
             state_root_tracker: RwLock::new(tracker),
-            finality: Arc::new(RwLock::new(FinalityState::new())),
+            finality: Arc::new(RwLock::new(finality_state)),
             fork_choice: Arc::new(RwLock::new(ForkChoice::new(ShellHash::ZERO))),
             metrics,
             shutdown_tx,
@@ -158,8 +180,17 @@ impl<S: KvStore + 'static> Node<S> {
                 None
             };
         // Shared finalized block number for the RPC layer.
+        // F-107: recover persisted finalized_number from ChainStore on restart,
+        // falling back to finality state and then 0.
+        let finality_num = self.finality.read().last_finalized_number();
+        let persisted_num = self
+            .chain_store
+            .get_finalized_number()
+            .ok()
+            .flatten()
+            .unwrap_or(0);
         let finalized_number = Arc::new(parking_lot::RwLock::new(
-            self.finality.read().last_finalized_number(),
+            finality_num.max(persisted_num),
         ));
 
         let _rpc = start_rpc_server(
@@ -814,6 +845,23 @@ impl<S: KvStore + 'static> Node<S> {
         // Re-execute transactions and commit state changes.
         let mut receipts = Vec::new();
         if !block.transactions.is_empty() {
+            // Validate all transactions before execution (F-181):
+            // security-critical checks (sig, algorithm, access list, pubkey)
+            // are enforced during block import, not just mempool.
+            let import_cs = ChainStore::new(self.store.clone());
+            let import_verifier = MultiVerifier;
+            for tx in &block.transactions {
+                validate_tx_for_import(
+                    tx,
+                    &import_cs,
+                    &import_verifier,
+                    self.config.chain_id,
+                ).map_err(|e| NodeError::Startup(format!(
+                    "block {} tx validation failed: {e}",
+                    block.number()
+                )))?;
+            }
+
             let current_root = {
                 let mut ws = self.world_state.write();
                 ws.state_root()?
@@ -913,6 +961,29 @@ impl<S: KvStore + 'static> Node<S> {
         let block_number = attestation.block_number;
         let validator = attestation.validator;
 
+        // F-087: Verify the attested block exists in our local chain store.
+        // If unknown, log and skip — the block may arrive later via sync.
+        match self.chain_store.get_block_by_hash(&block_hash) {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                tracing::warn!(
+                    %block_hash,
+                    block_number,
+                    %validator,
+                    "attestation for unknown block — skipping (may arrive via sync)"
+                );
+                return Ok(());
+            }
+            Err(e) => {
+                tracing::warn!(
+                    %block_hash,
+                    error = %e,
+                    "failed to check block existence for attestation"
+                );
+                return Ok(());
+            }
+        }
+
         // Verify the attesting validator is a known authority.
         let known = self.known_authorities.read();
         let pubkey = known.get(&validator)
@@ -956,7 +1027,10 @@ impl<S: KvStore + 'static> Node<S> {
                 "block finalized"
             );
             let _ = self.chain_store.set_finalized_number(block_number);
-            self.fork_choice.write().mark_finalized(&block_hash);
+            // F-088: Prune fork choice data for old blocks to prevent unbounded growth.
+            let mut fc = self.fork_choice.write();
+            fc.mark_finalized(&block_hash);
+            fc.prune_below(block_number);
         }
 
         Ok(())
@@ -1977,10 +2051,20 @@ mod tests {
         let att1 = node.create_attestation(hash1, height, &signer).unwrap();
         node.finality.write().record_attestation(att1);
 
-        // Create a second attestation from the same validator for a different
-        // hash at the same height — this is equivocation.
-        let fake_hash = ShellHash::from([0xDE; 32]);
-        let att2 = node.create_attestation(fake_hash, height, &signer).unwrap();
+        // Create a competing block at the same height and store it so the
+        // F-087 block existence check passes.
+        let mut competing_block = Block {
+            header: block1.header.clone(),
+            transactions: vec![],
+            proposer_seal: None,
+        };
+        competing_block.header.timestamp += 999; // different timestamp → different hash
+        let competing_hash = competing_block.hash();
+        node.chain_store.put_block(&competing_block).unwrap();
+
+        // Create a second attestation from the same validator for the
+        // competing block at the same height — this is equivocation.
+        let att2 = node.create_attestation(competing_hash, height, &signer).unwrap();
         let result = node.handle_attestation(att2, &verifier);
 
         assert!(result.is_err(), "equivocation must be rejected");

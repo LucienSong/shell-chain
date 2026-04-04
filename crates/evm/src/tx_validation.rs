@@ -188,6 +188,85 @@ pub fn validate_tx<S: KvStore + 'static, V: Verifier>(
     Ok(pubkey)
 }
 
+/// Validate security-critical transaction properties during block import.
+///
+/// Unlike [`validate_tx`], this function:
+/// - Does NOT register pubkeys (read-only)
+/// - Does NOT check nonce/balance (validated implicitly by EVM re-execution)
+///
+/// Checks performed:
+/// 1. Chain ID
+/// 2. Access list size limits
+/// 3. Intrinsic gas
+/// 4. Algorithm allowlist
+/// 5. Pubkey binding conflict
+/// 6. Address derivation
+/// 7. Signature verification
+pub fn validate_tx_for_import<S: KvStore + 'static, V: Verifier>(
+    signed_tx: &SignedTransaction,
+    chain_store: &ChainStore<S>,
+    verifier: &V,
+    expected_chain_id: u64,
+) -> Result<(), TxValidationError> {
+    let tx = &signed_tx.tx;
+
+    // 1. Chain ID
+    if tx.chain_id != expected_chain_id {
+        return Err(TxValidationError::ChainIdMismatch {
+            expected: expected_chain_id,
+            got: tx.chain_id,
+        });
+    }
+
+    // 2. Access list size
+    if let Err(msg) = tx.validate_access_list() {
+        return Err(TxValidationError::InvalidAccessList(msg.to_string()));
+    }
+
+    // 3. Intrinsic gas
+    let intrinsic = compute_intrinsic_gas(
+        tx.data.as_ref(),
+        tx.is_contract_creation(),
+        &tx.access_list,
+    );
+    if tx.gas_limit < intrinsic {
+        return Err(TxValidationError::GasTooLow(tx.gas_limit));
+    }
+
+    // 4. Resolve pubkey + algorithm allowlist
+    let pubkey = resolve_pubkey(signed_tx, chain_store)?;
+    if !shell_crypto::ALLOWED_ALGORITHMS.contains(&signed_tx.signature.sig_type) {
+        return Err(TxValidationError::DisallowedAlgorithm(signed_tx.signature.sig_type));
+    }
+
+    // 5. Pubkey binding conflict
+    if signed_tx.sender_pubkey.is_some() {
+        if let Some(registered) = chain_store.get_pubkey(&signed_tx.from)? {
+            if registered != pubkey {
+                return Err(TxValidationError::PubkeyConflict);
+            }
+        }
+    }
+
+    // 6. Address derivation
+    let derived = Address::from_public_key(&pubkey);
+    if signed_tx.from != derived {
+        return Err(TxValidationError::AddressMismatch {
+            from: signed_tx.from,
+            derived,
+        });
+    }
+
+    // 7. Signature verification
+    let tx_hash = signed_tx.hash();
+    let valid = verifier.verify(&pubkey, tx_hash.as_bytes(), &signed_tx.signature)?;
+    if !valid {
+        return Err(TxValidationError::SignatureInvalid);
+    }
+
+    Ok(())
+}
+
 /// Resolve the public key for signature verification.
 ///
 /// Hybrid model:
