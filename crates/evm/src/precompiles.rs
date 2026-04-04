@@ -373,7 +373,7 @@ mod tests {
 
     #[test]
     fn shell_precompiles_contains_custom() {
-        let sp = ShellPrecompiles::new(SpecId::SHANGHAI);
+        let sp = ShellPrecompiles::new(SpecId::CANCUN);
         assert!(sp.is_precompile(&ECRECOVER_ADDR));
         assert!(sp.is_precompile(&PQ_DILITHIUM_VERIFY_ADDR));
     }

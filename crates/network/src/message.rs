@@ -92,6 +92,8 @@ mod tests {
                 proposer: Address::from_public_key(b"test-proposer"),
                 sig_aggregate_proof: None,
                 base_fee_per_gas: 0,
+                withdrawals_root: ShellHash::ZERO,
+                parent_beacon_block_root: ShellHash::ZERO,
             },
             transactions: vec![],
             proposer_seal: None,

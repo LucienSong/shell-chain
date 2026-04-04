@@ -41,6 +41,8 @@ fn sample_header(number: u64) -> BlockHeader {
         proposer: ShellAddress::ZERO,
         sig_aggregate_proof: None,
         base_fee_per_gas: 0,
+        withdrawals_root: ShellHash::ZERO,
+        parent_beacon_block_root: ShellHash::ZERO,
     }
 }
 
@@ -270,7 +272,7 @@ fn e2e_precompile_addresses() {
     use revm::primitives::hardfork::SpecId;
     use shell_evm::ShellPrecompiles;
 
-    let sp = ShellPrecompiles::new(SpecId::SHANGHAI);
+    let sp = ShellPrecompiles::new(SpecId::CANCUN);
 
     // PQ precompile at 0x0100
     let pq_addr = address!("0x0000000000000000000000000000000000000100");

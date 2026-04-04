@@ -25,6 +25,10 @@ pub struct BlockHeader {
     pub sig_aggregate_proof: Option<Bytes>,
     /// EIP-1559 base fee per gas. 0 for the genesis block.
     pub base_fee_per_gas: u64,
+    /// Withdrawals root (EIP-4895). Always empty-trie root for PoA chains.
+    pub withdrawals_root: ShellHash,
+    /// Parent beacon block root (EIP-4788). Zero for non-beacon chains.
+    pub parent_beacon_block_root: ShellHash,
 }
 
 impl Encodable for BlockHeader {
@@ -53,6 +57,8 @@ impl Encodable for BlockHeader {
             }
         }
         self.base_fee_per_gas.encode(out);
+        self.withdrawals_root.encode(out);
+        self.parent_beacon_block_root.encode(out);
     }
 
     fn length(&self) -> usize {
@@ -80,6 +86,8 @@ impl BlockHeader {
             + self.proposer.length()
             + proof_len
             + self.base_fee_per_gas.length()
+            + self.withdrawals_root.length()
+            + self.parent_beacon_block_root.length()
     }
 
     /// Compute the block hash (keccak256 of RLP-encoded header).
@@ -137,6 +145,8 @@ mod tests {
             proposer: Address::ZERO,
             sig_aggregate_proof: None,
             base_fee_per_gas: 0,
+            withdrawals_root: ShellHash::ZERO,
+            parent_beacon_block_root: ShellHash::ZERO,
         }
     }
 

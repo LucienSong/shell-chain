@@ -118,8 +118,9 @@ impl<S: KvStore + 'static> ShellEvm<S> {
             .build_fill();
 
         // Build revm BlockEnv
-        // Use Shanghai spec: no blob gas required, no EIP-4844
-        let block_env = BlockEnv {
+        // Use Cancun spec: enables EIP-1153 (transient storage), EIP-5656 (MCOPY),
+        // EIP-6780 (SELFDESTRUCT restriction). No actual blob txs on PoA chain.
+        let mut block_env = BlockEnv {
             number: U256::from(header.number),
             beneficiary: header.proposer.into(),
             timestamp: U256::from(header.timestamp),
@@ -130,12 +131,15 @@ impl<S: KvStore + 'static> ShellEvm<S> {
             blob_excess_gas_and_price: None,
             slot_num: 0,
         };
+        // Cancun requires blob_excess_gas_and_price to be Some.
+        // Use Cancun blob base fee update fraction (3_338_477) with zero excess gas.
+        block_env.set_blob_excess_gas_and_price(0, 3_338_477);
 
         // Build revm context + EVM
-        // Use SHANGHAI spec — no blob gas, no EIP-4844 requirements.
-        // Shell-chain can upgrade to Cancun/Deneb when blob support is added.
+        // Use CANCUN spec — enables transient storage (EIP-1153), MCOPY (EIP-5656),
+        // and SELFDESTRUCT restriction (EIP-6780).
         let ctx: MainnetContext<&mut ShellStateDb<S>> =
-            Context::new(&mut self.state_db, SpecId::SHANGHAI)
+            Context::new(&mut self.state_db, SpecId::CANCUN)
                 .modify_block_chained(|b| *b = block_env)
                 .modify_cfg_chained(|cfg: &mut CfgEnv| {
                     cfg.chain_id = self.chain_id;
@@ -143,7 +147,7 @@ impl<S: KvStore + 'static> ShellEvm<S> {
                     cfg.disable_base_fee = true;
                 });
 
-        let spec = SpecId::SHANGHAI;
+        let spec = SpecId::CANCUN;
         let mut evm = Evm::new(
             ctx,
             EthInstructions::new_mainnet_with_spec(spec),
@@ -416,6 +420,8 @@ mod tests {
             proposer: ShellAddress::ZERO,
             sig_aggregate_proof: None,
             base_fee_per_gas: 0,
+            withdrawals_root: ShellHash::ZERO,
+            parent_beacon_block_root: ShellHash::ZERO,
         }
     }
 
@@ -1076,7 +1082,9 @@ mod tests {
     }
 
     #[test]
-    fn selfdestruct_to_self_zeroes_balance() {
+    fn selfdestruct_to_self_preserves_balance_cancun() {
+        // Cancun (EIP-6780): SELFDESTRUCT in a separate tx from creation
+        // only sends balance; when the beneficiary is self, balance is unchanged.
         let mut evm = setup_evm();
         let deployer = ShellAddress::from([0x42; 20]);
         fund_account(&mut evm, &deployer, U256::from(100_000_000_000u64));
@@ -1094,12 +1102,12 @@ mod tests {
 
         let balance = evm.state_db_mut().world_state_mut()
             .get_balance(&contract_addr).unwrap();
-        assert_eq!(balance, U256::ZERO, "self-destruct to self should zero balance");
+        assert_eq!(balance, deposit, "Cancun: self-destruct to self in separate tx preserves balance");
     }
 
     #[test]
-    fn selfdestruct_post_shanghai_code_remains() {
-        // Post-Shanghai (EIP-6780): SELFDESTRUCT in a separate tx only
+    fn selfdestruct_post_cancun_code_remains() {
+        // Cancun (EIP-6780): SELFDESTRUCT in a separate tx only
         // transfers balance; code/storage remain.
         let mut evm = setup_evm();
         let deployer = ShellAddress::from([0x42; 20]);
@@ -1123,10 +1131,10 @@ mod tests {
         );
         assert_eq!(result.receipt.status, 1);
 
-        // Post-Shanghai: code hash should still exist
+        // Cancun: code hash should still exist
         let code_hash = evm.state_db_mut().world_state_mut()
             .get_code_hash(&contract_addr).unwrap();
-        assert!(code_hash.is_some(), "code should remain post-Shanghai SELFDESTRUCT");
+        assert!(code_hash.is_some(), "code should remain post-Cancun SELFDESTRUCT");
     }
 
     // ════════════════════════════════════════════════════════════
@@ -1500,5 +1508,149 @@ mod tests {
         assert_eq!(result.output.len(), 32);
         assert_eq!(result.output[30], 0x12);
         assert_eq!(result.output[31], 0x34);
+    }
+
+    // ── Cancun opcode tests ──────────────────────────────────────
+
+    #[test]
+    fn test_transient_storage_tstore_tload() {
+        // EIP-1153: TSTORE (0x5d) writes to transient storage,
+        // TLOAD (0x5c) reads it back within the same transaction.
+        // We store the TLOAD result to persistent storage so we can verify.
+        let mut evm = setup_evm();
+        let deployer = ShellAddress::from([0x50; 20]);
+        fund_account(&mut evm, &deployer, U256::from(10_000_000_000u64));
+
+        // Runtime bytecode:
+        //   PUSH1 0x42   ; value
+        //   PUSH1 0x00   ; key
+        //   TSTORE       ; transient_storage[0] = 0x42
+        //   PUSH1 0x00   ; key
+        //   TLOAD        ; read transient_storage[0] → 0x42
+        //   PUSH1 0x00   ; slot
+        //   SSTORE       ; persistent_storage[0] = 0x42
+        //   PUSH1 0x00   ; offset
+        //   SLOAD        ; load persistent_storage[0]
+        //   PUSH1 0x00   ; offset
+        //   MSTORE       ; memory[0..32] = value
+        //   PUSH1 0x20   ; size
+        //   PUSH1 0x00   ; offset
+        //   RETURN       ; return 32 bytes
+        let runtime = vec![
+            0x60, 0x42,       // PUSH1 0x42
+            0x60, 0x00,       // PUSH1 0x00
+            0x5d,             // TSTORE
+            0x60, 0x00,       // PUSH1 0x00
+            0x5c,             // TLOAD
+            0x60, 0x00,       // PUSH1 0x00
+            0x55,             // SSTORE
+            0x60, 0x00,       // PUSH1 0x00
+            0x54,             // SLOAD
+            0x60, 0x00,       // PUSH1 0x00
+            0x52,             // MSTORE
+            0x60, 0x20,       // PUSH1 0x20
+            0x60, 0x00,       // PUSH1 0x00
+            0xF3,             // RETURN
+        ];
+
+        let (_, addr) = deploy_contract(&mut evm, &deployer, make_init_code(&runtime), U256::ZERO, 0);
+
+        let result = call_contract(&mut evm, &deployer, &addr, vec![], U256::ZERO, 1, 500_000);
+        assert_eq!(result.receipt.status, 1, "TSTORE/TLOAD tx should succeed");
+        assert_eq!(result.output.len(), 32);
+        assert_eq!(result.output[31], 0x42, "TLOAD should read back the value stored by TSTORE");
+    }
+
+    #[test]
+    fn test_mcopy_opcode() {
+        // EIP-5656: MCOPY (0x5e) copies memory within the EVM.
+        // Store 0xAB at memory[0], then MCOPY 1 byte from offset 0 to offset 32,
+        // then return 32 bytes from offset 32.
+        let mut evm = setup_evm();
+        let deployer = ShellAddress::from([0x51; 20]);
+        fund_account(&mut evm, &deployer, U256::from(10_000_000_000u64));
+
+        // Runtime bytecode:
+        //   PUSH1 0xAB   ; value
+        //   PUSH1 0x00   ; offset
+        //   MSTORE8      ; memory[0] = 0xAB
+        //   PUSH1 0x01   ; size  (1 byte)
+        //   PUSH1 0x00   ; src   (offset 0)
+        //   PUSH1 0x20   ; dst   (offset 32)
+        //   MCOPY        ; memory[32] = memory[0] (1 byte)
+        //   PUSH1 0x20   ; size  (32 bytes)
+        //   PUSH1 0x20   ; offset
+        //   RETURN       ; return memory[32..64]
+        let runtime = vec![
+            0x60, 0xAB,       // PUSH1 0xAB
+            0x60, 0x00,       // PUSH1 0x00
+            0x53,             // MSTORE8
+            0x60, 0x01,       // PUSH1 0x01 (size)
+            0x60, 0x00,       // PUSH1 0x00 (src)
+            0x60, 0x20,       // PUSH1 0x20 (dst)
+            0x5e,             // MCOPY
+            0x60, 0x20,       // PUSH1 0x20 (size)
+            0x60, 0x20,       // PUSH1 0x20 (offset)
+            0xF3,             // RETURN
+        ];
+
+        let (_, addr) = deploy_contract(&mut evm, &deployer, make_init_code(&runtime), U256::ZERO, 0);
+
+        let result = call_contract(&mut evm, &deployer, &addr, vec![], U256::ZERO, 1, 500_000);
+        assert_eq!(result.receipt.status, 1, "MCOPY tx should succeed");
+        assert_eq!(result.output.len(), 32);
+        assert_eq!(result.output[0], 0xAB, "MCOPY should copy 0xAB from src to dst");
+    }
+
+    #[test]
+    fn test_selfdestruct_cancun_restriction() {
+        // EIP-6780: In Cancun, SELFDESTRUCT called outside the creation tx
+        // sends balance but does NOT delete the contract code.
+        let mut evm = setup_evm();
+        let deployer = ShellAddress::from([0x52; 20]);
+        let beneficiary = ShellAddress::from([0x53; 20]);
+        fund_account(&mut evm, &deployer, U256::from(10_000_000_000u64));
+        fund_account(&mut evm, &beneficiary, U256::ZERO);
+
+        // Runtime: PUSH20 <beneficiary>, SELFDESTRUCT
+        let mut runtime = vec![0x73]; // PUSH20
+        runtime.extend_from_slice(beneficiary.as_ref());
+        runtime.push(0xFF); // SELFDESTRUCT
+
+        // Deploy contract with 1 ETH value
+        let deploy_value = U256::from(1_000_000_000u64);
+        let (_, addr) = deploy_contract(
+            &mut evm,
+            &deployer,
+            make_init_code(&runtime),
+            deploy_value,
+            0,
+        );
+
+        // Verify the contract has code and balance after deployment
+        let account_before = evm
+            .state_db()
+            .world_state()
+            .get_account(&addr)
+            .unwrap()
+            .unwrap();
+        assert!(account_before.code_hash.is_some(), "contract should have code");
+        assert_eq!(account_before.balance, deploy_value);
+
+        // Call SELFDESTRUCT from a separate transaction (not the creation tx)
+        let result = call_contract(&mut evm, &deployer, &addr, vec![], U256::ZERO, 1, 500_000);
+        assert_eq!(result.receipt.status, 1, "SELFDESTRUCT call should succeed");
+
+        // Cancun behavior: code should still exist (not deleted)
+        let account_after = evm
+            .state_db()
+            .world_state()
+            .get_account(&addr)
+            .unwrap()
+            .unwrap();
+        assert!(
+            account_after.code_hash.is_some(),
+            "Cancun: contract code must NOT be deleted by SELFDESTRUCT in separate tx"
+        );
     }
 }

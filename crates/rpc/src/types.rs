@@ -36,6 +36,8 @@ pub struct RpcBlock {
     pub mix_hash: ShellHash,
     pub extra_data: String,
     pub logs_bloom: String,
+    pub withdrawals_root: String,
+    pub parent_beacon_block_root: String,
 }
 
 /// Hex-encoded transaction response.

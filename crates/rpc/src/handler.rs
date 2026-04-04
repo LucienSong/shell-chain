@@ -324,6 +324,8 @@ impl<S: KvStore + 'static> RpcHandler<S> {
             proposer: Address::ZERO,
             sig_aggregate_proof: None,
             base_fee_per_gas: 0,
+            withdrawals_root: ShellHash::ZERO,
+            parent_beacon_block_root: ShellHash::ZERO,
         };
 
         let result = evm
@@ -488,6 +490,8 @@ fn block_to_rpc(block: &Block, full_txs: bool) -> RpcBlock {
         mix_hash: ShellHash::ZERO,
         extra_data: hex_bytes(block.header.extra_data.as_ref()),
         logs_bloom,
+        withdrawals_root: format!("{:?}", block.header.withdrawals_root),
+        parent_beacon_block_root: format!("{:?}", block.header.parent_beacon_block_root),
     }
 }
 
@@ -621,6 +625,8 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
                     mix_hash: ShellHash::ZERO,
                     extra_data: "0x".into(),
                     logs_bloom: format!("0x{}", "00".repeat(BLOOM_SIZE)),
+                    withdrawals_root: format!("{:?}", ShellHash::ZERO),
+                    parent_beacon_block_root: format!("{:?}", ShellHash::ZERO),
                 };
                 Ok(Some(pending_block))
             }
@@ -1502,6 +1508,8 @@ mod tests {
                 proposer: Address::from_public_key(b"proposer-key-data"),
                 sig_aggregate_proof: None,
                 base_fee_per_gas: 0,
+                withdrawals_root: ShellHash::ZERO,
+                parent_beacon_block_root: ShellHash::ZERO,
             },
             transactions: vec![],
             proposer_seal: None,
@@ -1949,6 +1957,8 @@ mod tests {
                 proposer: Address::from_public_key(b"proposer-key-data"),
                 sig_aggregate_proof: None,
                 base_fee_per_gas: 0,
+                withdrawals_root: ShellHash::ZERO,
+                parent_beacon_block_root: ShellHash::ZERO,
             },
             transactions: vec![],
             proposer_seal: None,
@@ -2641,6 +2651,8 @@ mod tests {
                 proposer: Address::from_public_key(b"proposer-key-data"),
                 sig_aggregate_proof: None,
                 base_fee_per_gas: 1_000_000_000,
+                withdrawals_root: ShellHash::ZERO,
+                parent_beacon_block_root: ShellHash::ZERO,
             },
             transactions: vec![],
             proposer_seal: None,
@@ -2711,6 +2723,8 @@ mod tests {
                 proposer: Address::from_public_key(b"proposer-key-data"),
                 sig_aggregate_proof: None,
                 base_fee_per_gas: 0,
+                withdrawals_root: ShellHash::ZERO,
+                parent_beacon_block_root: ShellHash::ZERO,
             },
             transactions: vec![],
             proposer_seal: None,

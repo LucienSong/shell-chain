@@ -62,6 +62,8 @@ pub fn initialize_genesis<S: KvStore + 'static>(
         proposer,
         sig_aggregate_proof: None,
         base_fee_per_gas: 0,
+        withdrawals_root: ShellHash::ZERO,
+        parent_beacon_block_root: ShellHash::ZERO,
     };
 
     let block = Block {

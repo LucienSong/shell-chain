@@ -274,6 +274,8 @@ mod tests {
             proposer,
             sig_aggregate_proof: None,
             base_fee_per_gas: 0,
+            withdrawals_root: ShellHash::ZERO,
+            parent_beacon_block_root: ShellHash::ZERO,
         }
     }
 
