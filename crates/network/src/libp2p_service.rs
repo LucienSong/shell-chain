@@ -460,6 +460,10 @@ async fn swarm_loop(
     attestation_topic: IdentTopic,
     bandwidth: Arc<BandwidthTracker>,
 ) {
+    // F-305: Initialize peer tracking and ban list.
+    let mut peer_tracker = crate::security::PeerTracker::new(128);
+    let mut peer_ban_list = crate::security::PeerBanList::new(5, Duration::from_secs(600));
+
     // Subscribe to gossipsub topics.
     if let Err(e) = swarm.behaviour_mut().gossipsub.subscribe(&blocks_topic) {
         warn!("Failed to subscribe to blocks topic: {e}");
@@ -526,6 +530,8 @@ async fn swarm_loop(
                     &event_tx,
                     &peer_count,
                     &bandwidth,
+                    &mut peer_tracker,
+                    &mut peer_ban_list,
                 ).await;
             }
             _ = kad_bootstrap_interval.tick() => {
@@ -551,6 +557,8 @@ async fn handle_swarm_event(
     event_tx: &mpsc::Sender<NetworkEvent>,
     peer_count: &Arc<AtomicUsize>,
     bandwidth: &Arc<BandwidthTracker>,
+    peer_tracker: &mut crate::security::PeerTracker,
+    peer_ban_list: &mut crate::security::PeerBanList,
 ) {
     match event {
         // Gossipsub message received.
@@ -570,6 +578,12 @@ async fn handle_swarm_event(
                     peer = %propagation_source,
                     "Message exceeds MAX_MESSAGE_SIZE — rejecting"
                 );
+                // F-305: Record violation for oversized messages.
+                let peer = PeerId(propagation_source.to_string());
+                let banned = peer_ban_list.record_violation(&peer);
+                if banned {
+                    warn!(peer = %propagation_source, "peer banned for repeated violations");
+                }
                 swarm.behaviour_mut().gossipsub.report_message_validation_result(
                     &message_id,
                     &propagation_source,
@@ -610,6 +624,12 @@ async fn handle_swarm_event(
                 Err(e) => {
                     // F-062: reject invalid message — penalize sender.
                     debug!("Failed to deserialize gossipsub message: {e}");
+                    // F-305: Record violation for malformed messages.
+                    let ban_peer = PeerId(propagation_source.to_string());
+                    let banned = peer_ban_list.record_violation(&ban_peer);
+                    if banned {
+                        warn!(peer = %propagation_source, "peer banned for repeated violations");
+                    }
                     swarm.behaviour_mut().gossipsub.report_message_validation_result(
                         &message_id,
                         &propagation_source,
@@ -751,11 +771,26 @@ async fn handle_swarm_event(
         }
         // Connection established.
         SwarmEvent::ConnectionEstablished { peer_id, .. } => {
+            let peer = PeerId(peer_id.to_string());
+            // F-305: Check ban list before accepting connection.
+            if peer_ban_list.is_banned(&peer) {
+                warn!(peer = %peer_id, "rejecting banned peer connection");
+                let _ = swarm.disconnect_peer_id(peer_id);
+                return;
+            }
+            // F-305: Enforce connection limit.
+            if let Err(e) = peer_tracker.try_add_peer(peer) {
+                debug!(peer = %peer_id, error = %e, "connection limit reached, disconnecting");
+                let _ = swarm.disconnect_peer_id(peer_id);
+                return;
+            }
             debug!("Connected to {peer_id}");
             update_peer_count(swarm, peer_count);
         }
         // Connection closed.
         SwarmEvent::ConnectionClosed { peer_id, .. } => {
+            let peer = PeerId(peer_id.to_string());
+            peer_tracker.remove_peer(&peer);
             debug!("Disconnected from {peer_id}");
             update_peer_count(swarm, peer_count);
         }

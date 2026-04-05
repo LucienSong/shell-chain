@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashMap};
 use parking_lot::RwLock;
 
 use shell_core::SignedTransaction;
-use shell_crypto::Verifier;
+use shell_crypto::{Verifier, ALLOWED_ALGORITHMS};
 use shell_primitives::{Address, ShellHash, U256};
 
 use crate::{MempoolConfig, MempoolError};
@@ -321,6 +321,14 @@ impl TxPool {
                 from: tx.sender(),
                 derived,
             });
+        }
+
+        // Algorithm allowlist check (F-301)
+        if !ALLOWED_ALGORITHMS.contains(&tx.signature.sig_type) {
+            return Err(MempoolError::InvalidTransaction(format!(
+                "disallowed signature algorithm: {:?}",
+                tx.signature.sig_type
+            )));
         }
 
         // Signature verification

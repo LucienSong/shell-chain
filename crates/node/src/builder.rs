@@ -58,7 +58,18 @@ impl<S: KvStore + 'static> NodeBuilder<S> {
         let world_state = match chain_store.get_head_block() {
             Ok(Some(head)) => {
                 match WorldState::at_root(store.clone(), &head.header.state_root) {
-                    Ok(ws) => Arc::new(RwLock::new(ws)),
+                    Ok(mut ws) => {
+                        // F-306: Validate DB integrity on startup.
+                        if let Err(e) = ws.validate() {
+                            tracing::warn!(
+                                error = %e,
+                                "world state validation failed on startup — starting fresh"
+                            );
+                            Arc::new(RwLock::new(WorldState::new(store.clone())))
+                        } else {
+                            Arc::new(RwLock::new(ws))
+                        }
+                    }
                     Err(_) => Arc::new(RwLock::new(WorldState::new(store.clone()))),
                 }
             }

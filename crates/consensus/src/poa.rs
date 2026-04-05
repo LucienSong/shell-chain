@@ -54,7 +54,7 @@ impl PoaConfig {
         if self.epoch_length == 0 {
             return false;
         }
-        block_number.is_multiple_of(self.epoch_length)
+        block_number % self.epoch_length == 0
     }
 
     /// Return the expected proposer for a given block number.

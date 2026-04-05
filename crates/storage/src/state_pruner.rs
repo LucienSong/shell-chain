@@ -37,6 +37,9 @@ pub struct PruneResult {
     pub protected_count: u64,
 }
 
+/// Maximum entries in block_roots before evicting oldest (F-304).
+const MAX_BLOCK_ROOTS: usize = 10_000;
+
 /// Tracks active state roots and performs lazy pruning of canonical mappings.
 ///
 /// # Safety invariants
@@ -97,6 +100,14 @@ impl StatePruner {
     /// which state roots correspond to which block heights.
     pub fn register_block(&mut self, block_number: u64, state_root: ShellHash) {
         self.block_roots.insert(block_number, state_root);
+        // F-304: Evict oldest entries if map grows too large.
+        while self.block_roots.len() > MAX_BLOCK_ROOTS {
+            if let Some(&oldest) = self.block_roots.keys().next() {
+                self.block_roots.remove(&oldest);
+            } else {
+                break;
+            }
+        }
     }
 
     /// Mark a state root as in-use.  Active roots are never pruned regardless

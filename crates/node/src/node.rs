@@ -15,7 +15,7 @@ use shell_evm::{commit_evm_state, ShellEvm, ShellStateDb, validate_tx_for_import
 use shell_mempool::TxPool;
 use shell_network::NetworkService;
 use shell_primitives::{Address, Bytes, ShellHash, U256};
-use shell_storage::{ChainStore, KvStore, WorldState};
+use shell_storage::{ChainStore, KvStore, StatePruner, WorldState};
 
 use crate::config::NodeConfig;
 use crate::error::NodeError;
@@ -37,6 +37,8 @@ pub struct Node<S: KvStore + 'static> {
     pub known_authorities: Arc<RwLock<HashMap<Address, Vec<u8>>>>,
     /// Tracks recent state roots for pruning decisions.
     pub state_root_tracker: RwLock<StateRootTracker>,
+    /// State pruner: removes old canonical mappings (F-303).
+    pub state_pruner: RwLock<StatePruner>,
     /// Finality tracking: collects attestations and detects quorum.
     pub finality: Arc<RwLock<FinalityState>>,
     /// Fork-choice rule: selects the canonical head based on attestations and finality.
@@ -58,6 +60,7 @@ impl<S: KvStore + 'static> Node<S> {
     ) -> Self {
         let (shutdown_tx, _) = watch::channel(false);
         let tracker = StateRootTracker::new(config.pruning.clone());
+        let state_pruner = StatePruner::new(128);
         let metrics = Arc::new(
             Metrics::new().expect("failed to register Prometheus metrics"),
         );
@@ -92,6 +95,7 @@ impl<S: KvStore + 'static> Node<S> {
             consensus,
             known_authorities: Arc::new(RwLock::new(HashMap::new())),
             state_root_tracker: RwLock::new(tracker),
+            state_pruner: RwLock::new(state_pruner),
             finality: Arc::new(RwLock::new(finality_state)),
             fork_choice: Arc::new(RwLock::new(ForkChoice::new(ShellHash::ZERO))),
             metrics,
@@ -109,7 +113,7 @@ impl<S: KvStore + 'static> Node<S> {
         let _ = self.shutdown_tx.send(true);
     }
 
-    /// Record a finalised state root and evict old entries if pruning is enabled.
+    /// Record a finalised state root, run state pruning, and evict old entries.
     fn record_finalized_state_root(&self, block_number: u64, state_root: ShellHash) {
         let mut tracker = self.state_root_tracker.write();
         if let Some(evicted) = tracker.record(block_number, state_root) {
@@ -119,8 +123,34 @@ impl<S: KvStore + 'static> Node<S> {
                 "state root eligible for pruning"
             );
         }
+
+        // F-303: Drive StatePruner — register block and run periodic pruning.
+        {
+            let mut pruner = self.state_pruner.write();
+            pruner.register_block(block_number, state_root);
+            pruner.mark_active(state_root);
+            if pruner.should_prune(block_number) {
+                pruner.mark_prunable(block_number);
+                match pruner.prune(self.store.as_ref()) {
+                    Ok(result) => {
+                        if result.pruned_count > 0 {
+                            tracing::info!(
+                                pruned = result.pruned_count,
+                                protected = result.protected_count,
+                                block = block_number,
+                                "state pruner: removed old canonical mappings"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "state pruner: prune failed");
+                    }
+                }
+            }
+        }
+
         // Periodic status log every 64 blocks.
-        if block_number.is_multiple_of(64) {
+        if block_number > 0 && block_number % 64 == 0 {
             let oldest = tracker.oldest().map(|e| e.block_number).unwrap_or(0);
             tracing::info!(
                 tracked = tracker.len(),
@@ -625,6 +655,26 @@ impl<S: KvStore + 'static> Node<S> {
                 continue;
             }
 
+            // F-302: Re-validate mempool txs before execution. Security checks
+            // may have changed since the tx was originally admitted (e.g. new
+            // algorithm restrictions, pubkey conflicts). Uses the import-path
+            // validator which skips nonce/balance (EVM handles those).
+            let import_cs = ChainStore::new(self.store.clone());
+            let pre_verifier = PreVerified;
+            if let Err(e) = validate_tx_for_import(
+                tx,
+                &import_cs,
+                &pre_verifier,
+                self.config.chain_id,
+            ) {
+                debug!(
+                    tx_hash = %tx.tx.hash(),
+                    error = %e,
+                    "produce_block: skipping tx that failed re-validation"
+                );
+                continue;
+            }
+
             match evm.execute_tx(tx, &header, idx as u32, cumulative_gas) {
                 Ok(result) => {
                     cumulative_gas += result.gas_used;
@@ -840,11 +890,12 @@ impl<S: KvStore + 'static> Node<S> {
                             .write()
                             .insert(*proposer, pubkey);
                     } else {
-                        warn!(
-                            proposer = %proposer,
-                            block = block.number(),
-                            "seal present but proposer pubkey unknown, skipping verification (M1b)"
-                        );
+                        // F-308: Reject blocks from unknown proposers.
+                        return Err(NodeError::Startup(format!(
+                            "block {} seal verification failed: proposer {} pubkey unknown",
+                            block.number(),
+                            proposer
+                        )));
                     }
                 }
             }
@@ -1897,6 +1948,7 @@ mod tests {
         }));
         let config = NodeConfig::dev(proposer);
         let node2 = Node::new(config, db2, cs2, ws2, tx_pool, consensus);
+        node2.register_authority_pubkey(proposer, signer.public_key().to_vec());
         store_genesis(&node2);
 
         // Produce block 2 on node1.

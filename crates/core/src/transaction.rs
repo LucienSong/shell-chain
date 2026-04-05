@@ -73,9 +73,16 @@ impl Encodable for Transaction {
         self.encode_access_list(out);
         // EIP-4844 fields
         self.tx_type.encode(out);
+        // Use flag byte: 0 = None, 1 = Some (preserves Some(0) round-trip)
         match &self.max_fee_per_blob_gas {
-            Some(fee) => fee.encode(out),
-            None => 0u64.encode(out),
+            Some(fee) => {
+                1u8.encode(out);
+                fee.encode(out);
+            }
+            None => {
+                0u8.encode(out);
+                0u64.encode(out);
+            }
         }
         self.encode_blob_hashes(out);
     }
@@ -177,8 +184,8 @@ impl Transaction {
             None => 1, // RLP encoding of empty bytes
         };
         let blob_fee_len = match &self.max_fee_per_blob_gas {
-            Some(fee) => fee.length(),
-            None => 0u64.length(),
+            Some(fee) => 1u8.length() + fee.length(),
+            None => 0u8.length() + 0u64.length(),
         };
         self.chain_id.length()
             + self.nonce.length()
@@ -437,8 +444,9 @@ impl Decodable for Transaction {
 
         // EIP-4844 fields
         let tx_type = u8::decode(buf)?;
+        let blob_fee_flag = u8::decode(buf)?;
         let blob_fee_raw = u64::decode(buf)?;
-        let max_fee_per_blob_gas = if blob_fee_raw == 0 { None } else { Some(blob_fee_raw) };
+        let max_fee_per_blob_gas = if blob_fee_flag == 1 { Some(blob_fee_raw) } else { None };
         let blob_versioned_hashes = Self::decode_blob_hashes(buf)?;
 
         let consumed = remaining - buf.len();
