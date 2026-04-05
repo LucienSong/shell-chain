@@ -37,7 +37,7 @@ cargo build --release
 ./target/release/shell-node run --datadir ./data
 ```
 
-For production deployments with Docker, see the [Operator Guide](docs/OPERATOR_GUIDE.md).
+For production deployments with Docker, see the [Operator Guide](docs/TESTNET_OPERATOR_GUIDE.md).
 
 ## Architecture
 
@@ -119,8 +119,8 @@ For details, see [docs/PQ_CRYPTO_GUIDE.md](docs/PQ_CRYPTO_GUIDE.md).
 ## Documentation
 
 - [Quick Start Guide](docs/QUICKSTART.md) — run your first node in minutes
-- [Operator Guide](docs/OPERATOR_GUIDE.md) — production deployment with Docker and monitoring
-- [API Reference](docs/API_REFERENCE.md) — complete JSON-RPC API documentation
+- [Operator Guide](docs/TESTNET_OPERATOR_GUIDE.md) — production deployment with Docker and monitoring
+- [API Reference](docs/JSON_RPC_API.md) — complete JSON-RPC API documentation
 - [PQ Crypto Guide](docs/PQ_CRYPTO_GUIDE.md) — post-quantum cryptography details
 - [Changelog](CHANGELOG.md) — full release history
 
