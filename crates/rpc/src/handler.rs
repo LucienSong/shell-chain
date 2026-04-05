@@ -614,6 +614,54 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
         Ok(serde_json::Value::Bool(false))
     }
 
+    async fn mining(&self) -> Result<bool, ErrorObjectOwned> {
+        // Return true if the node is configured as a validator.
+        Ok(self.proposer_signer.is_some())
+    }
+
+    async fn hashrate(&self) -> Result<String, ErrorObjectOwned> {
+        // PoA consensus — no mining, hashrate is always zero.
+        Ok("0x0".to_string())
+    }
+
+    async fn accounts(&self) -> Result<Vec<Address>, ErrorObjectOwned> {
+        // Node does not manage user accounts.
+        Ok(vec![])
+    }
+
+    async fn sign(
+        &self,
+        _address: Address,
+        _data: String,
+    ) -> Result<String, ErrorObjectOwned> {
+        Err(ErrorObjectOwned::owned(
+            -32601,
+            "eth_sign is not supported: node does not hold private keys",
+            None::<()>,
+        ))
+    }
+
+    async fn sign_transaction(
+        &self,
+        _tx: serde_json::Value,
+    ) -> Result<String, ErrorObjectOwned> {
+        Err(ErrorObjectOwned::owned(
+            -32601,
+            "eth_signTransaction is not supported: node does not hold private keys",
+            None::<()>,
+        ))
+    }
+
+    async fn get_compilers(&self) -> Result<Vec<String>, ErrorObjectOwned> {
+        // Deprecated method; always returns an empty array.
+        Ok(vec![])
+    }
+
+    async fn protocol_version(&self) -> Result<String, ErrorObjectOwned> {
+        // Protocol version 69 (Cancun-compatible).
+        Ok("0x45".to_string())
+    }
+
     async fn get_block_by_number(
         &self,
         number: String,
@@ -1483,7 +1531,7 @@ impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
 #[jsonrpsee::core::async_trait]
 impl<S: KvStore + 'static> Web3ApiServer for RpcHandler<S> {
     async fn client_version(&self) -> Result<String, ErrorObjectOwned> {
-        Ok("ShellChain/v0.1.0/rust".to_string())
+        Ok("shell-chain/0.5.0".to_string())
     }
 
     async fn sha3(&self, data: String) -> Result<String, ErrorObjectOwned> {
@@ -2445,7 +2493,7 @@ mod tests {
     async fn web3_client_version() {
         let handler = setup();
         let result = Web3ApiServer::client_version(&handler).await.unwrap();
-        assert_eq!(result, "ShellChain/v0.1.0/rust");
+        assert_eq!(result, "shell-chain/0.5.0");
     }
 
     #[tokio::test]
@@ -2499,6 +2547,69 @@ mod tests {
         let handler = setup();
         let result = EthApiServer::syncing(&handler).await.unwrap();
         assert_eq!(result, serde_json::Value::Bool(false));
+    }
+
+    // ── eth_mining / eth_hashrate / eth_accounts tests ───────────────
+
+    #[tokio::test]
+    async fn eth_mining_returns_false_without_signer() {
+        let handler = setup();
+        let result = EthApiServer::mining(&handler).await.unwrap();
+        assert!(!result);
+    }
+
+    #[tokio::test]
+    async fn eth_mining_returns_true_with_signer() {
+        let mut handler = setup();
+        let signer = DilithiumSigner::generate();
+        handler.proposer_signer = Some(Arc::new(signer));
+        let result = EthApiServer::mining(&handler).await.unwrap();
+        assert!(result);
+    }
+
+    #[tokio::test]
+    async fn eth_hashrate_returns_zero() {
+        let handler = setup();
+        let result = EthApiServer::hashrate(&handler).await.unwrap();
+        assert_eq!(result, "0x0");
+    }
+
+    #[tokio::test]
+    async fn eth_accounts_returns_empty() {
+        let handler = setup();
+        let result = EthApiServer::accounts(&handler).await.unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn eth_sign_returns_error() {
+        let handler = setup();
+        let addr = Address::from_public_key(b"test-key");
+        let result = EthApiServer::sign(&handler, addr, "0xdeadbeef".into()).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message().contains("not supported"));
+    }
+
+    #[tokio::test]
+    async fn eth_sign_transaction_returns_error() {
+        let handler = setup();
+        let result = EthApiServer::sign_transaction(&handler, serde_json::json!({})).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message().contains("not supported"));
+    }
+
+    #[tokio::test]
+    async fn eth_get_compilers_returns_empty() {
+        let handler = setup();
+        let result = EthApiServer::get_compilers(&handler).await.unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn eth_protocol_version_returns_cancun() {
+        let handler = setup();
+        let result = EthApiServer::protocol_version(&handler).await.unwrap();
+        assert_eq!(result, "0x45");
     }
 
     // ── shell_getValidatorStatus tests ────────────────────────────────

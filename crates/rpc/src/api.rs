@@ -49,6 +49,41 @@ pub trait EthApi {
     #[method(name = "syncing")]
     async fn syncing(&self) -> Result<serde_json::Value, jsonrpsee::types::ErrorObjectOwned>;
 
+    /// Returns true if the node is actively mining (validating).
+    #[method(name = "mining")]
+    async fn mining(&self) -> Result<bool, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns the current hashrate (always 0 for PoA).
+    #[method(name = "hashrate")]
+    async fn hashrate(&self) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns a list of accounts owned by the node (always empty).
+    #[method(name = "accounts")]
+    async fn accounts(&self) -> Result<Vec<Address>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Signs data with a local account (unsupported — node holds no private keys).
+    #[method(name = "sign")]
+    async fn sign(
+        &self,
+        address: Address,
+        data: String,
+    ) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Signs a transaction with a local account (unsupported).
+    #[method(name = "signTransaction")]
+    async fn sign_transaction(
+        &self,
+        tx: serde_json::Value,
+    ) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns a list of available compilers (deprecated, always empty).
+    #[method(name = "getCompilers")]
+    async fn get_compilers(&self) -> Result<Vec<String>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns the current Ethereum protocol version.
+    #[method(name = "protocolVersion")]
+    async fn protocol_version(&self) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+
     /// Returns a block by number (hex-encoded or "latest").
     #[method(name = "getBlockByNumber")]
     async fn get_block_by_number(
