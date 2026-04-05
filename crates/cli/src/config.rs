@@ -231,4 +231,47 @@ listen_addr = "0.0.0.0:8545"
         assert_eq!(effective_chain_id, 1337); // CLI wins
         assert_eq!(effective_db, "rocksdb"); // Config wins (CLI was None)
     }
+
+    #[test]
+    fn metrics_addr_cli_overrides_config() {
+        let toml_str = r#"
+[metrics]
+listen_addr = "0.0.0.0:9100"
+"#;
+        let config: ShellConfig = toml::from_str(toml_str).unwrap();
+
+        // CLI explicitly provides --metrics-addr
+        let cli_metrics: Option<String> = Some("192.168.1.1:9090".to_string());
+        let effective = cli_metrics
+            .or(config.metrics.listen_addr)
+            .unwrap_or_else(|| "127.0.0.1:9090".to_string());
+        assert_eq!(effective, "192.168.1.1:9090");
+    }
+
+    #[test]
+    fn metrics_addr_falls_back_to_config() {
+        let toml_str = r#"
+[metrics]
+listen_addr = "0.0.0.0:9100"
+"#;
+        let config: ShellConfig = toml::from_str(toml_str).unwrap();
+
+        // CLI does not provide --metrics-addr
+        let cli_metrics: Option<String> = None;
+        let effective = cli_metrics
+            .or(config.metrics.listen_addr)
+            .unwrap_or_else(|| "127.0.0.1:9090".to_string());
+        assert_eq!(effective, "0.0.0.0:9100");
+    }
+
+    #[test]
+    fn metrics_addr_default_when_no_cli_no_config() {
+        let config = ShellConfig::default();
+
+        let cli_metrics: Option<String> = None;
+        let effective = cli_metrics
+            .or(config.metrics.listen_addr)
+            .unwrap_or_else(|| "127.0.0.1:9090".to_string());
+        assert_eq!(effective, "127.0.0.1:9090");
+    }
 }

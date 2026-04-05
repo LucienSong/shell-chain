@@ -250,6 +250,9 @@ fn cmd_call(
     });
 
     let result = rpc_post(&rpc_url, &body)?;
+    if let Some(err) = result.get("error") {
+        return Err(format!("RPC error: {err}").into());
+    }
     let result_str = result["result"]
         .as_str()
         .ok_or("unexpected eth_call response")?;
@@ -272,7 +275,12 @@ fn load_keystore(path: &PathBuf) -> Result<Box<dyn Signer>, Box<dyn std::error::
 
     eprint!("Enter keystore password: ");
     let password = rpassword::read_password()?;
-    let signer = decrypt(&encrypted, password.as_bytes())?;
+    let signer = decrypt(&encrypted, password.as_bytes());
+    // Zeroize password from memory immediately after use.
+    let mut pw_bytes = password.into_bytes();
+    pw_bytes.fill(0);
+    drop(pw_bytes);
+    let signer = signer?;
 
     Ok(Box::new(signer))
 }

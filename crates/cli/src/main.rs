@@ -122,8 +122,8 @@ enum Commands {
         rpc_api: Option<String>,
 
         /// Metrics HTTP server listen address (ip:port).
-        #[arg(long, default_value = "127.0.0.1:9090")]
-        metrics_addr: String,
+        #[arg(long)]
+        metrics_addr: Option<String>,
     },
 
     /// Initialize genesis block and data directory.
@@ -357,14 +357,9 @@ async fn main() {
                 }
             }
 
-            let effective_metrics_addr = if metrics_addr != "127.0.0.1:9090" {
-                metrics_addr
-            } else {
-                file_config
-                    .metrics
-                    .listen_addr
-                    .unwrap_or(metrics_addr)
-            };
+            let effective_metrics_addr = metrics_addr
+                .or(file_config.metrics.listen_addr)
+                .unwrap_or_else(|| "127.0.0.1:9090".to_string());
 
             commands::run(commands::run::RunArgs {
                 datadir,
