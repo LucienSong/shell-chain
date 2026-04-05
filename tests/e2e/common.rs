@@ -165,8 +165,14 @@ pub fn sign_tx(
 }
 
 /// Simulates mining a block that includes the given signed transactions.
+/// Simulates mining a block containing the given transactions.
 /// Creates receipts and stores everything in the chain store.
 /// Returns the block hash.
+///
+/// NOTE: This does NOT execute transactions through the EVM or update
+/// world state (balances, nonces, storage). Callers must manually update
+/// world state if post-execution assertions are needed. Receipts are
+/// hardcoded to status=1, gas_used=21000 per tx.
 pub fn mine_block(
     env: &TestEnv,
     number: u64,

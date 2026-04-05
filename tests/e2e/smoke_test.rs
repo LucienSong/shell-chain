@@ -170,3 +170,55 @@ async fn clean_shutdown() {
     // Dropping env is the "shutdown" — no panics expected
     drop(env);
 }
+
+// ---------------------------------------------------------------------------
+// 6. Negative-path tests — error & rejection scenarios
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn receipt_for_nonexistent_tx_returns_none() {
+    let env = setup();
+    let genesis = make_genesis_block();
+    store_block(&env, &genesis);
+
+    let fake_hash = shell_primitives::ShellHash::from([0xDE; 32]);
+    let receipt = EthApiServer::get_transaction_receipt(&env.handler, fake_hash)
+        .await
+        .unwrap();
+    assert!(receipt.is_none(), "non-existent tx should return None");
+}
+
+#[tokio::test]
+async fn block_by_future_number_returns_none() {
+    let env = setup();
+    let genesis = make_genesis_block();
+    store_block(&env, &genesis);
+
+    let block = EthApiServer::get_block_by_number(&env.handler, "0xFFFF".into(), false)
+        .await
+        .unwrap();
+    assert!(block.is_none(), "future block number should return None");
+}
+
+#[tokio::test]
+async fn balance_of_unknown_address_is_zero() {
+    let env = setup();
+    let unknown = Address::from([0xBB; 20]);
+    let bal = EthApiServer::get_balance(&env.handler, unknown, None)
+        .await
+        .unwrap();
+    assert_eq!(bal, "0x0", "unknown address balance should be zero");
+}
+
+#[tokio::test]
+async fn get_tx_by_hash_nonexistent_returns_none() {
+    let env = setup();
+    let genesis = make_genesis_block();
+    store_block(&env, &genesis);
+
+    let fake_hash = shell_primitives::ShellHash::from([0xAB; 32]);
+    let tx = EthApiServer::get_transaction_by_hash(&env.handler, fake_hash)
+        .await
+        .unwrap();
+    assert!(tx.is_none(), "non-existent tx hash should return None");
+}
