@@ -38,6 +38,8 @@ pub struct RpcBlock {
     pub logs_bloom: String,
     pub withdrawals_root: String,
     pub parent_beacon_block_root: String,
+    pub blob_gas_used: String,
+    pub excess_blob_gas: String,
 }
 
 /// Hex-encoded transaction response.
@@ -58,7 +60,7 @@ pub struct RpcTransaction {
     pub nonce: String,
     pub input: String,
     pub chain_id: String,
-    /// EIP-2718 transaction type — always "0x2" (EIP-1559).
+    /// EIP-2718 transaction type (0x2=EIP-1559, 0x3=blob).
     #[serde(rename = "type")]
     pub tx_type: String,
     /// Legacy ECDSA compat stub — always "0x0" (PQ chain has no ECDSA).
@@ -70,6 +72,12 @@ pub struct RpcTransaction {
     /// EIP-2930 access list.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub access_list: Option<Vec<RpcAccessListItem>>,
+    /// EIP-4844 max fee per blob gas.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_fee_per_blob_gas: Option<String>,
+    /// EIP-4844 blob versioned hashes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blob_versioned_hashes: Option<Vec<ShellHash>>,
 }
 
 /// EIP-2930 access list item for RPC responses.

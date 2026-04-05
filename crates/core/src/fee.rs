@@ -57,6 +57,51 @@ pub fn calculate_base_fee(
     }
 }
 
+/// EIP-4844: target blob gas per block (3 blobs × 131072 gas each).
+pub const TARGET_BLOB_GAS_PER_BLOCK: u64 = 393_216;
+
+/// EIP-4844: minimum blob base fee (1 wei).
+pub const MIN_BLOB_BASE_FEE: u64 = 1;
+
+/// EIP-4844: blob base fee update fraction.
+pub const BLOB_BASE_FEE_UPDATE_FRACTION: u64 = 3_338_477;
+
+/// Calculate EIP-4844 blob gas price from excess blob gas.
+///
+/// Uses the exponential formula: `fake_exponential(MIN_BLOB_BASE_FEE, excess, BLOB_BASE_FEE_UPDATE_FRACTION)`
+/// This is an integer approximation of `min_fee * e^(excess / fraction)`.
+pub fn calc_blob_gas_price(excess_blob_gas: u64) -> u64 {
+    fake_exponential(MIN_BLOB_BASE_FEE, excess_blob_gas, BLOB_BASE_FEE_UPDATE_FRACTION)
+}
+
+/// Calculate excess blob gas for the next block.
+///
+/// excess = max(0, parent_excess + parent_used - target)
+pub fn calc_excess_blob_gas(parent_excess: u64, parent_used: u64) -> u64 {
+    let total = parent_excess.saturating_add(parent_used);
+    total.saturating_sub(TARGET_BLOB_GAS_PER_BLOCK)
+}
+
+/// Integer approximation of `factor * e^(numerator / denominator)`.
+///
+/// Uses Taylor series: sum of factor * numerator^i / (denominator^i * i!)
+fn fake_exponential(factor: u64, numerator: u64, denominator: u64) -> u64 {
+    let mut i: u64 = 1;
+    let mut output: u128 = 0;
+    let mut numerator_accum: u128 = factor as u128 * denominator as u128;
+    let factor_128 = factor as u128;
+    let numerator_128 = numerator as u128;
+    let denominator_128 = denominator as u128;
+    let _ = factor_128; // used in numerator_accum init
+
+    while numerator_accum > 0 {
+        output += numerator_accum;
+        numerator_accum = numerator_accum * numerator_128 / (denominator_128 * i as u128);
+        i += 1;
+    }
+    (output / denominator_128) as u64
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -240,5 +285,49 @@ mod tests {
     #[test]
     fn tip_zero_when_max_fee_equals_base() {
         assert_eq!(miner_tip(10, 5, 10), 0);
+    }
+
+    // ── EIP-4844 blob gas tests ───────────────────────────────
+
+    #[test]
+    fn blob_gas_price_zero_excess() {
+        let price = calc_blob_gas_price(0);
+        assert_eq!(price, MIN_BLOB_BASE_FEE, "zero excess should yield minimum blob fee");
+    }
+
+    #[test]
+    fn blob_gas_price_increases_with_excess() {
+        let price0 = calc_blob_gas_price(0);
+        // Need enough excess to overcome integer truncation (factor=1)
+        let price1 = calc_blob_gas_price(BLOB_BASE_FEE_UPDATE_FRACTION);
+        let price2 = calc_blob_gas_price(BLOB_BASE_FEE_UPDATE_FRACTION * 3);
+        assert!(price1 > price0, "blob gas price should increase with excess (got {price1} vs {price0})");
+        assert!(price2 > price1, "blob gas price should keep increasing (got {price2} vs {price1})");
+    }
+
+    #[test]
+    fn excess_blob_gas_zero_when_under_target() {
+        let excess = calc_excess_blob_gas(0, 0);
+        assert_eq!(excess, 0);
+    }
+
+    #[test]
+    fn excess_blob_gas_accumulates() {
+        // Parent used more than target
+        let excess = calc_excess_blob_gas(0, TARGET_BLOB_GAS_PER_BLOCK + 131_072);
+        assert_eq!(excess, 131_072);
+    }
+
+    #[test]
+    fn excess_blob_gas_drains() {
+        // Parent had excess but used nothing
+        let excess = calc_excess_blob_gas(100_000, 0);
+        assert_eq!(excess, 0, "should drain to zero when under target");
+    }
+
+    #[test]
+    fn excess_blob_gas_carries_forward() {
+        let excess = calc_excess_blob_gas(500_000, TARGET_BLOB_GAS_PER_BLOCK);
+        assert_eq!(excess, 500_000, "should carry forward when used == target");
     }
 }

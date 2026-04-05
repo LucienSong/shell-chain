@@ -117,6 +117,8 @@ impl<S: KvStore + 'static> ShellEvm<S> {
             .nonce(tx.nonce)
             .chain_id(Some(self.chain_id))
             .access_list(Self::convert_access_list(&tx.access_list))
+            .blob_hashes(Self::convert_blob_hashes(&tx.blob_versioned_hashes))
+            .max_fee_per_blob_gas(tx.max_fee_per_blob_gas.unwrap_or(0) as u128)
             .build_fill();
 
         // Build revm BlockEnv
@@ -134,8 +136,8 @@ impl<S: KvStore + 'static> ShellEvm<S> {
             slot_num: 0,
         };
         // Cancun requires blob_excess_gas_and_price to be Some.
-        // Use Cancun blob base fee update fraction (3_338_477) with zero excess gas.
-        block_env.set_blob_excess_gas_and_price(0, 3_338_477);
+        // EIP-4844: use header's excess blob gas for blob gas pricing.
+        block_env.set_blob_excess_gas_and_price(header.excess_blob_gas, 3_338_477);
 
         // Build revm context + EVM
         // Use CANCUN spec — enables transient storage (EIP-1153), MCOPY (EIP-5656),
@@ -248,6 +250,16 @@ impl<S: KvStore + 'static> ShellEvm<S> {
                     .collect(),
             ),
             None => AccessList::default(),
+        }
+    }
+
+    /// Convert shell-chain blob versioned hashes to revm B256 format.
+    fn convert_blob_hashes(
+        hashes: &Option<Vec<ShellHash>>,
+    ) -> Vec<B256> {
+        match hashes {
+            Some(h) => h.iter().map(|hash| B256::from(*hash)).collect(),
+            None => Vec::new(),
         }
     }
 
@@ -445,6 +457,8 @@ mod tests {
             base_fee_per_gas: 0,
             withdrawals_root: ShellHash::ZERO,
             parent_beacon_block_root: ShellHash::ZERO,
+            blob_gas_used: 0,
+            excess_blob_gas: 0,
         }
     }
 
@@ -484,6 +498,9 @@ mod tests {
             max_fee_per_gas: 10,
             max_priority_fee_per_gas: 1,
             access_list: None,
+            tx_type: 2,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
         };
 
         let sig = PQSignature::new(SignatureType::Dilithium3, vec![0xAA; 100]);
@@ -518,6 +535,9 @@ mod tests {
             max_fee_per_gas: 10,
             max_priority_fee_per_gas: 1,
             access_list: None,
+            tx_type: 2,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
         };
 
         let sig = PQSignature::new(SignatureType::Dilithium3, vec![0xBB; 100]);
@@ -558,6 +578,9 @@ mod tests {
             max_fee_per_gas: 10,
             max_priority_fee_per_gas: 1,
             access_list: None,
+            tx_type: 2,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
         };
 
         let sig = PQSignature::new(SignatureType::Dilithium3, vec![0xCC; 100]);
@@ -589,6 +612,9 @@ mod tests {
             max_fee_per_gas: 0,
             max_priority_fee_per_gas: 0,
             access_list: None,
+            tx_type: 2,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
         };
         let sig = PQSignature::new(SignatureType::Dilithium3, vec![0xDD; 100]);
         SignedTransaction::new(from, tx, sig)
@@ -691,6 +717,9 @@ mod tests {
             max_fee_per_gas: 10,
             max_priority_fee_per_gas: 1,
             access_list: None,
+            tx_type: 2,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
         };
         let sig = PQSignature::new(SignatureType::Dilithium3, vec![0xAA; 100]);
         let signed = SignedTransaction::new(from, tx, sig);
@@ -884,6 +913,9 @@ mod tests {
             max_fee_per_gas: 0,
             max_priority_fee_per_gas: 0,
             access_list: None,
+            tx_type: 2,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
         };
         let sig = PQSignature::new(SignatureType::Dilithium3, vec![0xCC; 100]);
         let signed = SignedTransaction::new(*from, tx, sig);
@@ -913,6 +945,9 @@ mod tests {
             max_fee_per_gas: 0,
             max_priority_fee_per_gas: 0,
             access_list: None,
+            tx_type: 2,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
         };
         let sig = PQSignature::new(SignatureType::Dilithium3, vec![0xDD; 100]);
         let signed = SignedTransaction::new(*from, tx, sig);
@@ -1323,6 +1358,9 @@ mod tests {
             data: shell_primitives::Bytes::from(init_code),
             gas_limit: 29_000_000, max_fee_per_gas: 0, max_priority_fee_per_gas: 0,
             access_list: None,
+            tx_type: 2,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
         };
         let sig = PQSignature::new(SignatureType::Dilithium3, vec![0xCC; 100]);
         let signed = SignedTransaction::new(deployer, tx, sig);
@@ -1346,6 +1384,9 @@ mod tests {
             data: shell_primitives::Bytes::from(init_code),
             gas_limit: 29_000_000, max_fee_per_gas: 0, max_priority_fee_per_gas: 0,
             access_list: None,
+            tx_type: 2,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
         };
         let sig = PQSignature::new(SignatureType::Dilithium3, vec![0xCC; 100]);
         let signed = SignedTransaction::new(deployer, tx, sig);
@@ -1372,6 +1413,9 @@ mod tests {
             data: shell_primitives::Bytes::new(),
             gas_limit: 21_000, max_fee_per_gas: 0, max_priority_fee_per_gas: 0,
             access_list: None,
+            tx_type: 2,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
         };
         let sig = PQSignature::new(SignatureType::Dilithium3, vec![0xAA; 100]);
         let signed = SignedTransaction::new(from, tx, sig);
@@ -1398,6 +1442,9 @@ mod tests {
             data: shell_primitives::Bytes::new(),
             gas_limit: 21_100, max_fee_per_gas: 0, max_priority_fee_per_gas: 0,
             access_list: None,
+            tx_type: 2,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
         };
         let sig = PQSignature::new(SignatureType::Dilithium3, vec![0xDD; 100]);
         let signed = SignedTransaction::new(deployer, tx, sig);
@@ -1753,6 +1800,9 @@ mod tests {
             max_fee_per_gas: 0,
             max_priority_fee_per_gas: 0,
             access_list: None,
+            tx_type: 2,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
         };
         let sig = PQSignature::new(SignatureType::Dilithium3, vec![0xDD; 100]);
         let signed_no_al = SignedTransaction::new(deployer, tx_no_al, sig);
@@ -1773,6 +1823,9 @@ mod tests {
                 address: ShellAddress::from(addr),
                 storage_keys: vec![ShellHash::ZERO],
             }]),
+            tx_type: 2,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
         };
         let sig2 = PQSignature::new(SignatureType::Dilithium3, vec![0xEE; 100]);
         let signed_with_al = SignedTransaction::new(deployer, tx_with_al, sig2);
@@ -1798,6 +1851,9 @@ mod tests {
             max_fee_per_gas: 10,
             max_priority_fee_per_gas: 1,
             access_list: Some(vec![]),
+            tx_type: 2,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
         };
         let sig = PQSignature::new(SignatureType::Dilithium3, vec![0xAA; 100]);
         let signed = SignedTransaction::new(from, tx_empty_al, sig);
@@ -1816,6 +1872,9 @@ mod tests {
             max_fee_per_gas: 10,
             max_priority_fee_per_gas: 1,
             access_list: None,
+            tx_type: 2,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
         };
         let sig2 = PQSignature::new(SignatureType::Dilithium3, vec![0xBB; 100]);
         let signed2 = SignedTransaction::new(from, tx_none_al, sig2);

@@ -232,6 +232,10 @@ pub trait EthApi {
         &self,
         id: String,
     ) -> Result<bool, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns the current blob base fee per gas (EIP-4844).
+    #[method(name = "blobBaseFee")]
+    async fn blob_base_fee(&self) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
 }
 
 /// Debug namespace RPCs (transaction tracing).

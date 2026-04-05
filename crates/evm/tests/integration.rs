@@ -43,6 +43,8 @@ fn sample_header(number: u64) -> BlockHeader {
         base_fee_per_gas: 0,
         withdrawals_root: ShellHash::ZERO,
         parent_beacon_block_root: ShellHash::ZERO,
+        blob_gas_used: 0,
+        excess_blob_gas: 0,
     }
 }
 
@@ -89,6 +91,9 @@ fn e2e_transfer_with_real_dilithium_sig() {
         max_fee_per_gas: 10,
         max_priority_fee_per_gas: 1,
         access_list: None,
+        tx_type: 2,
+        max_fee_per_blob_gas: None,
+        blob_versioned_hashes: None,
     };
 
     let hash = tx_signing_hash(&tx);
@@ -135,6 +140,9 @@ fn e2e_reject_invalid_signature() {
         max_fee_per_gas: 10,
         max_priority_fee_per_gas: 1,
         access_list: None,
+        tx_type: 2,
+        max_fee_per_blob_gas: None,
+        blob_versioned_hashes: None,
     };
 
     let bad_sig = PQSignature::new(SignatureType::Dilithium3, vec![0xFF; 3293]);
@@ -172,6 +180,9 @@ fn e2e_contract_deployment() {
         max_fee_per_gas: 10,
         max_priority_fee_per_gas: 1,
         access_list: None,
+        tx_type: 2,
+        max_fee_per_blob_gas: None,
+        blob_versioned_hashes: None,
     };
 
     let sig = PQSignature::new(SignatureType::Dilithium3, vec![0xAA; 100]);
@@ -213,6 +224,9 @@ fn e2e_hybrid_pubkey_second_tx_from_registry() {
         max_fee_per_gas: 10,
         max_priority_fee_per_gas: 1,
         access_list: None,
+        tx_type: 2,
+        max_fee_per_blob_gas: None,
+        blob_versioned_hashes: None,
     };
 
     let hash1 = tx_signing_hash(&tx1);
@@ -255,6 +269,9 @@ fn e2e_hybrid_pubkey_second_tx_from_registry() {
         max_fee_per_gas: 10,
         max_priority_fee_per_gas: 1,
         access_list: None,
+        tx_type: 2,
+        max_fee_per_blob_gas: None,
+        blob_versioned_hashes: None,
     };
 
     let hash2 = tx_signing_hash(&tx2);
@@ -317,6 +334,9 @@ fn e2e_cumulative_gas_tracking() {
         max_fee_per_gas: 10,
         max_priority_fee_per_gas: 1,
         access_list: None,
+        tx_type: 2,
+        max_fee_per_blob_gas: None,
+        blob_versioned_hashes: None,
     };
     let sig1 = PQSignature::new(SignatureType::Dilithium3, vec![0xAA; 100]);
     let signed1 = SignedTransaction::new(from, tx1, sig1);
@@ -335,6 +355,9 @@ fn e2e_cumulative_gas_tracking() {
         max_fee_per_gas: 10,
         max_priority_fee_per_gas: 1,
         access_list: None,
+        tx_type: 2,
+        max_fee_per_blob_gas: None,
+        blob_versioned_hashes: None,
     };
     let sig2 = PQSignature::new(SignatureType::Dilithium3, vec![0xBB; 100]);
     let signed2 = SignedTransaction::new(from, tx2, sig2);

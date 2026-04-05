@@ -234,6 +234,9 @@ impl<S: KvStore + 'static> RpcHandler<S> {
             max_fee_per_gas: 0,
             max_priority_fee_per_gas: 0,
             access_list: None,
+            tx_type: 2,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
         };
 
         let tx_hash = tx.hash();
@@ -336,6 +339,9 @@ impl<S: KvStore + 'static> RpcHandler<S> {
             value,
             data,
             access_list,
+            tx_type: 2,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
         };
 
         let sig = shell_crypto::PQSignature::new(
@@ -360,6 +366,8 @@ impl<S: KvStore + 'static> RpcHandler<S> {
             base_fee_per_gas: 0,
             withdrawals_root: ShellHash::ZERO,
             parent_beacon_block_root: ShellHash::ZERO,
+            blob_gas_used: 0,
+            excess_blob_gas: 0,
         };
 
         let result = evm
@@ -655,6 +663,8 @@ fn block_to_rpc(block: &Block, full_txs: bool) -> RpcBlock {
         logs_bloom,
         withdrawals_root: format!("{:?}", block.header.withdrawals_root),
         parent_beacon_block_root: format!("{:?}", block.header.parent_beacon_block_root),
+        blob_gas_used: hex_u64(block.header.blob_gas_used),
+        excess_blob_gas: hex_u64(block.header.excess_blob_gas),
     }
 }
 
@@ -690,7 +700,7 @@ fn tx_to_rpc(
         nonce: hex_u64(tx.tx.nonce),
         input: hex_bytes(tx.tx.data.as_ref()),
         chain_id: hex_u64(tx.tx.chain_id),
-        tx_type: "0x2".into(),
+        tx_type: format!("{:#x}", tx.tx.tx_type),
         v: "0x0".into(),
         r: "0x0".into(),
         s: "0x0".into(),
@@ -706,6 +716,8 @@ fn tx_to_rpc(
                 })
                 .collect()
         }),
+        max_fee_per_blob_gas: tx.tx.max_fee_per_blob_gas.map(hex_u64),
+        blob_versioned_hashes: tx.tx.blob_versioned_hashes.clone(),
     }
 }
 
@@ -860,6 +872,8 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
                     logs_bloom: format!("0x{}", "00".repeat(BLOOM_SIZE)),
                     withdrawals_root: format!("{:?}", ShellHash::ZERO),
                     parent_beacon_block_root: format!("{:?}", ShellHash::ZERO),
+                    blob_gas_used: hex_u64(0),
+                    excess_blob_gas: hex_u64(0),
                 };
                 Ok(Some(pending_block))
             }
@@ -935,16 +949,16 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
             if let (Some(block), Some(receipts)) = (block, receipts) {
                 if let Some(receipt) = receipts.get(tx_index as usize) {
                     // F-067: populate from/to/effective_gas_price from the transaction.
-                    let (from, to, eff_gas_price) =
+                    let (from, to, eff_gas_price, tx_type_val) =
                         if let Some(tx) = block.transactions.get(tx_index as usize) {
                             let price = shell_core::effective_gas_price(
                                 tx.tx.max_fee_per_gas,
                                 tx.tx.max_priority_fee_per_gas,
                                 block.header.base_fee_per_gas,
                             );
-                            (tx.sender(), tx.tx.to, price)
+                            (tx.sender(), tx.tx.to, price, tx.tx.tx_type)
                         } else {
-                            (Address::ZERO, None, 0)
+                            (Address::ZERO, None, 0, 2u8)
                         };
 
                     return Ok(Some(RpcReceipt {
@@ -969,7 +983,7 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
                             })
                             .collect(),
                         logs_bloom: hex_bytes(receipt.logs_bloom.as_ref()),
-                        tx_type: "0x2".into(),
+                        tx_type: format!("{:#x}", tx_type_val),
                     }));
                 }
             }
@@ -1431,6 +1445,13 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
     ) -> Result<bool, ErrorObjectOwned> {
         Ok(self.filter_registry.uninstall(&id))
     }
+
+    async fn blob_base_fee(&self) -> Result<String, ErrorObjectOwned> {
+        let head = self.chain_store.get_head_block().map_err(internal_err)?;
+        let excess = head.map(|b| b.header.excess_blob_gas).unwrap_or(0);
+        let price = shell_core::calc_blob_gas_price(excess);
+        Ok(hex_u64(price))
+    }
 }
 
 #[jsonrpsee::core::async_trait]
@@ -1870,6 +1891,8 @@ mod tests {
                 base_fee_per_gas: 0,
                 withdrawals_root: ShellHash::ZERO,
                 parent_beacon_block_root: ShellHash::ZERO,
+                blob_gas_used: 0,
+                excess_blob_gas: 0,
             },
             transactions: vec![],
             proposer_seal: None,
@@ -2064,6 +2087,9 @@ mod tests {
                     value: U256::ZERO,
                     data: Bytes::default(),
                     access_list: None,
+                    tx_type: 2,
+                    max_fee_per_blob_gas: None,
+                    blob_versioned_hashes: None,
                 },
                 shell_crypto::PQSignature::new(
                     shell_crypto::SignatureType::Dilithium3,
@@ -2106,6 +2132,9 @@ mod tests {
             value: U256::ZERO,
             data: Bytes::default(),
             access_list: None,
+            tx_type: 2,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
         };
 
         let signature = signer.sign(tx.hash().0.as_slice()).unwrap();
@@ -2143,6 +2172,9 @@ mod tests {
             value: U256::ZERO,
             data: Bytes::default(),
             access_list: None,
+            tx_type: 2,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
         };
         let signature = signer.sign(tx.hash().0.as_slice()).unwrap();
         let signed = SignedTransaction::new(addr, tx, signature);
@@ -2324,6 +2356,8 @@ mod tests {
                 base_fee_per_gas: 0,
                 withdrawals_root: ShellHash::ZERO,
                 parent_beacon_block_root: ShellHash::ZERO,
+                blob_gas_used: 0,
+                excess_blob_gas: 0,
             },
             transactions: vec![],
             proposer_seal: None,
@@ -3081,6 +3115,8 @@ mod tests {
                 base_fee_per_gas: 1_000_000_000,
                 withdrawals_root: ShellHash::ZERO,
                 parent_beacon_block_root: ShellHash::ZERO,
+                blob_gas_used: 0,
+                excess_blob_gas: 0,
             },
             transactions: vec![],
             proposer_seal: None,
@@ -3153,6 +3189,8 @@ mod tests {
                 base_fee_per_gas: 0,
                 withdrawals_root: ShellHash::ZERO,
                 parent_beacon_block_root: ShellHash::ZERO,
+                blob_gas_used: 0,
+                excess_blob_gas: 0,
             },
             transactions: vec![],
             proposer_seal: None,
@@ -3522,6 +3560,9 @@ mod tests {
             value: U256::from(1000),
             data: Bytes::from(vec![0xaa, 0xbb]),
             access_list: None,
+            tx_type: 2,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
         };
         let sig = shell_crypto::PQSignature::new(shell_crypto::SignatureType::Dilithium3, vec![]);
         let signed = SignedTransaction::new(from, tx, sig);
@@ -3544,6 +3585,8 @@ mod tests {
                 base_fee_per_gas: 0,
                 withdrawals_root: ShellHash::ZERO,
                 parent_beacon_block_root: ShellHash::ZERO,
+                blob_gas_used: 0,
+                excess_blob_gas: 0,
             },
             transactions: vec![signed],
             proposer_seal: None,
