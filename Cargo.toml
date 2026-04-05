@@ -77,6 +77,8 @@ rustls-pemfile = "2"
 
 # --- cli ---
 clap = { version = "4", features = ["derive"] }
+toml = "0.8"
+ureq = { version = "2", features = ["json"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 rpassword = "7"

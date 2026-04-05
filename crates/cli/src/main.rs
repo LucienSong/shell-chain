@@ -5,6 +5,8 @@
 //! - `run`           — start the node (block production + RPC + network)
 //! - `init`          — initialize genesis and data directory
 //! - `key generate`  — create a new encrypted keystore file
+//! - `tx send|deploy|call` — transaction operations
+//! - `account list|balance|nonce` — account management
 //! - `export-state`  — export chain state to a snapshot file
 //! - `import-state`  — import chain state from a snapshot file
 //! - `removedb`      — remove the chain database
@@ -16,6 +18,9 @@ use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 mod commands;
+mod config;
+
+use config::ShellConfig;
 
 #[derive(Parser)]
 #[command(
@@ -44,6 +49,10 @@ struct Cli {
 enum Commands {
     /// Start the node.
     Run {
+        /// Path to TOML configuration file.
+        #[arg(long)]
+        config: Option<PathBuf>,
+
         /// JSON-RPC listen address.
         #[arg(long, default_value = "127.0.0.1:8545")]
         rpc_addr: String,
@@ -157,6 +166,18 @@ enum Commands {
 
     /// Print version information.
     Version,
+
+    /// Send, deploy, or call transactions.
+    Tx {
+        #[command(subcommand)]
+        command: commands::tx::TxCommand,
+    },
+
+    /// Account management (list keystores, query balance/nonce).
+    Account {
+        #[command(subcommand)]
+        command: commands::account::AccountCommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -207,6 +228,7 @@ async fn main() {
 
     let result = match cli.command {
         Commands::Run {
+            config: config_path,
             rpc_addr,
             block_time,
             keystore,
@@ -225,28 +247,129 @@ async fn main() {
             rpc_rate_limit,
             rpc_api,
         } => {
+            // Load config file if specified (CLI args override file values).
+            let file_config = match &config_path {
+                Some(path) => match config::load_config(path) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        eprintln!("Error: {e}");
+                        std::process::exit(1);
+                    }
+                },
+                None => ShellConfig::default(),
+            };
+
+            // Merge: CLI explicit values take priority over config file.
+            let datadir = if cli.datadir != PathBuf::from("shell-data") {
+                cli.datadir
+            } else {
+                file_config
+                    .node
+                    .datadir
+                    .map(PathBuf::from)
+                    .unwrap_or(cli.datadir)
+            };
+
+            let effective_rpc_addr = if rpc_addr != "127.0.0.1:8545" {
+                rpc_addr
+            } else {
+                file_config
+                    .rpc
+                    .listen_addr
+                    .unwrap_or(rpc_addr)
+            };
+
+            let effective_block_time = if block_time != 2000 {
+                block_time
+            } else {
+                file_config.node.block_time.unwrap_or(block_time)
+            };
+
+            let effective_keystore = keystore.or_else(|| {
+                file_config.node.keystore.map(PathBuf::from)
+            });
+
+            let effective_chain_id = if chain_id != 1337 {
+                chain_id
+            } else {
+                file_config.node.chain_id.unwrap_or(chain_id)
+            };
+
+            let effective_db = if db != "memory" {
+                db
+            } else {
+                file_config.node.db.unwrap_or(db)
+            };
+
+            let effective_ws = ws || file_config.rpc.ws_enabled.unwrap_or(false);
+
+            let effective_ws_port = if ws_port != 8546 {
+                ws_port
+            } else {
+                file_config.rpc.ws_port.unwrap_or(ws_port)
+            };
+
+            let effective_p2p = p2p || file_config.p2p.enabled.unwrap_or(false);
+
+            let effective_p2p_addr = if p2p_addr != "0.0.0.0:30303" {
+                p2p_addr
+            } else {
+                file_config.p2p.listen_addr.unwrap_or(p2p_addr)
+            };
+
+            let effective_enable_mdns =
+                enable_mdns || file_config.p2p.enable_mdns.unwrap_or(false);
+
+            let effective_pruning = if pruning != 0 {
+                pruning
+            } else {
+                file_config.node.pruning.unwrap_or(pruning)
+            };
+
+            let effective_rpc_cors = rpc_cors.or_else(|| {
+                file_config
+                    .rpc
+                    .cors_origins
+                    .map(|v| v.join(","))
+            });
+
+            let effective_rpc_rate_limit =
+                rpc_rate_limit.or(file_config.rpc.rate_limit);
+
+            let effective_rpc_api = rpc_api.or_else(|| {
+                file_config
+                    .rpc
+                    .api_modules
+                    .map(|v| v.join(","))
+            });
+
             // Merge --bootnode (repeatable) and --bootnodes (comma-separated).
             let mut all_bootnodes = bootnode;
             all_bootnodes.extend(bootnodes);
+            if all_bootnodes.is_empty() {
+                if let Some(cfg_bootnodes) = file_config.p2p.bootnodes {
+                    all_bootnodes = cfg_bootnodes;
+                }
+            }
 
             commands::run(commands::run::RunArgs {
-                datadir: cli.datadir,
-                rpc_addr,
-                block_time,
-                keystore,
-                chain_id,
-                db,
-                ws,
-                ws_port,
-                p2p,
-                p2p_addr,
+                datadir,
+                rpc_addr: effective_rpc_addr,
+                block_time: effective_block_time,
+                keystore: effective_keystore,
+                chain_id: effective_chain_id,
+                db: effective_db,
+                ws: effective_ws,
+                ws_port: effective_ws_port,
+                p2p: effective_p2p,
+                p2p_addr: effective_p2p_addr,
                 bootnodes: all_bootnodes,
-                enable_mdns,
-                pruning,
+                enable_mdns: effective_enable_mdns,
+                pruning: effective_pruning,
                 checkpoint_url,
-                rpc_cors,
-                rpc_rate_limit,
-                rpc_api,
+                rpc_cors: effective_rpc_cors,
+                rpc_rate_limit: effective_rpc_rate_limit,
+                rpc_api: effective_rpc_api,
             })
             .await
         }
@@ -267,6 +390,8 @@ async fn main() {
             commands::removedb(cli.datadir, force)
         }
         Commands::Version => commands::version(),
+        Commands::Tx { command } => commands::tx::execute(command),
+        Commands::Account { command } => commands::account::execute(command),
     };
 
     if let Err(e) = result {
