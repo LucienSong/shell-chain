@@ -244,6 +244,32 @@ pub trait DebugApi {
         tx_hash: String,
         opts: Option<serde_json::Value>,
     ) -> Result<serde_json::Value, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Traces all transactions in a block by number, returning an array of call traces.
+    #[method(name = "traceBlockByNumber")]
+    async fn trace_block_by_number(
+        &self,
+        block_number: String,
+        opts: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, jsonrpsee::types::ErrorObjectOwned>;
+}
+
+/// OpenEthereum-compatible trace namespace RPCs.
+#[rpc(server, namespace = "trace")]
+pub trait TraceApi {
+    /// Returns traces for all transactions in a block (OpenEthereum format).
+    #[method(name = "block")]
+    async fn trace_block(
+        &self,
+        block_number: String,
+    ) -> Result<serde_json::Value, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns traces for a single transaction (OpenEthereum format).
+    #[method(name = "transaction")]
+    async fn trace_oe_transaction(
+        &self,
+        tx_hash: String,
+    ) -> Result<serde_json::Value, jsonrpsee::types::ErrorObjectOwned>;
 }
 
 /// Shell-chain extension API for PQ-specific features.

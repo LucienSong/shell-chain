@@ -158,3 +158,64 @@ pub fn hex_u256(v: U256) -> String {
 pub fn hex_bytes(data: &[u8]) -> String {
     format!("0x{}", hex::encode(data))
 }
+
+// ── Debug / Trace RPC types ────────────────────────────────────
+
+/// Options accepted by `debug_traceTransaction` and `debug_traceBlockByNumber`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TraceOptions {
+    /// Tracer type (only "callTracer" is supported).
+    #[serde(default)]
+    pub tracer: Option<String>,
+    /// Whether to include only the top-level call (no nested calls).
+    #[serde(default)]
+    pub disable_stack: Option<bool>,
+    /// Whether to exclude memory from the result.
+    #[serde(default)]
+    pub disable_memory: Option<bool>,
+    /// Whether to exclude storage from the result.
+    #[serde(default)]
+    pub disable_storage: Option<bool>,
+}
+
+/// OpenEthereum-compatible trace action.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OeTraceAction {
+    /// Call type: "call", "create", "staticcall", "delegatecall"
+    pub call_type: Option<String>,
+    pub from: Address,
+    pub to: Option<Address>,
+    pub gas: String,
+    pub value: String,
+    pub input: String,
+}
+
+/// OpenEthereum-compatible trace result (return data + gas).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OeTraceOutput {
+    pub gas_used: String,
+    pub output: String,
+}
+
+/// Single OpenEthereum-compatible trace entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OeTrace {
+    pub action: OeTraceAction,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<OeTraceOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub subtraces: u64,
+    pub trace_address: Vec<u64>,
+    /// "call" | "create"
+    #[serde(rename = "type")]
+    pub trace_type: String,
+    pub block_number: u64,
+    pub block_hash: ShellHash,
+    pub transaction_hash: ShellHash,
+    pub transaction_position: u64,
+}

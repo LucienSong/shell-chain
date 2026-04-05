@@ -16,7 +16,7 @@ use shell_mempool::TxPool;
 use shell_primitives::{Address, Bytes, ShellHash, U256};
 use shell_storage::{ChainStore, KvStore, WorldState};
 
-use crate::api::{EthApiServer, ShellApiServer, Web3ApiServer, NetApiServer, DebugApiServer};
+use crate::api::{EthApiServer, ShellApiServer, Web3ApiServer, NetApiServer, DebugApiServer, TraceApiServer};
 use crate::filter::{RawLogFilter, MAX_BLOCK_RANGE};
 use crate::filter_registry::{FilterKind, FilterRegistry};
 use crate::subscriptions::{BlockEvent, SubscriptionTracker, SyncStatus};
@@ -380,6 +380,121 @@ impl<S: KvStore + 'static> RpcHandler<S> {
                 Ok(Some(num))
             }
             BlockTag::Number(n) => Ok(Some(n)),
+        }
+    }
+
+    /// Look up a transaction and its containing block by hex-encoded hash.
+    /// Returns (block, signed_tx, receipt, tx_index).
+    fn lookup_tx_with_block(
+        &self,
+        tx_hash: &str,
+    ) -> Result<(Block, SignedTransaction, shell_core::TransactionReceipt, u32), ErrorObjectOwned> {
+        let hex_str = tx_hash.strip_prefix("0x").unwrap_or(tx_hash);
+        let hash_bytes = hex::decode(hex_str)
+            .map_err(|e| internal_err(format!("invalid tx hash hex: {e}")))?;
+        let hash = ShellHash::try_from_slice(&hash_bytes)
+            .map_err(|e| internal_err(format!("invalid tx hash length: {e}")))?;
+
+        let (block_hash, tx_index) = self
+            .chain_store
+            .get_tx_location(&hash)
+            .map_err(internal_err)?
+            .ok_or_else(|| internal_err("transaction not found"))?;
+
+        let block = self
+            .chain_store
+            .get_block_by_hash(&block_hash)
+            .map_err(internal_err)?
+            .ok_or_else(|| internal_err("block not found"))?;
+
+        let tx = block
+            .transactions
+            .get(tx_index as usize)
+            .ok_or_else(|| internal_err("transaction not in block"))?
+            .clone();
+
+        let receipts = self
+            .chain_store
+            .get_receipts(&block_hash)
+            .map_err(internal_err)?
+            .ok_or_else(|| internal_err("receipts not found"))?;
+
+        let receipt = receipts
+            .get(tx_index as usize)
+            .ok_or_else(|| internal_err("receipt not found"))?
+            .clone();
+
+        Ok((block, tx, receipt, tx_index))
+    }
+
+    /// Resolve a block number string ("latest", "0x...", etc.) to a Block.
+    fn resolve_block(&self, block_number: &str) -> Result<Block, ErrorObjectOwned> {
+        let num_opt = self.parse_block_number(block_number)?;
+        match num_opt {
+            Some(n) => self
+                .chain_store
+                .get_block_by_number(n)
+                .map_err(internal_err)?
+                .ok_or_else(|| internal_err(format!("block {n} not found"))),
+            None => {
+                // "latest" — resolve head
+                let head = self.chain_store.get_head_block().map_err(internal_err)?;
+                head.ok_or_else(|| internal_err("chain has no blocks"))
+            }
+        }
+    }
+
+    /// Build an OpenEthereum-compatible trace entry for a single transaction.
+    fn build_oe_trace(
+        &self,
+        tx: &SignedTransaction,
+        receipt: Option<&shell_core::TransactionReceipt>,
+        block_number: u64,
+        block_hash: ShellHash,
+        tx_position: u64,
+    ) -> OeTrace {
+        let is_create = tx.tx.to.is_none();
+        let trace_type = if is_create { "create" } else { "call" };
+        let call_type = if is_create { None } else { Some("call".to_string()) };
+
+        let action = OeTraceAction {
+            call_type,
+            from: tx.sender(),
+            to: tx.tx.to,
+            gas: hex_u64(tx.tx.gas_limit),
+            value: hex_u256(tx.tx.value),
+            input: hex_bytes(tx.tx.data.as_ref()),
+        };
+
+        let (result, error) = match receipt {
+            Some(r) if r.succeeded() => {
+                let output = OeTraceOutput {
+                    gas_used: hex_u64(r.gas_used),
+                    output: "0x".to_string(),
+                };
+                (Some(output), None)
+            }
+            Some(r) => {
+                let output = OeTraceOutput {
+                    gas_used: hex_u64(r.gas_used),
+                    output: "0x".to_string(),
+                };
+                (Some(output), Some("execution reverted".to_string()))
+            }
+            None => (None, Some("receipt not available".to_string())),
+        };
+
+        OeTrace {
+            action,
+            result,
+            error,
+            subtraces: 0,
+            trace_address: vec![],
+            trace_type: trace_type.to_string(),
+            block_number,
+            block_hash,
+            transaction_hash: tx.hash(),
+            transaction_position: tx_position,
         }
     }
 }
@@ -1569,42 +1684,13 @@ impl<S: KvStore + 'static> DebugApiServer for RpcHandler<S> {
     async fn trace_transaction(
         &self,
         tx_hash: String,
-        _opts: Option<serde_json::Value>,
+        opts: Option<serde_json::Value>,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        // Parse the hex-encoded transaction hash.
-        let hex_str = tx_hash.strip_prefix("0x").unwrap_or(&tx_hash);
-        let hash_bytes = hex::decode(hex_str)
-            .map_err(|e| internal_err(format!("invalid tx hash hex: {e}")))?;
-        let hash = ShellHash::try_from_slice(&hash_bytes)
-            .map_err(|e| internal_err(format!("invalid tx hash length: {e}")))?;
+        let _trace_opts: TraceOptions = opts
+            .map(|v| serde_json::from_value(v).unwrap_or_default())
+            .unwrap_or_default();
 
-        // Find the transaction's on-chain location.
-        let (block_hash, tx_index) = self
-            .chain_store
-            .get_tx_location(&hash)
-            .map_err(internal_err)?
-            .ok_or_else(|| internal_err("transaction not found"))?;
-
-        let block = self
-            .chain_store
-            .get_block_by_hash(&block_hash)
-            .map_err(internal_err)?
-            .ok_or_else(|| internal_err("block not found"))?;
-
-        let tx = block
-            .transactions
-            .get(tx_index as usize)
-            .ok_or_else(|| internal_err("transaction not in block"))?;
-
-        let receipts = self
-            .chain_store
-            .get_receipts(&block_hash)
-            .map_err(internal_err)?
-            .ok_or_else(|| internal_err("receipts not found"))?;
-
-        let receipt = receipts
-            .get(tx_index as usize)
-            .ok_or_else(|| internal_err("receipt not found"))?;
+        let (_block, tx, receipt, _tx_index) = self.lookup_tx_with_block(&tx_hash)?;
 
         let to_addr = tx.tx.to.unwrap_or(Address::ZERO);
         let call_type = if tx.tx.to.is_none() { "CREATE" } else { "CALL" };
@@ -1616,10 +1702,22 @@ impl<S: KvStore + 'static> DebugApiServer for RpcHandler<S> {
             tx.tx.gas_limit,
             tx.tx.data.clone(),
         );
+        if !tx.tx.value.is_zero() {
+            frame = frame.with_value(tx.tx.value);
+        }
         frame.gas_used = receipt.gas_used;
 
-        if !receipt.succeeded() {
+        if receipt.succeeded() {
+            frame.output = Some(Bytes::default());
+        } else {
             frame.error = Some("execution reverted".to_string());
+        }
+
+        // Populate output/revert_reason from contract address if CREATE
+        if tx.tx.to.is_none() {
+            if let Some(addr) = receipt.contract_address {
+                frame.to = addr;
+            }
         }
 
         let trace = shell_evm::TraceResult {
@@ -1628,6 +1726,107 @@ impl<S: KvStore + 'static> DebugApiServer for RpcHandler<S> {
         };
 
         serde_json::to_value(&trace).map_err(|e| internal_err(format!("serialization error: {e}")))
+    }
+
+    async fn trace_block_by_number(
+        &self,
+        block_number: String,
+        opts: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let _trace_opts: TraceOptions = opts
+            .map(|v| serde_json::from_value(v).unwrap_or_default())
+            .unwrap_or_default();
+
+        let block = self.resolve_block(&block_number)?;
+        let block_hash = block.hash();
+
+        let receipts = self
+            .chain_store
+            .get_receipts(&block_hash)
+            .map_err(internal_err)?
+            .unwrap_or_default();
+
+        let mut traces = Vec::with_capacity(block.transactions.len());
+        for (i, tx) in block.transactions.iter().enumerate() {
+            let receipt = receipts.get(i);
+            let to_addr = tx.tx.to.unwrap_or(Address::ZERO);
+            let call_type = if tx.tx.to.is_none() { "CREATE" } else { "CALL" };
+
+            let mut frame = shell_evm::CallFrame::new(
+                call_type,
+                tx.sender(),
+                to_addr,
+                tx.tx.gas_limit,
+                tx.tx.data.clone(),
+            );
+            if !tx.tx.value.is_zero() {
+                frame = frame.with_value(tx.tx.value);
+            }
+
+            if let Some(r) = receipt {
+                frame.gas_used = r.gas_used;
+                if r.succeeded() {
+                    frame.output = Some(Bytes::default());
+                } else {
+                    frame.error = Some("execution reverted".to_string());
+                }
+                if tx.tx.to.is_none() {
+                    if let Some(addr) = r.contract_address {
+                        frame.to = addr;
+                    }
+                }
+            }
+
+            let failed = receipt.map(|r| !r.succeeded()).unwrap_or(true);
+            let trace = shell_evm::TraceResult { frame, failed };
+            traces.push(trace);
+        }
+
+        serde_json::to_value(&traces)
+            .map_err(|e| internal_err(format!("serialization error: {e}")))
+    }
+}
+
+#[jsonrpsee::core::async_trait]
+impl<S: KvStore + 'static> TraceApiServer for RpcHandler<S> {
+    async fn trace_block(
+        &self,
+        block_number: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let block = self.resolve_block(&block_number)?;
+        let block_hash = block.hash();
+        let block_num = block.header.number;
+
+        let receipts = self
+            .chain_store
+            .get_receipts(&block_hash)
+            .map_err(internal_err)?
+            .unwrap_or_default();
+
+        let mut traces = Vec::with_capacity(block.transactions.len());
+        for (i, tx) in block.transactions.iter().enumerate() {
+            let receipt = receipts.get(i);
+            let trace = self.build_oe_trace(tx, receipt, block_num, block_hash, i as u64);
+            traces.push(trace);
+        }
+
+        serde_json::to_value(&traces)
+            .map_err(|e| internal_err(format!("serialization error: {e}")))
+    }
+
+    async fn trace_oe_transaction(
+        &self,
+        tx_hash: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let (block, tx, receipt, tx_index) = self.lookup_tx_with_block(&tx_hash)?;
+        let block_hash = block.hash();
+        let block_num = block.header.number;
+
+        let trace = self.build_oe_trace(&tx, Some(&receipt), block_num, block_hash, tx_index as u64);
+        let traces = vec![trace];
+
+        serde_json::to_value(&traces)
+            .map_err(|e| internal_err(format!("serialization error: {e}")))
     }
 }
 
@@ -3304,5 +3503,242 @@ mod tests {
         let result = EthApiServer::get_filter_logs(&handler, filter_id).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().message().contains("filter not found"));
+    }
+
+    // ── Debug / Trace API tests ────────────────────────────────
+
+    /// Helper: create a block with one transaction and store it along with receipts.
+    /// Returns (block_hash, tx_hash).
+    fn store_block_with_tx(handler: &RpcHandler<MemoryDb>, number: u64, succeeded: bool) -> (ShellHash, ShellHash) {
+        let signer = DilithiumSigner::generate();
+        let from = Address::from_public_key(signer.public_key());
+        let tx = Transaction {
+            chain_id: 42,
+            nonce: 0,
+            max_fee_per_gas: 0,
+            max_priority_fee_per_gas: 0,
+            gas_limit: 21_000,
+            to: Some(Address::from([0xBB; 20])),
+            value: U256::from(1000),
+            data: Bytes::from(vec![0xaa, 0xbb]),
+            access_list: None,
+        };
+        let sig = shell_crypto::PQSignature::new(shell_crypto::SignatureType::Dilithium3, vec![]);
+        let signed = SignedTransaction::new(from, tx, sig);
+        let tx_hash = signed.hash();
+
+        let block = Block {
+            header: BlockHeader {
+                parent_hash: ShellHash::default(),
+                state_root: ShellHash::default(),
+                transactions_root: ShellHash::default(),
+                receipts_root: ShellHash::default(),
+                logs_bloom: Bytes::default(),
+                number,
+                gas_limit: 30_000_000,
+                gas_used: 21_000,
+                timestamp: 1_700_000_000 + number,
+                extra_data: Bytes::default(),
+                proposer: Address::from_public_key(b"proposer-key-data"),
+                sig_aggregate_proof: None,
+                base_fee_per_gas: 0,
+                withdrawals_root: ShellHash::ZERO,
+                parent_beacon_block_root: ShellHash::ZERO,
+            },
+            transactions: vec![signed],
+            proposer_seal: None,
+        };
+        let block_hash = block.hash();
+
+        handler.chain_store.put_block(&block).unwrap();
+        handler.chain_store.set_canonical(number, &block_hash).unwrap();
+        handler.chain_store.set_head(&block_hash).unwrap();
+
+        let receipt = TransactionReceipt {
+            tx_hash,
+            block_number: number,
+            tx_index: 0,
+            status: if succeeded { 1 } else { 0 },
+            gas_used: 21_000,
+            cumulative_gas_used: 21_000,
+            contract_address: None,
+            logs_bloom: Bytes::default(),
+            logs: vec![],
+        };
+        handler.chain_store.put_receipts(&block_hash, &[receipt]).unwrap();
+
+        (block_hash, tx_hash)
+    }
+
+    #[tokio::test]
+    async fn debug_trace_transaction_returns_call_frame() {
+        let handler = setup();
+        let (_block_hash, tx_hash) = store_block_with_tx(&handler, 0, true);
+
+        let result = DebugApiServer::trace_transaction(
+            &handler,
+            format!("0x{}", hex::encode(tx_hash.as_bytes())),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result["type"], "CALL");
+        assert_eq!(result["failed"], false);
+        assert_eq!(result["gasUsed"], 21_000);
+        assert!(result["error"].is_null());
+    }
+
+    #[tokio::test]
+    async fn debug_trace_transaction_reverted() {
+        let handler = setup();
+        let (_block_hash, tx_hash) = store_block_with_tx(&handler, 0, false);
+
+        let result = DebugApiServer::trace_transaction(
+            &handler,
+            format!("0x{}", hex::encode(tx_hash.as_bytes())),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result["type"], "CALL");
+        assert_eq!(result["failed"], true);
+        assert_eq!(result["error"], "execution reverted");
+    }
+
+    #[tokio::test]
+    async fn debug_trace_transaction_not_found() {
+        let handler = setup();
+        let fake_hash = "0x".to_string() + &"aa".repeat(32);
+        let result = DebugApiServer::trace_transaction(&handler, fake_hash, None).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn debug_trace_block_by_number_returns_traces() {
+        let handler = setup();
+        store_block_with_tx(&handler, 0, true);
+
+        let result = DebugApiServer::trace_block_by_number(&handler, "0x0".into(), None)
+            .await
+            .unwrap();
+
+        let traces = result.as_array().unwrap();
+        assert_eq!(traces.len(), 1);
+        assert_eq!(traces[0]["type"], "CALL");
+        assert_eq!(traces[0]["failed"], false);
+    }
+
+    #[tokio::test]
+    async fn debug_trace_block_by_number_empty_block() {
+        let handler = setup();
+        let block = make_genesis_block();
+        let hash = block.hash();
+        handler.chain_store.put_block(&block).unwrap();
+        handler.chain_store.set_canonical(0, &hash).unwrap();
+        handler.chain_store.set_head(&hash).unwrap();
+
+        let result = DebugApiServer::trace_block_by_number(&handler, "0x0".into(), None)
+            .await
+            .unwrap();
+
+        let traces = result.as_array().unwrap();
+        assert!(traces.is_empty());
+    }
+
+    #[tokio::test]
+    async fn trace_block_returns_oe_format() {
+        let handler = setup();
+        let (block_hash, tx_hash) = store_block_with_tx(&handler, 0, true);
+
+        let result = TraceApiServer::trace_block(&handler, "0x0".into())
+            .await
+            .unwrap();
+
+        let traces = result.as_array().unwrap();
+        assert_eq!(traces.len(), 1);
+
+        let t = &traces[0];
+        assert_eq!(t["type"], "call");
+        assert_eq!(t["subtraces"], 0);
+        assert_eq!(t["traceAddress"], serde_json::json!([]));
+        assert_eq!(t["blockNumber"], 0);
+        assert_eq!(t["transactionPosition"], 0);
+        assert_eq!(
+            t["blockHash"],
+            serde_json::to_value(block_hash).unwrap()
+        );
+        assert_eq!(
+            t["transactionHash"],
+            serde_json::to_value(tx_hash).unwrap()
+        );
+        // Action fields
+        assert!(t["action"]["from"].is_string());
+        assert!(t["action"]["gas"].is_string());
+        // Result fields
+        assert!(t["result"]["gasUsed"].is_string());
+    }
+
+    #[tokio::test]
+    async fn trace_oe_transaction_returns_oe_format() {
+        let handler = setup();
+        let (_block_hash, tx_hash) = store_block_with_tx(&handler, 0, true);
+
+        let result = TraceApiServer::trace_oe_transaction(
+            &handler,
+            format!("0x{}", hex::encode(tx_hash.as_bytes())),
+        )
+        .await
+        .unwrap();
+
+        let traces = result.as_array().unwrap();
+        assert_eq!(traces.len(), 1);
+        assert_eq!(traces[0]["type"], "call");
+        assert!(traces[0]["error"].is_null());
+    }
+
+    #[tokio::test]
+    async fn trace_oe_transaction_reverted_has_error() {
+        let handler = setup();
+        let (_block_hash, tx_hash) = store_block_with_tx(&handler, 0, false);
+
+        let result = TraceApiServer::trace_oe_transaction(
+            &handler,
+            format!("0x{}", hex::encode(tx_hash.as_bytes())),
+        )
+        .await
+        .unwrap();
+
+        let traces = result.as_array().unwrap();
+        assert_eq!(traces[0]["error"], "execution reverted");
+    }
+
+    #[tokio::test]
+    async fn trace_oe_transaction_not_found() {
+        let handler = setup();
+        let fake_hash = "0x".to_string() + &"cc".repeat(32);
+        let result = TraceApiServer::trace_oe_transaction(&handler, fake_hash).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn debug_trace_transaction_with_options() {
+        let handler = setup();
+        let (_block_hash, tx_hash) = store_block_with_tx(&handler, 0, true);
+
+        let opts = serde_json::json!({ "tracer": "callTracer" });
+        let result = DebugApiServer::trace_transaction(
+            &handler,
+            format!("0x{}", hex::encode(tx_hash.as_bytes())),
+            Some(opts),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result["type"], "CALL");
+        assert_eq!(result["failed"], false);
     }
 }
