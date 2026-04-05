@@ -4,6 +4,14 @@ use serde::{Deserialize, Serialize};
 use shell_consensus::Attestation;
 use shell_core::{Block, SignedTransaction};
 
+use crate::error::NetworkError;
+
+/// Default maximum message size: 4 MiB.
+///
+/// This matches the GossipSub `max_transmit_size` and prevents memory
+/// exhaustion from oversized payloads before deserialization is attempted.
+pub const MAX_MESSAGE_SIZE: usize = 4 * 1024 * 1024;
+
 /// Unique identifier for a network peer.
 #[derive(Debug, Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PeerId(pub String);
@@ -67,6 +75,29 @@ pub enum NetworkEvent {
         /// Number of peers in the routing table.
         peer_count: usize,
     },
+}
+
+/// F-069: Validate that raw message bytes do not exceed the size limit.
+///
+/// Call this *before* deserializing to avoid allocating memory for
+/// oversized payloads. Returns `Ok(())` if within bounds or an error
+/// containing the actual and allowed sizes.
+pub fn validate_message_size(data: &[u8], limit: usize) -> Result<(), NetworkError> {
+    if data.len() > limit {
+        return Err(NetworkError::MessageTooLarge {
+            size: data.len(),
+            limit,
+        });
+    }
+    Ok(())
+}
+
+/// F-069: Deserialize a `NetworkMessage` from raw bytes after validating size.
+///
+/// Combines size validation and JSON deserialization in a single call.
+pub fn deserialize_checked(data: &[u8], limit: usize) -> Result<NetworkMessage, NetworkError> {
+    validate_message_size(data, limit)?;
+    serde_json::from_slice(data).map_err(|e| NetworkError::Serialization(e.to_string()))
 }
 
 #[cfg(test)]
@@ -258,5 +289,71 @@ mod tests {
             }
             other => panic!("unexpected variant: {other:?}"),
         }
+    }
+
+    // ---- F-069: message size validation tests ----
+
+    #[test]
+    fn validate_message_size_within_limit() {
+        let data = vec![0u8; 100];
+        assert!(validate_message_size(&data, 100).is_ok());
+        assert!(validate_message_size(&data, 200).is_ok());
+    }
+
+    #[test]
+    fn validate_message_size_over_limit() {
+        let data = vec![0u8; 101];
+        let err = validate_message_size(&data, 100);
+        assert!(err.is_err());
+        match err.unwrap_err() {
+            NetworkError::MessageTooLarge { size, limit } => {
+                assert_eq!(size, 101);
+                assert_eq!(limit, 100);
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
+    fn validate_message_size_empty() {
+        assert!(validate_message_size(&[], 0).is_ok());
+        assert!(validate_message_size(&[], 100).is_ok());
+    }
+
+    #[test]
+    fn deserialize_checked_rejects_oversized() {
+        let msg = NetworkMessage::Ping;
+        let json = serde_json::to_vec(&msg).unwrap();
+        // Set limit smaller than serialized size.
+        let err = deserialize_checked(&json, 1);
+        assert!(err.is_err());
+        assert!(matches!(
+            err.unwrap_err(),
+            NetworkError::MessageTooLarge { .. }
+        ));
+    }
+
+    #[test]
+    fn deserialize_checked_accepts_valid() {
+        let msg = NetworkMessage::Ping;
+        let json = serde_json::to_vec(&msg).unwrap();
+        let decoded = deserialize_checked(&json, MAX_MESSAGE_SIZE).unwrap();
+        assert!(matches!(decoded, NetworkMessage::Ping));
+    }
+
+    #[test]
+    fn deserialize_checked_rejects_invalid_json() {
+        let bad_data = b"not-json";
+        let err = deserialize_checked(bad_data, MAX_MESSAGE_SIZE);
+        assert!(err.is_err());
+        assert!(matches!(
+            err.unwrap_err(),
+            NetworkError::Serialization(_)
+        ));
+    }
+
+    #[test]
+    fn max_message_size_constant() {
+        assert_eq!(MAX_MESSAGE_SIZE, 4 * 1024 * 1024);
     }
 }

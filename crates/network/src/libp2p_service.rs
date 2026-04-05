@@ -562,6 +562,21 @@ async fn handle_swarm_event(
             },
         )) => {
             let data_len = message.data.len() as u64;
+            // F-069: reject messages exceeding the application-level size limit.
+            if message.data.len() > crate::message::MAX_MESSAGE_SIZE {
+                warn!(
+                    bytes = message.data.len(),
+                    limit = crate::message::MAX_MESSAGE_SIZE,
+                    peer = %propagation_source,
+                    "Message exceeds MAX_MESSAGE_SIZE — rejecting"
+                );
+                swarm.behaviour_mut().gossipsub.report_message_validation_result(
+                    &message_id,
+                    &propagation_source,
+                    gossipsub::MessageAcceptance::Reject,
+                );
+                return;
+            }
             // F-065: drop message when bandwidth limit exceeded.
             if !bandwidth.record_inbound(data_len) {
                 warn!(

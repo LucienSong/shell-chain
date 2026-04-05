@@ -55,6 +55,12 @@ pub struct NetworkConfig {
     pub max_inbound_bandwidth: u64,
     /// Maximum outbound bandwidth in bytes/second (0 = unlimited).
     pub max_outbound_bandwidth: u64,
+    /// F-069: Maximum allowed incoming message size in bytes.
+    pub max_message_size: usize,
+    /// F-071: Number of violations before a peer is temporarily banned.
+    pub ban_threshold: u32,
+    /// F-071: Duration of a temporary ban in seconds.
+    pub ban_duration_secs: u64,
 }
 
 impl Default for NetworkConfig {
@@ -78,6 +84,9 @@ impl Default for NetworkConfig {
             max_established_per_peer: 3,
             max_inbound_bandwidth: 0,
             max_outbound_bandwidth: 0,
+            max_message_size: 4 * 1024 * 1024, // 4 MiB
+            ban_threshold: 5,
+            ban_duration_secs: 600, // 10 minutes
         }
     }
 }
@@ -194,6 +203,9 @@ mod tests {
         assert_eq!(config.max_established_per_peer, 3);
         assert_eq!(config.max_inbound_bandwidth, 0);
         assert_eq!(config.max_outbound_bandwidth, 0);
+        assert_eq!(config.max_message_size, 4 * 1024 * 1024);
+        assert_eq!(config.ban_threshold, 5);
+        assert_eq!(config.ban_duration_secs, 600);
     }
 
     #[test]

@@ -15,6 +15,7 @@ pub mod error;
 #[cfg(feature = "libp2p")]
 pub mod libp2p_service;
 pub mod message;
+pub mod security;
 pub mod service;
 
 pub use bandwidth::{BandwidthStats, BandwidthTracker};
@@ -25,5 +26,6 @@ pub use config::validate_bootnode_multiaddr;
 pub use error::NetworkError;
 #[cfg(feature = "libp2p")]
 pub use libp2p_service::Libp2pNetwork;
-pub use message::{NetworkEvent, NetworkMessage, PeerId};
+pub use message::{deserialize_checked, validate_message_size, NetworkEvent, NetworkMessage, PeerId, MAX_MESSAGE_SIZE};
+pub use security::{PeerBanList, PeerTracker};
 pub use service::NetworkService;

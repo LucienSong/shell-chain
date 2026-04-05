@@ -18,4 +18,16 @@ pub enum NetworkError {
 
     #[error("network shut down")]
     Shutdown,
+
+    /// F-069: Incoming message exceeds the configured size limit.
+    #[error("message too large: {size} bytes (limit: {limit})")]
+    MessageTooLarge { size: usize, limit: usize },
+
+    /// F-070: Peer connection limit reached.
+    #[error("connection limit reached ({current}/{max})")]
+    ConnectionLimitReached { current: usize, max: usize },
+
+    /// F-071: Peer is temporarily banned.
+    #[error("peer banned: {peer} until {until_secs}s from now")]
+    PeerBanned { peer: String, until_secs: u64 },
 }

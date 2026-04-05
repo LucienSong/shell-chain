@@ -15,6 +15,9 @@ use crate::error::NetworkError;
 use crate::message::{NetworkEvent, NetworkMessage, PeerId};
 use crate::service::NetworkService;
 
+/// Default message size limit used by ChannelNetwork when no config override.
+const CHANNEL_MAX_MESSAGE_SIZE: usize = crate::message::MAX_MESSAGE_SIZE;
+
 /// Shared broadcast bus that multiple `ChannelNetwork` instances connect to.
 pub struct NetworkBus {
     tx: broadcast::Sender<(PeerId, Vec<u8>)>,
@@ -32,13 +35,14 @@ impl NetworkBus {
     }
 
     /// Create a `ChannelNetwork` node connected to this bus.
-    pub fn join(&self, _config: &NetworkConfig) -> ChannelNetwork {
+    pub fn join(&self, config: &NetworkConfig) -> ChannelNetwork {
         let id = self.peer_counter.fetch_add(1, Ordering::Relaxed);
         let peer_id = PeerId(format!("local-{id}"));
         let rx = self.tx.subscribe();
         let (event_tx, event_rx) = mpsc::channel(256);
         let bus_tx = self.tx.clone();
         let running = Arc::new(AtomicBool::new(true));
+        let max_msg_size = config.max_message_size;
 
         // Background task: convert broadcast messages into NetworkEvents.
         let my_id = peer_id.clone();
@@ -50,6 +54,10 @@ impl NetworkBus {
                     Ok((sender, data)) => {
                         // Skip own messages.
                         if sender == my_id {
+                            continue;
+                        }
+                        // F-069: validate message size before deserialization.
+                        if let Err(_e) = crate::message::validate_message_size(&data, max_msg_size) {
                             continue;
                         }
                         if let Ok(message) = serde_json::from_slice::<NetworkMessage>(&data) {
@@ -100,6 +108,8 @@ impl NetworkService for ChannelNetwork {
     async fn broadcast(&self, msg: NetworkMessage) -> Result<(), NetworkError> {
         let data =
             serde_json::to_vec(&msg).map_err(|e| NetworkError::Serialization(e.to_string()))?;
+        // F-069: validate outbound message size.
+        crate::message::validate_message_size(&data, CHANNEL_MAX_MESSAGE_SIZE)?;
         self.bus_tx
             .send((self.peer_id.clone(), data))
             .map_err(|_| NetworkError::ChannelClosed)?;
