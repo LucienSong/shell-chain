@@ -337,6 +337,13 @@ impl TxPool {
             return Err(MempoolError::InvalidTransaction(msg.to_string()));
         }
 
+        // Blob transaction validation (F-233)
+        if tx.tx.tx_type == 3 {
+            if let Err(msg) = tx.tx.validate_blob_tx() {
+                return Err(MempoolError::InvalidTransaction(msg.to_string()));
+            }
+        }
+
         // Per-tx serialized size limit — protects against oversized PQ
         // signatures and access lists.
         let tx_size = serde_json::to_vec(tx)

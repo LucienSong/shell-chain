@@ -50,6 +50,9 @@ pub enum TxValidationError {
 
     #[error("invalid access list: {0}")]
     InvalidAccessList(String),
+
+    #[error("invalid blob transaction: {0}")]
+    InvalidBlobTx(String),
 }
 
 /// Minimum gas for a plain transfer (no data).
@@ -100,6 +103,13 @@ pub fn validate_tx<S: KvStore + 'static, V: Verifier>(
     // 1b. Access list size validation
     if let Err(msg) = tx.validate_access_list() {
         return Err(TxValidationError::InvalidAccessList(msg.to_string()));
+    }
+
+    // 1c. Blob transaction validation (F-233)
+    if tx.tx_type == 3 {
+        if let Err(msg) = tx.validate_blob_tx() {
+            return Err(TxValidationError::InvalidBlobTx(msg.to_string()));
+        }
     }
 
     // 2. Intrinsic gas check
@@ -221,6 +231,13 @@ pub fn validate_tx_for_import<S: KvStore + 'static, V: Verifier>(
     // 2. Access list size
     if let Err(msg) = tx.validate_access_list() {
         return Err(TxValidationError::InvalidAccessList(msg.to_string()));
+    }
+
+    // 2b. Blob transaction validation (F-233)
+    if tx.tx_type == 3 {
+        if let Err(msg) = tx.validate_blob_tx() {
+            return Err(TxValidationError::InvalidBlobTx(msg.to_string()));
+        }
     }
 
     // 3. Intrinsic gas
