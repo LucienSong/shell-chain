@@ -34,6 +34,9 @@ pub struct RunArgs {
     pub enable_mdns: bool,
     pub pruning: u64,
     pub checkpoint_url: Option<String>,
+    pub rpc_cors: Option<String>,
+    pub rpc_rate_limit: Option<u32>,
+    pub rpc_api: Option<String>,
 }
 
 /// Maximum genesis file size: 10 MB (F-082).
@@ -238,6 +241,16 @@ async fn run_with_store<S: KvStore + 'static>(
         rpc: RpcConfig {
             listen_addr,
             ws_addr,
+            cors_allowed_origins: args.rpc_cors.as_ref().map(|s| {
+                s.split(',').map(|o| o.trim().to_string()).collect()
+            }),
+            rate_limit_per_sec: args.rpc_rate_limit.or(Some(50)),
+            api_namespaces: args.rpc_api.as_ref().map(|s| {
+                s.split(',').map(|n| n.trim().to_string()).collect()
+            }).unwrap_or_else(|| vec![
+                "eth".into(), "net".into(), "web3".into(), "shell".into(),
+            ]),
+            max_request_body_size: 5 * 1024 * 1024,
             ..RpcConfig::default()
         },
         network: NetworkConfig::default(),

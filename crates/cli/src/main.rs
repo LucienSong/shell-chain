@@ -99,6 +99,18 @@ enum Commands {
         /// Checkpoint sync: download snapshot from URL on first start.
         #[arg(long)]
         checkpoint_url: Option<String>,
+
+        /// CORS allowed origins (comma-separated, '*' for all).
+        #[arg(long)]
+        rpc_cors: Option<String>,
+
+        /// RPC rate limit per second per connection.
+        #[arg(long)]
+        rpc_rate_limit: Option<u32>,
+
+        /// API namespaces to enable (comma-separated: eth,net,web3,shell,debug,trace).
+        #[arg(long)]
+        rpc_api: Option<String>,
     },
 
     /// Initialize genesis block and data directory.
@@ -209,6 +221,9 @@ async fn main() {
             enable_mdns,
             pruning,
             checkpoint_url,
+            rpc_cors,
+            rpc_rate_limit,
+            rpc_api,
         } => {
             // Merge --bootnode (repeatable) and --bootnodes (comma-separated).
             let mut all_bootnodes = bootnode;
@@ -229,6 +244,9 @@ async fn main() {
                 enable_mdns,
                 pruning,
                 checkpoint_url,
+                rpc_cors,
+                rpc_rate_limit,
+                rpc_api,
             })
             .await
         }

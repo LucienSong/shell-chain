@@ -1100,12 +1100,22 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
         &self,
         data: String,
     ) -> Result<ShellHash, ErrorObjectOwned> {
-        // Decode hex payload: "0x" + hex-encoded JSON of SignedTransaction.
+        // Decode hex payload: "0x" + hex-encoded transaction bytes.
         let raw = data.strip_prefix("0x").unwrap_or(&data);
         let bytes = hex::decode(raw)
             .map_err(|e| internal_err(format!("invalid hex: {e}")))?;
-        let signed_tx: SignedTransaction = serde_json::from_slice(&bytes)
-            .map_err(|e| internal_err(format!("invalid tx JSON: {e}")))?;
+
+        // Try RLP decoding first (standard Ethereum format), then JSON (legacy).
+        let signed_tx: SignedTransaction =
+            match alloy_rlp::Decodable::decode(&mut bytes.as_slice()) {
+                Ok(tx) => tx,
+                Err(_) => serde_json::from_slice::<SignedTransaction>(&bytes)
+                    .map_err(|e| {
+                        internal_err(format!(
+                            "invalid transaction: not valid RLP or JSON ({e})"
+                        ))
+                    })?,
+            };
 
         self.submit_tx(signed_tx)
     }
@@ -3973,5 +3983,87 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result, "0x2a");
+    }
+
+    #[tokio::test]
+    async fn m6b1_send_raw_transaction_rlp_format() {
+        let handler = setup();
+        let signer = DilithiumSigner::generate();
+        let pubkey = signer.public_key().to_vec();
+        let addr = Address::from_public_key(&pubkey);
+
+        // Fund the sender and register pubkey so mempool can verify.
+        {
+            let mut ws = handler.world_state.write();
+            ws.add_balance(&addr, U256::from(100_000_000_000_000u64)).unwrap();
+        }
+        handler.chain_store.put_pubkey(&addr, &pubkey).unwrap();
+
+        let tx = Transaction {
+            chain_id: 42,
+            nonce: 0,
+            max_priority_fee_per_gas: 100_000_000,
+            max_fee_per_gas: 1_000_000_000,
+            gas_limit: 21_000,
+            to: None,
+            value: U256::ZERO,
+            data: Bytes::default(),
+            access_list: None,
+            tx_type: 2,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
+        };
+
+        let signature = signer.sign(tx.hash().0.as_slice()).unwrap();
+        let signed = SignedTransaction::new(addr, tx, signature);
+
+        // Encode as RLP.
+        let mut rlp_buf = Vec::new();
+        alloy_rlp::Encodable::encode(&signed, &mut rlp_buf);
+        let hex_payload = format!("0x{}", hex::encode(&rlp_buf));
+
+        let result = EthApiServer::send_raw_transaction(&handler, hex_payload).await;
+        assert!(result.is_ok(), "RLP send_raw_transaction failed: {:?}", result.err());
+        assert_eq!(handler.tx_pool.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn m6b1_send_raw_transaction_json_format() {
+        let handler = setup();
+        let signer = DilithiumSigner::generate();
+        let pubkey = signer.public_key().to_vec();
+        let addr = Address::from_public_key(&pubkey);
+
+        {
+            let mut ws = handler.world_state.write();
+            ws.add_balance(&addr, U256::from(100_000_000_000_000u64)).unwrap();
+        }
+        handler.chain_store.put_pubkey(&addr, &pubkey).unwrap();
+
+        let tx = Transaction {
+            chain_id: 42,
+            nonce: 0,
+            max_priority_fee_per_gas: 100_000_000,
+            max_fee_per_gas: 1_000_000_000,
+            gas_limit: 21_000,
+            to: None,
+            value: U256::ZERO,
+            data: Bytes::default(),
+            access_list: None,
+            tx_type: 2,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
+        };
+
+        let signature = signer.sign(tx.hash().0.as_slice()).unwrap();
+        let signed = SignedTransaction::new(addr, tx, signature);
+
+        // Encode as JSON (legacy format).
+        let json_bytes = serde_json::to_vec(&signed).unwrap();
+        let hex_payload = format!("0x{}", hex::encode(&json_bytes));
+
+        let result = EthApiServer::send_raw_transaction(&handler, hex_payload).await;
+        assert!(result.is_ok(), "JSON send_raw_transaction failed: {:?}", result.err());
+        assert_eq!(handler.tx_pool.len(), 1);
     }
 }

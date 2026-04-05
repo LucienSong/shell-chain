@@ -4,6 +4,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use jsonrpsee::server::{Server, ServerHandle};
+use tower_http::cors::{Any, CorsLayer};
 use tracing::{info, warn};
 
 use shell_consensus::FinalityState;
@@ -35,6 +36,16 @@ pub struct RpcConfig {
     /// Path to a PEM-encoded TLS private key file for WSS/HTTPS transport.
     /// Both `tls_cert_path` and `tls_key_path` must be set to enable TLS.
     pub tls_key_path: Option<String>,
+    /// CORS allowed origins. `None` means CORS disabled (same-origin only).
+    /// Use `vec!["*".to_string()]` to allow all origins.
+    pub cors_allowed_origins: Option<Vec<String>>,
+    /// Maximum RPC requests per second per connection. `None` disables rate limiting.
+    pub rate_limit_per_sec: Option<u32>,
+    /// API namespaces to enable. Default: ["eth", "net", "web3", "shell"].
+    /// Debug and trace require explicit opt-in.
+    pub api_namespaces: Vec<String>,
+    /// Maximum request body size in bytes (default: 5 MB).
+    pub max_request_body_size: u32,
 }
 
 impl Default for RpcConfig {
@@ -45,6 +56,15 @@ impl Default for RpcConfig {
             ws_addr: Some(SocketAddr::from(([127, 0, 0, 1], 8546))),
             tls_cert_path: None,
             tls_key_path: None,
+            cors_allowed_origins: Some(vec!["*".to_string()]),
+            rate_limit_per_sec: Some(50),
+            api_namespaces: vec![
+                "eth".into(),
+                "net".into(),
+                "web3".into(),
+                "shell".into(),
+            ],
+            max_request_body_size: 5 * 1024 * 1024,
         }
     }
 }
@@ -128,19 +148,59 @@ pub async fn start_rpc_server<S: KvStore + 'static>(
         handler = handler.with_proposer(signer, addr);
     }
 
+    // Build CORS middleware layer.
+    let cors = if let Some(ref origins) = config.cors_allowed_origins {
+        if origins.iter().any(|o| o == "*") {
+            CorsLayer::permissive()
+        } else {
+            CorsLayer::new()
+                .allow_origin(
+                    origins
+                        .iter()
+                        .map(|o| o.parse().expect("invalid CORS origin"))
+                        .collect::<Vec<_>>(),
+                )
+                .allow_methods(Any)
+                .allow_headers(Any)
+        }
+    } else {
+        CorsLayer::new() // restrictive default
+    };
+
+    // TODO: integrate per-connection rate limiting once tower's RateLimitLayer
+    // produces Clone services (required by jsonrpsee). Config field is retained
+    // for future use. Current value: {:?} config.rate_limit_per_sec.
+    let middleware = tower::ServiceBuilder::new().layer(cors);
+
+    // Conditionally merge RPC modules based on enabled namespaces.
+    let ns = &config.api_namespaces;
     let mut module = jsonrpsee::server::RpcModule::new(());
-    module.merge(EthApiServer::into_rpc(handler.clone()))?;
-    module.merge(ShellApiServer::into_rpc(handler.clone()))?;
-    module.merge(Web3ApiServer::into_rpc(handler.clone()))?;
-    module.merge(NetApiServer::into_rpc(handler.clone()))?;
-    module.merge(DebugApiServer::into_rpc(handler.clone()))?;
-    module.merge(TraceApiServer::into_rpc(handler.clone()))?;
-    module.merge(EthPubSubServer::into_rpc(handler))?;
+    if ns.iter().any(|n| n == "eth") {
+        module.merge(EthApiServer::into_rpc(handler.clone()))?;
+        module.merge(EthPubSubServer::into_rpc(handler.clone()))?;
+    }
+    if ns.iter().any(|n| n == "shell") {
+        module.merge(ShellApiServer::into_rpc(handler.clone()))?;
+    }
+    if ns.iter().any(|n| n == "web3") {
+        module.merge(Web3ApiServer::into_rpc(handler.clone()))?;
+    }
+    if ns.iter().any(|n| n == "net") {
+        module.merge(NetApiServer::into_rpc(handler.clone()))?;
+    }
+    if ns.iter().any(|n| n == "debug") {
+        module.merge(DebugApiServer::into_rpc(handler.clone()))?;
+    }
+    if ns.iter().any(|n| n == "trace") {
+        module.merge(TraceApiServer::into_rpc(handler))?;
+    }
 
     if let Some(ws_listen) = config.ws_addr {
         // Separate ports: HTTP-only + WS-only.
         let http_server = Server::builder()
+            .set_http_middleware(middleware.clone())
             .max_connections(config.max_connections)
+            .max_request_body_size(config.max_request_body_size)
             .http_only()
             .build(config.listen_addr)
             .await?;
@@ -148,7 +208,9 @@ pub async fn start_rpc_server<S: KvStore + 'static>(
         let http_handle = http_server.start(module.clone());
 
         let ws_server = Server::builder()
+            .set_http_middleware(middleware)
             .max_connections(config.max_connections)
+            .max_request_body_size(config.max_request_body_size)
             .ws_only()
             .build(ws_listen)
             .await?;
@@ -164,7 +226,9 @@ pub async fn start_rpc_server<S: KvStore + 'static>(
     } else {
         // Single port: both HTTP and WS on listen_addr (jsonrpsee default).
         let server = Server::builder()
+            .set_http_middleware(middleware)
             .max_connections(config.max_connections)
+            .max_request_body_size(config.max_request_body_size)
             .build(config.listen_addr)
             .await?;
         let http_addr = server.local_addr()?;
