@@ -1,3 +1,4 @@
+use alloy_rlp::{Decodable, Encodable};
 use serde::{Deserialize, Serialize};
 use shell_primitives::{Address, Bytes, ShellHash};
 
@@ -29,6 +30,75 @@ impl Log {
             });
         }
         Ok(Self { address, topics, data })
+    }
+}
+
+impl Encodable for Log {
+    fn encode(&self, out: &mut dyn alloy_rlp::BufMut) {
+        let header = alloy_rlp::Header {
+            list: true,
+            payload_length: self.rlp_fields_len(),
+        };
+        header.encode(out);
+        self.address.encode(out);
+        let topics_payload: usize = self.topics.iter().map(|t| t.length()).sum();
+        alloy_rlp::Header { list: true, payload_length: topics_payload }.encode(out);
+        for topic in &self.topics {
+            topic.encode(out);
+        }
+        self.data.encode(out);
+    }
+
+    fn length(&self) -> usize {
+        let payload = self.rlp_fields_len();
+        alloy_rlp::Header { list: true, payload_length: payload }.length() + payload
+    }
+}
+
+impl Decodable for Log {
+    fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
+        let header = alloy_rlp::Header::decode(buf)?;
+        if !header.list {
+            return Err(alloy_rlp::Error::UnexpectedString);
+        }
+        let remaining = buf.len();
+
+        let address = Address::decode(buf)?;
+
+        let topics_header = alloy_rlp::Header::decode(buf)?;
+        if !topics_header.list {
+            return Err(alloy_rlp::Error::UnexpectedString);
+        }
+        let mut topics = Vec::new();
+        let topics_end = buf.len() - topics_header.payload_length;
+        while buf.len() > topics_end {
+            topics.push(ShellHash::decode(buf)?);
+        }
+
+        let data = Bytes::decode(buf)?;
+
+        let consumed = remaining - buf.len();
+        if consumed != header.payload_length {
+            return Err(alloy_rlp::Error::ListLengthMismatch {
+                expected: header.payload_length,
+                got: consumed,
+            });
+        }
+
+        Ok(Self { address, topics, data })
+    }
+}
+
+impl Log {
+    fn rlp_fields_len(&self) -> usize {
+        let topics_payload: usize = self.topics.iter().map(|t| t.length()).sum();
+        let topics_list_len = alloy_rlp::Header {
+            list: true,
+            payload_length: topics_payload,
+        }
+        .length()
+            + topics_payload;
+        self.address.length() + topics_list_len + self.data.length()
     }
 }
 
@@ -70,5 +140,31 @@ mod tests {
         assert!(log.is_err());
         let err = log.unwrap_err();
         assert!(err.to_string().contains("too many topics"));
+    }
+
+    #[test]
+    fn log_rlp_roundtrip() {
+        let log = Log {
+            address: Address::from([0xAB; 20]),
+            topics: vec![ShellHash::ZERO, ShellHash::from([0xFF; 32])],
+            data: Bytes::from(vec![1, 2, 3, 4]),
+        };
+        let mut buf = Vec::new();
+        log.encode(&mut buf);
+        let decoded = Log::decode(&mut buf.as_slice()).unwrap();
+        assert_eq!(log, decoded);
+    }
+
+    #[test]
+    fn log_rlp_roundtrip_empty() {
+        let log = Log {
+            address: Address::default(),
+            topics: vec![],
+            data: Bytes::new(),
+        };
+        let mut buf = Vec::new();
+        log.encode(&mut buf);
+        let decoded = Log::decode(&mut buf.as_slice()).unwrap();
+        assert_eq!(log, decoded);
     }
 }

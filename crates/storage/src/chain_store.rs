@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use alloy_rlp::{Decodable, Encodable};
 use serde::{Deserialize, Serialize};
 use shell_core::{Block, BlockHeader, TransactionReceipt};
 use shell_primitives::{Address, ShellHash};
@@ -11,6 +12,58 @@ use crate::{KvStore, StorageError};
 pub struct ChainConfig {
     pub chain_id: u64,
     pub genesis_hash: ShellHash,
+}
+
+/// Storage format version bytes for migration compatibility.
+mod format_version {
+    /// Legacy JSON format.
+    pub const JSON: u8 = 0x01;
+    /// RLP binary format (current).
+    pub const RLP: u8 = 0x02;
+}
+
+/// Encode a value to RLP with a version prefix byte.
+fn encode_rlp<T: Encodable>(value: &T) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(1 + value.length());
+    buf.push(format_version::RLP);
+    value.encode(&mut buf);
+    buf
+}
+
+/// Encode a slice of items as an RLP list with a version prefix byte.
+fn encode_rlp_list<T: Encodable>(items: &[T]) -> Vec<u8> {
+    let payload: usize = items.iter().map(|item| item.length()).sum();
+    let header = alloy_rlp::Header { list: true, payload_length: payload };
+    let mut buf = Vec::with_capacity(1 + header.length() + payload);
+    buf.push(format_version::RLP);
+    header.encode(&mut buf);
+    for item in items {
+        item.encode(&mut buf);
+    }
+    buf
+}
+
+/// Decode a value from versioned storage format.
+///
+/// Supports three formats based on the first byte:
+/// - `0x02` → RLP (current)
+/// - `0x01` → JSON with explicit version prefix
+/// - anything else → legacy JSON (no prefix, backward compatibility)
+fn decode_versioned<T: Decodable + serde::de::DeserializeOwned>(
+    data: &[u8],
+) -> Result<T, StorageError> {
+    if data.is_empty() {
+        return Err(StorageError::Codec("empty data".into()));
+    }
+    match data[0] {
+        format_version::RLP => T::decode(&mut &data[1..])
+            .map_err(|e| StorageError::Codec(format!("RLP decode: {e}"))),
+        format_version::JSON => serde_json::from_slice(&data[1..])
+            .map_err(|e| StorageError::Codec(e.to_string())),
+        // Legacy data without version prefix — fall back to JSON.
+        _ => serde_json::from_slice(data)
+            .map_err(|e| StorageError::Codec(e.to_string())),
+    }
 }
 
 /// Key prefixes for chain store data. All keys are prefixed to avoid
@@ -85,14 +138,12 @@ impl<S: KvStore> ChainStore<S> {
     pub fn put_block(&self, block: &Block) -> Result<(), StorageError> {
         let block_hash = block.hash();
 
-        // Store header (JSON for now; RLP later if perf-critical)
-        let header_bytes = serde_json::to_vec(&block.header)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        // Store header (RLP with version prefix)
+        let header_bytes = encode_rlp(&block.header);
         self.store.put(&Self::header_key(&block_hash), &header_bytes)?;
 
-        // Store body (full block JSON)
-        let body_bytes = serde_json::to_vec(block)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        // Store body (full block RLP)
+        let body_bytes = encode_rlp(block);
         self.store.put(&Self::body_key(&block_hash), &body_bytes)?;
 
         // Transaction → (block_hash, tx_index) mapping
@@ -125,8 +176,7 @@ impl<S: KvStore> ChainStore<S> {
     pub fn get_block_by_hash(&self, hash: &ShellHash) -> Result<Option<Block>, StorageError> {
         match self.store.get(&Self::body_key(hash))? {
             Some(data) => {
-                let block: Block = serde_json::from_slice(&data)
-                    .map_err(|e| StorageError::Codec(e.to_string()))?;
+                let block: Block = decode_versioned(&data)?;
                 Ok(Some(block))
             }
             None => Ok(None),
@@ -151,8 +201,7 @@ impl<S: KvStore> ChainStore<S> {
     ) -> Result<Option<BlockHeader>, StorageError> {
         match self.store.get(&Self::header_key(hash))? {
             Some(data) => {
-                let header: BlockHeader = serde_json::from_slice(&data)
-                    .map_err(|e| StorageError::Codec(e.to_string()))?;
+                let header: BlockHeader = decode_versioned(&data)?;
                 Ok(Some(header))
             }
             None => Ok(None),
@@ -187,8 +236,7 @@ impl<S: KvStore> ChainStore<S> {
         block_hash: &ShellHash,
         receipts: &[TransactionReceipt],
     ) -> Result<(), StorageError> {
-        let data = serde_json::to_vec(receipts)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        let data = encode_rlp_list(receipts);
         self.store.put(&Self::receipts_key(block_hash), &data)
     }
 
@@ -199,8 +247,7 @@ impl<S: KvStore> ChainStore<S> {
     ) -> Result<Option<Vec<TransactionReceipt>>, StorageError> {
         match self.store.get(&Self::receipts_key(block_hash))? {
             Some(data) => {
-                let receipts: Vec<TransactionReceipt> = serde_json::from_slice(&data)
-                    .map_err(|e| StorageError::Codec(e.to_string()))?;
+                let receipts: Vec<TransactionReceipt> = decode_versioned(&data)?;
                 Ok(Some(receipts))
             }
             None => Ok(None),
@@ -436,6 +483,8 @@ mod tests {
                 base_fee_per_gas: 0,
                 withdrawals_root: ShellHash::ZERO,
                 parent_beacon_block_root: ShellHash::ZERO,
+                blob_gas_used: 0,
+                excess_blob_gas: 0,
             },
             transactions: vec![],
             proposer_seal: None,
@@ -1053,6 +1102,168 @@ mod tests {
         assert!(
             err.contains("chain ID mismatch"),
             "expected chain ID mismatch error, got: {err}"
+        );
+    }
+
+    // ── RLP serialization tests ───────────────────────────────────────
+
+    #[test]
+    fn rlp_block_roundtrip_through_store() {
+        let store = Arc::new(MemoryDb::new());
+        let cs = ChainStore::new(store);
+
+        let block = empty_block(42);
+        let hash = block.hash();
+        cs.put_block(&block).unwrap();
+
+        let loaded = cs.get_block_by_hash(&hash).unwrap().unwrap();
+        assert_eq!(loaded.header, block.header);
+        assert_eq!(loaded.transactions.len(), 0);
+    }
+
+    #[test]
+    fn rlp_header_roundtrip_through_store() {
+        let store = Arc::new(MemoryDb::new());
+        let cs = ChainStore::new(store);
+
+        let block = empty_block(7);
+        let hash = block.hash();
+        cs.put_block(&block).unwrap();
+
+        let header = cs.get_header_by_hash(&hash).unwrap().unwrap();
+        assert_eq!(header, block.header);
+    }
+
+    #[test]
+    fn rlp_receipts_roundtrip_through_store() {
+        let store = Arc::new(MemoryDb::new());
+        let cs = ChainStore::new(store);
+
+        let block = empty_block(0);
+        let hash = block.hash();
+        cs.put_block(&block).unwrap();
+
+        let log = shell_core::Log {
+            address: Address::from([0xAB; 20]),
+            topics: vec![shell_primitives::keccak256(b"Transfer(address,address,uint256)")],
+            data: Bytes::from(vec![1, 2, 3]),
+        };
+        let receipts = vec![TransactionReceipt {
+            tx_hash: shell_primitives::keccak256(b"tx1"),
+            block_number: 0,
+            tx_index: 0,
+            status: 1,
+            gas_used: 21000,
+            cumulative_gas_used: 21000,
+            contract_address: Some(Address::from([0xCD; 20])),
+            logs_bloom: Bytes::new(),
+            logs: vec![log],
+        }];
+
+        cs.put_receipts(&hash, &receipts).unwrap();
+        let loaded = cs.get_receipts(&hash).unwrap().unwrap();
+        assert_eq!(loaded, receipts);
+    }
+
+    // ── Backward compatibility tests ──────────────────────────────────
+
+    #[test]
+    fn backward_compat_legacy_json_block() {
+        // Simulate legacy data stored as plain JSON (no version prefix).
+        let store = Arc::new(MemoryDb::new());
+        let cs = ChainStore::new(store.clone());
+
+        let block = empty_block(0);
+        let hash = block.hash();
+
+        // Write raw JSON directly (legacy format — no version prefix)
+        let header_json = serde_json::to_vec(&block.header).unwrap();
+        store
+            .put(
+                &[prefix::HEADER_BY_HASH, hash.as_bytes()].concat(),
+                &header_json,
+            )
+            .unwrap();
+        let body_json = serde_json::to_vec(&block).unwrap();
+        store
+            .put(
+                &[prefix::BODY_BY_HASH, hash.as_bytes()].concat(),
+                &body_json,
+            )
+            .unwrap();
+
+        // Read back using the new versioned decoder
+        let loaded_header = cs.get_header_by_hash(&hash).unwrap().unwrap();
+        assert_eq!(loaded_header, block.header);
+        let loaded_block = cs.get_block_by_hash(&hash).unwrap().unwrap();
+        assert_eq!(loaded_block.header, block.header);
+    }
+
+    #[test]
+    fn backward_compat_legacy_json_receipts() {
+        let store = Arc::new(MemoryDb::new());
+        let cs = ChainStore::new(store.clone());
+
+        let hash = shell_primitives::keccak256(b"block");
+        let receipts = vec![TransactionReceipt {
+            tx_hash: ShellHash::ZERO,
+            block_number: 0,
+            tx_index: 0,
+            status: 1,
+            gas_used: 21000,
+            cumulative_gas_used: 21000,
+            contract_address: None,
+            logs_bloom: Bytes::new(),
+            logs: vec![],
+        }];
+
+        // Write raw JSON directly
+        let json = serde_json::to_vec(&receipts).unwrap();
+        store
+            .put(
+                &[prefix::RECEIPTS_BY_HASH, hash.as_bytes()].concat(),
+                &json,
+            )
+            .unwrap();
+
+        // Read back with versioned decoder
+        let loaded = cs.get_receipts(&hash).unwrap().unwrap();
+        assert_eq!(loaded, receipts);
+    }
+
+    #[test]
+    fn backward_compat_prefixed_json_header() {
+        // Test explicit JSON version prefix (0x01).
+        let store = Arc::new(MemoryDb::new());
+        let cs = ChainStore::new(store.clone());
+
+        let block = empty_block(0);
+        let hash = block.hash();
+
+        let mut header_data = vec![format_version::JSON];
+        header_data.extend_from_slice(&serde_json::to_vec(&block.header).unwrap());
+        store
+            .put(
+                &[prefix::HEADER_BY_HASH, hash.as_bytes()].concat(),
+                &header_data,
+            )
+            .unwrap();
+
+        let loaded = cs.get_header_by_hash(&hash).unwrap().unwrap();
+        assert_eq!(loaded, block.header);
+    }
+
+    #[test]
+    fn rlp_smaller_than_json() {
+        // Verify RLP encoding is smaller than JSON for blocks.
+        let block = empty_block(42);
+        let rlp_bytes = encode_rlp(&block);
+        let json_bytes = serde_json::to_vec(&block).unwrap();
+        assert!(
+            rlp_bytes.len() < json_bytes.len(),
+            "RLP ({}) should be smaller than JSON ({})",
+            rlp_bytes.len(),
+            json_bytes.len()
         );
     }
 }

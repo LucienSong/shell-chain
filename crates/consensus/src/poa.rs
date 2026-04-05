@@ -276,6 +276,8 @@ mod tests {
             base_fee_per_gas: 0,
             withdrawals_root: ShellHash::ZERO,
             parent_beacon_block_root: ShellHash::ZERO,
+            blob_gas_used: 0,
+            excess_blob_gas: 0,
         }
     }
 

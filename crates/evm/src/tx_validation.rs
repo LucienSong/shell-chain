@@ -364,6 +364,9 @@ mod tests {
             max_fee_per_gas: 10,
             max_priority_fee_per_gas: 1,
             access_list: None,
+            tx_type: 2,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
         }
     }
 
@@ -584,6 +587,9 @@ mod tests {
             max_fee_per_gas: u64::MAX,
             max_priority_fee_per_gas: 0,
             access_list: None,
+            tx_type: 2,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
         };
         let signed = sign_tx(&signer, tx, true);
 

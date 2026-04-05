@@ -125,6 +125,8 @@ mod tests {
                 base_fee_per_gas: 0,
                 withdrawals_root: ShellHash::ZERO,
                 parent_beacon_block_root: ShellHash::ZERO,
+                blob_gas_used: 0,
+                excess_blob_gas: 0,
             },
             transactions: vec![],
             proposer_seal: None,
@@ -144,6 +146,9 @@ mod tests {
                 value: U256::ZERO,
                 data: Bytes::default(),
                 access_list: None,
+                tx_type: 2,
+                max_fee_per_blob_gas: None,
+                blob_versioned_hashes: None,
             },
             PQSignature::new(shell_crypto::SignatureType::Dilithium3, vec![]),
         )
