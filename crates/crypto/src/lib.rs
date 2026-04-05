@@ -6,6 +6,8 @@ mod multi;
 mod signature;
 mod keypair;
 mod error;
+#[cfg(feature = "batch")]
+mod batch;
 
 pub use signer::Signer;
 pub use verifier::Verifier;
@@ -15,3 +17,5 @@ pub use multi::MultiVerifier;
 pub use signature::{PQSignature, SignatureType, ALLOWED_ALGORITHMS};
 pub use keypair::KeyPair;
 pub use error::CryptoError;
+#[cfg(feature = "batch")]
+pub use batch::{BatchVerifier, PreVerified, VerifyItem};

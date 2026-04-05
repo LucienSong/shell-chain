@@ -49,6 +49,9 @@ impl MultiVerifier {
     }
 }
 
+#[cfg(feature = "batch")]
+impl crate::BatchVerifier for MultiVerifier {}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use serde::{Serialize, Deserialize};
 use shell_primitives::{Address, ShellHash};
+use shell_crypto::{BatchVerifier, CryptoError, PQSignature, SignatureType, VerifyItem};
 
 /// An attestation is a validator's signed confirmation that they accept a block.
 /// Validators broadcast attestations after importing a valid block.
@@ -163,6 +164,47 @@ impl FinalityState {
             }
         }
         None
+    }
+
+    /// Batch verify all stored attestation signatures for a block using
+    /// parallel verification. Returns per-attestation results.
+    ///
+    /// `authorities` maps validator addresses to their public keys.
+    /// Attestations from unknown validators produce a `VerificationFailed` error.
+    pub fn batch_verify_attestations(
+        &self,
+        block_hash: &ShellHash,
+        authorities: &HashMap<Address, Vec<u8>>,
+        verifier: &dyn BatchVerifier,
+    ) -> Result<Vec<bool>, CryptoError> {
+        let attestations = match self.attestation_store.get(block_hash) {
+            Some(atts) => atts,
+            None => return Ok(vec![]),
+        };
+
+        let messages: Vec<Vec<u8>> = attestations
+            .iter()
+            .map(|att| Attestation::signing_message(&att.block_hash, att.block_number))
+            .collect();
+
+        let sigs: Vec<PQSignature> = attestations
+            .iter()
+            .map(|att| PQSignature::new(SignatureType::Dilithium3, att.signature.clone()))
+            .collect();
+
+        let mut items = Vec::with_capacity(attestations.len());
+        for (i, att) in attestations.iter().enumerate() {
+            let pk = authorities
+                .get(&att.validator)
+                .ok_or(CryptoError::VerificationFailed)?;
+            items.push(VerifyItem {
+                pubkey: pk.as_slice(),
+                message: &messages[i],
+                signature: &sigs[i],
+            });
+        }
+
+        verifier.verify_batch(&items)
     }
 
     /// Remove attestation data for blocks at or below the given number.

@@ -10,7 +10,7 @@ use tracing::{debug, info, warn};
 
 use shell_consensus::{Attestation, ConsensusEngine, FinalityState, ForkChoice, PoaEngine};
 use shell_core::{Block, BlockHeader, SignedTransaction, calculate_base_fee};
-use shell_crypto::{MultiVerifier, Signer, Verifier};
+use shell_crypto::{BatchVerifier, MultiVerifier, PreVerified, Signer, VerifyItem, Verifier};
 use shell_evm::{commit_evm_state, ShellEvm, ShellStateDb, validate_tx_for_import};
 use shell_mempool::TxPool;
 use shell_network::NetworkService;
@@ -864,12 +864,49 @@ impl<S: KvStore + 'static> Node<S> {
             // security-critical checks (sig, algorithm, access list, pubkey)
             // are enforced during block import, not just mempool.
             let import_cs = ChainStore::new(self.store.clone());
-            let import_verifier = MultiVerifier;
+
+            // M5-C2: Batch verify all transaction signatures in parallel.
+            // Resolve pubkeys and compute tx hashes, then dispatch to rayon.
+            let batch_verifier = MultiVerifier;
+            let tx_hashes: Vec<ShellHash> = block.transactions.iter()
+                .map(|tx| tx.hash())
+                .collect();
+            let mut resolved_pks: Vec<Vec<u8>> = Vec::with_capacity(block.transactions.len());
+            for tx in &block.transactions {
+                let pk = match &tx.sender_pubkey {
+                    Some(pk) => pk.clone(),
+                    None => import_cs.get_pubkey(&tx.from)
+                        .map_err(|e| NodeError::Startup(format!(
+                            "block {} pubkey lookup failed: {e}", block.number()
+                        )))?
+                        .ok_or_else(|| NodeError::Startup(format!(
+                            "block {} missing pubkey for {}", block.number(), tx.from
+                        )))?,
+                };
+                resolved_pks.push(pk);
+            }
+            let verify_items: Vec<VerifyItem> = block.transactions.iter()
+                .enumerate()
+                .map(|(i, tx)| VerifyItem {
+                    pubkey: &resolved_pks[i],
+                    message: tx_hashes[i].as_bytes(),
+                    signature: &tx.signature,
+                })
+                .collect();
+            batch_verifier.verify_batch_all(&verify_items)
+                .map_err(|e| NodeError::Startup(format!(
+                    "block {} batch sig verification failed: {e}", block.number()
+                )))?;
+
+            // Non-signature validation (chain-id, gas, access list, address
+            // derivation). Uses PreVerified to skip redundant individual
+            // sig checks — signatures were already batch-verified above.
+            let pre_verified = PreVerified;
             for tx in &block.transactions {
                 validate_tx_for_import(
                     tx,
                     &import_cs,
-                    &import_verifier,
+                    &pre_verified,
                     self.config.chain_id,
                 ).map_err(|e| NodeError::Startup(format!(
                     "block {} tx validation failed: {e}",

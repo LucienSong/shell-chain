@@ -19,4 +19,7 @@ pub enum CryptoError {
 
     #[error("unsupported signature type: {0:?}")]
     UnsupportedSignatureType(crate::SignatureType),
+
+    #[error("batch verification failed: {failed}/{total} signatures invalid")]
+    BatchVerificationFailed { total: usize, failed: usize },
 }
