@@ -120,6 +120,10 @@ enum Commands {
         /// API namespaces to enable (comma-separated: eth,net,web3,shell,debug,trace).
         #[arg(long)]
         rpc_api: Option<String>,
+
+        /// Metrics HTTP server listen address (ip:port).
+        #[arg(long, default_value = "127.0.0.1:9090")]
+        metrics_addr: String,
     },
 
     /// Initialize genesis block and data directory.
@@ -246,6 +250,7 @@ async fn main() {
             rpc_cors,
             rpc_rate_limit,
             rpc_api,
+            metrics_addr,
         } => {
             // Load config file if specified (CLI args override file values).
             let file_config = match &config_path {
@@ -352,6 +357,15 @@ async fn main() {
                 }
             }
 
+            let effective_metrics_addr = if metrics_addr != "127.0.0.1:9090" {
+                metrics_addr
+            } else {
+                file_config
+                    .metrics
+                    .listen_addr
+                    .unwrap_or(metrics_addr)
+            };
+
             commands::run(commands::run::RunArgs {
                 datadir,
                 rpc_addr: effective_rpc_addr,
@@ -370,6 +384,7 @@ async fn main() {
                 rpc_cors: effective_rpc_cors,
                 rpc_rate_limit: effective_rpc_rate_limit,
                 rpc_api: effective_rpc_api,
+                metrics_addr: effective_metrics_addr,
             })
             .await
         }

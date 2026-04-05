@@ -37,6 +37,7 @@ pub struct RunArgs {
     pub rpc_cors: Option<String>,
     pub rpc_rate_limit: Option<u32>,
     pub rpc_api: Option<String>,
+    pub metrics_addr: String,
 }
 
 /// Maximum genesis file size: 10 MB (F-082).
@@ -258,7 +259,10 @@ async fn run_with_store<S: KvStore + 'static>(
         block_time_ms: args.block_time,
         data_dir: args.datadir.to_string_lossy().into(),
         pruning: PruningConfig::new(args.pruning),
-        metrics: shell_node::config::MetricsConfig::default(),
+        metrics: shell_node::config::MetricsConfig {
+            enabled: true,
+            listen_addr: args.metrics_addr.parse()?,
+        },
     };
 
     // Build the node (auto-detects existing state via NodeBuilder).
@@ -292,6 +296,7 @@ async fn run_with_store<S: KvStore + 'static>(
             }
             eprintln!("   P2P:         {p2p_listen} (libp2p)");
             eprintln!("   Authority:   0x{}", hex::encode(authority.as_bytes()));
+            eprintln!("   Metrics:     http://{}", args.metrics_addr);
             eprintln!("   Block time:  {}ms", args.block_time);
             if args.pruning > 0 {
                 eprintln!("   Pruning:     keep last {} state roots", args.pruning);
@@ -329,6 +334,7 @@ async fn run_with_store<S: KvStore + 'static>(
             eprintln!("   WS:          ws://{ws}");
         }
         eprintln!("   Authority:   0x{}", hex::encode(authority.as_bytes()));
+        eprintln!("   Metrics:     http://{}", args.metrics_addr);
         eprintln!("   Block time:  {}ms", args.block_time);
         if args.pruning > 0 {
             eprintln!("   Pruning:     keep last {} state roots", args.pruning);

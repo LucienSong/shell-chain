@@ -1,0 +1,213 @@
+# Production shell-chain deployment: 3 validators + RPC node + monitoring.
+# Usage: docker compose -f docker-compose.prod.yml up -d
+
+services:
+  node1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: shell-prod-node1
+    environment:
+      - GENESIS_CREATOR=true
+      - DATADIR=/data
+      - SHARED=/shared
+      - SHELL_NODE_ROLE=validator
+    command: >
+      --datadir /data
+      --rpc-addr 0.0.0.0:8545
+      --ws --ws-port 8546
+      --p2p --p2p-addr 0.0.0.0:30303
+      --enable-mdns
+      --rpc-cors "*"
+      --rpc-api eth,net,web3,shell
+      --db rocksdb
+      --block-time 2000
+      --keystore /data/keystore.json
+      --metrics-addr 0.0.0.0:9090
+    ports:
+      - "8545:8545"
+      - "8546:8546"
+      - "30303:30303"
+    volumes:
+      - genesis:/shared
+      - node1-data:/data
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8545", "-X", "POST", "-H", "Content-Type: application/json", "-d", '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}']
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
+  node2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: shell-prod-node2
+    depends_on:
+      node1:
+        condition: service_healthy
+    environment:
+      - DATADIR=/data
+      - SHARED=/shared
+      - SHELL_NODE_ROLE=validator
+    command: >
+      --datadir /data
+      --rpc-addr 0.0.0.0:8545
+      --ws --ws-port 8546
+      --p2p --p2p-addr 0.0.0.0:30303
+      --bootnode /dns4/node1/tcp/30303
+      --enable-mdns
+      --rpc-cors "*"
+      --rpc-api eth,net,web3,shell
+      --db rocksdb
+      --block-time 2000
+      --keystore /data/keystore.json
+      --metrics-addr 0.0.0.0:9090
+    ports:
+      - "8555:8545"
+      - "8556:8546"
+      - "30304:30303"
+    volumes:
+      - genesis:/shared
+      - node2-data:/data
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8545", "-X", "POST", "-H", "Content-Type: application/json", "-d", '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}']
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
+  node3:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: shell-prod-node3
+    depends_on:
+      node1:
+        condition: service_healthy
+    environment:
+      - DATADIR=/data
+      - SHARED=/shared
+      - SHELL_NODE_ROLE=validator
+    command: >
+      --datadir /data
+      --rpc-addr 0.0.0.0:8545
+      --ws --ws-port 8546
+      --p2p --p2p-addr 0.0.0.0:30303
+      --bootnode /dns4/node1/tcp/30303
+      --enable-mdns
+      --rpc-cors "*"
+      --rpc-api eth,net,web3,shell
+      --db rocksdb
+      --block-time 2000
+      --keystore /data/keystore.json
+      --metrics-addr 0.0.0.0:9090
+    ports:
+      - "8565:8545"
+      - "8566:8546"
+      - "30305:30303"
+    volumes:
+      - genesis:/shared
+      - node3-data:/data
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8545", "-X", "POST", "-H", "Content-Type: application/json", "-d", '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}']
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
+  rpc-node:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: shell-prod-rpc
+    depends_on:
+      node1:
+        condition: service_healthy
+    environment:
+      - DATADIR=/data
+      - SHARED=/shared
+      - SHELL_NODE_ROLE=rpc
+    command: >
+      --datadir /data
+      --rpc-addr 0.0.0.0:8545
+      --ws --ws-port 8546
+      --p2p --p2p-addr 0.0.0.0:30303
+      --bootnode /dns4/node1/tcp/30303
+      --enable-mdns
+      --rpc-cors "*"
+      --rpc-api eth,net,web3,shell,debug,trace
+      --db rocksdb
+      --metrics-addr 0.0.0.0:9090
+    ports:
+      - "8548:8545"
+      - "8549:8546"
+      - "30306:30303"
+    volumes:
+      - genesis:/shared
+      - rpc-data:/data
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8545", "-X", "POST", "-H", "Content-Type: application/json", "-d", '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}']
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    container_name: shell-prod-prometheus
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.0.0
+    container_name: shell-prod-grafana
+    depends_on:
+      - prometheus
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=shell-chain
+      - GF_USERS_ALLOW_SIGN_UP=false
+    restart: unless-stopped
+
+volumes:
+  genesis:
+  node1-data:
+  node2-data:
+  node3-data:
+  rpc-data:
+  prometheus-data:
+  grafana-data:

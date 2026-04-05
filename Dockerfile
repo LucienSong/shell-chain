@@ -32,6 +32,6 @@ RUN mkdir -p /data /shared && chown shelluser:shelluser /data /shared
 
 USER shelluser
 
-EXPOSE 8545 30303
+EXPOSE 8545 30303 9090
 
 ENTRYPOINT ["/entrypoint.sh"]
