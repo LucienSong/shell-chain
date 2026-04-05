@@ -347,10 +347,13 @@ mod tests {
         let _ = verifier.verify(signer.public_key(), msg, &sig).unwrap();
         let elapsed = start.elapsed();
 
+        // Debug builds are significantly slower; use generous threshold
+        let limit_ms = if cfg!(debug_assertions) { 50 } else { 10 };
         assert!(
-            elapsed.as_millis() < 10,
-            "sign+verify took {}ms, expected <10ms",
-            elapsed.as_millis()
+            elapsed.as_millis() < limit_ms,
+            "sign+verify took {}ms, expected <{}ms",
+            elapsed.as_millis(),
+            limit_ms
         );
     }
 
