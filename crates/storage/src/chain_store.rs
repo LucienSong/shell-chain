@@ -258,7 +258,10 @@ impl<S: KvStore> ChainStore<S> {
                 }
                 let block_hash = ShellHash::try_from_slice(&data[..32])
                     .map_err(|e| StorageError::Codec(e.to_string()))?;
-                let tx_idx = u32::from_be_bytes(data[32..36].try_into().unwrap());
+                let tx_idx = u32::from_be_bytes(
+                    data[32..36].try_into()
+                        .map_err(|_| StorageError::Codec("invalid tx index byte length".into()))?
+                );
                 Ok(Some((block_hash, tx_idx)))
             }
             None => Ok(None),
@@ -399,7 +402,9 @@ impl<S: KvStore> ChainStore<S> {
     pub fn get_finalized_number(&self) -> Result<Option<u64>, StorageError> {
         match self.store.get(b"FINALIZED")? {
             Some(bytes) if bytes.len() == 8 => {
-                let n = u64::from_be_bytes(bytes.try_into().unwrap());
+                let arr: [u8; 8] = bytes.try_into()
+                    .map_err(|_| StorageError::Codec("invalid finalized number encoding".into()))?;
+                let n = u64::from_be_bytes(arr);
                 Ok(Some(n))
             }
             _ => Ok(None),

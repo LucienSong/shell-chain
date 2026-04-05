@@ -282,6 +282,33 @@ impl<S: KvStore + 'static> WorldState<S> {
         Ok(ShellHash::from(root))
     }
 
+    /// Validate the world state by performing a health check (F-123).
+    ///
+    /// Verifies that the state trie can compute a root hash and that
+    /// the validator registry (if populated) is readable and consistent.
+    /// Call this after opening a world state from an existing root to
+    /// detect DB corruption early.
+    pub fn validate(&mut self) -> Result<(), StorageError> {
+        // Verify trie can compute root hash without panic.
+        let _root = self.account_trie.root_hash()
+            .map_err(|e| StorageError::State(format!("state trie integrity check failed: {e}")))?;
+
+        // Verify the validator registry is readable.
+        let validators = self.get_validators()
+            .map_err(|e| StorageError::State(format!("validator registry read failed: {e}")))?;
+
+        // Sanity check: if validators are present, count must be bounded.
+        if validators.len() > Self::MAX_VALIDATORS {
+            return Err(StorageError::State(format!(
+                "validator set size {} exceeds maximum {}",
+                validators.len(),
+                Self::MAX_VALIDATORS
+            )));
+        }
+
+        Ok(())
+    }
+
     /// Check whether an account exists in the state.
     pub fn exists(&self, address: &Address) -> Result<bool, StorageError> {
         Ok(self.get_account(address)?.is_some())
@@ -511,5 +538,33 @@ mod tests {
 
         let ws2 = WorldState::at_root(store, &root).unwrap();
         assert_eq!(ws2.get_validators().unwrap(), validators);
+    }
+
+    #[test]
+    fn validate_empty_state_ok() {
+        let store = test_store();
+        let mut ws = WorldState::new(store);
+        assert!(ws.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_with_validators_ok() {
+        let store = test_store();
+        let mut ws = WorldState::new(store);
+        let validators = vec![Address::from([0x01; 20]), Address::from([0x02; 20])];
+        ws.set_validators(&validators).unwrap();
+        assert!(ws.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_after_reopen_at_root() {
+        let store = test_store();
+        let mut ws = WorldState::new(Arc::clone(&store));
+        let addr = test_address(b"val-test");
+        ws.add_balance(&addr, U256::from(42)).unwrap();
+        let root = ws.state_root().unwrap();
+
+        let mut ws2 = WorldState::at_root(store, &root).unwrap();
+        assert!(ws2.validate().is_ok());
     }
 }

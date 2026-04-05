@@ -12,6 +12,9 @@ use shell_storage::MemoryDb;
 
 use tracing::info;
 
+/// Maximum genesis file size: 10 MB (F-082).
+const MAX_GENESIS_FILE_SIZE: u64 = 10 * 1024 * 1024;
+
 /// Initialize a data directory with genesis block.
 ///
 /// If no genesis.json is provided, creates a dev genesis with a single
@@ -21,10 +24,35 @@ pub fn init(
     genesis_path: Option<PathBuf>,
     chain_id: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    std::fs::create_dir_all(&datadir)?;
+    // F-096: Canonicalize data directory path.
+    let datadir = if datadir.exists() {
+        datadir.canonicalize()?
+    } else {
+        std::fs::create_dir_all(&datadir)?;
+        datadir.canonicalize()?
+    };
 
     let genesis_config = match genesis_path {
         Some(path) => {
+            // F-082: Validate genesis file path.
+            if !path.exists() {
+                return Err(format!(
+                    "genesis file not found: {}",
+                    path.display()
+                )
+                .into());
+            }
+            let path = path.canonicalize().map_err(|e| {
+                format!("failed to canonicalize genesis path '{}': {e}", path.display())
+            })?;
+            let file_size = std::fs::metadata(&path)?.len();
+            if file_size > MAX_GENESIS_FILE_SIZE {
+                return Err(format!(
+                    "genesis file too large: {} bytes (max {} bytes)",
+                    file_size, MAX_GENESIS_FILE_SIZE
+                )
+                .into());
+            }
             info!("Loading genesis from {}", path.display());
             GenesisConfig::from_file(&path)?
         }

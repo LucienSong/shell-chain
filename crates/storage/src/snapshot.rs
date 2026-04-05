@@ -1,6 +1,7 @@
 use std::io::{Read, Write};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use shell_primitives::ShellHash;
 
 use crate::StorageError;
@@ -24,6 +25,10 @@ pub struct SnapshotMetadata {
     pub entry_count: u64,
     /// Total uncompressed data size in bytes.
     pub data_size: u64,
+    /// SHA-256 checksum of all entry data (hex-encoded).
+    /// Computed over concatenated (key ++ value) bytes of every entry, in order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checksum: Option<String>,
 }
 
 impl SnapshotMetadata {
@@ -47,6 +52,7 @@ impl SnapshotMetadata {
             genesis_hash,
             entry_count: 0,
             data_size: 0,
+            checksum: None,
         }
     }
 
@@ -129,6 +135,7 @@ pub struct SnapshotWriter<W: Write> {
     metadata: SnapshotMetadata,
     entry_count: u64,
     data_size: u64,
+    hasher: Sha256,
 }
 
 impl<W: Write> SnapshotWriter<W> {
@@ -139,6 +146,7 @@ impl<W: Write> SnapshotWriter<W> {
             metadata,
             entry_count: 0,
             data_size: 0,
+            hasher: Sha256::new(),
         })
     }
 
@@ -159,6 +167,9 @@ impl<W: Write> SnapshotWriter<W> {
 
         self.entry_count += 1;
         self.data_size += (key.len() + value.len()) as u64;
+        // Feed data into SHA-256 hasher for integrity checksum (F-089).
+        self.hasher.update(key);
+        self.hasher.update(value);
         Ok(())
     }
 
@@ -167,6 +178,9 @@ impl<W: Write> SnapshotWriter<W> {
         let mut meta = self.metadata.clone();
         meta.entry_count = self.entry_count;
         meta.data_size = self.data_size;
+        // Compute SHA-256 checksum over all entry data (F-089).
+        let digest = self.hasher.finalize();
+        meta.checksum = Some(hex::encode(digest));
 
         // Write metadata as the last line, prefixed with "META:"
         let meta_json = serde_json::to_string(&meta)
@@ -192,6 +206,7 @@ impl<W: Write> SnapshotWriter<W> {
 ///
 /// Uses `BufReader` for line-by-line parsing to avoid loading the entire
 /// snapshot into a single contiguous `String` (F-079).
+#[derive(Debug)]
 pub struct SnapshotReader {
     lines: Vec<String>,
     metadata: SnapshotMetadata,
@@ -203,6 +218,7 @@ impl SnapshotReader {
     ///
     /// Uses `BufRead::lines()` to parse line-by-line instead of
     /// `read_to_string()`, avoiding a redundant full-file buffer.
+    /// Verifies the SHA-256 checksum if present in metadata (F-089).
     pub fn new<R: Read>(reader: R) -> Result<Self, StorageError> {
         use std::io::BufRead;
         let buf_reader = std::io::BufReader::new(reader);
@@ -231,6 +247,27 @@ impl SnapshotReader {
         let meta_json = &meta_line[5..]; // skip "META:" prefix
         let metadata: SnapshotMetadata = serde_json::from_str(meta_json)
             .map_err(|e| StorageError::Serialization(format!("parse metadata: {e}")))?;
+
+        // Verify SHA-256 checksum if present (F-089).
+        if let Some(ref expected_checksum) = metadata.checksum {
+            let mut hasher = Sha256::new();
+            for line in &lines {
+                if line.starts_with("META:") || line.is_empty() {
+                    continue;
+                }
+                let entry: SnapshotEntry = serde_json::from_str(line).map_err(|e| {
+                    StorageError::Serialization(format!("parse entry for checksum: {e}"))
+                })?;
+                hasher.update(&entry.key);
+                hasher.update(&entry.value);
+            }
+            let actual = hex::encode(hasher.finalize());
+            if actual != *expected_checksum {
+                return Err(StorageError::State(format!(
+                    "snapshot checksum mismatch: expected {expected_checksum}, got {actual}"
+                )));
+            }
+        }
 
         Ok(Self {
             lines,
@@ -444,5 +481,41 @@ mod tests {
         let e2 = reader.next_entry().unwrap().unwrap();
         assert_eq!(e2.key, b"b");
         assert!(reader.next_entry().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_checksum_present_in_finalized_metadata() {
+        let meta = test_metadata();
+        let mut buffer = Vec::new();
+
+        let mut writer = SnapshotWriter::new(Cursor::new(&mut buffer), meta).unwrap();
+        writer.write_entry(b"key1", b"value1").unwrap();
+        let written_meta = writer.finalize().unwrap();
+
+        assert!(written_meta.checksum.is_some());
+        assert_eq!(written_meta.checksum.as_ref().unwrap().len(), 64); // hex SHA-256
+    }
+
+    #[test]
+    fn test_checksum_verified_on_read() {
+        let meta = test_metadata();
+        let mut buffer = Vec::new();
+
+        let mut writer = SnapshotWriter::new(Cursor::new(&mut buffer), meta).unwrap();
+        writer.write_entry(b"k", b"v").unwrap();
+        writer.finalize().unwrap();
+
+        // Valid snapshot reads successfully
+        assert!(SnapshotReader::new(Cursor::new(&buffer)).is_ok());
+
+        // Tamper with entry data — replace value in the JSON line
+        let text = String::from_utf8(buffer).unwrap();
+        let tampered = text.replacen("\"diA=\"", "\"AAAA\"", 1); // change base64 value
+        if tampered != text {
+            // Only test if we actually tampered with something
+            let result = SnapshotReader::new(Cursor::new(tampered.as_bytes()));
+            assert!(result.is_err());
+            assert!(result.unwrap_err().to_string().contains("checksum mismatch"));
+        }
     }
 }

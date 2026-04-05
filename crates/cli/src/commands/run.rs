@@ -36,8 +36,24 @@ pub struct RunArgs {
     pub checkpoint_url: Option<String>,
 }
 
+/// Maximum genesis file size: 10 MB (F-082).
+const MAX_GENESIS_FILE_SIZE: u64 = 10 * 1024 * 1024;
+
 /// Start the node: load genesis, initialize state, and run the event loop.
 pub async fn run(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
+    // F-096: Canonicalize and validate data directory.
+    let datadir = if args.datadir.exists() {
+        args.datadir.canonicalize()?
+    } else {
+        std::fs::create_dir_all(&args.datadir)?;
+        args.datadir.canonicalize()?
+    };
+
+    let args = RunArgs {
+        datadir,
+        ..args
+    };
+
     match args.db.as_str() {
         "memory" => {
             info!("Using in-memory storage (non-persistent)");
@@ -74,6 +90,13 @@ async fn run_with_store<S: KvStore + 'static>(
     // Load or generate the signer.
     let signer: Arc<dyn Signer> = match args.keystore {
         Some(path) => {
+            // F-096: Validate keystore path.
+            if !path.exists() {
+                return Err(format!("keystore file not found: {}", path.display()).into());
+            }
+            let path = path.canonicalize().map_err(|e| {
+                format!("failed to canonicalize keystore path '{}': {e}", path.display())
+            })?;
             info!("Loading keystore from {}", path.display());
             let json = std::fs::read_to_string(&path)?;
             let encrypted: EncryptedKey = serde_json::from_str(&json)?;
@@ -110,6 +133,15 @@ async fn run_with_store<S: KvStore + 'static>(
     // Load genesis config.
     let genesis_file = args.datadir.join("genesis.json");
     let genesis_config = if genesis_file.exists() {
+        // F-082: Validate genesis file before loading.
+        let file_size = std::fs::metadata(&genesis_file)?.len();
+        if file_size > MAX_GENESIS_FILE_SIZE {
+            return Err(format!(
+                "genesis file too large: {} bytes (max {} bytes)",
+                file_size, MAX_GENESIS_FILE_SIZE
+            )
+            .into());
+        }
         info!("Loading genesis from {}", genesis_file.display());
         GenesisConfig::from_file(&genesis_file)?
     } else {

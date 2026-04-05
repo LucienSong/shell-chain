@@ -12,6 +12,10 @@ pub fn import_state(
     if !snapshot.exists() {
         return Err(format!("Snapshot file not found: {}", snapshot.display()).into());
     }
+    // F-096: Canonicalize snapshot path.
+    let snapshot = snapshot.canonicalize().map_err(|e| {
+        format!("failed to canonicalize snapshot path '{}': {e}", snapshot.display())
+    })?;
 
     // Validate snapshot file before opening the database.
     let validate_file = std::fs::File::open(&snapshot)?;

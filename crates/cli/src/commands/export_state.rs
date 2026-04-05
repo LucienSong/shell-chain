@@ -8,6 +8,16 @@ pub fn export_state(
     output: PathBuf,
     block: Option<u64>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // F-096: Validate output path — parent directory must exist and be writable.
+    if let Some(parent) = output.parent() {
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            return Err(format!(
+                "output parent directory does not exist: {}",
+                parent.display()
+            )
+            .into());
+        }
+    }
     #[cfg(feature = "rocksdb")]
     {
         use std::sync::Arc;
@@ -56,6 +66,10 @@ pub fn export_state(
         let file = std::fs::File::create(&output)?;
         let writer = std::io::BufWriter::new(file);
         let final_meta = chain_store.export_snapshot(metadata, writer)?;
+
+        // F-129: Ensure data reaches disk after BufWriter finalize.
+        let file = std::fs::OpenOptions::new().write(true).open(&output)?;
+        file.sync_all()?;
 
         let file_size = std::fs::metadata(&output)?.len();
         eprintln!("✓ State exported successfully");

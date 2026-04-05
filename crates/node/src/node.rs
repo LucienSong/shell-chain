@@ -882,6 +882,19 @@ impl<S: KvStore + 'static> Node<S> {
                             // Propagate errors to abort block import (F-068).
                             let local_ws = evm.state_db_mut().world_state_mut();
                             let validators = local_ws.get_validators()?;
+                            // F-068: Validate resulting validator set is sane.
+                            if validators.is_empty() {
+                                return Err(NodeError::Startup(
+                                    "system tx produced empty validator set".into(),
+                                ));
+                            }
+                            if validators.len() > WorldState::<S>::MAX_VALIDATORS {
+                                return Err(NodeError::Startup(format!(
+                                    "system tx produced validator set of size {} exceeding max {}",
+                                    validators.len(),
+                                    WorldState::<S>::MAX_VALIDATORS,
+                                )));
+                            }
                             let mut ws = self.world_state.write();
                             ws.set_validators(&validators)?;
                         } else {

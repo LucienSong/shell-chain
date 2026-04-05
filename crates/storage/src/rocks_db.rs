@@ -113,6 +113,32 @@ pub struct RocksDbStores {
     pub index: RocksDbStore,
 }
 
+impl RocksDbStores {
+    /// Verify database integrity by performing basic health checks (F-124).
+    ///
+    /// Reads a probe key from each column family to confirm the DB is
+    /// accessible and not corrupted. Returns an error with recovery
+    /// guidance if any column family is unreadable.
+    pub fn verify_integrity(&self) -> Result<(), StorageError> {
+        let stores = [
+            (&self.state, CF_STATE),
+            (&self.chain, CF_CHAIN),
+            (&self.receipts, CF_RECEIPTS),
+            (&self.index, CF_INDEX),
+        ];
+        for (store, cf_name) in &stores {
+            store.get(b"__integrity_probe__").map_err(|e| {
+                StorageError::Database(format!(
+                    "integrity check failed for column family '{cf_name}': {e}. \
+                     The database may be corrupted. \
+                     Back up the database directory and try RocksDB repair."
+                ))
+            })?;
+        }
+        Ok(())
+    }
+}
+
 impl RocksDbStore {
     /// Open a RocksDB database at the given path with all shell-chain column families.
     ///
@@ -153,8 +179,24 @@ impl RocksDbStore {
             .map(|name| ColumnFamilyDescriptor::new(*name, make_cf_opts()))
             .collect();
 
-        let db = RocksDb::open_cf_descriptors(&db_opts, path, cf_descriptors)
-            .map_err(|e| StorageError::Database(e.to_string()))?;
+        let db = RocksDb::open_cf_descriptors(&db_opts, &path, cf_descriptors)
+            .map_err(|e| {
+                let msg = e.to_string();
+                // F-124: Detect corruption and provide recovery guidance.
+                if msg.contains("Corruption") || msg.contains("corruption") || msg.contains("MANIFEST") {
+                    StorageError::Database(format!(
+                        "database corruption detected at '{}': {msg}. \
+                         Recovery steps: \
+                         1) Stop the node. \
+                         2) Back up the database directory. \
+                         3) Try `ldb repair --db=<path>` (RocksDB repair tool). \
+                         4) If repair fails, re-sync from a snapshot or genesis.",
+                        path.as_ref().display()
+                    ))
+                } else {
+                    StorageError::Database(msg)
+                }
+            })?;
 
         let db = Arc::new(db);
 
@@ -362,5 +404,18 @@ mod tests {
         let stores = RocksDbStore::open_all(dir.path(), Some(cfg)).unwrap();
         stores.state.put(b"k", b"v").unwrap();
         assert_eq!(stores.state.get(b"k").unwrap(), Some(b"v".to_vec()));
+    }
+
+    #[test]
+    fn verify_integrity_passes_on_healthy_db() {
+        let (_dir, stores) = open_temp();
+        stores.state.put(b"test", b"data").unwrap();
+        assert!(stores.verify_integrity().is_ok());
+    }
+
+    #[test]
+    fn verify_integrity_on_empty_db() {
+        let (_dir, stores) = open_temp();
+        assert!(stores.verify_integrity().is_ok());
     }
 }
