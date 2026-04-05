@@ -6,6 +6,7 @@ mod merkle_trie;
 mod world_state;
 mod chain_store;
 mod snapshot;
+mod state_pruner;
 
 #[cfg(feature = "rocksdb")]
 mod rocks_db;
@@ -18,6 +19,7 @@ pub use merkle_trie::MerkleTrie;
 pub use world_state::{WorldState, validator_registry_addr};
 pub use chain_store::{ChainConfig, ChainStore};
 pub use snapshot::{SnapshotEntry, SnapshotMetadata, SnapshotReader, SnapshotWriter};
+pub use state_pruner::{PruneResult, StatePruner};
 
 #[cfg(feature = "rocksdb")]
 pub use rocks_db::{
