@@ -153,15 +153,22 @@ pub async fn start_rpc_server<S: KvStore + 'static>(
         if origins.iter().any(|o| o == "*") {
             CorsLayer::permissive()
         } else {
-            CorsLayer::new()
-                .allow_origin(
-                    origins
-                        .iter()
-                        .map(|o| o.parse().expect("invalid CORS origin"))
-                        .collect::<Vec<_>>(),
-                )
-                .allow_methods(Any)
-                .allow_headers(Any)
+            {
+                let parsed: Vec<_> = origins
+                    .iter()
+                    .filter_map(|o| match o.parse() {
+                        Ok(v) => Some(v),
+                        Err(e) => {
+                            warn!("Ignoring invalid CORS origin '{}': {}", o, e);
+                            None
+                        }
+                    })
+                    .collect();
+                CorsLayer::new()
+                    .allow_origin(parsed)
+                    .allow_methods(Any)
+                    .allow_headers(Any)
+            }
         }
     } else {
         CorsLayer::new() // restrictive default

@@ -1106,16 +1106,24 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
             .map_err(|e| internal_err(format!("invalid hex: {e}")))?;
 
         // Try RLP decoding first (standard Ethereum format), then JSON (legacy).
-        let signed_tx: SignedTransaction =
-            match alloy_rlp::Decodable::decode(&mut bytes.as_slice()) {
-                Ok(tx) => tx,
+        let signed_tx: SignedTransaction = {
+            let mut slice = bytes.as_slice();
+            match alloy_rlp::Decodable::decode(&mut slice) {
+                Ok(tx) if slice.is_empty() => tx,
+                Ok(_) => {
+                    // RLP decoded but trailing bytes remain — reject per Geth behavior.
+                    return Err(internal_err(
+                        "invalid transaction: RLP has trailing bytes".to_string(),
+                    ));
+                }
                 Err(_) => serde_json::from_slice::<SignedTransaction>(&bytes)
                     .map_err(|e| {
                         internal_err(format!(
                             "invalid transaction: not valid RLP or JSON ({e})"
                         ))
                     })?,
-            };
+            }
+        };
 
         self.submit_tx(signed_tx)
     }
@@ -4065,5 +4073,19 @@ mod tests {
         let result = EthApiServer::send_raw_transaction(&handler, hex_payload).await;
         assert!(result.is_ok(), "JSON send_raw_transaction failed: {:?}", result.err());
         assert_eq!(handler.tx_pool.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn m6b1_send_raw_transaction_invalid_format_rejected() {
+        // Both RLP and JSON decode should fail for random garbage.
+        let handler = setup();
+        let garbage = format!("0x{}", hex::encode(b"this is not valid rlp or json"));
+        let result = EthApiServer::send_raw_transaction(&handler, garbage).await;
+        assert!(result.is_err());
+        let err_msg = format!("{:?}", result.unwrap_err());
+        assert!(
+            err_msg.contains("not valid RLP or JSON"),
+            "unexpected error: {err_msg}"
+        );
     }
 }
