@@ -64,7 +64,7 @@ rustup update stable
 ### 2. Clone the repository
 
 ```bash
-git clone https://github.com/your-org/shell-chain.git
+git clone https://github.com/shellchain-project/shell-chain.git
 cd shell-chain
 ```
 
@@ -164,7 +164,7 @@ pruning = 0                     # State roots to retain (0 = archive mode)
 listen_addr = "0.0.0.0:8545"   # JSON-RPC HTTP listen address
 ws_enabled = true               # Enable WebSocket RPC
 ws_port = 8546                  # WebSocket listen port
-cors_origins = ["*"]            # CORS allowed origins
+cors_origins = ["*"]            # CORS allowed origins (⚠️ restrict in production!)
 rate_limit = 100                # Max RPC requests per second per connection
 api_modules = ["eth", "net", "web3", "shell"]  # Enabled API namespaces
 
@@ -312,6 +312,8 @@ shell-node run \
 ```
 
 You will be prompted for the keystore password on startup.
+
+> ⚠️ **Security**: Binding to `0.0.0.0` exposes RPC to all network interfaces. In production, use a reverse proxy (nginx/caddy) with TLS and firewall rules to restrict access. For local-only access, use `127.0.0.1:8545`.
 
 ### RPC-only node
 

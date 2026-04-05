@@ -94,7 +94,56 @@ Enable the WebSocket server with `--ws`:
 shell-node run --ws --ws-port 8546
 ```
 
-The WebSocket endpoint supports all the same JSON-RPC methods as HTTP, plus filter-based subscriptions via `eth_newFilter`, `eth_newBlockFilter`, and `eth_getFilterChanges`.
+The WebSocket endpoint supports all the same JSON-RPC methods as HTTP, plus real-time PubSub subscriptions and filter-based polling via `eth_newFilter`, `eth_newBlockFilter`, and `eth_getFilterChanges`.
+
+### eth_subscribe (WebSocket only)
+
+Subscribe to live events. Returns a subscription ID.
+
+**Subscription types:**
+
+| Type | Description |
+|------|-------------|
+| `newHeads` | Pushes new block headers when blocks are produced or imported |
+| `logs` | Pushes log events matching a filter (address, topics) |
+| `newPendingTransactions` | Pushes transaction hashes as they enter the mempool |
+| `syncing` | Pushes sync status changes (syncing/not syncing) |
+
+**Example — newHeads:**
+
+```bash
+wscat -c ws://127.0.0.1:8546
+
+> {"jsonrpc":"2.0","id":1,"method":"eth_subscribe","params":["newHeads"]}
+< {"jsonrpc":"2.0","id":1,"result":"0x1"}
+< {"jsonrpc":"2.0","method":"eth_subscription","params":{"subscription":"0x1","result":{"number":"0xa","hash":"0x...","parentHash":"0x...","timestamp":"0x..."}}}
+```
+
+**Example — logs with filter:**
+
+```bash
+> {"jsonrpc":"2.0","id":2,"method":"eth_subscribe","params":["logs",{"address":"0x1234...","topics":["0xddf2..."]}]}
+< {"jsonrpc":"2.0","id":2,"result":"0x2"}
+```
+
+**Example — newPendingTransactions:**
+
+```bash
+> {"jsonrpc":"2.0","id":3,"method":"eth_subscribe","params":["newPendingTransactions"]}
+< {"jsonrpc":"2.0","id":3,"result":"0x3"}
+< {"jsonrpc":"2.0","method":"eth_subscription","params":{"subscription":"0x3","result":"0xabc123..."}}
+```
+
+### eth_unsubscribe (WebSocket only)
+
+Cancel an active subscription.
+
+```bash
+> {"jsonrpc":"2.0","id":4,"method":"eth_unsubscribe","params":["0x1"]}
+< {"jsonrpc":"2.0","id":4,"result":true}
+```
+
+**Limits:** Maximum 1024 global subscriptions, 16 per connection. Connections are auto-disconnected after repeated lag events.
 
 ---
 

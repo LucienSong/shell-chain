@@ -16,7 +16,7 @@ Get a local shell-chain node running in 5 minutes.
 ## 1. Clone and build
 
 ```bash
-git clone https://github.com/your-org/shell-chain.git
+git clone https://github.com/shellchain-project/shell-chain.git
 cd shell-chain
 cargo build --release
 ```
@@ -131,7 +131,7 @@ The block number should increase every 2 seconds.
 Using the CLI:
 
 ```bash
-shell-node account balance 0xYOUR_ADDRESS_HERE --rpc_url http://127.0.0.1:8545
+shell-node account balance 0xYOUR_ADDRESS_HERE --rpc-url http://127.0.0.1:8545
 ```
 
 Or via curl:
@@ -163,7 +163,7 @@ shell-node tx send \
   --to 0xRECIPIENT_ADDRESS \
   --value 1000000000000000000 \
   --keystore my-key.json \
-  --rpc_url http://127.0.0.1:8545
+  --rpc-url http://127.0.0.1:8545
 ```
 
 Enter your keystore password when prompted. The command outputs the transaction hash.
@@ -171,7 +171,7 @@ Enter your keystore password when prompted. The command outputs the transaction 
 Verify the recipient received the funds:
 
 ```bash
-shell-node account balance 0xRECIPIENT_ADDRESS --rpc_url http://127.0.0.1:8545
+shell-node account balance 0xRECIPIENT_ADDRESS --rpc-url http://127.0.0.1:8545
 ```
 
 ---
