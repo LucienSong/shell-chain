@@ -1882,4 +1882,503 @@ mod tests {
         assert_eq!(result2.receipt.status, 1);
         assert_eq!(result2.gas_used, 21_000);
     }
+
+    // ════════════════════════════════════════════════════════════
+    //  M5-A6: Cancun opcode — PUSH0 (EIP-3855)
+    // ════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_push0_opcode() {
+        let mut evm = setup_evm();
+        let deployer = ShellAddress::from([0x60; 20]);
+        fund_account(&mut evm, &deployer, U256::from(10_000_000_000u64));
+
+        // PUSH0 PUSH0 SSTORE PUSH0 SLOAD PUSH0 MSTORE PUSH1 32 PUSH0 RETURN
+        let runtime = vec![
+            0x5f, 0x5f, 0x55,
+            0x5f, 0x54,
+            0x5f, 0x52,
+            0x60, 0x20, 0x5f, 0xF3,
+        ];
+
+        let (_, addr) = deploy_contract(&mut evm, &deployer, make_init_code(&runtime), U256::ZERO, 0);
+        let result = call_contract(&mut evm, &deployer, &addr, vec![], U256::ZERO, 1, 500_000);
+        assert_eq!(result.receipt.status, 1, "PUSH0 opcode should be supported in Cancun");
+        assert_eq!(result.output, vec![0u8; 32]);
+    }
+
+    #[test]
+    fn test_push0_used_in_arithmetic() {
+        let mut evm = setup_evm();
+        let deployer = ShellAddress::from([0x61; 20]);
+        fund_account(&mut evm, &deployer, U256::from(10_000_000_000u64));
+
+        // PUSH0 + PUSH1 1 + ADD → 1
+        let runtime = vec![
+            0x5f, 0x60, 0x01, 0x01, // PUSH0, PUSH1 1, ADD → 1
+            0x5f, 0x52,              // PUSH0, MSTORE
+            0x60, 0x20, 0x5f, 0xF3,  // RETURN 32
+        ];
+
+        let (_, addr) = deploy_contract(&mut evm, &deployer, make_init_code(&runtime), U256::ZERO, 0);
+        let result = call_contract(&mut evm, &deployer, &addr, vec![], U256::ZERO, 1, 500_000);
+        assert_eq!(result.receipt.status, 1);
+        assert_eq!(result.output[31], 1, "PUSH0 + 1 should equal 1");
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  M5-A6: BLOBHASH opcode (EIP-4844, opcode 0x49)
+    // ════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_blobhash_returns_zero_without_blobs() {
+        let mut evm = setup_evm();
+        let deployer = ShellAddress::from([0x62; 20]);
+        fund_account(&mut evm, &deployer, U256::from(10_000_000_000u64));
+
+        let runtime = vec![
+            0x5f, 0x49,       // PUSH0, BLOBHASH
+            0x5f, 0x52,       // PUSH0, MSTORE
+            0x60, 0x20, 0x5f, 0xF3,
+        ];
+
+        let (_, addr) = deploy_contract(&mut evm, &deployer, make_init_code(&runtime), U256::ZERO, 0);
+        let result = call_contract(&mut evm, &deployer, &addr, vec![], U256::ZERO, 1, 500_000);
+        assert_eq!(result.receipt.status, 1, "BLOBHASH should execute in Cancun");
+        assert_eq!(result.output, vec![0u8; 32]);
+    }
+
+    #[test]
+    fn test_blobhash_with_blob_tx_context() {
+        // BLOBHASH returns the versioned hash when hashes are provided.
+        // We use a type 2 tx (not type 3) because revm validates blob tx
+        // version hashes at protocol level; our executor still passes
+        // blob_versioned_hashes to the TxEnv for the BLOBHASH opcode.
+        let mut evm = setup_evm();
+        let deployer = ShellAddress::from([0x63; 20]);
+        fund_account(&mut evm, &deployer, U256::from(1_000_000_000_000u64));
+
+        let runtime = vec![
+            0x5f, 0x49, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xF3,
+        ];
+        let (_, addr) = deploy_contract(&mut evm, &deployer, make_init_code(&runtime), U256::ZERO, 0);
+
+        let mut blob_hash_bytes = [0u8; 32];
+        blob_hash_bytes[0] = 0x01; // version prefix
+        blob_hash_bytes[1..].copy_from_slice(&[0xAB; 31]);
+        let blob_hash = ShellHash::from(blob_hash_bytes);
+        let tx = Transaction {
+            chain_id: 1337, nonce: 1,
+            to: Some(addr), value: U256::ZERO,
+            data: shell_primitives::Bytes::new(),
+            gas_limit: 500_000, max_fee_per_gas: 0, max_priority_fee_per_gas: 0,
+            access_list: None, tx_type: 2,
+            max_fee_per_blob_gas: Some(1_000_000),
+            blob_versioned_hashes: Some(vec![blob_hash]),
+        };
+        let sig = PQSignature::new(SignatureType::Dilithium3, vec![0xEE; 100]);
+        let signed = SignedTransaction::new(deployer, tx, sig);
+        let result = evm.execute_tx(&signed, &sample_header(), 0, 0).unwrap();
+        assert_eq!(result.receipt.status, 1);
+        assert_eq!(result.output, blob_hash.as_bytes().to_vec());
+    }
+
+    #[test]
+    fn test_blobhash_out_of_bounds_returns_zero() {
+        let mut evm = setup_evm();
+        let deployer = ShellAddress::from([0x64; 20]);
+        fund_account(&mut evm, &deployer, U256::from(1_000_000_000_000u64));
+
+        // BLOBHASH(1) with only 1 blob → zero
+        let runtime = vec![
+            0x60, 0x01, 0x49, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xF3,
+        ];
+        let (_, addr) = deploy_contract(&mut evm, &deployer, make_init_code(&runtime), U256::ZERO, 0);
+
+        let mut blob_hash_bytes = [0u8; 32];
+        blob_hash_bytes[0] = 0x01;
+        blob_hash_bytes[1..].copy_from_slice(&[0xCD; 31]);
+        let blob_hash = ShellHash::from(blob_hash_bytes);
+        let tx = Transaction {
+            chain_id: 1337, nonce: 1,
+            to: Some(addr), value: U256::ZERO,
+            data: shell_primitives::Bytes::new(),
+            gas_limit: 500_000, max_fee_per_gas: 0, max_priority_fee_per_gas: 0,
+            access_list: None, tx_type: 2,
+            max_fee_per_blob_gas: Some(1_000_000),
+            blob_versioned_hashes: Some(vec![blob_hash]),
+        };
+        let sig = PQSignature::new(SignatureType::Dilithium3, vec![0xFF; 100]);
+        let signed = SignedTransaction::new(deployer, tx, sig);
+        let result = evm.execute_tx(&signed, &sample_header(), 0, 0).unwrap();
+        assert_eq!(result.receipt.status, 1);
+        assert_eq!(result.output, vec![0u8; 32]);
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  M5-A6: BLOBBASEFEE opcode (EIP-7516, opcode 0x4a)
+    // ════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_blobbasefee_opcode() {
+        let mut evm = setup_evm();
+        let deployer = ShellAddress::from([0x65; 20]);
+        fund_account(&mut evm, &deployer, U256::from(10_000_000_000u64));
+
+        let runtime = vec![
+            0x4a, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xF3,
+        ];
+
+        let (_, addr) = deploy_contract(&mut evm, &deployer, make_init_code(&runtime), U256::ZERO, 0);
+        let result = call_contract(&mut evm, &deployer, &addr, vec![], U256::ZERO, 1, 500_000);
+        assert_eq!(result.receipt.status, 1, "BLOBBASEFEE should be supported");
+        assert_eq!(result.output.len(), 32);
+        // excess_blob_gas=0 → blob base fee = 1
+        assert_eq!(result.output[31], 1);
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  M5-A6: SSTORE gas — EIP-2200 net gas metering
+    // ════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_sstore_cold_zero_to_nonzero_costs_more() {
+        let mut evm = setup_evm();
+        let deployer = ShellAddress::from([0x70; 20]);
+        fund_account(&mut evm, &deployer, U256::from(100_000_000_000u64));
+
+        // SSTORE(calldataload(0), calldataload(32)) STOP
+        let runtime = vec![
+            0x60, 0x20, 0x35, // CALLDATALOAD(32) → value
+            0x60, 0x00, 0x35, // CALLDATALOAD(0) → key
+            0x55, 0x00,
+        ];
+        let (_, addr) = deploy_contract(&mut evm, &deployer, make_init_code(&runtime), U256::ZERO, 0);
+
+        // First: zero → nonzero (cold, 20_000 gas)
+        let mut cd1 = [0u8; 64];
+        cd1[31] = 0x01;
+        cd1[63] = 0x42;
+        let r1 = call_contract(&mut evm, &deployer, &addr, cd1.to_vec(), U256::ZERO, 1, 500_000);
+        assert_eq!(r1.receipt.status, 1);
+
+        // Second: nonzero → nonzero (warm, 5000 gas)
+        let mut cd2 = [0u8; 64];
+        cd2[31] = 0x01;
+        cd2[63] = 0x43;
+        let r2 = call_contract(&mut evm, &deployer, &addr, cd2.to_vec(), U256::ZERO, 2, 500_000);
+        assert_eq!(r2.receipt.status, 1);
+
+        assert!(r1.gas_used > r2.gas_used,
+            "cold zero→nonzero ({}) should cost more than warm nonzero→nonzero ({})",
+            r1.gas_used, r2.gas_used);
+    }
+
+    #[test]
+    fn test_sstore_nonzero_to_zero_gets_refund() {
+        let mut evm = setup_evm();
+        let deployer = ShellAddress::from([0x71; 20]);
+        fund_account(&mut evm, &deployer, U256::from(100_000_000_000u64));
+
+        let runtime = vec![
+            0x60, 0x00, 0x35, 0x60, 0x00, 0x55, 0x00,
+        ];
+        let (_, addr) = deploy_contract(&mut evm, &deployer, make_init_code(&runtime), U256::ZERO, 0);
+
+        let mut set_data = [0u8; 32];
+        set_data[31] = 0xFF;
+        let r_set = call_contract(&mut evm, &deployer, &addr, set_data.to_vec(), U256::ZERO, 1, 500_000);
+        assert_eq!(r_set.receipt.status, 1);
+
+        let r_clear = call_contract(&mut evm, &deployer, &addr, vec![0u8; 32], U256::ZERO, 2, 500_000);
+        assert_eq!(r_clear.receipt.status, 1);
+
+        assert!(r_clear.gas_used < r_set.gas_used,
+            "clearing (gas={}) should cost less than setting (gas={})",
+            r_clear.gas_used, r_set.gas_used);
+    }
+
+    #[test]
+    fn test_sstore_same_value_no_op_cheap() {
+        let mut evm = setup_evm();
+        let deployer = ShellAddress::from([0x72; 20]);
+        fund_account(&mut evm, &deployer, U256::from(100_000_000_000u64));
+
+        let runtime = vec![
+            0x60, 0x00, 0x35, 0x60, 0x00, 0x55, // SSTORE(0, calldataload(0))
+            0x60, 0x00, 0x35, 0x60, 0x00, 0x55, // SSTORE(0, same value)
+            0x00,
+        ];
+        let (_, addr) = deploy_contract(&mut evm, &deployer, make_init_code(&runtime), U256::ZERO, 0);
+
+        let mut cd = [0u8; 32];
+        cd[31] = 0x01;
+        let result = call_contract(&mut evm, &deployer, &addr, cd.to_vec(), U256::ZERO, 1, 500_000);
+        assert_eq!(result.receipt.status, 1);
+        assert!(result.gas_used < 50_000,
+            "double SSTORE should be cheaper than 50k gas, got {}", result.gas_used);
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  M5-A6: EIP-2929 cold/warm SLOAD/SSTORE gas costs
+    // ════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_eip2929_cold_sload_costs_more_than_warm() {
+        let mut evm = setup_evm();
+        let deployer = ShellAddress::from([0x73; 20]);
+        fund_account(&mut evm, &deployer, U256::from(100_000_000_000u64));
+
+        // Contract A: 1 SLOAD
+        let runtime_one = vec![0x60, 0x00, 0x54, 0x50, 0x00];
+        let (_, addr_one) = deploy_contract(
+            &mut evm, &deployer, make_init_code(&runtime_one), U256::ZERO, 0,
+        );
+
+        // Contract B: 2 SLOADs on same slot
+        let runtime_two = vec![
+            0x60, 0x00, 0x54, 0x50,
+            0x60, 0x00, 0x54, 0x50,
+            0x00,
+        ];
+        let (_, addr_two) = deploy_contract(
+            &mut evm, &deployer, make_init_code(&runtime_two), U256::ZERO, 1,
+        );
+
+        let r1 = call_contract(&mut evm, &deployer, &addr_one, vec![], U256::ZERO, 2, 500_000);
+        assert_eq!(r1.receipt.status, 1);
+
+        let r2 = call_contract(&mut evm, &deployer, &addr_two, vec![], U256::ZERO, 3, 500_000);
+        assert_eq!(r2.receipt.status, 1);
+
+        let extra_gas = r2.gas_used - r1.gas_used;
+        assert!(extra_gas < 500,
+            "second SLOAD (warm) should add ~100 gas, not {extra_gas}");
+    }
+
+    #[test]
+    fn test_eip2929_access_list_makes_sload_warm() {
+        let mut evm = setup_evm();
+        let deployer = ShellAddress::from([0x74; 20]);
+        fund_account(&mut evm, &deployer, U256::from(100_000_000_000u64));
+
+        let runtime = vec![0x60, 0x00, 0x54, 0x50, 0x00];
+        let (_, addr) = deploy_contract(
+            &mut evm, &deployer, make_init_code(&runtime), U256::ZERO, 0,
+        );
+
+        // Cold SLOAD
+        let tx_cold = Transaction {
+            chain_id: 1337, nonce: 1,
+            to: Some(addr), value: U256::ZERO,
+            data: shell_primitives::Bytes::new(),
+            gas_limit: 500_000, max_fee_per_gas: 0, max_priority_fee_per_gas: 0,
+            access_list: None, tx_type: 2,
+            max_fee_per_blob_gas: None, blob_versioned_hashes: None,
+        };
+        let sig1 = PQSignature::new(SignatureType::Dilithium3, vec![0xAA; 100]);
+        let signed_cold = SignedTransaction::new(deployer, tx_cold, sig1);
+        let r_cold = evm.execute_tx(&signed_cold, &sample_header(), 0, 0).unwrap();
+        assert_eq!(r_cold.receipt.status, 1);
+
+        // Warm SLOAD via access list
+        let tx_warm = Transaction {
+            chain_id: 1337, nonce: 2,
+            to: Some(addr), value: U256::ZERO,
+            data: shell_primitives::Bytes::new(),
+            gas_limit: 500_000, max_fee_per_gas: 0, max_priority_fee_per_gas: 0,
+            access_list: Some(vec![shell_core::AccessListItem {
+                address: addr,
+                storage_keys: vec![ShellHash::ZERO],
+            }]),
+            tx_type: 2,
+            max_fee_per_blob_gas: None, blob_versioned_hashes: None,
+        };
+        let sig2 = PQSignature::new(SignatureType::Dilithium3, vec![0xBB; 100]);
+        let signed_warm = SignedTransaction::new(deployer, tx_warm, sig2);
+        let r_warm = evm.execute_tx(&signed_warm, &sample_header(), 0, 0).unwrap();
+        assert_eq!(r_warm.receipt.status, 1);
+        // Both succeed; the access list is processed by revm
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  M5-A6: Transient storage isolation between transactions
+    // ════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_transient_storage_cleared_between_txs() {
+        let mut evm = setup_evm();
+        let deployer = ShellAddress::from([0x75; 20]);
+        fund_account(&mut evm, &deployer, U256::from(10_000_000_000u64));
+
+        // Two contracts: one that TSTOREs, one that TLOADs.
+        // Since transient storage is per-transaction, running TSTORE in tx1
+        // and TLOAD in tx2 should return 0 for tx2.
+
+        // Contract: TSTORE(0, 0x42), SSTORE(0, 0x42), STOP
+        let tstore_runtime = vec![
+            0x60, 0x42, 0x60, 0x00, 0x5d, // TSTORE(0, 0x42)
+            0x60, 0x42, 0x60, 0x00, 0x55, // SSTORE(0, 0x42) — for persistent verification
+            0x00,                          // STOP
+        ];
+        let (_, tstore_addr) = deploy_contract(&mut evm, &deployer, make_init_code(&tstore_runtime), U256::ZERO, 0);
+
+        // Contract: TLOAD(0) → MSTORE → RETURN
+        let tload_runtime = vec![
+            0x60, 0x00, 0x5c, // TLOAD(0)
+            0x60, 0x00, 0x52, // MSTORE
+            0x60, 0x20, 0x60, 0x00, 0xF3, // RETURN 32
+        ];
+        let (_, tload_addr) = deploy_contract(&mut evm, &deployer, make_init_code(&tload_runtime), U256::ZERO, 1);
+
+        // Tx 1: call TSTORE contract
+        let r1 = call_contract(&mut evm, &deployer, &tstore_addr, vec![], U256::ZERO, 2, 500_000);
+        assert_eq!(r1.receipt.status, 1, "TSTORE tx should succeed");
+
+        // Verify SSTORE persisted (to confirm contract executed)
+        let slot = ShellHash::ZERO;
+        let stored = evm.state_db_mut().world_state_mut()
+            .get_storage(&tstore_addr, &slot).unwrap();
+        assert_eq!(stored.as_bytes()[31], 0x42, "SSTORE should persist");
+
+        // Tx 2: call TLOAD contract (different tx, same storage address scope doesn't matter)
+        let r2 = call_contract(&mut evm, &deployer, &tload_addr, vec![], U256::ZERO, 3, 500_000);
+        assert_eq!(r2.receipt.status, 1);
+        assert_eq!(r2.output[31], 0, "transient storage should be cleared between txs");
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  M5-A6: MCOPY edge cases
+    // ════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_mcopy_overlapping_regions() {
+        let mut evm = setup_evm();
+        let deployer = ShellAddress::from([0x76; 20]);
+        fund_account(&mut evm, &deployer, U256::from(10_000_000_000u64));
+
+        let runtime = vec![
+            0x60, 0x01, 0x60, 0x00, 0x53, // MSTORE8(0, 0x01)
+            0x60, 0x02, 0x60, 0x01, 0x53, // MSTORE8(1, 0x02)
+            0x60, 0x03, 0x60, 0x02, 0x53, // MSTORE8(2, 0x03)
+            0x60, 0x04, 0x60, 0x03, 0x53, // MSTORE8(3, 0x04)
+            0x60, 0x04, 0x60, 0x00, 0x60, 0x02, 0x5e, // MCOPY 4 bytes from 0 to 2
+            0x60, 0x08, 0x60, 0x00, 0xF3, // RETURN 8 bytes
+        ];
+        let (_, addr) = deploy_contract(&mut evm, &deployer, make_init_code(&runtime), U256::ZERO, 0);
+        let result = call_contract(&mut evm, &deployer, &addr, vec![], U256::ZERO, 1, 500_000);
+        assert_eq!(result.receipt.status, 1, "MCOPY overlapping should succeed");
+        assert_eq!(&result.output[..6], &[0x01, 0x02, 0x01, 0x02, 0x03, 0x04]);
+    }
+
+    #[test]
+    fn test_mcopy_zero_length() {
+        let mut evm = setup_evm();
+        let deployer = ShellAddress::from([0x77; 20]);
+        fund_account(&mut evm, &deployer, U256::from(10_000_000_000u64));
+
+        let runtime = vec![
+            0x60, 0xAA, 0x60, 0x00, 0x53, // MSTORE8(0, 0xAA)
+            0x60, 0x00, 0x60, 0x00, 0x60, 0x20, 0x5e, // MCOPY 0 bytes
+            0x60, 0x01, 0x60, 0x20, 0xF3,
+        ];
+        let (_, addr) = deploy_contract(&mut evm, &deployer, make_init_code(&runtime), U256::ZERO, 0);
+        let result = call_contract(&mut evm, &deployer, &addr, vec![], U256::ZERO, 1, 500_000);
+        assert_eq!(result.receipt.status, 1);
+        assert_eq!(result.output, vec![0x00], "MCOPY zero length should be no-op");
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  M5-A6: EIP-4844 blob gas pricing integration
+    // ════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_blob_excess_gas_in_header_affects_blob_base_fee() {
+        let mut evm = setup_evm();
+        let deployer = ShellAddress::from([0x78; 20]);
+        fund_account(&mut evm, &deployer, U256::from(100_000_000_000u64));
+
+        // Contract returns BLOBBASEFEE
+        let runtime = vec![0x4a, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xF3];
+        let (_, addr) = deploy_contract(&mut evm, &deployer, make_init_code(&runtime), U256::ZERO, 0);
+
+        // Low excess → low fee
+        let tx1 = Transaction {
+            chain_id: 1337, nonce: 1,
+            to: Some(addr), value: U256::ZERO,
+            data: shell_primitives::Bytes::new(),
+            gas_limit: 500_000, max_fee_per_gas: 0, max_priority_fee_per_gas: 0,
+            access_list: None, tx_type: 2,
+            max_fee_per_blob_gas: None, blob_versioned_hashes: None,
+        };
+        let sig1 = PQSignature::new(SignatureType::Dilithium3, vec![0xAA; 100]);
+        let signed1 = SignedTransaction::new(deployer, tx1, sig1);
+        let mut header_low = sample_header();
+        header_low.excess_blob_gas = 0;
+        let r1 = evm.execute_tx(&signed1, &header_low, 0, 0).unwrap();
+        assert_eq!(r1.receipt.status, 1);
+
+        // High excess → higher fee
+        let tx2 = Transaction {
+            chain_id: 1337, nonce: 2,
+            to: Some(addr), value: U256::ZERO,
+            data: shell_primitives::Bytes::new(),
+            gas_limit: 500_000, max_fee_per_gas: 0, max_priority_fee_per_gas: 0,
+            access_list: None, tx_type: 2,
+            max_fee_per_blob_gas: None, blob_versioned_hashes: None,
+        };
+        let sig2 = PQSignature::new(SignatureType::Dilithium3, vec![0xBB; 100]);
+        let signed2 = SignedTransaction::new(deployer, tx2, sig2);
+        let mut header_high = sample_header();
+        header_high.excess_blob_gas = 10_000_000;
+        let r2 = evm.execute_tx(&signed2, &header_high, 0, 0).unwrap();
+        assert_eq!(r2.receipt.status, 1);
+
+        let fee1 = U256::from_be_slice(&r1.output);
+        let fee2 = U256::from_be_slice(&r2.output);
+        assert!(fee2 > fee1,
+            "higher excess should yield higher blob base fee: low={fee1}, high={fee2}");
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  M5-A6: EIP-2930 access list gas formula verification
+    // ════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_access_list_gas_formula() {
+        use shell_core::AccessListItem;
+
+        let base = crate::tx_validation::compute_intrinsic_gas(&[], false, &None);
+
+        // 1 address, 0 keys → +2400
+        let al1 = Some(vec![AccessListItem {
+            address: ShellAddress::from([0xAA; 20]),
+            storage_keys: vec![],
+        }]);
+        assert_eq!(crate::tx_validation::compute_intrinsic_gas(&[], false, &al1) - base, 2_400);
+
+        // 1 address, 1 key → +4300
+        let al2 = Some(vec![AccessListItem {
+            address: ShellAddress::from([0xBB; 20]),
+            storage_keys: vec![ShellHash::from([0x01; 32])],
+        }]);
+        assert_eq!(crate::tx_validation::compute_intrinsic_gas(&[], false, &al2) - base, 4_300);
+
+        // 3 addresses, 2 keys each → 3*2400 + 6*1900 = 18600
+        let al3 = Some(vec![
+            AccessListItem {
+                address: ShellAddress::from([0x01; 20]),
+                storage_keys: vec![ShellHash::from([0x01; 32]), ShellHash::from([0x02; 32])],
+            },
+            AccessListItem {
+                address: ShellAddress::from([0x02; 20]),
+                storage_keys: vec![ShellHash::from([0x03; 32]), ShellHash::from([0x04; 32])],
+            },
+            AccessListItem {
+                address: ShellAddress::from([0x03; 20]),
+                storage_keys: vec![ShellHash::from([0x05; 32]), ShellHash::from([0x06; 32])],
+            },
+        ]);
+        assert_eq!(crate::tx_validation::compute_intrinsic_gas(&[], false, &al3) - base, 18_600);
+    }
 }

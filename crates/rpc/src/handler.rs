@@ -3784,4 +3784,194 @@ mod tests {
         assert_eq!(result["type"], "CALL");
         assert_eq!(result["failed"], false);
     }
+
+    // ════════════════════════════════════════════════════════════
+    //  M5-A6: RPC eth_* response format compatibility tests
+    // ════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn m5a6_eth_chain_id_returns_hex_string() {
+        let handler = setup();
+        let result = EthApiServer::chain_id(&handler).await.unwrap();
+        assert!(result.starts_with("0x"), "chain_id should be hex: {result}");
+        assert_eq!(result, "0x2a");
+    }
+
+    #[tokio::test]
+    async fn m5a6_eth_block_number_returns_hex_string() {
+        let handler = setup();
+        let block = make_genesis_block();
+        let hash = block.hash();
+        handler.chain_store.put_block(&block).unwrap();
+        handler.chain_store.set_canonical(0, &hash).unwrap();
+        handler.chain_store.set_head(&hash).unwrap();
+
+        let result = EthApiServer::block_number(&handler).await.unwrap();
+        assert!(result.starts_with("0x"), "blockNumber should be hex: {result}");
+        assert_eq!(result, "0x0");
+    }
+
+    #[tokio::test]
+    async fn m5a6_eth_gas_price_returns_hex_string() {
+        let handler = setup();
+        let result = EthApiServer::gas_price(&handler).await.unwrap();
+        assert!(result.starts_with("0x"), "gasPrice should be hex: {result}");
+    }
+
+    #[tokio::test]
+    async fn m5a6_eth_get_block_not_found_returns_none() {
+        let handler = setup();
+        let result = EthApiServer::get_block_by_number(&handler, "0xff".into(), false)
+            .await
+            .unwrap();
+        assert!(result.is_none(), "non-existent block should return None");
+
+        let fake_hash = ShellHash::from([0xAA; 32]);
+        let result2 = EthApiServer::get_block_by_hash(&handler, fake_hash, false)
+            .await
+            .unwrap();
+        assert!(result2.is_none(), "non-existent block by hash should return None");
+    }
+
+    #[tokio::test]
+    async fn m5a6_eth_get_block_tx_hashes_vs_full_txs() {
+        let handler = setup();
+        let (block_hash, _tx_hash) = store_block_with_tx(&handler, 0, true);
+
+        let rpc_hashes = EthApiServer::get_block_by_hash(&handler, block_hash, false)
+            .await
+            .unwrap()
+            .unwrap();
+        let txs = rpc_hashes.transactions.as_array().unwrap();
+        assert_eq!(txs.len(), 1);
+        assert!(txs[0].is_string(), "with full=false, tx should be hash string");
+
+        let rpc_full = EthApiServer::get_block_by_hash(&handler, block_hash, true)
+            .await
+            .unwrap()
+            .unwrap();
+        let txs_full = rpc_full.transactions.as_array().unwrap();
+        assert_eq!(txs_full.len(), 1);
+        assert!(txs_full[0].is_object(), "with full=true, tx should be object");
+        assert!(txs_full[0].get("hash").is_some());
+        assert!(txs_full[0].get("from").is_some());
+    }
+
+    #[tokio::test]
+    async fn m5a6_eth_get_transaction_by_hash_format() {
+        let handler = setup();
+        let (_block_hash, tx_hash) = store_block_with_tx(&handler, 0, true);
+
+        let result = EthApiServer::get_transaction_by_hash(&handler, tx_hash)
+            .await
+            .unwrap();
+        assert!(result.is_some());
+        let rpc_tx = result.unwrap();
+
+        assert!(rpc_tx.value.starts_with("0x"));
+        assert!(rpc_tx.gas.starts_with("0x"));
+        assert!(rpc_tx.nonce.starts_with("0x"));
+        assert!(rpc_tx.chain_id.starts_with("0x"));
+        assert!(rpc_tx.tx_type.starts_with("0x"));
+        assert!(rpc_tx.input.starts_with("0x"));
+        assert_eq!(rpc_tx.v, "0x0");
+        assert_eq!(rpc_tx.r, "0x0");
+        assert_eq!(rpc_tx.s, "0x0");
+    }
+
+    #[tokio::test]
+    async fn m5a6_eth_get_transaction_by_hash_not_found() {
+        let handler = setup();
+        let fake_hash = ShellHash::from([0xBB; 32]);
+        let result = EthApiServer::get_transaction_by_hash(&handler, fake_hash)
+            .await
+            .unwrap();
+        assert!(result.is_none(), "non-existent tx should return None");
+    }
+
+    #[tokio::test]
+    async fn m5a6_eth_get_transaction_receipt_format() {
+        let handler = setup();
+        let (_block_hash, tx_hash) = store_block_with_tx(&handler, 0, true);
+
+        let result = EthApiServer::get_transaction_receipt(&handler, tx_hash)
+            .await
+            .unwrap();
+        assert!(result.is_some());
+        let receipt = result.unwrap();
+
+        assert!(receipt.block_number.starts_with("0x"));
+        assert!(receipt.transaction_index.starts_with("0x"));
+        assert!(receipt.gas_used.starts_with("0x"));
+        assert!(receipt.cumulative_gas_used.starts_with("0x"));
+        assert!(receipt.status.starts_with("0x"));
+        assert_eq!(receipt.status, "0x1");
+        assert!(receipt.tx_type.starts_with("0x"));
+    }
+
+    #[tokio::test]
+    async fn m5a6_eth_get_transaction_receipt_not_found() {
+        let handler = setup();
+        let fake_hash = ShellHash::from([0xCC; 32]);
+        let result = EthApiServer::get_transaction_receipt(&handler, fake_hash)
+            .await
+            .unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn m5a6_rpc_block_blob_gas_fields_are_hex() {
+        let handler = setup();
+        let mut block = make_genesis_block();
+        block.header.blob_gas_used = 131_072;
+        block.header.excess_blob_gas = 393_216;
+        let hash = block.hash();
+        handler.chain_store.put_block(&block).unwrap();
+        handler.chain_store.set_canonical(0, &hash).unwrap();
+        handler.chain_store.set_head(&hash).unwrap();
+
+        let rpc = EthApiServer::get_block_by_number(&handler, "0x0".into(), false)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(rpc.blob_gas_used, "0x20000");
+        assert_eq!(rpc.excess_blob_gas, "0x60000");
+    }
+
+    #[tokio::test]
+    async fn m5a6_eth_get_balance_returns_hex_string() {
+        let handler = setup();
+        let addr = Address::from([0xAA; 20]);
+
+        {
+            let mut ws = handler.world_state.write();
+            let account = shell_core::Account::new_eoa(ShellHash::ZERO, U256::from(1_000_000));
+            ws.set_account(&addr, &account).unwrap();
+        }
+
+        let result = EthApiServer::get_balance(&handler, addr, None)
+            .await
+            .unwrap();
+        assert!(result.starts_with("0x"), "balance should be hex: {result}");
+        assert_eq!(result, "0xf4240");
+    }
+
+    #[tokio::test]
+    async fn m5a6_eth_get_transaction_count_returns_hex_nonce() {
+        let handler = setup();
+        let addr = Address::from([0xBB; 20]);
+
+        {
+            let mut ws = handler.world_state.write();
+            let mut account = shell_core::Account::new_eoa(ShellHash::ZERO, U256::ZERO);
+            account.nonce = 42;
+            ws.set_account(&addr, &account).unwrap();
+        }
+
+        let result = EthApiServer::get_transaction_count(&handler, addr, None)
+            .await
+            .unwrap();
+        assert_eq!(result, "0x2a");
+    }
 }

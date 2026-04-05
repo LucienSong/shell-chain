@@ -227,3 +227,427 @@ pub struct OeTrace {
     pub transaction_hash: ShellHash,
     pub transaction_position: u64,
 }
+
+// ════════════════════════════════════════════════════════════════
+//  M5-A6: RPC type compatibility tests
+// ════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json;
+
+    #[test]
+    fn hex_u64_formats_correctly() {
+        assert_eq!(hex_u64(0), "0x0");
+        assert_eq!(hex_u64(1), "0x1");
+        assert_eq!(hex_u64(255), "0xff");
+        assert_eq!(hex_u64(256), "0x100");
+        assert_eq!(hex_u64(21_000), "0x5208");
+        assert_eq!(hex_u64(30_000_000), "0x1c9c380");
+        assert_eq!(hex_u64(u64::MAX), "0xffffffffffffffff");
+    }
+
+    #[test]
+    fn hex_u256_formats_correctly() {
+        assert_eq!(hex_u256(U256::ZERO), "0x0");
+        assert_eq!(hex_u256(U256::from(1)), "0x1");
+        assert_eq!(hex_u256(U256::from(1000)), "0x3e8");
+        assert_eq!(hex_u256(U256::from(u64::MAX)), "0xffffffffffffffff");
+    }
+
+    #[test]
+    fn hex_bytes_formats_correctly() {
+        assert_eq!(hex_bytes(&[]), "0x");
+        assert_eq!(hex_bytes(&[0x00]), "0x00");
+        assert_eq!(hex_bytes(&[0xAA, 0xBB, 0xCC]), "0xaabbcc");
+        assert_eq!(hex_bytes(&[0xFF]), "0xff");
+    }
+
+    #[test]
+    fn rpc_block_json_camel_case_keys() {
+        let block = RpcBlock {
+            hash: ShellHash::ZERO,
+            parent_hash: ShellHash::ZERO,
+            number: "0x0".into(),
+            timestamp: "0x0".into(),
+            gas_limit: "0x1c9c380".into(),
+            gas_used: "0x0".into(),
+            miner: Address::ZERO,
+            state_root: ShellHash::ZERO,
+            transactions_root: ShellHash::ZERO,
+            receipts_root: ShellHash::ZERO,
+            transactions: serde_json::json!([]),
+            size: "0x0".into(),
+            base_fee_per_gas: "0x0".into(),
+            total_difficulty: "0x1".into(),
+            sha3_uncles: EMPTY_OMMER_HASH.into(),
+            uncles: vec![],
+            nonce: "0x0000000000000000".into(),
+            difficulty: "0x1".into(),
+            mix_hash: ShellHash::ZERO,
+            extra_data: "0x".into(),
+            logs_bloom: format!("0x{}", "00".repeat(256)),
+            withdrawals_root: format!("{:?}", ShellHash::ZERO),
+            parent_beacon_block_root: format!("{:?}", ShellHash::ZERO),
+            blob_gas_used: "0x0".into(),
+            excess_blob_gas: "0x0".into(),
+        };
+
+        let json = serde_json::to_value(&block).unwrap();
+
+        // Verify camelCase JSON keys per Ethereum spec
+        assert!(json.get("parentHash").is_some(), "missing parentHash");
+        assert!(json.get("gasLimit").is_some(), "missing gasLimit");
+        assert!(json.get("gasUsed").is_some(), "missing gasUsed");
+        assert!(json.get("stateRoot").is_some(), "missing stateRoot");
+        assert!(json.get("transactionsRoot").is_some(), "missing transactionsRoot");
+        assert!(json.get("receiptsRoot").is_some(), "missing receiptsRoot");
+        assert!(json.get("baseFeePerGas").is_some(), "missing baseFeePerGas");
+        assert!(json.get("totalDifficulty").is_some(), "missing totalDifficulty");
+        assert!(json.get("sha3Uncles").is_some(), "missing sha3Uncles");
+        assert!(json.get("mixHash").is_some(), "missing mixHash");
+        assert!(json.get("extraData").is_some(), "missing extraData");
+        assert!(json.get("logsBloom").is_some(), "missing logsBloom");
+        assert!(json.get("withdrawalsRoot").is_some(), "missing withdrawalsRoot");
+        assert!(json.get("parentBeaconBlockRoot").is_some(), "missing parentBeaconBlockRoot");
+        assert!(json.get("blobGasUsed").is_some(), "missing blobGasUsed");
+        assert!(json.get("excessBlobGas").is_some(), "missing excessBlobGas");
+    }
+
+    #[test]
+    fn rpc_block_numbers_are_hex_strings() {
+        let block = RpcBlock {
+            hash: ShellHash::ZERO,
+            parent_hash: ShellHash::ZERO,
+            number: hex_u64(42),
+            timestamp: hex_u64(1_700_000_000),
+            gas_limit: hex_u64(30_000_000),
+            gas_used: hex_u64(21_000),
+            miner: Address::ZERO,
+            state_root: ShellHash::ZERO,
+            transactions_root: ShellHash::ZERO,
+            receipts_root: ShellHash::ZERO,
+            transactions: serde_json::json!([]),
+            size: hex_u64(1000),
+            base_fee_per_gas: hex_u64(1_000_000_000),
+            total_difficulty: "0x1".into(),
+            sha3_uncles: EMPTY_OMMER_HASH.into(),
+            uncles: vec![],
+            nonce: "0x0000000000000000".into(),
+            difficulty: "0x1".into(),
+            mix_hash: ShellHash::ZERO,
+            extra_data: "0x".into(),
+            logs_bloom: format!("0x{}", "00".repeat(256)),
+            withdrawals_root: format!("{:?}", ShellHash::ZERO),
+            parent_beacon_block_root: format!("{:?}", ShellHash::ZERO),
+            blob_gas_used: hex_u64(0),
+            excess_blob_gas: hex_u64(0),
+        };
+
+        let json = serde_json::to_value(&block).unwrap();
+
+        for key in &[
+            "number", "timestamp", "gasLimit", "gasUsed", "size",
+            "baseFeePerGas", "totalDifficulty", "nonce", "difficulty",
+            "blobGasUsed", "excessBlobGas",
+        ] {
+            let val = json.get(key).unwrap();
+            assert!(val.is_string(), "{key} should be a string");
+            let s = val.as_str().unwrap();
+            assert!(s.starts_with("0x"), "{key} = '{s}' should start with 0x");
+        }
+    }
+
+    #[test]
+    fn rpc_transaction_json_has_required_fields() {
+        let tx = RpcTransaction {
+            hash: ShellHash::ZERO,
+            block_hash: Some(ShellHash::ZERO),
+            block_number: Some("0x1".into()),
+            transaction_index: Some("0x0".into()),
+            from: Address::ZERO,
+            to: Some(Address::from([0x01; 20])),
+            value: "0x3e8".into(),
+            gas: "0x5208".into(),
+            gas_price: "0x14".into(),
+            max_fee_per_gas: "0x14".into(),
+            max_priority_fee_per_gas: "0x1".into(),
+            nonce: "0x0".into(),
+            input: "0x".into(),
+            chain_id: "0x539".into(),
+            tx_type: "0x2".into(),
+            v: "0x0".into(),
+            r: "0x0".into(),
+            s: "0x0".into(),
+            access_list: None,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
+        };
+
+        let json = serde_json::to_value(&tx).unwrap();
+
+        for key in &[
+            "hash", "blockHash", "blockNumber", "transactionIndex",
+            "from", "to", "value", "gas", "gasPrice",
+            "maxFeePerGas", "maxPriorityFeePerGas",
+            "nonce", "input", "chainId", "type", "v", "r", "s",
+        ] {
+            assert!(json.get(key).is_some(), "missing field: {key}");
+        }
+    }
+
+    #[test]
+    fn rpc_transaction_null_to_for_contract_creation() {
+        let tx = RpcTransaction {
+            hash: ShellHash::ZERO,
+            block_hash: None,
+            block_number: None,
+            transaction_index: None,
+            from: Address::ZERO,
+            to: None,
+            value: "0x0".into(),
+            gas: "0x5208".into(),
+            gas_price: "0x0".into(),
+            max_fee_per_gas: "0x0".into(),
+            max_priority_fee_per_gas: "0x0".into(),
+            nonce: "0x0".into(),
+            input: "0x6080".into(),
+            chain_id: "0x539".into(),
+            tx_type: "0x2".into(),
+            v: "0x0".into(),
+            r: "0x0".into(),
+            s: "0x0".into(),
+            access_list: None,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
+        };
+
+        let json = serde_json::to_value(&tx).unwrap();
+        assert!(json.get("to").unwrap().is_null(), "to must be null for contract creation");
+        assert!(json.get("blockHash").unwrap().is_null(), "pending tx should have null blockHash");
+        assert!(json.get("blockNumber").unwrap().is_null(), "pending tx should have null blockNumber");
+        assert!(json.get("transactionIndex").unwrap().is_null(), "pending tx should have null transactionIndex");
+    }
+
+    #[test]
+    fn rpc_transaction_optional_eip4844_fields_absent_when_none() {
+        let tx = RpcTransaction {
+            hash: ShellHash::ZERO,
+            block_hash: None,
+            block_number: None,
+            transaction_index: None,
+            from: Address::ZERO,
+            to: Some(Address::from([0x01; 20])),
+            value: "0x0".into(),
+            gas: "0x5208".into(),
+            gas_price: "0x0".into(),
+            max_fee_per_gas: "0x0".into(),
+            max_priority_fee_per_gas: "0x0".into(),
+            nonce: "0x0".into(),
+            input: "0x".into(),
+            chain_id: "0x539".into(),
+            tx_type: "0x2".into(),
+            v: "0x0".into(),
+            r: "0x0".into(),
+            s: "0x0".into(),
+            access_list: None,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
+        };
+
+        let json = serde_json::to_string(&tx).unwrap();
+        assert!(!json.contains("maxFeePerBlobGas"), "absent for non-blob tx");
+        assert!(!json.contains("blobVersionedHashes"), "absent for non-blob tx");
+        assert!(!json.contains("accessList"), "absent when None");
+    }
+
+    #[test]
+    fn rpc_transaction_eip4844_fields_present_when_some() {
+        let tx = RpcTransaction {
+            hash: ShellHash::ZERO,
+            block_hash: None,
+            block_number: None,
+            transaction_index: None,
+            from: Address::ZERO,
+            to: Some(Address::from([0x01; 20])),
+            value: "0x0".into(),
+            gas: "0x5208".into(),
+            gas_price: "0x0".into(),
+            max_fee_per_gas: "0x0".into(),
+            max_priority_fee_per_gas: "0x0".into(),
+            nonce: "0x0".into(),
+            input: "0x".into(),
+            chain_id: "0x539".into(),
+            tx_type: "0x3".into(),
+            v: "0x0".into(),
+            r: "0x0".into(),
+            s: "0x0".into(),
+            access_list: Some(vec![]),
+            max_fee_per_blob_gas: Some("0xf4240".into()),
+            blob_versioned_hashes: Some(vec![ShellHash::ZERO]),
+        };
+
+        let json = serde_json::to_value(&tx).unwrap();
+        assert!(json.get("maxFeePerBlobGas").is_some());
+        assert!(json.get("blobVersionedHashes").is_some());
+        assert!(json.get("accessList").is_some());
+    }
+
+    #[test]
+    fn rpc_receipt_json_has_required_fields() {
+        let receipt = RpcReceipt {
+            transaction_hash: ShellHash::ZERO,
+            block_hash: ShellHash::ZERO,
+            block_number: "0x1".into(),
+            transaction_index: "0x0".into(),
+            from: Address::ZERO,
+            to: Some(Address::from([0x01; 20])),
+            status: "0x1".into(),
+            gas_used: "0x5208".into(),
+            cumulative_gas_used: "0x5208".into(),
+            effective_gas_price: "0x14".into(),
+            contract_address: None,
+            logs: vec![],
+            logs_bloom: format!("0x{}", "00".repeat(256)),
+            tx_type: "0x2".into(),
+        };
+
+        let json = serde_json::to_value(&receipt).unwrap();
+
+        for key in &[
+            "transactionHash", "blockHash", "blockNumber", "transactionIndex",
+            "from", "to", "status", "gasUsed", "cumulativeGasUsed",
+            "effectiveGasPrice", "contractAddress", "logs", "logsBloom", "type",
+        ] {
+            assert!(json.get(key).is_some(), "missing field: {key}");
+        }
+    }
+
+    #[test]
+    fn rpc_receipt_contract_address_null_for_non_creation() {
+        let receipt = RpcReceipt {
+            transaction_hash: ShellHash::ZERO,
+            block_hash: ShellHash::ZERO,
+            block_number: "0x1".into(),
+            transaction_index: "0x0".into(),
+            from: Address::ZERO,
+            to: Some(Address::from([0x01; 20])),
+            status: "0x1".into(),
+            gas_used: "0x5208".into(),
+            cumulative_gas_used: "0x5208".into(),
+            effective_gas_price: "0x14".into(),
+            contract_address: None,
+            logs: vec![],
+            logs_bloom: format!("0x{}", "00".repeat(256)),
+            tx_type: "0x2".into(),
+        };
+
+        let json = serde_json::to_value(&receipt).unwrap();
+        assert!(json.get("contractAddress").unwrap().is_null());
+    }
+
+    #[test]
+    fn rpc_log_with_meta_json_fields() {
+        let log = RpcLogWithMeta {
+            address: Address::from([0xAA; 20]),
+            topics: vec![ShellHash::from([0xBB; 32])],
+            data: "0x1234".into(),
+            block_number: "0x1".into(),
+            block_hash: ShellHash::ZERO,
+            transaction_hash: ShellHash::ZERO,
+            transaction_index: "0x0".into(),
+            log_index: "0x0".into(),
+            removed: false,
+        };
+
+        let json = serde_json::to_value(&log).unwrap();
+
+        for key in &[
+            "address", "topics", "data", "blockNumber", "blockHash",
+            "transactionHash", "transactionIndex", "logIndex", "removed",
+        ] {
+            assert!(json.get(key).is_some(), "missing field: {key}");
+        }
+        assert_eq!(json.get("removed").unwrap(), false);
+    }
+
+    #[test]
+    fn rpc_block_serde_roundtrip() {
+        let block = RpcBlock {
+            hash: ShellHash::ZERO,
+            parent_hash: ShellHash::ZERO,
+            number: "0x2a".into(),
+            timestamp: "0x65612340".into(),
+            gas_limit: "0x1c9c380".into(),
+            gas_used: "0x5208".into(),
+            miner: Address::ZERO,
+            state_root: ShellHash::ZERO,
+            transactions_root: ShellHash::ZERO,
+            receipts_root: ShellHash::ZERO,
+            transactions: serde_json::json!([]),
+            size: "0x3e8".into(),
+            base_fee_per_gas: "0x3b9aca00".into(),
+            total_difficulty: "0x1".into(),
+            sha3_uncles: EMPTY_OMMER_HASH.into(),
+            uncles: vec![],
+            nonce: "0x0000000000000000".into(),
+            difficulty: "0x1".into(),
+            mix_hash: ShellHash::ZERO,
+            extra_data: "0x".into(),
+            logs_bloom: format!("0x{}", "00".repeat(256)),
+            withdrawals_root: format!("{:?}", ShellHash::ZERO),
+            parent_beacon_block_root: format!("{:?}", ShellHash::ZERO),
+            blob_gas_used: "0x0".into(),
+            excess_blob_gas: "0x0".into(),
+        };
+
+        let json = serde_json::to_string(&block).unwrap();
+        let decoded: RpcBlock = serde_json::from_str(&json).unwrap();
+        assert_eq!(block.hash, decoded.hash);
+        assert_eq!(block.number, decoded.number);
+        assert_eq!(block.gas_limit, decoded.gas_limit);
+        assert_eq!(block.blob_gas_used, decoded.blob_gas_used);
+    }
+
+    #[test]
+    fn empty_ommer_hash_is_standard_ethereum() {
+        assert_eq!(
+            EMPTY_OMMER_HASH,
+            "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347"
+        );
+    }
+
+    #[test]
+    fn call_request_deserializes_all_fields() {
+        let json = r#"{
+            "from": "0x0000000000000000000000000000000000000001",
+            "to": "0x0000000000000000000000000000000000000002",
+            "data": "0xabcd",
+            "value": "0x3e8",
+            "gas": "0x5208",
+            "accessList": [
+                {"address": "0x0000000000000000000000000000000000000003", "storageKeys": ["0x0000000000000000000000000000000000000000000000000000000000000001"]}
+            ]
+        }"#;
+        let req: CallRequest = serde_json::from_str(json).unwrap();
+        assert!(req.from.is_some());
+        assert!(req.to.is_some());
+        assert_eq!(req.data.as_ref().unwrap(), "0xabcd");
+        assert_eq!(req.value.as_ref().unwrap(), "0x3e8");
+        assert_eq!(req.gas.as_ref().unwrap(), "0x5208");
+        assert_eq!(req.access_list.as_ref().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn call_request_optional_fields_default_to_none() {
+        let json = r#"{}"#;
+        let req: CallRequest = serde_json::from_str(json).unwrap();
+        assert!(req.from.is_none());
+        assert!(req.to.is_none());
+        assert!(req.data.is_none());
+        assert!(req.value.is_none());
+        assert!(req.gas.is_none());
+        assert!(req.access_list.is_none());
+    }
+}

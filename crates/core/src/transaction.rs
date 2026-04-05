@@ -944,4 +944,297 @@ mod tests {
         };
         assert!(tx.validate_blob_tx().is_ok());
     }
+
+    // ════════════════════════════════════════════════════════════
+    //  M5-A6: Transaction type serialization/deserialization tests
+    // ════════════════════════════════════════════════════════════
+
+    #[test]
+    fn tx_type0_legacy_rlp_roundtrip() {
+        let tx = Transaction {
+            chain_id: 1337,
+            nonce: 0,
+            to: Some(Address::from([0x01; 20])),
+            value: U256::from(1000),
+            data: Bytes::new(),
+            gas_limit: 21_000,
+            max_fee_per_gas: 20,
+            max_priority_fee_per_gas: 0,
+            access_list: None,
+            tx_type: 0,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
+        };
+        let mut buf = Vec::new();
+        tx.encode(&mut buf);
+        let decoded = Transaction::decode(&mut buf.as_slice()).unwrap();
+        assert_eq!(tx, decoded);
+        assert_eq!(decoded.tx_type, 0);
+    }
+
+    #[test]
+    fn tx_type1_access_list_rlp_roundtrip() {
+        let tx = Transaction {
+            chain_id: 1337,
+            nonce: 5,
+            to: Some(Address::from([0x02; 20])),
+            value: U256::from(500),
+            data: Bytes::from(vec![0xAA, 0xBB]),
+            gas_limit: 50_000,
+            max_fee_per_gas: 30,
+            max_priority_fee_per_gas: 2,
+            access_list: Some(vec![AccessListItem {
+                address: Address::from([0xCC; 20]),
+                storage_keys: vec![
+                    ShellHash::from([0x11; 32]),
+                    ShellHash::from([0x22; 32]),
+                ],
+            }]),
+            tx_type: 1,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
+        };
+        let mut buf = Vec::new();
+        tx.encode(&mut buf);
+        let decoded = Transaction::decode(&mut buf.as_slice()).unwrap();
+        assert_eq!(tx, decoded);
+        assert_eq!(decoded.tx_type, 1);
+        assert_eq!(decoded.access_list.as_ref().unwrap().len(), 1);
+        assert_eq!(decoded.access_list.as_ref().unwrap()[0].storage_keys.len(), 2);
+    }
+
+    #[test]
+    fn tx_type2_eip1559_rlp_roundtrip() {
+        let tx = Transaction {
+            chain_id: 1337,
+            nonce: 10,
+            to: Some(Address::from([0x03; 20])),
+            value: U256::from(1_000_000),
+            data: Bytes::from(vec![0x60, 0x80]),
+            gas_limit: 100_000,
+            max_fee_per_gas: 50,
+            max_priority_fee_per_gas: 5,
+            access_list: None,
+            tx_type: 2,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
+        };
+        let mut buf = Vec::new();
+        tx.encode(&mut buf);
+        let decoded = Transaction::decode(&mut buf.as_slice()).unwrap();
+        assert_eq!(tx, decoded);
+        assert_eq!(decoded.tx_type, 2);
+        assert_eq!(decoded.max_fee_per_gas, 50);
+        assert_eq!(decoded.max_priority_fee_per_gas, 5);
+    }
+
+    #[test]
+    fn tx_type3_blob_rlp_roundtrip() {
+        let tx = Transaction {
+            chain_id: 1337,
+            nonce: 20,
+            to: Some(Address::from([0x04; 20])),
+            value: U256::ZERO,
+            data: Bytes::new(),
+            gas_limit: 21_000,
+            max_fee_per_gas: 100,
+            max_priority_fee_per_gas: 10,
+            access_list: None,
+            tx_type: 3,
+            max_fee_per_blob_gas: Some(5_000_000),
+            blob_versioned_hashes: Some(vec![
+                ShellHash::from([0xAA; 32]),
+                ShellHash::from([0xBB; 32]),
+            ]),
+        };
+        let mut buf = Vec::new();
+        tx.encode(&mut buf);
+        let decoded = Transaction::decode(&mut buf.as_slice()).unwrap();
+        assert_eq!(tx, decoded);
+        assert_eq!(decoded.tx_type, 3);
+        assert_eq!(decoded.max_fee_per_blob_gas, Some(5_000_000));
+        assert_eq!(decoded.blob_versioned_hashes.as_ref().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn tx_type0_serde_roundtrip() {
+        let tx = Transaction {
+            chain_id: 1337,
+            nonce: 0,
+            to: Some(Address::from([0x01; 20])),
+            value: U256::from(1000),
+            data: Bytes::new(),
+            gas_limit: 21_000,
+            max_fee_per_gas: 20,
+            max_priority_fee_per_gas: 0,
+            access_list: None,
+            tx_type: 0,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
+        };
+        let json = serde_json::to_string(&tx).unwrap();
+        let decoded: Transaction = serde_json::from_str(&json).unwrap();
+        assert_eq!(tx, decoded);
+    }
+
+    #[test]
+    fn tx_type1_serde_roundtrip() {
+        let tx = Transaction {
+            chain_id: 1337,
+            nonce: 5,
+            to: Some(Address::from([0x02; 20])),
+            value: U256::from(500),
+            data: Bytes::from(vec![0xAA]),
+            gas_limit: 50_000,
+            max_fee_per_gas: 30,
+            max_priority_fee_per_gas: 2,
+            access_list: Some(vec![AccessListItem {
+                address: Address::from([0xCC; 20]),
+                storage_keys: vec![ShellHash::from([0x11; 32])],
+            }]),
+            tx_type: 1,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
+        };
+        let json = serde_json::to_string(&tx).unwrap();
+        let decoded: Transaction = serde_json::from_str(&json).unwrap();
+        assert_eq!(tx, decoded);
+    }
+
+    #[test]
+    fn tx_hash_unique_per_type() {
+        let base = Transaction {
+            chain_id: 1337,
+            nonce: 0,
+            to: Some(Address::from([0x01; 20])),
+            value: U256::from(1000),
+            data: Bytes::new(),
+            gas_limit: 21_000,
+            max_fee_per_gas: 20,
+            max_priority_fee_per_gas: 1,
+            access_list: None,
+            tx_type: 0,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
+        };
+
+        let type0 = base.clone();
+        let type1 = Transaction { tx_type: 1, ..base.clone() };
+        let type2 = Transaction { tx_type: 2, ..base.clone() };
+        let type3 = Transaction {
+            tx_type: 3,
+            max_fee_per_blob_gas: Some(1_000_000),
+            blob_versioned_hashes: Some(vec![ShellHash::ZERO]),
+            ..base
+        };
+
+        let h0 = type0.hash();
+        let h1 = type1.hash();
+        let h2 = type2.hash();
+        let h3 = type3.hash();
+
+        assert_ne!(h0, h1, "type 0 and type 1 hashes must differ");
+        assert_ne!(h0, h2, "type 0 and type 2 hashes must differ");
+        assert_ne!(h0, h3, "type 0 and type 3 hashes must differ");
+        assert_ne!(h1, h2, "type 1 and type 2 hashes must differ");
+        assert_ne!(h1, h3, "type 1 and type 3 hashes must differ");
+        assert_ne!(h2, h3, "type 2 and type 3 hashes must differ");
+    }
+
+    #[test]
+    fn signed_tx_hash_consistent_across_types() {
+        let from = Address::from([0x42; 20]);
+        let sig = PQSignature::new(SignatureType::Dilithium3, vec![0xAA; 100]);
+
+        for tx_type in [0u8, 1, 2, 3] {
+            let tx = Transaction {
+                chain_id: 1337,
+                nonce: 0,
+                to: Some(Address::from([0x01; 20])),
+                value: U256::from(1000),
+                data: Bytes::new(),
+                gas_limit: 21_000,
+                max_fee_per_gas: 20,
+                max_priority_fee_per_gas: 1,
+                access_list: if tx_type >= 1 {
+                    Some(vec![AccessListItem {
+                        address: Address::from([0xDD; 20]),
+                        storage_keys: vec![],
+                    }])
+                } else {
+                    None
+                },
+                tx_type,
+                max_fee_per_blob_gas: if tx_type == 3 { Some(1_000_000) } else { None },
+                blob_versioned_hashes: if tx_type == 3 {
+                    Some(vec![ShellHash::ZERO])
+                } else {
+                    None
+                },
+            };
+            let signed = SignedTransaction::new(from, tx, sig.clone());
+            let h1 = signed.hash();
+            let h2 = signed.hash();
+            assert_eq!(h1, h2, "hash for type {tx_type} must be deterministic");
+        }
+    }
+
+    #[test]
+    fn signed_tx_rlp_roundtrip_all_types() {
+        let from = Address::from([0x42; 20]);
+        let sig = PQSignature::new(SignatureType::Dilithium3, vec![0xBB; 100]);
+
+        for tx_type in [0u8, 1, 2, 3] {
+            let tx = Transaction {
+                chain_id: 1337,
+                nonce: tx_type as u64,
+                to: Some(Address::from([0x01; 20])),
+                value: U256::from(1000),
+                data: Bytes::from(vec![0xCC]),
+                gas_limit: 21_000,
+                max_fee_per_gas: 20,
+                max_priority_fee_per_gas: 1,
+                access_list: if tx_type >= 1 {
+                    Some(vec![AccessListItem {
+                        address: Address::from([0xDD; 20]),
+                        storage_keys: vec![ShellHash::from([0xEE; 32])],
+                    }])
+                } else {
+                    None
+                },
+                tx_type,
+                max_fee_per_blob_gas: if tx_type == 3 { Some(1_000_000) } else { None },
+                blob_versioned_hashes: if tx_type == 3 {
+                    Some(vec![ShellHash::from([0xFF; 32])])
+                } else {
+                    None
+                },
+            };
+            let signed = SignedTransaction::new(from, tx, sig.clone());
+            let mut buf = Vec::new();
+            signed.encode(&mut buf);
+            let decoded = SignedTransaction::decode(&mut buf.as_slice()).unwrap();
+            assert_eq!(signed, decoded, "RLP roundtrip failed for tx type {tx_type}");
+        }
+    }
+
+    #[test]
+    fn tx_type_affects_contract_creation_hash() {
+        let t2 = Transaction {
+            chain_id: 1337,
+            nonce: 0,
+            to: None,
+            value: U256::ZERO,
+            data: Bytes::from(vec![0x60, 0x80]),
+            gas_limit: 100_000,
+            max_fee_per_gas: 20,
+            max_priority_fee_per_gas: 1,
+            access_list: None,
+            tx_type: 2,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
+        };
+        let t0 = Transaction { tx_type: 0, ..t2.clone() };
+        assert_ne!(t0.hash(), t2.hash(), "contract creation hashes should differ by type");
+    }
 }

@@ -330,4 +330,121 @@ mod tests {
         let excess = calc_excess_blob_gas(500_000, TARGET_BLOB_GAS_PER_BLOCK);
         assert_eq!(excess, 500_000, "should carry forward when used == target");
     }
+
+    // ════════════════════════════════════════════════════════════
+    //  M5-A6: EIP-1559 base fee adjustment comprehensive tests
+    // ════════════════════════════════════════════════════════════
+
+    #[test]
+    fn eip1559_base_fee_increase_when_above_target() {
+        let base = 1_000_000_000u64;
+        let above_target = GAS_TARGET + 5_000_000;
+        let new = calculate_base_fee(above_target, GAS_LIMIT, base);
+        assert!(new > base, "base fee must increase when usage is above target");
+        let expected_delta = base * (above_target - GAS_TARGET) / GAS_TARGET / 8;
+        assert_eq!(new, base + expected_delta.max(1));
+    }
+
+    #[test]
+    fn eip1559_base_fee_decrease_when_below_target() {
+        let base = 1_000_000_000u64;
+        let below_target = GAS_TARGET - 5_000_000;
+        let new = calculate_base_fee(below_target, GAS_LIMIT, base);
+        assert!(new < base, "base fee must decrease when usage is below target");
+        let expected_delta = base * (GAS_TARGET - below_target) / GAS_TARGET / 8;
+        assert_eq!(new, base - expected_delta);
+    }
+
+    #[test]
+    fn eip1559_base_fee_alternating_full_empty_oscillates() {
+        let base = INITIAL_BASE_FEE;
+        let full = calculate_base_fee(GAS_LIMIT, GAS_LIMIT, base);
+        assert!(full > base);
+        let empty = calculate_base_fee(0, GAS_LIMIT, full);
+        assert!(empty < full);
+        assert!(empty > base / 2, "should not drop too far after one oscillation");
+    }
+
+    #[test]
+    fn eip1559_base_fee_stabilizes_at_50_pct() {
+        let base = 500_000_000u64;
+        let mut fee = base;
+        for _ in 0..100 {
+            fee = calculate_base_fee(GAS_TARGET, GAS_LIMIT, fee);
+        }
+        assert_eq!(fee, base, "base fee should remain constant at 50% utilization");
+    }
+
+    #[test]
+    fn eip1559_base_fee_never_zero() {
+        let mut fee = 2u64;
+        for _ in 0..1000 {
+            fee = calculate_base_fee(0, GAS_LIMIT, fee);
+            assert!(fee >= 1, "base fee must never be zero");
+        }
+    }
+
+    #[test]
+    fn eip1559_base_fee_max_change_bounded() {
+        let base = 1_000_000u64;
+        let max_increase = calculate_base_fee(GAS_LIMIT, GAS_LIMIT, base);
+        assert!(max_increase - base <= base / 8 + 1,
+            "increase {} exceeds 12.5% of {}", max_increase - base, base);
+
+        let max_decrease = calculate_base_fee(0, GAS_LIMIT, base);
+        assert!(base - max_decrease <= base / 8,
+            "decrease {} exceeds 12.5% of {}", base - max_decrease, base);
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  M5-A6: EIP-4844 blob gas pricing comprehensive tests
+    // ════════════════════════════════════════════════════════════
+
+    #[test]
+    fn eip4844_excess_blob_gas_multi_block_simulation() {
+        let blob_gas_per_blob = 131_072u64;
+        let used_per_block = blob_gas_per_blob * 4;
+        let mut excess = 0u64;
+        let mut prices = Vec::new();
+        for _ in 0..5 {
+            excess = calc_excess_blob_gas(excess, used_per_block);
+            let price = calc_blob_gas_price(excess);
+            prices.push(price);
+        }
+        for i in 1..prices.len() {
+            assert!(prices[i] >= prices[i - 1],
+                "blob gas price should increase: block {} = {}, block {} = {}",
+                i - 1, prices[i - 1], i, prices[i]);
+        }
+    }
+
+    #[test]
+    fn eip4844_excess_drains_when_no_blobs() {
+        let mut excess = 1_000_000u64;
+        for _ in 0..20 {
+            excess = calc_excess_blob_gas(excess, 0);
+        }
+        assert_eq!(excess, 0, "excess should drain to zero when no blobs are used");
+    }
+
+    #[test]
+    fn eip4844_exact_target_keeps_excess_constant() {
+        let excess = 500_000u64;
+        let next = calc_excess_blob_gas(excess, TARGET_BLOB_GAS_PER_BLOCK);
+        assert_eq!(next, excess, "exact target usage should not change excess");
+    }
+
+    #[test]
+    fn eip4844_blob_gas_price_exponential_growth() {
+        let p0 = calc_blob_gas_price(0);
+        let p1 = calc_blob_gas_price(BLOB_BASE_FEE_UPDATE_FRACTION);
+        let p2 = calc_blob_gas_price(BLOB_BASE_FEE_UPDATE_FRACTION * 2);
+        assert!(p1 > p0, "price should increase with excess");
+        assert!(p2 > p1, "price should keep increasing with more excess");
+        // Growth should be super-linear (exponential-like)
+        let growth1 = p1 - p0;
+        let growth2 = p2 - p1;
+        assert!(growth2 > growth1,
+            "growth should accelerate (exponential): g1={growth1}, g2={growth2}");
+    }
 }
