@@ -5553,6 +5553,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "shell-e2e-tests"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "parking_lot",
+ "serde_json",
+ "shell-consensus",
+ "shell-core",
+ "shell-crypto",
+ "shell-mempool",
+ "shell-primitives",
+ "shell-rpc",
+ "shell-storage",
+ "tokio",
+]
+
+[[package]]
 name = "shell-evm"
 version = "0.1.0"
 dependencies = [

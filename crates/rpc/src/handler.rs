@@ -1599,7 +1599,7 @@ impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
         };
 
         Ok(serde_json::json!({
-            "version": "ShellChain/v0.1.0/rust",
+            "version": "ShellChain/v0.6.0/rust",
             "chainId": self.chain_id,
             "blockHeight": block_height,
             "peerCount": 0,
@@ -1685,7 +1685,7 @@ impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
 #[jsonrpsee::core::async_trait]
 impl<S: KvStore + 'static> Web3ApiServer for RpcHandler<S> {
     async fn client_version(&self) -> Result<String, ErrorObjectOwned> {
-        Ok("shell-chain/0.5.0".to_string())
+        Ok("shell-chain/0.6.0".to_string())
     }
 
     async fn sha3(&self, data: String) -> Result<String, ErrorObjectOwned> {
@@ -2744,7 +2744,7 @@ mod tests {
     async fn web3_client_version() {
         let handler = setup();
         let result = Web3ApiServer::client_version(&handler).await.unwrap();
-        assert_eq!(result, "shell-chain/0.5.0");
+        assert_eq!(result, "shell-chain/0.6.0");
     }
 
     #[tokio::test]
@@ -3040,7 +3040,7 @@ mod tests {
         let handler = setup();
         let result = ShellApiServer::get_node_info(&handler).await.unwrap();
 
-        assert_eq!(result["version"], "ShellChain/v0.1.0/rust");
+        assert_eq!(result["version"], "ShellChain/v0.6.0/rust");
         assert_eq!(result["chainId"], 42);
         assert_eq!(result["blockHeight"], 0);
         assert_eq!(result["peerCount"], 0);
