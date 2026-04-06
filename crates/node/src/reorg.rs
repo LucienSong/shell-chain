@@ -210,6 +210,7 @@ mod tests {
 
     /// Create a store + chain store + world state, returning the persisted empty
     /// state root so test blocks can reference it.
+    #[allow(clippy::type_complexity)]
     fn setup_chain() -> (
         Arc<MemoryDb>,
         Arc<ChainStore<MemoryDb>>,

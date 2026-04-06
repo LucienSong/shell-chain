@@ -221,7 +221,7 @@ impl<S: KvStore + 'static> Node<S> {
             .unwrap_or(0);
         let finalized_number = Arc::new(parking_lot::RwLock::new(finality_num.max(persisted_num)));
 
-        let _rpc = start_rpc_server(
+        let rpc_handle = start_rpc_server(
             self.config.rpc.clone(),
             self.chain_store.clone(),
             self.world_state.clone(),
@@ -562,6 +562,20 @@ impl<S: KvStore + 'static> Node<S> {
                     }
                 }
             }
+        }
+
+        // Graceful shutdown: stop RPC servers first.
+        rpc_handle.http_handle.stop().ok();
+        if let Some(ws) = rpc_handle.ws_handle {
+            ws.stop().ok();
+        }
+        eprintln!("✓ RPC server stopped");
+
+        // Flush storage to disk.
+        if let Err(e) = self.store.flush() {
+            eprintln!("⚠  Storage flush failed: {e}");
+        } else {
+            eprintln!("✓ Storage flushed to disk");
         }
 
         let _ = network.shutdown().await;
@@ -2062,7 +2076,7 @@ mod tests {
         let expected_root = block.header.state_root;
 
         // Verify world state root matches what was written in the header.
-        let ws = node.world_state.read();
+        let _ws = node.world_state.read();
         // The state root won't literally match for empty blocks on a fresh trie,
         // but the produce_block code writes ws.state_root() into the header.
         // We verify the header's state_root is consistent.

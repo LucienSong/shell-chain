@@ -1,4 +1,4 @@
-.PHONY: bench bench-quick test
+.PHONY: bench bench-quick test e2e e2e-extended load-test chaos-test security-audit
 
 # Run full criterion benchmarks for all workspace crates
 bench:
@@ -11,3 +11,19 @@ bench-quick:
 # Run all workspace tests
 test:
 	cargo test --workspace --tests
+
+# E2E test suites (require Docker)
+e2e:
+	./tests/e2e/run-e2e.sh
+
+e2e-extended:
+	./tests/e2e/run-extended.sh
+
+load-test:
+	./tests/e2e/run-load-test.sh
+
+chaos-test:
+	./tests/e2e/run-chaos-test.sh
+
+security-audit:
+	./tests/e2e/run-security-audit.sh

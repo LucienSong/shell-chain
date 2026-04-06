@@ -3054,7 +3054,7 @@ mod tests {
     async fn get_node_info_mining_true_with_proposer() {
         let handler = setup();
         let signer = DilithiumSigner::generate();
-        let addr = Address::from_public_key(&signer.public_key());
+        let addr = Address::from_public_key(signer.public_key());
         let handler = handler.with_proposer(Arc::new(signer), addr);
 
         let result = ShellApiServer::get_node_info(&handler).await.unwrap();

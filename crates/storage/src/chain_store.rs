@@ -763,7 +763,8 @@ mod tests {
             logs_bloom: Bytes::new(),
             logs: vec![],
         };
-        cs.put_receipts(&block_hash, &[receipt.clone()]).unwrap();
+        cs.put_receipts(&block_hash, std::slice::from_ref(&receipt))
+            .unwrap();
 
         // Look up by tx hash
         let found = cs.get_receipt_by_tx_hash(&tx_hash).unwrap().unwrap();

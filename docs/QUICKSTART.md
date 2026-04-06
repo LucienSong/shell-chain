@@ -2,7 +2,7 @@
 
 Get a local shell-chain node running in 5 minutes.
 
-> **See also:** [Testnet Operator Guide](TESTNET_OPERATOR_GUIDE.md) · [JSON-RPC API Reference](JSON_RPC_API.md) · [Post-Quantum Cryptography Guide](PQ_CRYPTO_GUIDE.md)
+> **See also:** [Testnet Operator Guide](TESTNET_OPERATOR_GUIDE.md) · [JSON-RPC API Reference](JSON_RPC_API.md) · [Post-Quantum Cryptography Guide](PQ_CRYPTO_GUIDE.md) · [Smart Contract Guide](SMART_CONTRACT_GUIDE.md)
 
 ---
 
@@ -16,7 +16,7 @@ Get a local shell-chain node running in 5 minutes.
 ## 1. Clone and build
 
 ```bash
-git clone https://github.com/shellchain-project/shell-chain.git
+git clone https://github.com/LucienSong/shell-chain.git
 cd shell-chain
 cargo build --release
 ```
@@ -204,10 +204,36 @@ curl -s http://localhost:8545 \
 
 ---
 
+## Alpha Testnet
+
+Join the public alpha testnet:
+
+### Using Docker
+
+```bash
+cp .env.example .env
+docker compose -f docker-compose.alpha.yml up -d
+```
+
+### Health Check
+
+```bash
+curl http://localhost:9090/health
+# {"status":"ok","version":"0.6.0","block_height":...}
+
+curl http://localhost:9090/ready
+# {"ready":true} or {"ready":false,"reason":"..."}
+```
+
+For more details on alpha testnet operations, see the [Testnet Operator Guide](TESTNET_OPERATOR_GUIDE.md).
+
+---
+
 ## Next Steps
 
 - **Run a multi-node testnet:** See the [Testnet Operator Guide](TESTNET_OPERATOR_GUIDE.md) for Docker deployment with 3 validators + monitoring.
-- **Full API reference:** See [JSON-RPC API Reference](JSON_RPC_API.md) for all 50+ RPC methods.
+- **Deploy smart contracts:** See [Smart Contract Guide](SMART_CONTRACT_GUIDE.md) for deploying Solidity/Vyper contracts with Hardhat or Foundry.
+- **Full API reference:** See [JSON-RPC API Reference](JSON_RPC_API.md) for all 61 RPC methods.
 - **Understand the cryptography:** See [PQ Crypto Guide](PQ_CRYPTO_GUIDE.md) for details on Dilithium3, key formats, and quantum resistance.
 - **Deploy a contract:** Use `shell-node tx deploy --code 0x... --keystore my-key.json`.
 - **Make a read-only call:** Use `shell-node tx call --to 0xContractAddr --data 0x...`.

@@ -181,11 +181,7 @@ async fn snapshot_export_import_roundtrip() {
     store_block(&env, &block1);
 
     let genesis_hash = genesis.hash();
-    let state_root = env
-        .world_state
-        .write()
-        .state_root()
-        .unwrap_or(ShellHash::default());
+    let state_root = env.world_state.write().state_root().unwrap_or_default();
 
     // Export snapshot
     let metadata = SnapshotMetadata::new(TEST_CHAIN_ID, 1, block1.hash(), state_root, genesis_hash);

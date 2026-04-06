@@ -103,7 +103,9 @@ pub fn execute_system_contract<S: KvStore + 'static>(
         return Err(SystemContractError::InputTooShort);
     }
 
-    let selector: [u8; 4] = input[..4].try_into().unwrap();
+    let selector: [u8; 4] = input[..4]
+        .try_into()
+        .map_err(|_| SystemContractError::InputTooShort)?;
     let params = &input[4..];
 
     match selector {
