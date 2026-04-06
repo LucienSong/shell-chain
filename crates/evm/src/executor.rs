@@ -280,8 +280,7 @@ impl<S: KvStore + 'static> ShellEvm<S> {
 
                 // Build event logs for mutating operations
                 let mut shell_logs = Vec::new();
-                if input.len() >= 4 {
-                    let selector: [u8; 4] = input[..4].try_into().unwrap();
+                if let Ok(selector) = <[u8; 4]>::try_from(input.get(..4).unwrap_or_default()) {
                     let registry_addr = system_contracts::registry_address();
                     if selector == system_contracts::ADD_VALIDATOR_SELECTOR {
                         if let Ok(addr) = system_contracts::decode_address(&input[4..]) {

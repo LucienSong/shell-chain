@@ -87,7 +87,9 @@ pub fn decrypt(
     let mut derived_key = derive_key(password, &salt, &encrypted.kdf_params)?;
 
     let cipher = XChaCha20Poly1305::new((&derived_key).into());
-    let nonce: [u8; 24] = nonce_bytes.try_into().unwrap();
+    let nonce: [u8; 24] = nonce_bytes
+        .try_into()
+        .map_err(|_| KeystoreError::Decryption)?;
 
     let mut secret_key = cipher
         .decrypt((&nonce).into(), ciphertext.as_ref())
@@ -199,7 +201,9 @@ pub fn decrypt_sphincs(
     let mut derived_key = derive_key(password, &salt, &encrypted.kdf_params)?;
 
     let cipher = XChaCha20Poly1305::new((&derived_key).into());
-    let nonce: [u8; 24] = nonce_bytes.try_into().unwrap();
+    let nonce: [u8; 24] = nonce_bytes
+        .try_into()
+        .map_err(|_| KeystoreError::Decryption)?;
 
     let mut secret_key = cipher
         .decrypt((&nonce).into(), ciphertext.as_ref())

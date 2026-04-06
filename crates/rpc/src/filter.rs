@@ -32,7 +32,9 @@ impl LogFilter {
             // Malformed or empty bloom — fall through to exact matching.
             return true;
         }
-        let bloom: &Bloom = bloom_bytes.try_into().unwrap();
+        let Ok(bloom): Result<&Bloom, _> = bloom_bytes.try_into() else {
+            return true; // malformed bloom — fall through to exact matching
+        };
 
         // Every filtered address must have at least one bloom hit.
         if let Some(addrs) = &self.address {
