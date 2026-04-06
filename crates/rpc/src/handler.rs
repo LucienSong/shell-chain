@@ -1,7 +1,7 @@
 //! RPC handler implementation backed by chain storage, world state, and mempool.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use jsonrpsee::types::ErrorObjectOwned;
@@ -9,14 +9,16 @@ use jsonrpsee::types::ErrorObjectOwned;
 use alloy_rlp::Encodable;
 use shell_consensus::FinalityState;
 use shell_core::{Block, BlockHeader, SignedTransaction, Transaction};
-use shell_evm::bloom::BLOOM_SIZE;
 use shell_crypto::{MultiVerifier, Signer};
+use shell_evm::bloom::BLOOM_SIZE;
 use shell_evm::{ShellEvm, ShellStateDb};
 use shell_mempool::TxPool;
 use shell_primitives::{Address, Bytes, ShellHash, U256};
 use shell_storage::{ChainStore, KvStore, WorldState};
 
-use crate::api::{EthApiServer, ShellApiServer, Web3ApiServer, NetApiServer, DebugApiServer, TraceApiServer};
+use crate::api::{
+    DebugApiServer, EthApiServer, NetApiServer, ShellApiServer, TraceApiServer, Web3ApiServer,
+};
 use crate::filter::{RawLogFilter, MAX_BLOCK_RANGE};
 use crate::filter_registry::{FilterKind, FilterRegistry};
 use crate::subscriptions::{BlockEvent, SubscriptionTracker, SyncStatus};
@@ -174,12 +176,9 @@ impl<S: KvStore + 'static> RpcHandler<S> {
         let chain_store = &self.chain_store;
         let ws = self.world_state.read();
 
-        let known_pubkeys = |addr: &Address| -> Option<Vec<u8>> {
-            chain_store.get_pubkey(addr).ok().flatten()
-        };
-        let balance_of = |addr: &Address| -> U256 {
-            ws.get_balance(addr).unwrap_or(U256::ZERO)
-        };
+        let known_pubkeys =
+            |addr: &Address| -> Option<Vec<u8>> { chain_store.get_pubkey(addr).ok().flatten() };
+        let balance_of = |addr: &Address| -> U256 { ws.get_balance(addr).unwrap_or(U256::ZERO) };
 
         // Clone before insert (which consumes the value) so we can broadcast on success.
         let tx_for_broadcast = self.tx_broadcast.as_ref().map(|_| signed_tx.clone());
@@ -205,18 +204,10 @@ impl<S: KvStore + 'static> RpcHandler<S> {
     /// Returns the transaction hash on success.
     fn propose_validator_tx(&self, calldata: Vec<u8>) -> Result<ShellHash, ErrorObjectOwned> {
         let signer = self.proposer_signer.as_ref().ok_or_else(|| {
-            ErrorObjectOwned::owned(
-                -32601,
-                "node is not configured as a validator",
-                None::<()>,
-            )
+            ErrorObjectOwned::owned(-32601, "node is not configured as a validator", None::<()>)
         })?;
         let proposer_addr = self.proposer_address.ok_or_else(|| {
-            ErrorObjectOwned::owned(
-                -32601,
-                "node is not configured as a validator",
-                None::<()>,
-            )
+            ErrorObjectOwned::owned(-32601, "node is not configured as a validator", None::<()>)
         })?;
 
         let nonce = {
@@ -245,12 +236,7 @@ impl<S: KvStore + 'static> RpcHandler<S> {
             .map_err(|e| internal_err(format!("signing failed: {e}")))?;
 
         let pubkey = signer.public_key().to_vec();
-        let signed_tx = SignedTransaction::with_pubkey(
-            proposer_addr,
-            tx,
-            signature,
-            pubkey,
-        );
+        let signed_tx = SignedTransaction::with_pubkey(proposer_addr, tx, signature, pubkey);
 
         self.submit_tx(signed_tx)
     }
@@ -268,8 +254,7 @@ impl<S: KvStore + 'static> RpcHandler<S> {
             ws.state_root().map_err(internal_err)?
         };
 
-        let world_state =
-            WorldState::at_root(store.clone(), &state_root).map_err(internal_err)?;
+        let world_state = WorldState::at_root(store.clone(), &state_root).map_err(internal_err)?;
         let chain_store = ChainStore::new(store);
         let state_db = ShellStateDb::new(world_state, chain_store);
         let mut evm = ShellEvm::new(state_db, self.chain_id);
@@ -298,36 +283,36 @@ impl<S: KvStore + 'static> RpcHandler<S> {
             .map_err(|e| internal_err(format!("invalid call data hex: {e}")))?
             .unwrap_or_default();
 
-        let access_list = req
-            .access_list
-            .as_ref()
-            .map(|list| {
-                list.iter()
-                    .map(|item| {
-                        let addr_str = item.address.strip_prefix("0x").unwrap_or(&item.address);
-                        let addr_bytes = hex::decode(addr_str).unwrap_or_default();
-                        let address = if addr_bytes.len() == 20 {
-                            Address::from_slice(&addr_bytes)
-                        } else {
-                            Address::ZERO
-                        };
-                        let storage_keys = item
-                            .storage_keys
-                            .iter()
-                            .map(|k| {
-                                let k_str = k.strip_prefix("0x").unwrap_or(k);
-                                let k_bytes = hex::decode(k_str).unwrap_or_default();
-                                let mut hash = ShellHash::ZERO;
-                                if k_bytes.len() == 32 {
-                                    hash = ShellHash::from_slice(&k_bytes);
-                                }
-                                hash
-                            })
-                            .collect();
-                        shell_core::AccessListItem { address, storage_keys }
-                    })
-                    .collect()
-            });
+        let access_list = req.access_list.as_ref().map(|list| {
+            list.iter()
+                .map(|item| {
+                    let addr_str = item.address.strip_prefix("0x").unwrap_or(&item.address);
+                    let addr_bytes = hex::decode(addr_str).unwrap_or_default();
+                    let address = if addr_bytes.len() == 20 {
+                        Address::from_slice(&addr_bytes)
+                    } else {
+                        Address::ZERO
+                    };
+                    let storage_keys = item
+                        .storage_keys
+                        .iter()
+                        .map(|k| {
+                            let k_str = k.strip_prefix("0x").unwrap_or(k);
+                            let k_bytes = hex::decode(k_str).unwrap_or_default();
+                            let mut hash = ShellHash::ZERO;
+                            if k_bytes.len() == 32 {
+                                hash = ShellHash::from_slice(&k_bytes);
+                            }
+                            hash
+                        })
+                        .collect();
+                    shell_core::AccessListItem {
+                        address,
+                        storage_keys,
+                    }
+                })
+                .collect()
+        });
 
         let tx = Transaction {
             chain_id: self.chain_id,
@@ -344,10 +329,7 @@ impl<S: KvStore + 'static> RpcHandler<S> {
             blob_versioned_hashes: None,
         };
 
-        let sig = shell_crypto::PQSignature::new(
-            shell_crypto::SignatureType::Dilithium3,
-            vec![],
-        );
+        let sig = shell_crypto::PQSignature::new(shell_crypto::SignatureType::Dilithium3, vec![]);
         let signed = SignedTransaction::new(from, tx, sig);
 
         let header = BlockHeader {
@@ -396,10 +378,18 @@ impl<S: KvStore + 'static> RpcHandler<S> {
     fn lookup_tx_with_block(
         &self,
         tx_hash: &str,
-    ) -> Result<(Block, SignedTransaction, shell_core::TransactionReceipt, u32), ErrorObjectOwned> {
+    ) -> Result<
+        (
+            Block,
+            SignedTransaction,
+            shell_core::TransactionReceipt,
+            u32,
+        ),
+        ErrorObjectOwned,
+    > {
         let hex_str = tx_hash.strip_prefix("0x").unwrap_or(tx_hash);
-        let hash_bytes = hex::decode(hex_str)
-            .map_err(|e| internal_err(format!("invalid tx hash hex: {e}")))?;
+        let hash_bytes =
+            hex::decode(hex_str).map_err(|e| internal_err(format!("invalid tx hash hex: {e}")))?;
         let hash = ShellHash::try_from_slice(&hash_bytes)
             .map_err(|e| internal_err(format!("invalid tx hash length: {e}")))?;
 
@@ -463,7 +453,11 @@ impl<S: KvStore + 'static> RpcHandler<S> {
     ) -> OeTrace {
         let is_create = tx.tx.to.is_none();
         let trace_type = if is_create { "create" } else { "call" };
-        let call_type = if is_create { None } else { Some("call".to_string()) };
+        let call_type = if is_create {
+            None
+        } else {
+            Some("call".to_string())
+        };
 
         let action = OeTraceAction {
             call_type,
@@ -537,13 +531,11 @@ fn parse_hex_u256(s: &str) -> Result<U256, ErrorObjectOwned> {
             s.len()
         )));
     }
-    let bytes = hex::decode(
-        if s.len() < 64 {
-            format!("{:0>64}", s)
-        } else {
-            s.to_string()
-        },
-    )
+    let bytes = hex::decode(if s.len() < 64 {
+        format!("{:0>64}", s)
+    } else {
+        s.to_string()
+    })
     .map_err(|_| internal_err(format!("invalid hex U256: 0x{s}")))?;
     Ok(U256::from_be_slice(&bytes))
 }
@@ -568,11 +560,9 @@ fn parse_block_tag(s: &str) -> Result<BlockTag, ErrorObjectOwned> {
         "safe" | "finalized" => Ok(BlockTag::Finalized),
         "pending" => Ok(BlockTag::Pending),
         "earliest" => Ok(BlockTag::Number(0)),
-        hex if hex.starts_with("0x") => {
-            u64::from_str_radix(&hex[2..], 16)
-                .map(BlockTag::Number)
-                .map_err(|_| internal_err(format!("invalid block number: {hex}")))
-        }
+        hex if hex.starts_with("0x") => u64::from_str_radix(&hex[2..], 16)
+            .map(BlockTag::Number)
+            .map_err(|_| internal_err(format!("invalid block number: {hex}"))),
         _ => Err(internal_err(format!("invalid block number: {s}"))),
     }
 }
@@ -622,20 +612,31 @@ fn block_to_rpc(block: &Block, full_txs: bool) -> RpcBlock {
 
     let transactions = if full_txs {
         serde_json::to_value(
-            block.transactions.iter().enumerate().map(|(i, tx)| {
-                tx_to_rpc(
-                    tx,
-                    Some(block.hash()),
-                    Some(block.header.number),
-                    Some(i as u32),
-                    Some(block.header.base_fee_per_gas),
-                )
-            }).collect::<Vec<_>>()
-        ).unwrap_or_default()
+            block
+                .transactions
+                .iter()
+                .enumerate()
+                .map(|(i, tx)| {
+                    tx_to_rpc(
+                        tx,
+                        Some(block.hash()),
+                        Some(block.header.number),
+                        Some(i as u32),
+                        Some(block.header.base_fee_per_gas),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        )
+        .unwrap_or_default()
     } else {
         serde_json::to_value(
-            block.transactions.iter().map(|tx| tx.hash()).collect::<Vec<ShellHash>>()
-        ).unwrap_or_default()
+            block
+                .transactions
+                .iter()
+                .map(|tx| tx.hash())
+                .collect::<Vec<ShellHash>>(),
+        )
+        .unwrap_or_default()
     };
 
     RpcBlock {
@@ -708,11 +709,7 @@ fn tx_to_rpc(
             list.iter()
                 .map(|item| RpcAccessListItem {
                     address: format!("{}", item.address),
-                    storage_keys: item
-                        .storage_keys
-                        .iter()
-                        .map(|k| format!("{}", k))
-                        .collect(),
+                    storage_keys: item.storage_keys.iter().map(|k| format!("{}", k)).collect(),
                 })
                 .collect()
         }),
@@ -724,10 +721,7 @@ fn tx_to_rpc(
 #[jsonrpsee::core::async_trait]
 impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
     async fn block_number(&self) -> Result<String, ErrorObjectOwned> {
-        let head = self
-            .chain_store
-            .get_head_block()
-            .map_err(internal_err)?;
+        let head = self.chain_store.get_head_block().map_err(internal_err)?;
         let num = head.map(|b| b.number()).unwrap_or(0);
         Ok(hex_u64(num))
     }
@@ -756,11 +750,7 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
         Ok(vec![])
     }
 
-    async fn sign(
-        &self,
-        _address: Address,
-        _data: String,
-    ) -> Result<String, ErrorObjectOwned> {
+    async fn sign(&self, _address: Address, _data: String) -> Result<String, ErrorObjectOwned> {
         Err(ErrorObjectOwned::owned(
             -32601,
             "eth_sign is not supported: node does not hold private keys",
@@ -768,10 +758,7 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
         ))
     }
 
-    async fn sign_transaction(
-        &self,
-        _tx: serde_json::Value,
-    ) -> Result<String, ErrorObjectOwned> {
+    async fn sign_transaction(&self, _tx: serde_json::Value) -> Result<String, ErrorObjectOwned> {
         Err(ErrorObjectOwned::owned(
             -32601,
             "eth_signTransaction is not supported: node does not hold private keys",
@@ -798,11 +785,17 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
         match tag {
             BlockTag::Finalized => {
                 let n = *self.finalized_number.read();
-                let block = self.chain_store.get_block_by_number(n).map_err(internal_err)?;
+                let block = self
+                    .chain_store
+                    .get_block_by_number(n)
+                    .map_err(internal_err)?;
                 Ok(block.as_ref().map(|b| block_to_rpc(b, full_txs)))
             }
             BlockTag::Number(n) => {
-                let block = self.chain_store.get_block_by_number(n).map_err(internal_err)?;
+                let block = self
+                    .chain_store
+                    .get_block_by_number(n)
+                    .map_err(internal_err)?;
                 Ok(block.as_ref().map(|b| block_to_rpc(b, full_txs)))
             }
             BlockTag::Latest => {
@@ -838,14 +831,20 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
 
                 let transactions = if full_txs {
                     serde_json::to_value(
-                        pending_txs.iter().map(|tx| {
-                            tx_to_rpc(tx, None, Some(head.header.number + 1), None, None)
-                        }).collect::<Vec<_>>()
-                    ).unwrap_or_default()
+                        pending_txs
+                            .iter()
+                            .map(|tx| tx_to_rpc(tx, None, Some(head.header.number + 1), None, None))
+                            .collect::<Vec<_>>(),
+                    )
+                    .unwrap_or_default()
                 } else {
                     serde_json::to_value(
-                        pending_txs.iter().map(|tx| tx.hash()).collect::<Vec<ShellHash>>()
-                    ).unwrap_or_default()
+                        pending_txs
+                            .iter()
+                            .map(|tx| tx.hash())
+                            .collect::<Vec<ShellHash>>(),
+                    )
+                    .unwrap_or_default()
                 };
 
                 let pending_block = RpcBlock {
@@ -1096,14 +1095,10 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
         }))
     }
 
-    async fn send_raw_transaction(
-        &self,
-        data: String,
-    ) -> Result<ShellHash, ErrorObjectOwned> {
+    async fn send_raw_transaction(&self, data: String) -> Result<ShellHash, ErrorObjectOwned> {
         // Decode hex payload: "0x" + hex-encoded transaction bytes.
         let raw = data.strip_prefix("0x").unwrap_or(&data);
-        let bytes = hex::decode(raw)
-            .map_err(|e| internal_err(format!("invalid hex: {e}")))?;
+        let bytes = hex::decode(raw).map_err(|e| internal_err(format!("invalid hex: {e}")))?;
 
         // Try RLP decoding first (standard Ethereum format), then JSON (legacy).
         let signed_tx: SignedTransaction = {
@@ -1116,12 +1111,9 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
                         "invalid transaction: RLP has trailing bytes".to_string(),
                     ));
                 }
-                Err(_) => serde_json::from_slice::<SignedTransaction>(&bytes)
-                    .map_err(|e| {
-                        internal_err(format!(
-                            "invalid transaction: not valid RLP or JSON ({e})"
-                        ))
-                    })?,
+                Err(_) => serde_json::from_slice::<SignedTransaction>(&bytes).map_err(|e| {
+                    internal_err(format!("invalid transaction: not valid RLP or JSON ({e})"))
+                })?,
             }
         };
 
@@ -1184,10 +1176,7 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
         let code_hash = ws.get_code_hash(&address).map_err(internal_err)?;
         match code_hash {
             Some(hash) => {
-                let code = self
-                    .chain_store
-                    .get_code(&hash)
-                    .map_err(internal_err)?;
+                let code = self.chain_store.get_code(&hash).map_err(internal_err)?;
                 match code {
                     Some(bytes) => Ok(hex_bytes(&bytes)),
                     None => Ok("0x".into()),
@@ -1219,10 +1208,7 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
         raw_filter: RawLogFilter,
     ) -> Result<Vec<RpcLogWithMeta>, ErrorObjectOwned> {
         // Resolve "latest" block number.
-        let head = self
-            .chain_store
-            .get_head_block()
-            .map_err(internal_err)?;
+        let head = self.chain_store.get_head_block().map_err(internal_err)?;
         let latest = head.map(|b| b.number()).unwrap_or(0);
 
         let filter = raw_filter.into_filter(latest);
@@ -1313,14 +1299,8 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
         Ok(results)
     }
 
-    async fn new_filter(
-        &self,
-        mut filter: RawLogFilter,
-    ) -> Result<String, ErrorObjectOwned> {
-        let head = self
-            .chain_store
-            .get_head_block()
-            .map_err(internal_err)?;
+    async fn new_filter(&self, mut filter: RawLogFilter) -> Result<String, ErrorObjectOwned> {
+        let head = self.chain_store.get_head_block().map_err(internal_err)?;
         let latest = head.map(|b| b.number()).unwrap_or(0);
         // F-125: resolve from_block at creation time so get_filter_logs
         // does not re-scan from block 0 on every call.
@@ -1335,30 +1315,23 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
     }
 
     async fn new_block_filter(&self) -> Result<String, ErrorObjectOwned> {
-        let head = self
-            .chain_store
-            .get_head_block()
-            .map_err(internal_err)?;
+        let head = self.chain_store.get_head_block().map_err(internal_err)?;
         let latest = head.map(|b| b.number()).unwrap_or(0);
-        let id = self.filter_registry.new_filter(FilterKind::Block, latest)
+        let id = self
+            .filter_registry
+            .new_filter(FilterKind::Block, latest)
             .ok_or_else(|| internal_err("filter limit reached"))?;
         Ok(id)
     }
 
-    async fn get_filter_changes(
-        &self,
-        id: String,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+    async fn get_filter_changes(&self, id: String) -> Result<serde_json::Value, ErrorObjectOwned> {
         // Determine filter type and last polled block.
-        let (is_log, last_poll_block) =
-            self.filter_registry.get_filter_info(&id).ok_or_else(|| {
-                ErrorObjectOwned::owned(-32000, "filter not found", None::<()>)
-            })?;
+        let (is_log, last_poll_block) = self
+            .filter_registry
+            .get_filter_info(&id)
+            .ok_or_else(|| ErrorObjectOwned::owned(-32000, "filter not found", None::<()>))?;
 
-        let head = self
-            .chain_store
-            .get_head_block()
-            .map_err(internal_err)?;
+        let head = self.chain_store.get_head_block().map_err(internal_err)?;
         let latest = head.map(|b| b.number()).unwrap_or(0);
 
         if is_log {
@@ -1370,9 +1343,10 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
             }
 
             // Retrieve the original filter criteria.
-            let raw = self.filter_registry.get_log_filter(&id).ok_or_else(|| {
-                ErrorObjectOwned::owned(-32000, "filter not found", None::<()>)
-            })?;
+            let raw = self
+                .filter_registry
+                .get_log_filter(&id)
+                .ok_or_else(|| ErrorObjectOwned::owned(-32000, "filter not found", None::<()>))?;
             let filter = raw.into_filter(latest);
 
             let mut results = Vec::new();
@@ -1446,21 +1420,16 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
         }
     }
 
-    async fn get_filter_logs(
-        &self,
-        id: String,
-    ) -> Result<Vec<RpcLogWithMeta>, ErrorObjectOwned> {
+    async fn get_filter_logs(&self, id: String) -> Result<Vec<RpcLogWithMeta>, ErrorObjectOwned> {
         // Only valid for log filters — re-query all matching logs.
-        let raw = self.filter_registry.get_log_filter(&id).ok_or_else(|| {
-            ErrorObjectOwned::owned(-32000, "filter not found", None::<()>)
-        })?;
+        let raw = self
+            .filter_registry
+            .get_log_filter(&id)
+            .ok_or_else(|| ErrorObjectOwned::owned(-32000, "filter not found", None::<()>))?;
         self.get_logs(raw).await
     }
 
-    async fn uninstall_filter(
-        &self,
-        id: String,
-    ) -> Result<bool, ErrorObjectOwned> {
+    async fn uninstall_filter(&self, id: String) -> Result<bool, ErrorObjectOwned> {
         Ok(self.filter_registry.uninstall(&id))
     }
 
@@ -1474,10 +1443,7 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
 
 #[jsonrpsee::core::async_trait]
 impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
-    async fn get_pq_pubkey(
-        &self,
-        address: Address,
-    ) -> Result<Option<String>, ErrorObjectOwned> {
+    async fn get_pq_pubkey(&self, address: Address) -> Result<Option<String>, ErrorObjectOwned> {
         let pk = self
             .chain_store
             .get_pubkey(&address)
@@ -1489,10 +1455,7 @@ impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
         Ok(hex_u64(self.tx_pool.len() as u64))
     }
 
-    async fn send_transaction(
-        &self,
-        tx: SignedTransaction,
-    ) -> Result<ShellHash, ErrorObjectOwned> {
+    async fn send_transaction(&self, tx: SignedTransaction) -> Result<ShellHash, ErrorObjectOwned> {
         self.submit_tx(tx)
     }
 
@@ -1649,7 +1612,10 @@ impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
                     self.chain_store.get_block_by_number(block_height),
                     self.chain_store.get_block_by_number(block_height - window),
                 ) {
-                    let dt = recent.header.timestamp.saturating_sub(older.header.timestamp);
+                    let dt = recent
+                        .header
+                        .timestamp
+                        .saturating_sub(older.header.timestamp);
                     avg_block_time = dt as f64 / window as f64;
                 }
             }
@@ -1695,8 +1661,7 @@ impl<S: KvStore + 'static> Web3ApiServer for RpcHandler<S> {
         if raw.len() > MAX_HEX_LEN {
             return Err(internal_err("input too large (max 32 KB)"));
         }
-        let bytes = hex::decode(raw)
-            .map_err(|e| internal_err(format!("invalid hex: {e}")))?;
+        let bytes = hex::decode(raw).map_err(|e| internal_err(format!("invalid hex: {e}")))?;
         let hash = shell_primitives::keccak256(&bytes);
         Ok(format!("0x{}", hex::encode(hash.0)))
     }
@@ -1821,8 +1786,7 @@ impl<S: KvStore + 'static> DebugApiServer for RpcHandler<S> {
             traces.push(trace);
         }
 
-        serde_json::to_value(&traces)
-            .map_err(|e| internal_err(format!("serialization error: {e}")))
+        serde_json::to_value(&traces).map_err(|e| internal_err(format!("serialization error: {e}")))
     }
 }
 
@@ -1849,8 +1813,7 @@ impl<S: KvStore + 'static> TraceApiServer for RpcHandler<S> {
             traces.push(trace);
         }
 
-        serde_json::to_value(&traces)
-            .map_err(|e| internal_err(format!("serialization error: {e}")))
+        serde_json::to_value(&traces).map_err(|e| internal_err(format!("serialization error: {e}")))
     }
 
     async fn trace_oe_transaction(
@@ -1861,11 +1824,11 @@ impl<S: KvStore + 'static> TraceApiServer for RpcHandler<S> {
         let block_hash = block.hash();
         let block_num = block.header.number;
 
-        let trace = self.build_oe_trace(&tx, Some(&receipt), block_num, block_hash, tx_index as u64);
+        let trace =
+            self.build_oe_trace(&tx, Some(&receipt), block_num, block_hash, tx_index as u64);
         let traces = vec![trace];
 
-        serde_json::to_value(&traces)
-            .map_err(|e| internal_err(format!("serialization error: {e}")))
+        serde_json::to_value(&traces).map_err(|e| internal_err(format!("serialization error: {e}")))
     }
 }
 
@@ -1888,7 +1851,16 @@ mod tests {
         let (block_events, _) = tokio::sync::broadcast::channel(16);
         let finalized_number = Arc::new(parking_lot::RwLock::new(0u64));
         let finality = Arc::new(parking_lot::RwLock::new(FinalityState::new()));
-        RpcHandler::new(chain_store, world_state, tx_pool, 42, None, block_events, finalized_number, finality)
+        RpcHandler::new(
+            chain_store,
+            world_state,
+            tx_pool,
+            42,
+            None,
+            block_events,
+            finalized_number,
+            finality,
+        )
     }
 
     fn make_genesis_block() -> Block {
@@ -1966,7 +1938,9 @@ mod tests {
     async fn get_balance_default_zero() {
         let handler = setup();
         let addr = Address::from_public_key(b"test-address-key");
-        let result = EthApiServer::get_balance(&handler, addr, None).await.unwrap();
+        let result = EthApiServer::get_balance(&handler, addr, None)
+            .await
+            .unwrap();
         assert_eq!(result, "0x0");
     }
 
@@ -2006,7 +1980,9 @@ mod tests {
     #[tokio::test]
     async fn max_priority_fee_per_gas_returns_zero() {
         let handler = setup();
-        let result = EthApiServer::max_priority_fee_per_gas(&handler).await.unwrap();
+        let result = EthApiServer::max_priority_fee_per_gas(&handler)
+            .await
+            .unwrap();
         assert_eq!(result, "0x0");
     }
 
@@ -2109,10 +2085,7 @@ mod tests {
                     max_fee_per_blob_gas: None,
                     blob_versioned_hashes: None,
                 },
-                shell_crypto::PQSignature::new(
-                    shell_crypto::SignatureType::Dilithium3,
-                    vec![],
-                ),
+                shell_crypto::PQSignature::new(shell_crypto::SignatureType::Dilithium3, vec![]),
             ),
             None,
             None,
@@ -2135,7 +2108,8 @@ mod tests {
         // Fund the sender so balance check passes.
         {
             let mut ws = handler.world_state.write();
-            ws.add_balance(&addr, U256::from(100_000_000_000_000u64)).unwrap();
+            ws.add_balance(&addr, U256::from(100_000_000_000_000u64))
+                .unwrap();
         }
         // Register pubkey so mempool can verify.
         handler.chain_store.put_pubkey(&addr, &pubkey).unwrap();
@@ -2162,7 +2136,11 @@ mod tests {
         let hex_payload = format!("0x{}", hex::encode(&json_bytes));
 
         let result = EthApiServer::send_raw_transaction(&handler, hex_payload).await;
-        assert!(result.is_ok(), "send_raw_transaction failed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "send_raw_transaction failed: {:?}",
+            result.err()
+        );
 
         assert_eq!(handler.tx_pool.len(), 1);
     }
@@ -2176,7 +2154,8 @@ mod tests {
 
         {
             let mut ws = handler.world_state.write();
-            ws.add_balance(&addr, U256::from(100_000_000_000_000u64)).unwrap();
+            ws.add_balance(&addr, U256::from(100_000_000_000_000u64))
+                .unwrap();
         }
         handler.chain_store.put_pubkey(&addr, &pubkey).unwrap();
 
@@ -2303,7 +2282,8 @@ mod tests {
         // Fund the caller.
         {
             let mut ws = handler.world_state.write();
-            ws.add_balance(&from, U256::from(10_000_000_000u64)).unwrap();
+            ws.add_balance(&from, U256::from(10_000_000_000u64))
+                .unwrap();
         }
 
         let req = crate::types::CallRequest {
@@ -2327,7 +2307,8 @@ mod tests {
 
         {
             let mut ws = handler.world_state.write();
-            ws.add_balance(&from, U256::from(10_000_000_000u64)).unwrap();
+            ws.add_balance(&from, U256::from(10_000_000_000u64))
+                .unwrap();
         }
 
         let req = crate::types::CallRequest {
@@ -2354,7 +2335,11 @@ mod tests {
         logs_per_receipt: Vec<Vec<shell_core::Log>>,
     ) -> ShellHash {
         let bloom = shell_evm::bloom::logs_bloom(
-            &logs_per_receipt.iter().flatten().cloned().collect::<Vec<_>>(),
+            &logs_per_receipt
+                .iter()
+                .flatten()
+                .cloned()
+                .collect::<Vec<_>>(),
         );
 
         let block = Block {
@@ -2434,10 +2419,8 @@ mod tests {
         let target = Address::from([0xAA; 20]);
         let other = Address::from([0xBB; 20]);
 
-        let log_target =
-            shell_core::Log::new(target, vec![], Bytes::new()).unwrap();
-        let log_other =
-            shell_core::Log::new(other, vec![], Bytes::new()).unwrap();
+        let log_target = shell_core::Log::new(target, vec![], Bytes::new()).unwrap();
+        let log_other = shell_core::Log::new(other, vec![], Bytes::new()).unwrap();
 
         store_block_with_logs(&handler, 0, vec![vec![log_target, log_other]]);
 
@@ -2459,18 +2442,10 @@ mod tests {
         let topic_a = ShellHash::from_slice(&[0x11; 32]);
         let topic_b = ShellHash::from_slice(&[0x22; 32]);
 
-        let log_a = shell_core::Log::new(
-            Address::from([0x01; 20]),
-            vec![topic_a],
-            Bytes::new(),
-        )
-        .unwrap();
-        let log_b = shell_core::Log::new(
-            Address::from([0x01; 20]),
-            vec![topic_b],
-            Bytes::new(),
-        )
-        .unwrap();
+        let log_a =
+            shell_core::Log::new(Address::from([0x01; 20]), vec![topic_a], Bytes::new()).unwrap();
+        let log_b =
+            shell_core::Log::new(Address::from([0x01; 20]), vec![topic_b], Bytes::new()).unwrap();
 
         store_block_with_logs(&handler, 0, vec![vec![log_a, log_b]]);
 
@@ -2525,12 +2500,8 @@ mod tests {
         let handler = setup();
         let addr = Address::from([0xCC; 20]);
         let topic = ShellHash::from_slice(&[0xDD; 32]);
-        let log = shell_core::Log::new(
-            addr,
-            vec![topic],
-            Bytes::copy_from_slice(b"\x01\x02"),
-        )
-        .unwrap();
+        let log =
+            shell_core::Log::new(addr, vec![topic], Bytes::copy_from_slice(b"\x01\x02")).unwrap();
         let block_hash = store_block_with_logs(&handler, 1, vec![vec![log]]);
 
         let raw: crate::filter::RawLogFilter =
@@ -2634,10 +2605,13 @@ mod tests {
             Arc::new(parking_lot::RwLock::new(0u64)),
             Arc::new(parking_lot::RwLock::new(FinalityState::new())),
         )
-        .with_proposer(Arc::new(DilithiumSigner::from_bytes(
-            signer.public_key(),
-            signer.secret_key_bytes(),
-        ).unwrap()), addr);
+        .with_proposer(
+            Arc::new(
+                DilithiumSigner::from_bytes(signer.public_key(), signer.secret_key_bytes())
+                    .unwrap(),
+            ),
+            addr,
+        );
 
         // Register pubkey so mempool signature verification passes.
         handler.chain_store.put_pubkey(&addr, &pubkey).unwrap();
@@ -2669,9 +2643,12 @@ mod tests {
     async fn propose_add_validator_creates_correct_tx() {
         let (handler, _signer, _addr) = setup_with_proposer();
         let target = format!("0x{}", "ab".repeat(20));
-        let result = ShellApiServer::propose_add_validator(&handler, target.clone())
-            .await;
-        assert!(result.is_ok(), "proposeAddValidator failed: {:?}", result.err());
+        let result = ShellApiServer::propose_add_validator(&handler, target.clone()).await;
+        assert!(
+            result.is_ok(),
+            "proposeAddValidator failed: {:?}",
+            result.err()
+        );
 
         // Verify a transaction was inserted into the mempool.
         assert_eq!(handler.tx_pool.len(), 1);
@@ -2692,9 +2669,12 @@ mod tests {
     async fn propose_remove_validator_creates_correct_tx() {
         let (handler, _signer, _addr) = setup_with_proposer();
         let target = format!("0x{}", "cc".repeat(20));
-        let result = ShellApiServer::propose_remove_validator(&handler, target.clone())
-            .await;
-        assert!(result.is_ok(), "proposeRemoveValidator failed: {:?}", result.err());
+        let result = ShellApiServer::propose_remove_validator(&handler, target.clone()).await;
+        assert!(
+            result.is_ok(),
+            "proposeRemoveValidator failed: {:?}",
+            result.err()
+        );
 
         assert_eq!(handler.tx_pool.len(), 1);
 
@@ -2717,9 +2697,12 @@ mod tests {
         }
 
         let target = format!("0x{}", "ab".repeat(20));
-        let result = ShellApiServer::propose_add_validator(&handler, target)
-            .await;
-        assert!(result.is_ok(), "proposeAddValidator failed: {:?}", result.err());
+        let result = ShellApiServer::propose_add_validator(&handler, target).await;
+        assert!(
+            result.is_ok(),
+            "proposeAddValidator failed: {:?}",
+            result.err()
+        );
 
         let pending = handler.tx_pool.pending(100);
         assert_eq!(pending.len(), 1);
@@ -2751,7 +2734,9 @@ mod tests {
     async fn web3_sha3_known_vector() {
         let handler = setup();
         // keccak256("") = c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470
-        let result = Web3ApiServer::sha3(&handler, "0x".to_string()).await.unwrap();
+        let result = Web3ApiServer::sha3(&handler, "0x".to_string())
+            .await
+            .unwrap();
         assert_eq!(
             result,
             "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470"
@@ -3414,8 +3399,7 @@ mod tests {
     #[tokio::test]
     async fn new_filter_returns_hex_id() {
         let handler = setup();
-        let raw: crate::filter::RawLogFilter =
-            serde_json::from_str(r#"{}"#).unwrap();
+        let raw: crate::filter::RawLogFilter = serde_json::from_str(r#"{}"#).unwrap();
         let id = EthApiServer::new_filter(&handler, raw).await.unwrap();
         assert!(id.starts_with("0x"));
     }
@@ -3480,11 +3464,9 @@ mod tests {
         store_block_with_logs(&handler, 0, vec![vec![log]]);
 
         // Install a log filter starting from block 0.
-        let raw: crate::filter::RawLogFilter = serde_json::from_str(&format!(
-            r#"{{"fromBlock":"0x0","address":"{}"}}"#,
-            addr,
-        ))
-        .unwrap();
+        let raw: crate::filter::RawLogFilter =
+            serde_json::from_str(&format!(r#"{{"fromBlock":"0x0","address":"{}"}}"#, addr,))
+                .unwrap();
         let filter_id = EthApiServer::new_filter(&handler, raw).await.unwrap();
 
         // Store block 1 with another matching log.
@@ -3565,7 +3547,11 @@ mod tests {
 
     /// Helper: create a block with one transaction and store it along with receipts.
     /// Returns (block_hash, tx_hash).
-    fn store_block_with_tx(handler: &RpcHandler<MemoryDb>, number: u64, succeeded: bool) -> (ShellHash, ShellHash) {
+    fn store_block_with_tx(
+        handler: &RpcHandler<MemoryDb>,
+        number: u64,
+        succeeded: bool,
+    ) -> (ShellHash, ShellHash) {
         let signer = DilithiumSigner::generate();
         let from = Address::from_public_key(signer.public_key());
         let tx = Transaction {
@@ -3612,7 +3598,10 @@ mod tests {
         let block_hash = block.hash();
 
         handler.chain_store.put_block(&block).unwrap();
-        handler.chain_store.set_canonical(number, &block_hash).unwrap();
+        handler
+            .chain_store
+            .set_canonical(number, &block_hash)
+            .unwrap();
         handler.chain_store.set_head(&block_hash).unwrap();
 
         let receipt = TransactionReceipt {
@@ -3626,7 +3615,10 @@ mod tests {
             logs_bloom: Bytes::default(),
             logs: vec![],
         };
-        handler.chain_store.put_receipts(&block_hash, &[receipt]).unwrap();
+        handler
+            .chain_store
+            .put_receipts(&block_hash, &[receipt])
+            .unwrap();
 
         (block_hash, tx_hash)
     }
@@ -3727,14 +3719,8 @@ mod tests {
         assert_eq!(t["traceAddress"], serde_json::json!([]));
         assert_eq!(t["blockNumber"], 0);
         assert_eq!(t["transactionPosition"], 0);
-        assert_eq!(
-            t["blockHash"],
-            serde_json::to_value(block_hash).unwrap()
-        );
-        assert_eq!(
-            t["transactionHash"],
-            serde_json::to_value(tx_hash).unwrap()
-        );
+        assert_eq!(t["blockHash"], serde_json::to_value(block_hash).unwrap());
+        assert_eq!(t["transactionHash"], serde_json::to_value(tx_hash).unwrap());
         // Action fields
         assert!(t["action"]["from"].is_string());
         assert!(t["action"]["gas"].is_string());
@@ -3825,7 +3811,10 @@ mod tests {
         handler.chain_store.set_head(&hash).unwrap();
 
         let result = EthApiServer::block_number(&handler).await.unwrap();
-        assert!(result.starts_with("0x"), "blockNumber should be hex: {result}");
+        assert!(
+            result.starts_with("0x"),
+            "blockNumber should be hex: {result}"
+        );
         assert_eq!(result, "0x0");
     }
 
@@ -3848,7 +3837,10 @@ mod tests {
         let result2 = EthApiServer::get_block_by_hash(&handler, fake_hash, false)
             .await
             .unwrap();
-        assert!(result2.is_none(), "non-existent block by hash should return None");
+        assert!(
+            result2.is_none(),
+            "non-existent block by hash should return None"
+        );
     }
 
     #[tokio::test]
@@ -3862,7 +3854,10 @@ mod tests {
             .unwrap();
         let txs = rpc_hashes.transactions.as_array().unwrap();
         assert_eq!(txs.len(), 1);
-        assert!(txs[0].is_string(), "with full=false, tx should be hash string");
+        assert!(
+            txs[0].is_string(),
+            "with full=false, tx should be hash string"
+        );
 
         let rpc_full = EthApiServer::get_block_by_hash(&handler, block_hash, true)
             .await
@@ -3870,7 +3865,10 @@ mod tests {
             .unwrap();
         let txs_full = rpc_full.transactions.as_array().unwrap();
         assert_eq!(txs_full.len(), 1);
-        assert!(txs_full[0].is_object(), "with full=true, tx should be object");
+        assert!(
+            txs_full[0].is_object(),
+            "with full=true, tx should be object"
+        );
         assert!(txs_full[0].get("hash").is_some());
         assert!(txs_full[0].get("from").is_some());
     }
@@ -4003,7 +4001,8 @@ mod tests {
         // Fund the sender and register pubkey so mempool can verify.
         {
             let mut ws = handler.world_state.write();
-            ws.add_balance(&addr, U256::from(100_000_000_000_000u64)).unwrap();
+            ws.add_balance(&addr, U256::from(100_000_000_000_000u64))
+                .unwrap();
         }
         handler.chain_store.put_pubkey(&addr, &pubkey).unwrap();
 
@@ -4031,7 +4030,11 @@ mod tests {
         let hex_payload = format!("0x{}", hex::encode(&rlp_buf));
 
         let result = EthApiServer::send_raw_transaction(&handler, hex_payload).await;
-        assert!(result.is_ok(), "RLP send_raw_transaction failed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "RLP send_raw_transaction failed: {:?}",
+            result.err()
+        );
         assert_eq!(handler.tx_pool.len(), 1);
     }
 
@@ -4044,7 +4047,8 @@ mod tests {
 
         {
             let mut ws = handler.world_state.write();
-            ws.add_balance(&addr, U256::from(100_000_000_000_000u64)).unwrap();
+            ws.add_balance(&addr, U256::from(100_000_000_000_000u64))
+                .unwrap();
         }
         handler.chain_store.put_pubkey(&addr, &pubkey).unwrap();
 
@@ -4071,7 +4075,11 @@ mod tests {
         let hex_payload = format!("0x{}", hex::encode(&json_bytes));
 
         let result = EthApiServer::send_raw_transaction(&handler, hex_payload).await;
-        assert!(result.is_ok(), "JSON send_raw_transaction failed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "JSON send_raw_transaction failed: {:?}",
+            result.err()
+        );
         assert_eq!(handler.tx_pool.len(), 1);
     }
 

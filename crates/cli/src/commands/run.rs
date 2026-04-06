@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use shell_consensus::PoaConfig;
 use shell_crypto::{DilithiumSigner, Signer};
-use shell_genesis::{AllocEntry, ConsensusConfig, GenesisConfig, initialize_genesis};
+use shell_genesis::{initialize_genesis, AllocEntry, ConsensusConfig, GenesisConfig};
 use shell_keystore::{decrypt, EncryptedKey};
 use shell_mempool::MempoolConfig;
 use shell_network::{NetworkBus, NetworkConfig};
@@ -53,10 +53,7 @@ pub async fn run(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
         args.datadir.canonicalize()?
     };
 
-    let args = RunArgs {
-        datadir,
-        ..args
-    };
+    let args = RunArgs { datadir, ..args };
 
     match args.db.as_str() {
         "memory" => {
@@ -82,7 +79,9 @@ pub async fn run(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
                 Err("RocksDB support not compiled. Rebuild with: cargo build -p shell-cli --features rocksdb".into())
             }
         }
-        other => Err(format!("Unknown storage backend: '{other}'. Use 'memory' or 'rocksdb'.").into()),
+        other => {
+            Err(format!("Unknown storage backend: '{other}'. Use 'memory' or 'rocksdb'.").into())
+        }
     }
 }
 
@@ -99,7 +98,10 @@ async fn run_with_store<S: KvStore + 'static>(
                 return Err(format!("keystore file not found: {}", path.display()).into());
             }
             let path = path.canonicalize().map_err(|e| {
-                format!("failed to canonicalize keystore path '{}': {e}", path.display())
+                format!(
+                    "failed to canonicalize keystore path '{}': {e}",
+                    path.display()
+                )
             })?;
             info!("Loading keystore from {}", path.display());
             let json = std::fs::read_to_string(&path)?;
@@ -153,12 +155,15 @@ async fn run_with_store<S: KvStore + 'static>(
         use shell_primitives::U256;
 
         let mut alloc = std::collections::HashMap::new();
-        alloc.insert(authority, AllocEntry {
-            balance: U256::from(1_000_000_000_000_000_000u128),
-            nonce: 0,
-            code: None,
-            storage: None,
-        });
+        alloc.insert(
+            authority,
+            AllocEntry {
+                balance: U256::from(1_000_000_000_000_000_000u128),
+                nonce: 0,
+                code: None,
+                storage: None,
+            },
+        );
 
         let config = GenesisConfig {
             chain_id: args.chain_id,
@@ -242,15 +247,16 @@ async fn run_with_store<S: KvStore + 'static>(
         rpc: RpcConfig {
             listen_addr,
             ws_addr,
-            cors_allowed_origins: args.rpc_cors.as_ref().map(|s| {
-                s.split(',').map(|o| o.trim().to_string()).collect()
-            }),
+            cors_allowed_origins: args
+                .rpc_cors
+                .as_ref()
+                .map(|s| s.split(',').map(|o| o.trim().to_string()).collect()),
             rate_limit_per_sec: args.rpc_rate_limit.or(Some(50)),
-            api_namespaces: args.rpc_api.as_ref().map(|s| {
-                s.split(',').map(|n| n.trim().to_string()).collect()
-            }).unwrap_or_else(|| vec![
-                "eth".into(), "net".into(), "web3".into(), "shell".into(),
-            ]),
+            api_namespaces: args
+                .rpc_api
+                .as_ref()
+                .map(|s| s.split(',').map(|n| n.trim().to_string()).collect())
+                .unwrap_or_else(|| vec!["eth".into(), "net".into(), "web3".into(), "shell".into()]),
             max_request_body_size: 5 * 1024 * 1024,
             ..RpcConfig::default()
         },

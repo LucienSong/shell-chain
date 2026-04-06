@@ -138,9 +138,11 @@ fn cmd_nonce(address: String, rpc_url: String) -> Result<(), Box<dyn std::error:
 fn parse_address(s: &str) -> Result<Address, Box<dyn std::error::Error>> {
     let s = s.strip_prefix("0x").unwrap_or(s);
     if s.len() != 40 {
-        return Err(
-            format!("invalid address length: expected 40 hex chars, got {}", s.len()).into(),
-        );
+        return Err(format!(
+            "invalid address length: expected 40 hex chars, got {}",
+            s.len()
+        )
+        .into());
     }
     let bytes = hex::decode(s)?;
     Ok(Address::from_slice(&bytes))
@@ -174,7 +176,9 @@ mod tests {
 
     #[test]
     fn list_empty_dir() {
-        let dir = std::env::current_dir().unwrap().join("__test_empty_acct_dir__");
+        let dir = std::env::current_dir()
+            .unwrap()
+            .join("__test_empty_acct_dir__");
         let _ = std::fs::create_dir(&dir);
         let result = cmd_list(dir.clone());
         let _ = std::fs::remove_dir(&dir);

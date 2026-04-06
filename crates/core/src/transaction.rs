@@ -1,7 +1,7 @@
-use serde::{Deserialize, Serialize};
-use shell_primitives::{Address, Bytes, ShellHash, U256};
-use shell_crypto::{PQSignature, SignatureType};
 use alloy_rlp::{Decodable, Encodable};
+use serde::{Deserialize, Serialize};
+use shell_crypto::{PQSignature, SignatureType};
+use shell_primitives::{Address, Bytes, ShellHash, U256};
 use std::sync::OnceLock;
 
 /// EIP-2930 access list entry: an address and its pre-warmed storage keys.
@@ -89,7 +89,12 @@ impl Encodable for Transaction {
 
     fn length(&self) -> usize {
         let payload = self.fields_len();
-        alloy_rlp::Header { list: true, payload_length: payload }.length() + payload
+        alloy_rlp::Header {
+            list: true,
+            payload_length: payload,
+        }
+        .length()
+            + payload
     }
 }
 
@@ -104,35 +109,47 @@ impl Transaction {
         match &self.access_list {
             None => {
                 // Empty list
-                let header = alloy_rlp::Header { list: true, payload_length: 0 };
+                let header = alloy_rlp::Header {
+                    list: true,
+                    payload_length: 0,
+                };
                 header.encode(out);
             }
             Some(items) => {
                 // Calculate total payload length
-                let payload: usize = items.iter().map(|item| {
-                    let keys_payload: usize = item.storage_keys.iter()
-                        .map(|k| k.length())
-                        .sum();
-                    let keys_list_len = alloy_rlp::Header {
-                        list: true,
-                        payload_length: keys_payload,
-                    }.length() + keys_payload;
-                    let entry_payload = item.address.length() + keys_list_len;
-                    alloy_rlp::Header {
-                        list: true,
-                        payload_length: entry_payload,
-                    }.length() + entry_payload
-                }).sum();
-                let header = alloy_rlp::Header { list: true, payload_length: payload };
+                let payload: usize = items
+                    .iter()
+                    .map(|item| {
+                        let keys_payload: usize =
+                            item.storage_keys.iter().map(|k| k.length()).sum();
+                        let keys_list_len = alloy_rlp::Header {
+                            list: true,
+                            payload_length: keys_payload,
+                        }
+                        .length()
+                            + keys_payload;
+                        let entry_payload = item.address.length() + keys_list_len;
+                        alloy_rlp::Header {
+                            list: true,
+                            payload_length: entry_payload,
+                        }
+                        .length()
+                            + entry_payload
+                    })
+                    .sum();
+                let header = alloy_rlp::Header {
+                    list: true,
+                    payload_length: payload,
+                };
                 header.encode(out);
                 for item in items {
-                    let keys_payload: usize = item.storage_keys.iter()
-                        .map(|k| k.length())
-                        .sum();
+                    let keys_payload: usize = item.storage_keys.iter().map(|k| k.length()).sum();
                     let keys_list_len = alloy_rlp::Header {
                         list: true,
                         payload_length: keys_payload,
-                    }.length() + keys_payload;
+                    }
+                    .length()
+                        + keys_payload;
                     let entry_payload = item.address.length() + keys_list_len;
                     let entry_header = alloy_rlp::Header {
                         list: true,
@@ -155,25 +172,38 @@ impl Transaction {
 
     fn access_list_rlp_len(&self) -> usize {
         match &self.access_list {
-            None => {
-                alloy_rlp::Header { list: true, payload_length: 0 }.length()
+            None => alloy_rlp::Header {
+                list: true,
+                payload_length: 0,
             }
+            .length(),
             Some(items) => {
-                let payload: usize = items.iter().map(|item| {
-                    let keys_payload: usize = item.storage_keys.iter()
-                        .map(|k| k.length())
-                        .sum();
-                    let keys_list_len = alloy_rlp::Header {
-                        list: true,
-                        payload_length: keys_payload,
-                    }.length() + keys_payload;
-                    let entry_payload = item.address.length() + keys_list_len;
-                    alloy_rlp::Header {
-                        list: true,
-                        payload_length: entry_payload,
-                    }.length() + entry_payload
-                }).sum();
-                alloy_rlp::Header { list: true, payload_length: payload }.length() + payload
+                let payload: usize = items
+                    .iter()
+                    .map(|item| {
+                        let keys_payload: usize =
+                            item.storage_keys.iter().map(|k| k.length()).sum();
+                        let keys_list_len = alloy_rlp::Header {
+                            list: true,
+                            payload_length: keys_payload,
+                        }
+                        .length()
+                            + keys_payload;
+                        let entry_payload = item.address.length() + keys_list_len;
+                        alloy_rlp::Header {
+                            list: true,
+                            payload_length: entry_payload,
+                        }
+                        .length()
+                            + entry_payload
+                    })
+                    .sum();
+                alloy_rlp::Header {
+                    list: true,
+                    payload_length: payload,
+                }
+                .length()
+                    + payload
             }
         }
     }
@@ -220,7 +250,9 @@ impl Transaction {
     /// Type 3 transactions must have 1..=6 blob hashes and a max_fee_per_blob_gas.
     pub fn validate_blob_tx(&self) -> Result<(), &'static str> {
         if self.tx_type == 3 {
-            let hashes = self.blob_versioned_hashes.as_ref()
+            let hashes = self
+                .blob_versioned_hashes
+                .as_ref()
                 .ok_or("blob tx (type 3) must have blob_versioned_hashes")?;
             if hashes.is_empty() {
                 return Err("blob tx must have at least 1 blob hash");
@@ -242,12 +274,18 @@ impl Transaction {
     fn encode_blob_hashes(&self, out: &mut dyn alloy_rlp::BufMut) {
         match &self.blob_versioned_hashes {
             None => {
-                let header = alloy_rlp::Header { list: true, payload_length: 0 };
+                let header = alloy_rlp::Header {
+                    list: true,
+                    payload_length: 0,
+                };
                 header.encode(out);
             }
             Some(hashes) => {
                 let payload: usize = hashes.iter().map(|h| h.length()).sum();
-                let header = alloy_rlp::Header { list: true, payload_length: payload };
+                let header = alloy_rlp::Header {
+                    list: true,
+                    payload_length: payload,
+                };
                 header.encode(out);
                 for hash in hashes {
                     hash.encode(out);
@@ -258,12 +296,19 @@ impl Transaction {
 
     fn blob_hashes_rlp_len(&self) -> usize {
         match &self.blob_versioned_hashes {
-            None => {
-                alloy_rlp::Header { list: true, payload_length: 0 }.length()
+            None => alloy_rlp::Header {
+                list: true,
+                payload_length: 0,
             }
+            .length(),
             Some(hashes) => {
                 let payload: usize = hashes.iter().map(|h| h.length()).sum();
-                alloy_rlp::Header { list: true, payload_length: payload }.length() + payload
+                alloy_rlp::Header {
+                    list: true,
+                    payload_length: payload,
+                }
+                .length()
+                    + payload
             }
         }
     }
@@ -398,7 +443,12 @@ impl Encodable for SignedTransaction {
 
     fn length(&self) -> usize {
         let payload = self.fields_len();
-        alloy_rlp::Header { list: true, payload_length: payload }.length() + payload
+        alloy_rlp::Header {
+            list: true,
+            payload_length: payload,
+        }
+        .length()
+            + payload
     }
 }
 
@@ -446,7 +496,11 @@ impl Decodable for Transaction {
         let tx_type = u8::decode(buf)?;
         let blob_fee_flag = u8::decode(buf)?;
         let blob_fee_raw = u64::decode(buf)?;
-        let max_fee_per_blob_gas = if blob_fee_flag == 1 { Some(blob_fee_raw) } else { None };
+        let max_fee_per_blob_gas = if blob_fee_flag == 1 {
+            Some(blob_fee_raw)
+        } else {
+            None
+        };
         let blob_versioned_hashes = Self::decode_blob_hashes(buf)?;
 
         let consumed = remaining - buf.len();
@@ -810,7 +864,10 @@ mod tests {
             max_fee_per_blob_gas: Some(1_000_000),
             blob_versioned_hashes: Some(vec![]),
         };
-        assert_eq!(tx.validate_blob_tx().unwrap_err(), "blob tx must have at least 1 blob hash");
+        assert_eq!(
+            tx.validate_blob_tx().unwrap_err(),
+            "blob tx must have at least 1 blob hash"
+        );
     }
 
     #[test]
@@ -830,7 +887,10 @@ mod tests {
             max_fee_per_blob_gas: Some(1_000_000),
             blob_versioned_hashes: Some(hashes),
         };
-        assert_eq!(tx.validate_blob_tx().unwrap_err(), "blob tx exceeds maximum blob hash count (6)");
+        assert_eq!(
+            tx.validate_blob_tx().unwrap_err(),
+            "blob tx exceeds maximum blob hash count (6)"
+        );
     }
 
     #[test]
@@ -849,7 +909,10 @@ mod tests {
             max_fee_per_blob_gas: None,
             blob_versioned_hashes: Some(vec![ShellHash::ZERO]),
         };
-        assert_eq!(tx.validate_blob_tx().unwrap_err(), "blob tx must have max_fee_per_blob_gas");
+        assert_eq!(
+            tx.validate_blob_tx().unwrap_err(),
+            "blob tx must have max_fee_per_blob_gas"
+        );
     }
 
     #[test]
@@ -868,7 +931,10 @@ mod tests {
             max_fee_per_blob_gas: Some(1_000_000),
             blob_versioned_hashes: Some(vec![ShellHash::ZERO]),
         };
-        assert_eq!(tx.validate_blob_tx().unwrap_err(), "blob tx cannot be a contract creation");
+        assert_eq!(
+            tx.validate_blob_tx().unwrap_err(),
+            "blob tx cannot be a contract creation"
+        );
     }
 
     #[test]
@@ -993,10 +1059,7 @@ mod tests {
             max_priority_fee_per_gas: 2,
             access_list: Some(vec![AccessListItem {
                 address: Address::from([0xCC; 20]),
-                storage_keys: vec![
-                    ShellHash::from([0x11; 32]),
-                    ShellHash::from([0x22; 32]),
-                ],
+                storage_keys: vec![ShellHash::from([0x11; 32]), ShellHash::from([0x22; 32])],
             }]),
             tx_type: 1,
             max_fee_per_blob_gas: None,
@@ -1008,7 +1071,10 @@ mod tests {
         assert_eq!(tx, decoded);
         assert_eq!(decoded.tx_type, 1);
         assert_eq!(decoded.access_list.as_ref().unwrap().len(), 1);
-        assert_eq!(decoded.access_list.as_ref().unwrap()[0].storage_keys.len(), 2);
+        assert_eq!(
+            decoded.access_list.as_ref().unwrap()[0].storage_keys.len(),
+            2
+        );
     }
 
     #[test]
@@ -1127,8 +1193,14 @@ mod tests {
         };
 
         let type0 = base.clone();
-        let type1 = Transaction { tx_type: 1, ..base.clone() };
-        let type2 = Transaction { tx_type: 2, ..base.clone() };
+        let type1 = Transaction {
+            tx_type: 1,
+            ..base.clone()
+        };
+        let type2 = Transaction {
+            tx_type: 2,
+            ..base.clone()
+        };
         let type3 = Transaction {
             tx_type: 3,
             max_fee_per_blob_gas: Some(1_000_000),
@@ -1222,7 +1294,10 @@ mod tests {
             let mut buf = Vec::new();
             signed.encode(&mut buf);
             let decoded = SignedTransaction::decode(&mut buf.as_slice()).unwrap();
-            assert_eq!(signed, decoded, "RLP roundtrip failed for tx type {tx_type}");
+            assert_eq!(
+                signed, decoded,
+                "RLP roundtrip failed for tx type {tx_type}"
+            );
         }
     }
 
@@ -1242,7 +1317,14 @@ mod tests {
             max_fee_per_blob_gas: None,
             blob_versioned_hashes: None,
         };
-        let t0 = Transaction { tx_type: 0, ..t2.clone() };
-        assert_ne!(t0.hash(), t2.hash(), "contract creation hashes should differ by type");
+        let t0 = Transaction {
+            tx_type: 0,
+            ..t2.clone()
+        };
+        assert_ne!(
+            t0.hash(),
+            t2.hash(),
+            "contract creation hashes should differ by type"
+        );
     }
 }

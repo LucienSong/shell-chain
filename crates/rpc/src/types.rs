@@ -301,16 +301,28 @@ mod tests {
         assert!(json.get("gasLimit").is_some(), "missing gasLimit");
         assert!(json.get("gasUsed").is_some(), "missing gasUsed");
         assert!(json.get("stateRoot").is_some(), "missing stateRoot");
-        assert!(json.get("transactionsRoot").is_some(), "missing transactionsRoot");
+        assert!(
+            json.get("transactionsRoot").is_some(),
+            "missing transactionsRoot"
+        );
         assert!(json.get("receiptsRoot").is_some(), "missing receiptsRoot");
         assert!(json.get("baseFeePerGas").is_some(), "missing baseFeePerGas");
-        assert!(json.get("totalDifficulty").is_some(), "missing totalDifficulty");
+        assert!(
+            json.get("totalDifficulty").is_some(),
+            "missing totalDifficulty"
+        );
         assert!(json.get("sha3Uncles").is_some(), "missing sha3Uncles");
         assert!(json.get("mixHash").is_some(), "missing mixHash");
         assert!(json.get("extraData").is_some(), "missing extraData");
         assert!(json.get("logsBloom").is_some(), "missing logsBloom");
-        assert!(json.get("withdrawalsRoot").is_some(), "missing withdrawalsRoot");
-        assert!(json.get("parentBeaconBlockRoot").is_some(), "missing parentBeaconBlockRoot");
+        assert!(
+            json.get("withdrawalsRoot").is_some(),
+            "missing withdrawalsRoot"
+        );
+        assert!(
+            json.get("parentBeaconBlockRoot").is_some(),
+            "missing parentBeaconBlockRoot"
+        );
         assert!(json.get("blobGasUsed").is_some(), "missing blobGasUsed");
         assert!(json.get("excessBlobGas").is_some(), "missing excessBlobGas");
     }
@@ -348,9 +360,17 @@ mod tests {
         let json = serde_json::to_value(&block).unwrap();
 
         for key in &[
-            "number", "timestamp", "gasLimit", "gasUsed", "size",
-            "baseFeePerGas", "totalDifficulty", "nonce", "difficulty",
-            "blobGasUsed", "excessBlobGas",
+            "number",
+            "timestamp",
+            "gasLimit",
+            "gasUsed",
+            "size",
+            "baseFeePerGas",
+            "totalDifficulty",
+            "nonce",
+            "difficulty",
+            "blobGasUsed",
+            "excessBlobGas",
         ] {
             let val = json.get(key).unwrap();
             assert!(val.is_string(), "{key} should be a string");
@@ -388,10 +408,24 @@ mod tests {
         let json = serde_json::to_value(&tx).unwrap();
 
         for key in &[
-            "hash", "blockHash", "blockNumber", "transactionIndex",
-            "from", "to", "value", "gas", "gasPrice",
-            "maxFeePerGas", "maxPriorityFeePerGas",
-            "nonce", "input", "chainId", "type", "v", "r", "s",
+            "hash",
+            "blockHash",
+            "blockNumber",
+            "transactionIndex",
+            "from",
+            "to",
+            "value",
+            "gas",
+            "gasPrice",
+            "maxFeePerGas",
+            "maxPriorityFeePerGas",
+            "nonce",
+            "input",
+            "chainId",
+            "type",
+            "v",
+            "r",
+            "s",
         ] {
             assert!(json.get(key).is_some(), "missing field: {key}");
         }
@@ -424,10 +458,22 @@ mod tests {
         };
 
         let json = serde_json::to_value(&tx).unwrap();
-        assert!(json.get("to").unwrap().is_null(), "to must be null for contract creation");
-        assert!(json.get("blockHash").unwrap().is_null(), "pending tx should have null blockHash");
-        assert!(json.get("blockNumber").unwrap().is_null(), "pending tx should have null blockNumber");
-        assert!(json.get("transactionIndex").unwrap().is_null(), "pending tx should have null transactionIndex");
+        assert!(
+            json.get("to").unwrap().is_null(),
+            "to must be null for contract creation"
+        );
+        assert!(
+            json.get("blockHash").unwrap().is_null(),
+            "pending tx should have null blockHash"
+        );
+        assert!(
+            json.get("blockNumber").unwrap().is_null(),
+            "pending tx should have null blockNumber"
+        );
+        assert!(
+            json.get("transactionIndex").unwrap().is_null(),
+            "pending tx should have null transactionIndex"
+        );
     }
 
     #[test]
@@ -458,7 +504,10 @@ mod tests {
 
         let json = serde_json::to_string(&tx).unwrap();
         assert!(!json.contains("maxFeePerBlobGas"), "absent for non-blob tx");
-        assert!(!json.contains("blobVersionedHashes"), "absent for non-blob tx");
+        assert!(
+            !json.contains("blobVersionedHashes"),
+            "absent for non-blob tx"
+        );
         assert!(!json.contains("accessList"), "absent when None");
     }
 
@@ -516,9 +565,20 @@ mod tests {
         let json = serde_json::to_value(&receipt).unwrap();
 
         for key in &[
-            "transactionHash", "blockHash", "blockNumber", "transactionIndex",
-            "from", "to", "status", "gasUsed", "cumulativeGasUsed",
-            "effectiveGasPrice", "contractAddress", "logs", "logsBloom", "type",
+            "transactionHash",
+            "blockHash",
+            "blockNumber",
+            "transactionIndex",
+            "from",
+            "to",
+            "status",
+            "gasUsed",
+            "cumulativeGasUsed",
+            "effectiveGasPrice",
+            "contractAddress",
+            "logs",
+            "logsBloom",
+            "type",
         ] {
             assert!(json.get(key).is_some(), "missing field: {key}");
         }
@@ -564,8 +624,15 @@ mod tests {
         let json = serde_json::to_value(&log).unwrap();
 
         for key in &[
-            "address", "topics", "data", "blockNumber", "blockHash",
-            "transactionHash", "transactionIndex", "logIndex", "removed",
+            "address",
+            "topics",
+            "data",
+            "blockNumber",
+            "blockHash",
+            "transactionHash",
+            "transactionIndex",
+            "logIndex",
+            "removed",
         ] {
             assert!(json.get(key).is_some(), "missing field: {key}");
         }

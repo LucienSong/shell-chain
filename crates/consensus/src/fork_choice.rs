@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use shell_primitives::ShellHash;
+use std::collections::HashMap;
 
 /// Score assigned to a block for fork choice comparison.
 /// Higher score = preferred chain. Compared lexicographically by fields in order.
@@ -326,7 +326,7 @@ mod tests {
         let mut fc = ForkChoice::new(hash(0));
         fc.add_block(hash(1), hash(0), 1, 0, false);
         fc.add_block(hash(2), hash(1), 2, 5, false); // higher score
-        // is_finalized comparison happens first: 1 > 0, so hash(1) wins
+                                                     // is_finalized comparison happens first: 1 > 0, so hash(1) wins
         fc.mark_finalized(&hash(1));
         assert_eq!(fc.head(), &hash(1));
     }
@@ -526,7 +526,10 @@ mod tests {
         let mut fc = ForkChoice::new(hash(0));
         fc.add_block(hash(1), hash(0), 1, 0, false);
         let chain = fc.chain_between(&hash(1), &hash(1));
-        assert!(chain.is_empty(), "chain from block to itself should be empty");
+        assert!(
+            chain.is_empty(),
+            "chain from block to itself should be empty"
+        );
     }
 
     #[test]
@@ -592,10 +595,19 @@ mod tests {
         fc.prune_below(3);
 
         assert!(fc.contains(&hash(0)), "genesis must survive pruning");
-        assert!(fc.contains(&hash(2)), "finalized block must survive pruning");
+        assert!(
+            fc.contains(&hash(2)),
+            "finalized block must survive pruning"
+        );
         assert!(fc.contains(&hash(3)), "block above finalized must survive");
-        assert!(!fc.contains(&hash(4)), "non-finalized fork block below finalized should be pruned");
-        assert!(!fc.contains(&hash(1)), "non-finalized block below finalized should be pruned");
+        assert!(
+            !fc.contains(&hash(4)),
+            "non-finalized fork block below finalized should be pruned"
+        );
+        assert!(
+            !fc.contains(&hash(1)),
+            "non-finalized block below finalized should be pruned"
+        );
     }
 
     #[test]
@@ -638,6 +650,9 @@ mod tests {
 
         // Should detect the cycle and return empty instead of looping forever.
         let chain = fc.chain_between(&hash(2), &hash(99));
-        assert!(chain.is_empty(), "cycle should be detected and return empty vec");
+        assert!(
+            chain.is_empty(),
+            "cycle should be detected and return empty vec"
+        );
     }
 }

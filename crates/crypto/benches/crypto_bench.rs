@@ -1,10 +1,10 @@
 //! Benchmarks for shell-crypto: Dilithium3, SPHINCS+, SHA3-256.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use sha3::{Digest, Sha3_256};
 use shell_crypto::{
-    BatchVerifier, DilithiumSigner, DilithiumVerifier, MultiVerifier, PQSignature,
-    Signer, SphincsSigner, SphincsVerifier, VerifyItem, Verifier,
+    BatchVerifier, DilithiumSigner, DilithiumVerifier, MultiVerifier, PQSignature, Signer,
+    SphincsSigner, SphincsVerifier, Verifier, VerifyItem,
 };
 
 const MSG: &[u8] = b"shell-chain benchmark payload 32B";
@@ -31,7 +31,11 @@ fn bench_dilithium_verify(c: &mut Criterion) {
     c.bench_function("dilithium3/verify", |b| {
         b.iter(|| {
             verifier
-                .verify(black_box(signer.public_key()), black_box(MSG), black_box(&sig))
+                .verify(
+                    black_box(signer.public_key()),
+                    black_box(MSG),
+                    black_box(&sig),
+                )
                 .unwrap()
         });
     });
@@ -43,7 +47,8 @@ fn bench_dilithium_batch_verify(c: &mut Criterion) {
 
     for count in [10, 50, 100] {
         // Pre-generate signers, signatures
-        let signers: Vec<DilithiumSigner> = (0..count).map(|_| DilithiumSigner::generate()).collect();
+        let signers: Vec<DilithiumSigner> =
+            (0..count).map(|_| DilithiumSigner::generate()).collect();
         let sigs: Vec<PQSignature> = signers.iter().map(|s| s.sign(MSG).unwrap()).collect();
         let pubkeys: Vec<Vec<u8>> = signers.iter().map(|s| s.public_key().to_vec()).collect();
 
@@ -81,7 +86,11 @@ fn bench_sphincs_verify(c: &mut Criterion) {
     c.bench_function("sphincs+/verify", |b| {
         b.iter(|| {
             verifier
-                .verify(black_box(signer.public_key()), black_box(MSG), black_box(&sig))
+                .verify(
+                    black_box(signer.public_key()),
+                    black_box(MSG),
+                    black_box(&sig),
+                )
                 .unwrap()
         });
     });

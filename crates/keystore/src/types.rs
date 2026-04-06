@@ -37,7 +37,7 @@ pub struct KdfParams {
 impl Default for KdfParams {
     fn default() -> Self {
         Self {
-            m_cost: 65536,  // 64 MiB
+            m_cost: 65536, // 64 MiB
             t_cost: 3,
             p_cost: 4,
             salt: String::new(),

@@ -49,13 +49,11 @@ pub async fn checkpoint_sync<S: KvStore>(
 
     // Determine expected genesis_hash for validation.
     // If the chain store already has a config, use it; otherwise trust the snapshot.
-    let (expected_chain_id_for_import, expected_genesis_hash) = match chain_store
-        .get_chain_config()
-        .map_err(NodeError::Storage)?
-    {
-        Some(cfg) => (cfg.chain_id, cfg.genesis_hash),
-        None => (metadata.chain_id, metadata.genesis_hash),
-    };
+    let (expected_chain_id_for_import, expected_genesis_hash) =
+        match chain_store.get_chain_config().map_err(NodeError::Storage)? {
+            Some(cfg) => (cfg.chain_id, cfg.genesis_hash),
+            None => (metadata.chain_id, metadata.genesis_hash),
+        };
 
     // Import the snapshot into the chain store.
     info!("Importing checkpoint snapshot...");
@@ -99,7 +97,8 @@ pub fn should_checkpoint_sync<S: KvStore>(chain_store: &ChainStore<S>) -> bool {
 
 /// Download a file from `url` to `dest` using `curl`.
 async fn download_snapshot(url: &str, dest: &PathBuf) -> Result<(), NodeError> {
-    let dest_str = dest.to_str()
+    let dest_str = dest
+        .to_str()
         .ok_or_else(|| NodeError::Startup("snapshot path contains invalid UTF-8".into()))?;
 
     let output = tokio::process::Command::new("curl")
@@ -108,8 +107,10 @@ async fn download_snapshot(url: &str, dest: &PathBuf) -> Result<(), NodeError> {
             "--silent",
             "--show-error",
             "--location",
-            "--max-filesize", "1073741824",  // 1 GB max
-            "--max-time", "600",             // 10 minute timeout
+            "--max-filesize",
+            "1073741824", // 1 GB max
+            "--max-time",
+            "600", // 10 minute timeout
             "--output",
             dest_str,
             url,
@@ -145,8 +146,8 @@ fn validate_snapshot(path: &Path) -> Result<shell_storage::SnapshotMetadata, Nod
     let file = std::fs::File::open(path)
         .map_err(|e| NodeError::Startup(format!("open snapshot for validation: {e}")))?;
     let reader = BufReader::new(file);
-    let snap_reader =
-        SnapshotReader::new(reader).map_err(|e| NodeError::Startup(format!("invalid snapshot: {e}")))?;
+    let snap_reader = SnapshotReader::new(reader)
+        .map_err(|e| NodeError::Startup(format!("invalid snapshot: {e}")))?;
     Ok(snap_reader.metadata().clone())
 }
 
@@ -159,13 +160,8 @@ mod tests {
     use std::sync::Arc;
 
     fn make_test_snapshot() -> Vec<u8> {
-        let meta = SnapshotMetadata::new(
-            1337,
-            42,
-            ShellHash::ZERO,
-            ShellHash::ZERO,
-            ShellHash::ZERO,
-        );
+        let meta =
+            SnapshotMetadata::new(1337, 42, ShellHash::ZERO, ShellHash::ZERO, ShellHash::ZERO);
         let mut buf = Vec::new();
         let mut writer = SnapshotWriter::new(Cursor::new(&mut buf), meta).unwrap();
         writer.write_entry(b"key1", b"value1").unwrap();

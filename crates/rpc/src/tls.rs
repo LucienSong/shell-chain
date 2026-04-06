@@ -77,8 +77,8 @@ pub fn load_tls_config(
             }
 
             // Parse certificate chain.
-            let cert_file = fs::File::open(cert_p)
-                .map_err(|e| TlsConfigError::CertReadError(e.to_string()))?;
+            let cert_file =
+                fs::File::open(cert_p).map_err(|e| TlsConfigError::CertReadError(e.to_string()))?;
             let mut cert_reader = BufReader::new(cert_file);
             let certs: Vec<_> = rustls_pemfile::certs(&mut cert_reader)
                 .filter_map(|r| r.ok())
@@ -88,8 +88,8 @@ pub fn load_tls_config(
             }
 
             // Parse private key.
-            let key_file = fs::File::open(key_p)
-                .map_err(|e| TlsConfigError::KeyReadError(e.to_string()))?;
+            let key_file =
+                fs::File::open(key_p).map_err(|e| TlsConfigError::KeyReadError(e.to_string()))?;
             let mut key_reader = BufReader::new(key_file);
             let private_key = rustls_pemfile::private_key(&mut key_reader)
                 .map_err(|e| TlsConfigError::KeyReadError(e.to_string()))?
@@ -138,11 +138,8 @@ mod tests {
 
     #[test]
     fn missing_cert_file_is_error() {
-        let err = load_tls_config(
-            Some("/nonexistent/cert.pem"),
-            Some("/nonexistent/key.pem"),
-        )
-        .unwrap_err();
+        let err = load_tls_config(Some("/nonexistent/cert.pem"), Some("/nonexistent/key.pem"))
+            .unwrap_err();
         assert!(
             matches!(err, TlsConfigError::CertFileNotFound(_)),
             "expected CertFileNotFound, got: {err}",
@@ -157,11 +154,8 @@ mod tests {
         fs::write(&cert, "not a real PEM\n").unwrap();
         fs::write(&key, "not a real PEM\n").unwrap();
 
-        let err = load_tls_config(
-            Some(cert.to_str().unwrap()),
-            Some(key.to_str().unwrap()),
-        )
-        .unwrap_err();
+        let err =
+            load_tls_config(Some(cert.to_str().unwrap()), Some(key.to_str().unwrap())).unwrap_err();
         assert!(
             matches!(err, TlsConfigError::NoCertsFound(_)),
             "expected NoCertsFound, got: {err}",

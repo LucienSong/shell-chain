@@ -6,7 +6,7 @@ use chacha20poly1305::XChaCha20Poly1305;
 use rand::RngCore;
 use zeroize::Zeroize;
 
-use shell_crypto::{DilithiumSigner, SphincsSigner, Signer};
+use shell_crypto::{DilithiumSigner, Signer, SphincsSigner};
 use shell_primitives::Address;
 
 use crate::types::{CipherParams, EncryptedKey, KdfParams, KeystoreError};
@@ -63,7 +63,10 @@ pub fn encrypt(signer: &DilithiumSigner, password: &[u8]) -> Result<EncryptedKey
 ///
 /// Verifies that the decrypted public key matches the stored address
 /// to catch wrong-password errors early (via AEAD tag check).
-pub fn decrypt(encrypted: &EncryptedKey, password: &[u8]) -> Result<DilithiumSigner, KeystoreError> {
+pub fn decrypt(
+    encrypted: &EncryptedKey,
+    password: &[u8],
+) -> Result<DilithiumSigner, KeystoreError> {
     let salt = hex::decode(&encrypted.kdf_params.salt)
         .map_err(|e| KeystoreError::InvalidKey(format!("bad salt hex: {e}")))?;
     let nonce_bytes = hex::decode(&encrypted.cipher_params.nonce)
@@ -100,11 +103,7 @@ pub fn decrypt(encrypted: &EncryptedKey, password: &[u8]) -> Result<DilithiumSig
 }
 
 /// Derive a 32-byte key from password + salt using argon2id.
-fn derive_key(
-    password: &[u8],
-    salt: &[u8],
-    params: &KdfParams,
-) -> Result<[u8; 32], KeystoreError> {
+fn derive_key(password: &[u8], salt: &[u8], params: &KdfParams) -> Result<[u8; 32], KeystoreError> {
     let argon2_params = Params::new(params.m_cost, params.t_cost, params.p_cost, Some(32))
         .map_err(|e| KeystoreError::Encryption(format!("argon2 params: {e}")))?;
 
@@ -123,7 +122,10 @@ fn derive_key(
 /// Same scheme as [`encrypt`] (argon2id + XChaCha20-Poly1305) but stores
 /// `key_type = "sphincs-sha2-256f"` in the output so [`decrypt_sphincs`]
 /// can reconstruct the correct signer type.
-pub fn encrypt_sphincs(signer: &SphincsSigner, password: &[u8]) -> Result<EncryptedKey, KeystoreError> {
+pub fn encrypt_sphincs(
+    signer: &SphincsSigner,
+    password: &[u8],
+) -> Result<EncryptedKey, KeystoreError> {
     let mut salt = [0u8; 32];
     let mut nonce = [0u8; 24];
     rand::thread_rng().fill_bytes(&mut salt);
@@ -167,7 +169,10 @@ pub fn encrypt_sphincs(signer: &SphincsSigner, password: &[u8]) -> Result<Encryp
 /// Decrypt an encrypted key with a password, returning a SphincsSigner.
 ///
 /// The stored `key_type` must be `"sphincs-sha2-256f"`.
-pub fn decrypt_sphincs(encrypted: &EncryptedKey, password: &[u8]) -> Result<SphincsSigner, KeystoreError> {
+pub fn decrypt_sphincs(
+    encrypted: &EncryptedKey,
+    password: &[u8],
+) -> Result<SphincsSigner, KeystoreError> {
     if encrypted.key_type != "sphincs-sha2-256f" {
         return Err(KeystoreError::InvalidKey(format!(
             "expected key_type sphincs-sha2-256f, got {}",
@@ -232,9 +237,7 @@ mod tests {
         let sig = recovered.sign(msg).unwrap();
         let verifier = shell_crypto::DilithiumVerifier;
         use shell_crypto::Verifier;
-        assert!(verifier
-            .verify(recovered.public_key(), msg, &sig)
-            .is_ok());
+        assert!(verifier.verify(recovered.public_key(), msg, &sig).is_ok());
     }
 
     #[test]
@@ -292,7 +295,10 @@ mod tests {
         // Incomplete JSON missing required fields should fail deserialization
         let incomplete = r#"{"version": 1, "address": "abc"}"#;
         let result = serde_json::from_str::<EncryptedKey>(incomplete);
-        assert!(result.is_err(), "missing fields should fail deserialization");
+        assert!(
+            result.is_err(),
+            "missing fields should fail deserialization"
+        );
 
         // Missing ciphertext
         let no_ciphertext = r#"{
@@ -305,7 +311,10 @@ mod tests {
             "public_key": "cc"
         }"#;
         let result = serde_json::from_str::<EncryptedKey>(no_ciphertext);
-        assert!(result.is_err(), "missing ciphertext should fail deserialization");
+        assert!(
+            result.is_err(),
+            "missing ciphertext should fail deserialization"
+        );
     }
 
     #[test]
@@ -321,7 +330,10 @@ mod tests {
 
         let key1 = derive_key(password, &salt, &params).unwrap();
         let key2 = derive_key(password, &salt, &params).unwrap();
-        assert_eq!(key1, key2, "same password+salt must produce same derived key");
+        assert_eq!(
+            key1, key2,
+            "same password+salt must produce same derived key"
+        );
 
         // Different password must produce different key
         let key3 = derive_key(b"different", &salt, &params).unwrap();
@@ -339,7 +351,10 @@ mod tests {
         encrypted.cipher_params.nonce = hex::encode(&nonce);
 
         let result = decrypt(&encrypted, b"nonce-test");
-        assert!(result.is_err(), "tampered nonce should cause decryption failure");
+        assert!(
+            result.is_err(),
+            "tampered nonce should cause decryption failure"
+        );
     }
 
     #[test]
@@ -353,7 +368,10 @@ mod tests {
         encrypted.kdf_params.salt = hex::encode(&salt);
 
         let result = decrypt(&encrypted, b"salt-test");
-        assert!(result.is_err(), "tampered salt should cause decryption failure");
+        assert!(
+            result.is_err(),
+            "tampered salt should cause decryption failure"
+        );
     }
 
     #[test]
@@ -414,9 +432,7 @@ mod tests {
         let sig = recovered.sign(msg).unwrap();
         let verifier = shell_crypto::SphincsVerifier;
         use shell_crypto::Verifier;
-        assert!(verifier
-            .verify(recovered.public_key(), msg, &sig)
-            .unwrap());
+        assert!(verifier.verify(recovered.public_key(), msg, &sig).unwrap());
     }
 
     #[test]

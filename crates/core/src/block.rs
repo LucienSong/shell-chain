@@ -1,7 +1,7 @@
-use serde::{Deserialize, Serialize};
-use shell_primitives::{Address, Bytes, ShellHash};
-use shell_crypto::PQSignature;
 use alloy_rlp::{Decodable, Encodable};
+use serde::{Deserialize, Serialize};
+use shell_crypto::PQSignature;
+use shell_primitives::{Address, Bytes, ShellHash};
 
 use crate::SignedTransaction;
 
@@ -71,7 +71,12 @@ impl Encodable for BlockHeader {
 
     fn length(&self) -> usize {
         let payload = self.fields_len();
-        alloy_rlp::Header { list: true, payload_length: payload }.length() + payload
+        alloy_rlp::Header {
+            list: true,
+            payload_length: payload,
+        }
+        .length()
+            + payload
     }
 }
 
@@ -137,8 +142,12 @@ impl Block {
 
     fn rlp_fields_len(&self) -> usize {
         let txs_payload: usize = self.transactions.iter().map(|t| t.length()).sum();
-        let txs_list_len =
-            alloy_rlp::Header { list: true, payload_length: txs_payload }.length() + txs_payload;
+        let txs_list_len = alloy_rlp::Header {
+            list: true,
+            payload_length: txs_payload,
+        }
+        .length()
+            + txs_payload;
         let seal_len = match &self.proposer_seal {
             Some(seal) => seal.length(),
             None => 1, // 0x80 empty bytes
@@ -221,7 +230,11 @@ impl Encodable for Block {
         self.header.encode(out);
         // Transactions as an RLP list
         let txs_payload: usize = self.transactions.iter().map(|t| t.length()).sum();
-        alloy_rlp::Header { list: true, payload_length: txs_payload }.encode(out);
+        alloy_rlp::Header {
+            list: true,
+            payload_length: txs_payload,
+        }
+        .encode(out);
         for tx in &self.transactions {
             tx.encode(out);
         }
@@ -236,7 +249,12 @@ impl Encodable for Block {
 
     fn length(&self) -> usize {
         let payload = self.rlp_fields_len();
-        alloy_rlp::Header { list: true, payload_length: payload }.length() + payload
+        alloy_rlp::Header {
+            list: true,
+            payload_length: payload,
+        }
+        .length()
+            + payload
     }
 }
 

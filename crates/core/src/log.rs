@@ -18,18 +18,18 @@ pub struct Log {
 
 impl Log {
     /// Create a new log entry, validating topic count ≤ [`MAX_LOG_TOPICS`].
-    pub fn new(
-        address: Address,
-        topics: Vec<ShellHash>,
-        data: Bytes,
-    ) -> Result<Self, LogError> {
+    pub fn new(address: Address, topics: Vec<ShellHash>, data: Bytes) -> Result<Self, LogError> {
         if topics.len() > MAX_LOG_TOPICS {
             return Err(LogError::TooManyTopics {
                 got: topics.len(),
                 max: MAX_LOG_TOPICS,
             });
         }
-        Ok(Self { address, topics, data })
+        Ok(Self {
+            address,
+            topics,
+            data,
+        })
     }
 }
 
@@ -42,7 +42,11 @@ impl Encodable for Log {
         header.encode(out);
         self.address.encode(out);
         let topics_payload: usize = self.topics.iter().map(|t| t.length()).sum();
-        alloy_rlp::Header { list: true, payload_length: topics_payload }.encode(out);
+        alloy_rlp::Header {
+            list: true,
+            payload_length: topics_payload,
+        }
+        .encode(out);
         for topic in &self.topics {
             topic.encode(out);
         }
@@ -51,7 +55,12 @@ impl Encodable for Log {
 
     fn length(&self) -> usize {
         let payload = self.rlp_fields_len();
-        alloy_rlp::Header { list: true, payload_length: payload }.length() + payload
+        alloy_rlp::Header {
+            list: true,
+            payload_length: payload,
+        }
+        .length()
+            + payload
     }
 }
 
@@ -85,7 +94,11 @@ impl Decodable for Log {
             });
         }
 
-        Ok(Self { address, topics, data })
+        Ok(Self {
+            address,
+            topics,
+            data,
+        })
     }
 }
 
@@ -115,11 +128,7 @@ mod tests {
 
     #[test]
     fn log_new_valid() {
-        let log = Log::new(
-            Address::default(),
-            vec![ShellHash::ZERO; 4],
-            Bytes::new(),
-        );
+        let log = Log::new(Address::default(), vec![ShellHash::ZERO; 4], Bytes::new());
         assert!(log.is_ok());
         assert_eq!(log.unwrap().topics.len(), 4);
     }
@@ -132,11 +141,7 @@ mod tests {
 
     #[test]
     fn log_new_too_many_topics() {
-        let log = Log::new(
-            Address::default(),
-            vec![ShellHash::ZERO; 5],
-            Bytes::new(),
-        );
+        let log = Log::new(Address::default(), vec![ShellHash::ZERO; 5], Bytes::new());
         assert!(log.is_err());
         let err = log.unwrap_err();
         assert!(err.to_string().contains("too many topics"));

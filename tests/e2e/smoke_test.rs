@@ -146,10 +146,9 @@ async fn get_block_by_number_latest() {
     let block = make_block(1, genesis.hash());
     store_block(&env, &block);
 
-    let rpc_block =
-        EthApiServer::get_block_by_number(&env.handler, "latest".into(), false)
-            .await
-            .unwrap();
+    let rpc_block = EthApiServer::get_block_by_number(&env.handler, "latest".into(), false)
+        .await
+        .unwrap();
     assert!(rpc_block.is_some());
     assert_eq!(rpc_block.unwrap().number, "0x1");
 }

@@ -207,8 +207,7 @@ async fn main() {
     // Build env filter: --log-level flag > RUST_LOG env var > "info" default.
     let filter = match &cli.log_level {
         Some(level) => EnvFilter::new(level),
-        None => EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| EnvFilter::new("info")),
+        None => EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
     };
 
     // Initialize tracing subscriber with the chosen format.
@@ -278,10 +277,7 @@ async fn main() {
             let effective_rpc_addr = if rpc_addr != "127.0.0.1:8545" {
                 rpc_addr
             } else {
-                file_config
-                    .rpc
-                    .listen_addr
-                    .unwrap_or(rpc_addr)
+                file_config.rpc.listen_addr.unwrap_or(rpc_addr)
             };
 
             let effective_block_time = if block_time != 2000 {
@@ -290,9 +286,8 @@ async fn main() {
                 file_config.node.block_time.unwrap_or(block_time)
             };
 
-            let effective_keystore = keystore.or_else(|| {
-                file_config.node.keystore.map(PathBuf::from)
-            });
+            let effective_keystore =
+                keystore.or_else(|| file_config.node.keystore.map(PathBuf::from));
 
             let effective_chain_id = if chain_id != 1337 {
                 chain_id
@@ -322,8 +317,7 @@ async fn main() {
                 file_config.p2p.listen_addr.unwrap_or(p2p_addr)
             };
 
-            let effective_enable_mdns =
-                enable_mdns || file_config.p2p.enable_mdns.unwrap_or(false);
+            let effective_enable_mdns = enable_mdns || file_config.p2p.enable_mdns.unwrap_or(false);
 
             let effective_pruning = if pruning != 0 {
                 pruning
@@ -331,22 +325,13 @@ async fn main() {
                 file_config.node.pruning.unwrap_or(pruning)
             };
 
-            let effective_rpc_cors = rpc_cors.or_else(|| {
-                file_config
-                    .rpc
-                    .cors_origins
-                    .map(|v| v.join(","))
-            });
+            let effective_rpc_cors =
+                rpc_cors.or_else(|| file_config.rpc.cors_origins.map(|v| v.join(",")));
 
-            let effective_rpc_rate_limit =
-                rpc_rate_limit.or(file_config.rpc.rate_limit);
+            let effective_rpc_rate_limit = rpc_rate_limit.or(file_config.rpc.rate_limit);
 
-            let effective_rpc_api = rpc_api.or_else(|| {
-                file_config
-                    .rpc
-                    .api_modules
-                    .map(|v| v.join(","))
-            });
+            let effective_rpc_api =
+                rpc_api.or_else(|| file_config.rpc.api_modules.map(|v| v.join(",")));
 
             // Merge --bootnode (repeatable) and --bootnodes (comma-separated).
             let mut all_bootnodes = bootnode;
@@ -383,9 +368,7 @@ async fn main() {
             })
             .await
         }
-        Commands::Init { genesis, chain_id } => {
-            commands::init(cli.datadir, genesis, chain_id)
-        }
+        Commands::Init { genesis, chain_id } => commands::init(cli.datadir, genesis, chain_id),
         Commands::Key { action } => match action {
             KeyCommands::Generate { output } => commands::key_generate(output),
             KeyCommands::Inspect { path } => commands::key_inspect(path),
@@ -393,12 +376,8 @@ async fn main() {
         Commands::ExportState { block, output } => {
             commands::export_state(cli.datadir, output, block)
         }
-        Commands::ImportState { snapshot } => {
-            commands::import_state(cli.datadir, snapshot)
-        }
-        Commands::Removedb { force } => {
-            commands::removedb(cli.datadir, force)
-        }
+        Commands::ImportState { snapshot } => commands::import_state(cli.datadir, snapshot),
+        Commands::Removedb { force } => commands::removedb(cli.datadir, force),
         Commands::Version => commands::version(),
         Commands::Tx { command } => commands::tx::execute(command),
         Commands::Account { command } => commands::account::execute(command),

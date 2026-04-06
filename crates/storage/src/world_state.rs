@@ -232,17 +232,14 @@ impl<S: KvStore + 'static> WorldState<S> {
         }
         let registry = validator_registry_addr();
         let old_count_hash = self.get_storage(&registry, &Self::validator_count_key())?;
-        let old_count = if old_count_hash == ShellHash::ZERO {
-            0u64
-        } else {
-            u64::from_be_bytes(
-                old_count_hash.as_bytes()[24..32]
-                    .try_into()
-                    .map_err(|e: std::array::TryFromSliceError| {
-                        StorageError::Codec(e.to_string())
-                    })?,
-            )
-        };
+        let old_count =
+            if old_count_hash == ShellHash::ZERO {
+                0u64
+            } else {
+                u64::from_be_bytes(old_count_hash.as_bytes()[24..32].try_into().map_err(
+                    |e: std::array::TryFromSliceError| StorageError::Codec(e.to_string()),
+                )?)
+            };
 
         let new_count = validators.len() as u64;
         for (i, addr) in validators.iter().enumerate() {
@@ -256,11 +253,7 @@ impl<S: KvStore + 'static> WorldState<S> {
         }
 
         for i in new_count..old_count {
-            self.set_storage(
-                &registry,
-                &Self::validator_slot_key(i),
-                &ShellHash::ZERO,
-            )?;
+            self.set_storage(&registry, &Self::validator_slot_key(i), &ShellHash::ZERO)?;
         }
 
         let mut count_bytes = [0u8; 32];
@@ -290,11 +283,14 @@ impl<S: KvStore + 'static> WorldState<S> {
     /// detect DB corruption early.
     pub fn validate(&mut self) -> Result<(), StorageError> {
         // Verify trie can compute root hash without panic.
-        let _root = self.account_trie.root_hash()
+        let _root = self
+            .account_trie
+            .root_hash()
             .map_err(|e| StorageError::State(format!("state trie integrity check failed: {e}")))?;
 
         // Verify the validator registry is readable.
-        let validators = self.get_validators()
+        let validators = self
+            .get_validators()
             .map_err(|e| StorageError::State(format!("validator registry read failed: {e}")))?;
 
         // Sanity check: if validators are present, count must be bounded.

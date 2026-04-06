@@ -108,8 +108,7 @@ mod tests {
 
     #[test]
     fn batch_verify_ten_dilithium() {
-        let signers: Vec<DilithiumSigner> =
-            (0..10).map(|_| DilithiumSigner::generate()).collect();
+        let signers: Vec<DilithiumSigner> = (0..10).map(|_| DilithiumSigner::generate()).collect();
         let messages: Vec<Vec<u8>> = (0..10).map(|i| format!("msg-{i}").into_bytes()).collect();
         let sigs: Vec<PQSignature> = signers
             .iter()
@@ -136,10 +135,10 @@ mod tests {
 
     #[test]
     fn batch_verify_hundred() {
-        let signers: Vec<DilithiumSigner> =
-            (0..100).map(|_| DilithiumSigner::generate()).collect();
-        let messages: Vec<Vec<u8>> =
-            (0..100).map(|i| format!("batch-{i}").into_bytes()).collect();
+        let signers: Vec<DilithiumSigner> = (0..100).map(|_| DilithiumSigner::generate()).collect();
+        let messages: Vec<Vec<u8>> = (0..100)
+            .map(|i| format!("batch-{i}").into_bytes())
+            .collect();
         let sigs: Vec<PQSignature> = signers
             .iter()
             .zip(messages.iter())
@@ -175,11 +174,23 @@ mod tests {
 
         let items = vec![
             // Valid
-            VerifyItem { pubkey: signer1.public_key(), message: b"msg-1", signature: &sig1 },
+            VerifyItem {
+                pubkey: signer1.public_key(),
+                message: b"msg-1",
+                signature: &sig1,
+            },
             // Invalid: wrong message
-            VerifyItem { pubkey: signer2.public_key(), message: b"wrong", signature: &sig2 },
+            VerifyItem {
+                pubkey: signer2.public_key(),
+                message: b"wrong",
+                signature: &sig2,
+            },
             // Valid
-            VerifyItem { pubkey: signer3.public_key(), message: b"msg-3", signature: &sig3 },
+            VerifyItem {
+                pubkey: signer3.public_key(),
+                message: b"msg-3",
+                signature: &sig3,
+            },
         ];
 
         let results = mv.verify_batch(&items).unwrap();
@@ -206,8 +217,16 @@ mod tests {
         let sig_s = sph.sign(b"sph-msg").unwrap();
 
         let items = vec![
-            VerifyItem { pubkey: dil.public_key(), message: b"dil-msg", signature: &sig_d },
-            VerifyItem { pubkey: sph.public_key(), message: b"sph-msg", signature: &sig_s },
+            VerifyItem {
+                pubkey: dil.public_key(),
+                message: b"dil-msg",
+                signature: &sig_d,
+            },
+            VerifyItem {
+                pubkey: sph.public_key(),
+                message: b"sph-msg",
+                signature: &sig_s,
+            },
         ];
 
         let results = mv.verify_batch(&items).unwrap();
@@ -223,8 +242,16 @@ mod tests {
         let sig = signer.sign(b"real").unwrap();
 
         let items = vec![
-            VerifyItem { pubkey: other.public_key(), message: b"real", signature: &sig },
-            VerifyItem { pubkey: signer.public_key(), message: b"fake", signature: &sig },
+            VerifyItem {
+                pubkey: other.public_key(),
+                message: b"real",
+                signature: &sig,
+            },
+            VerifyItem {
+                pubkey: signer.public_key(),
+                message: b"fake",
+                signature: &sig,
+            },
         ];
 
         let results = mv.verify_batch(&items).unwrap();
@@ -243,8 +270,9 @@ mod tests {
         let count = 50;
         let signers: Vec<DilithiumSigner> =
             (0..count).map(|_| DilithiumSigner::generate()).collect();
-        let messages: Vec<Vec<u8>> =
-            (0..count).map(|i| format!("perf-{i}").into_bytes()).collect();
+        let messages: Vec<Vec<u8>> = (0..count)
+            .map(|i| format!("perf-{i}").into_bytes())
+            .collect();
         let sigs: Vec<PQSignature> = signers
             .iter()
             .zip(messages.iter())

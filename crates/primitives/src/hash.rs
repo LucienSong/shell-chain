@@ -1,7 +1,7 @@
 use alloy_primitives::B256;
+use core::fmt;
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Keccak256};
-use core::fmt;
 
 use crate::PrimitivesError;
 

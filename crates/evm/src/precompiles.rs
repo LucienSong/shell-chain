@@ -22,9 +22,9 @@ use interpreter::{CallInput, CallInputs, Gas, InstructionResult, InterpreterResu
 use revm::context::{Cfg, LocalContextTr};
 use revm::context_interface::ContextTr;
 use revm::handler::PrecompileProvider;
+use revm::interpreter;
 use revm::precompile::{PrecompileSpecId, Precompiles};
 use revm::primitives::hardfork::SpecId;
-use revm::interpreter;
 use shell_crypto::{DilithiumVerifier, PQSignature, SignatureType, Verifier};
 use std::boxed::Box;
 
@@ -32,8 +32,7 @@ use std::boxed::Box;
 const ECRECOVER_ADDR: Address = address!("0x0000000000000000000000000000000000000001");
 
 /// Address of the PQ Dilithium3 verify precompile.
-const PQ_DILITHIUM_VERIFY_ADDR: Address =
-    address!("0x0000000000000000000000000000000000000100");
+const PQ_DILITHIUM_VERIFY_ADDR: Address = address!("0x0000000000000000000000000000000000000100");
 
 /// Gas cost for PQ Dilithium3 signature verification.
 pub const PQ_DILITHIUM_VERIFY_GAS: u64 = 10_000;
@@ -330,7 +329,9 @@ mod tests {
         let parsed = parse_pq_verify_input(&input).unwrap();
         let verifier = DilithiumVerifier;
         let pq_sig = PQSignature::new(SignatureType::Dilithium3, parsed.signature.to_vec());
-        let valid = verifier.verify(parsed.pubkey, parsed.message, &pq_sig).unwrap();
+        let valid = verifier
+            .verify(parsed.pubkey, parsed.message, &pq_sig)
+            .unwrap();
         assert!(valid);
     }
 

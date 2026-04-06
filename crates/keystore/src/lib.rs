@@ -25,4 +25,4 @@ mod crypto;
 mod types;
 
 pub use crypto::{decrypt, decrypt_sphincs, encrypt, encrypt_sphincs};
-pub use types::{EncryptedKey, KeystoreError, KdfParams, CipherParams};
+pub use types::{CipherParams, EncryptedKey, KdfParams, KeystoreError};

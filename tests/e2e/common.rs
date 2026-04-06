@@ -132,12 +132,7 @@ pub fn make_funded_account(env: &TestEnv) -> FundedAccount {
 }
 
 /// Creates a simple EIP-1559 transfer transaction.
-pub fn make_transfer(
-    chain_id: u64,
-    nonce: u64,
-    to: Address,
-    value: U256,
-) -> Transaction {
+pub fn make_transfer(chain_id: u64, nonce: u64, to: Address, value: U256) -> Transaction {
     Transaction {
         chain_id,
         nonce,
@@ -155,11 +150,7 @@ pub fn make_transfer(
 }
 
 /// Signs a transaction with the given signer.
-pub fn sign_tx(
-    signer: &DilithiumSigner,
-    from: Address,
-    tx: Transaction,
-) -> SignedTransaction {
+pub fn sign_tx(signer: &DilithiumSigner, from: Address, tx: Transaction) -> SignedTransaction {
     let sig = signer.sign(tx.hash().0.as_slice()).unwrap();
     SignedTransaction::new(from, tx, sig)
 }

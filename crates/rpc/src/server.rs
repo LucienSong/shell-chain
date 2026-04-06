@@ -14,7 +14,9 @@ use shell_mempool::TxPool;
 use shell_primitives::Address;
 use shell_storage::{ChainStore, KvStore, WorldState};
 
-use crate::api::{EthApiServer, ShellApiServer, Web3ApiServer, NetApiServer, DebugApiServer, TraceApiServer};
+use crate::api::{
+    DebugApiServer, EthApiServer, NetApiServer, ShellApiServer, TraceApiServer, Web3ApiServer,
+};
 use crate::handler::RpcHandler;
 use crate::subscriptions::{BlockEvent, EthPubSubServer};
 use crate::tls;
@@ -58,12 +60,7 @@ impl Default for RpcConfig {
             tls_key_path: None,
             cors_allowed_origins: Some(vec!["*".to_string()]),
             rate_limit_per_sec: Some(50),
-            api_namespaces: vec![
-                "eth".into(),
-                "net".into(),
-                "web3".into(),
-                "shell".into(),
-            ],
+            api_namespaces: vec!["eth".into(), "net".into(), "web3".into(), "shell".into()],
             max_request_body_size: 5 * 1024 * 1024,
         }
     }

@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use shell_crypto::DilithiumSigner;
 use shell_crypto::Signer;
-use shell_genesis::{AllocEntry, ConsensusConfig, GenesisConfig, initialize_genesis};
+use shell_genesis::{initialize_genesis, AllocEntry, ConsensusConfig, GenesisConfig};
 use shell_primitives::{Address, U256};
 use shell_storage::MemoryDb;
 
@@ -36,14 +36,13 @@ pub fn init(
         Some(path) => {
             // F-082: Validate genesis file path.
             if !path.exists() {
-                return Err(format!(
-                    "genesis file not found: {}",
-                    path.display()
-                )
-                .into());
+                return Err(format!("genesis file not found: {}", path.display()).into());
             }
             let path = path.canonicalize().map_err(|e| {
-                format!("failed to canonicalize genesis path '{}': {e}", path.display())
+                format!(
+                    "failed to canonicalize genesis path '{}': {e}",
+                    path.display()
+                )
             })?;
             let file_size = std::fs::metadata(&path)?.len();
             if file_size > MAX_GENESIS_FILE_SIZE {
@@ -62,12 +61,15 @@ pub fn init(
             let authority = Address::from_public_key(signer.public_key());
 
             let mut alloc = HashMap::new();
-            alloc.insert(authority, AllocEntry {
-                balance: U256::from(1_000_000_000_000_000_000u128), // 1e18
-                nonce: 0,
-                code: None,
-                storage: None,
-            });
+            alloc.insert(
+                authority,
+                AllocEntry {
+                    balance: U256::from(1_000_000_000_000_000_000u128), // 1e18
+                    nonce: 0,
+                    code: None,
+                    storage: None,
+                },
+            );
 
             GenesisConfig {
                 chain_id,

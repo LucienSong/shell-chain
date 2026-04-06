@@ -1,6 +1,6 @@
+use alloy_rlp::{Decodable, Encodable};
 use serde::{Deserialize, Serialize};
 use shell_primitives::{ShellHash, U256};
-use alloy_rlp::{Decodable, Encodable};
 
 /// Account with native Account Abstraction support.
 ///
@@ -80,7 +80,12 @@ impl Encodable for Account {
 
     fn length(&self) -> usize {
         let payload = self.fields_len();
-        alloy_rlp::Header { list: true, payload_length: payload }.length() + payload
+        alloy_rlp::Header {
+            list: true,
+            payload_length: payload,
+        }
+        .length()
+            + payload
     }
 }
 

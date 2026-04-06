@@ -183,11 +183,9 @@ impl PeerBanList {
     /// Remove all expired bans, reclaiming memory.
     pub fn purge_expired(&mut self) {
         let now = Instant::now();
-        self.records.retain(|_, r| {
-            match r.banned_until {
-                Some(until) if now >= until => false,
-                _ => true,
-            }
+        self.records.retain(|_, r| match r.banned_until {
+            Some(until) if now >= until => false,
+            _ => true,
         });
     }
 
@@ -280,7 +278,7 @@ mod tests {
 
         assert!(!bans.record_violation(&peer)); // 1
         assert!(!bans.record_violation(&peer)); // 2
-        assert!(bans.record_violation(&peer));  // 3 → banned
+        assert!(bans.record_violation(&peer)); // 3 → banned
         assert!(bans.is_banned(&peer));
     }
 
@@ -301,7 +299,7 @@ mod tests {
         let peer = PeerId::from("temp-ban");
 
         assert!(bans.record_violation(&peer)); // immediately banned
-        // With 0ms duration, the ban should already be expired.
+                                               // With 0ms duration, the ban should already be expired.
         std::thread::sleep(Duration::from_millis(1));
         assert!(!bans.is_banned(&peer));
         // Violations reset after expiry.

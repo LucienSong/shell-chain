@@ -104,8 +104,18 @@ fn e2e_transfer_with_real_dilithium_sig() {
     let header = sample_header(1);
 
     // Validate: real sig verification + pubkey registration
-    let validated = validate_tx(&signed, evm.state_db().world_state(), &cs, &verifier, CHAIN_ID);
-    assert!(validated.is_ok(), "validate_tx failed: {:?}", validated.err());
+    let validated = validate_tx(
+        &signed,
+        evm.state_db().world_state(),
+        &cs,
+        &verifier,
+        CHAIN_ID,
+    );
+    assert!(
+        validated.is_ok(),
+        "validate_tx failed: {:?}",
+        validated.err()
+    );
 
     // Execute: runs the transfer through revm
     let result = evm.execute_tx(&signed, &header, 0, 0);
@@ -148,7 +158,13 @@ fn e2e_reject_invalid_signature() {
     let bad_sig = PQSignature::new(SignatureType::Dilithium3, vec![0xFF; 3293]);
     let signed = SignedTransaction::with_pubkey(from, tx, bad_sig, signer.public_key().to_vec());
 
-    let result = validate_tx(&signed, evm.state_db().world_state(), &cs, &verifier, CHAIN_ID);
+    let result = validate_tx(
+        &signed,
+        evm.state_db().world_state(),
+        &cs,
+        &verifier,
+        CHAIN_ID,
+    );
     assert!(
         matches!(result, Err(TxValidationError::SignatureInvalid)),
         "should reject forged signature, got: {:?}",
@@ -166,9 +182,7 @@ fn e2e_contract_deployment() {
     fund_account(&mut evm, &from, U256::from(100_000_000_000u64));
 
     // Minimal init code: PUSH1 0x42 PUSH1 0 MSTORE PUSH1 1 PUSH1 31 RETURN
-    let init_code = vec![
-        0x60, 0x42, 0x60, 0x00, 0x52, 0x60, 0x01, 0x60, 0x1f, 0xf3,
-    ];
+    let init_code = vec![0x60, 0x42, 0x60, 0x00, 0x52, 0x60, 0x01, 0x60, 0x1f, 0xf3];
 
     let tx = Transaction {
         chain_id: CHAIN_ID,
@@ -234,7 +248,13 @@ fn e2e_hybrid_pubkey_second_tx_from_registry() {
     let signed1 = SignedTransaction::with_pubkey(from, tx1, sig1, signer.public_key().to_vec());
 
     // Validate first tx — registers pubkey to chain store
-    let v1 = validate_tx(&signed1, evm.state_db().world_state(), &cs, &verifier, CHAIN_ID);
+    let v1 = validate_tx(
+        &signed1,
+        evm.state_db().world_state(),
+        &cs,
+        &verifier,
+        CHAIN_ID,
+    );
     assert!(v1.is_ok(), "first tx validation failed: {:?}", v1.err());
 
     // Execute first tx to increment nonce in world state
@@ -246,9 +266,7 @@ fn e2e_hybrid_pubkey_second_tx_from_registry() {
     for (addr, acct_state) in &r1.state_changes {
         let shell_addr = ShellAddress::from(*addr);
         let info = &acct_state.info;
-        if let Ok(Some(mut existing)) =
-            evm.state_db().world_state().get_account(&shell_addr)
-        {
+        if let Ok(Some(mut existing)) = evm.state_db().world_state().get_account(&shell_addr) {
             existing.nonce = info.nonce;
             existing.balance = info.balance;
             evm.state_db_mut()
@@ -278,7 +296,13 @@ fn e2e_hybrid_pubkey_second_tx_from_registry() {
     let sig2 = signer.sign(hash2.as_bytes()).unwrap();
     let signed2 = SignedTransaction::new(from, tx2, sig2);
 
-    let v2 = validate_tx(&signed2, evm.state_db().world_state(), &cs, &verifier, CHAIN_ID);
+    let v2 = validate_tx(
+        &signed2,
+        evm.state_db().world_state(),
+        &cs,
+        &verifier,
+        CHAIN_ID,
+    );
     assert!(
         v2.is_ok(),
         "second tx should pass with registered pubkey: {:?}",
@@ -298,11 +322,17 @@ fn e2e_precompile_addresses() {
 
     // PQ precompile at 0x0100
     let pq_addr = address!("0x0000000000000000000000000000000000000100");
-    assert!(sp.is_precompile(&pq_addr), "PQ precompile should be registered");
+    assert!(
+        sp.is_precompile(&pq_addr),
+        "PQ precompile should be registered"
+    );
 
     // ecrecover at 0x01 (disabled but still "registered")
     let ecrecover_addr = address!("0x0000000000000000000000000000000000000001");
-    assert!(sp.is_precompile(&ecrecover_addr), "ecrecover should be registered");
+    assert!(
+        sp.is_precompile(&ecrecover_addr),
+        "ecrecover should be registered"
+    );
 
     // Standard SHA256 at 0x02
     let sha256_addr = address!("0x0000000000000000000000000000000000000002");
@@ -310,7 +340,10 @@ fn e2e_precompile_addresses() {
 
     // Non-precompile address
     let random_addr = address!("0x0000000000000000000000000000000000000200");
-    assert!(!sp.is_precompile(&random_addr), "random addr should not be precompile");
+    assert!(
+        !sp.is_precompile(&random_addr),
+        "random addr should not be precompile"
+    );
 }
 
 // ── Test 6: Multiple transfers accumulate gas ────────────────────

@@ -138,14 +138,16 @@ impl SubscriptionTracker {
     /// Release a subscription slot (called when the forwarding task ends).
     /// Saturates at zero to prevent underflow from double-release bugs.
     pub fn release(&self) {
-        let _ = self.active.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
-            if current > 0 {
-                Some(current - 1)
-            } else {
-                tracing::warn!("subscription tracker release called with zero active count");
-                None
-            }
-        });
+        let _ = self
+            .active
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+                if current > 0 {
+                    Some(current - 1)
+                } else {
+                    tracing::warn!("subscription tracker release called with zero active count");
+                    None
+                }
+            });
     }
 
     /// Release a subscription slot for a specific connection.
@@ -517,8 +519,8 @@ async fn forward_pending_txs(
             Ok(tx_hash) => {
                 consecutive_lags = 0;
                 let value = serde_json::json!(tx_hash);
-                let msg = SubscriptionMessage::from_json(&value)
-                    .expect("hash serialization cannot fail");
+                let msg =
+                    SubscriptionMessage::from_json(&value).expect("hash serialization cannot fail");
                 if sink.send(msg).await.is_err() {
                     break;
                 }
@@ -531,9 +533,7 @@ async fn forward_pending_txs(
                     "newPendingTransactions subscriber lagged"
                 );
                 if consecutive_lags >= MAX_CONSECUTIVE_LAGS {
-                    tracing::error!(
-                        "newPendingTransactions subscriber too slow — disconnecting"
-                    );
+                    tracing::error!("newPendingTransactions subscriber too slow — disconnecting");
                     break;
                 }
             }
@@ -554,8 +554,7 @@ async fn forward_syncing(
 ) {
     // Emit initial status: node is not syncing (no formal sync states yet).
     let initial = serde_json::json!(false);
-    let msg =
-        SubscriptionMessage::from_json(&initial).expect("bool serialization cannot fail");
+    let msg = SubscriptionMessage::from_json(&initial).expect("bool serialization cannot fail");
     if sink.send(msg).await.is_err() {
         return;
     }
@@ -806,10 +805,7 @@ mod tests {
         let e1 = rx1.recv().await.unwrap();
         let e2 = rx2.recv().await.unwrap();
         match (e1, e2) {
-            (
-                BlockEvent::NewBlock { header: h1, .. },
-                BlockEvent::NewBlock { header: h2, .. },
-            ) => {
+            (BlockEvent::NewBlock { header: h1, .. }, BlockEvent::NewBlock { header: h2, .. }) => {
                 assert_eq!(h1.number, 5);
                 assert_eq!(h2.number, 5);
             }
@@ -826,8 +822,10 @@ mod tests {
         };
 
         let matching_receipt = sample_receipt(addr, topic);
-        let non_matching_receipt =
-            sample_receipt(Address::from([0xDD; 20]), shell_primitives::keccak256(b"Other"));
+        let non_matching_receipt = sample_receipt(
+            Address::from([0xDD; 20]),
+            shell_primitives::keccak256(b"Other"),
+        );
 
         // The matching receipt's log should pass.
         assert!(filter.matches(&matching_receipt.logs[0]));

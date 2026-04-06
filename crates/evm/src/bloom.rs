@@ -35,8 +35,7 @@ pub fn logs_bloom(logs: &[Log]) -> Bloom {
 fn bloom_insert(bloom: &mut Bloom, data: &[u8]) {
     let hash = Keccak256::digest(data);
     for i in 0..3 {
-        let bit_index =
-            ((hash[i * 2] as usize) << 8 | hash[i * 2 + 1] as usize) & 0x7FF;
+        let bit_index = ((hash[i * 2] as usize) << 8 | hash[i * 2 + 1] as usize) & 0x7FF;
         let byte_index = bit_index / 8;
         let bit_position = 7 - (bit_index % 8);
         bloom[byte_index] |= 1 << bit_position;
@@ -51,8 +50,7 @@ fn bloom_insert(bloom: &mut Bloom, data: &[u8]) {
 pub fn bloom_contains(bloom: &Bloom, data: &[u8]) -> bool {
     let hash = Keccak256::digest(data);
     for i in 0..3 {
-        let bit_index =
-            ((hash[i * 2] as usize) << 8 | hash[i * 2 + 1] as usize) & 0x7FF;
+        let bit_index = ((hash[i * 2] as usize) << 8 | hash[i * 2 + 1] as usize) & 0x7FF;
         let byte_index = bit_index / 8;
         let bit_position = 7 - (bit_index % 8);
         if bloom[byte_index] & (1 << bit_position) == 0 {

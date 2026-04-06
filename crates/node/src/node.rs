@@ -9,9 +9,9 @@ use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
 use shell_consensus::{Attestation, ConsensusEngine, FinalityState, ForkChoice, PoaEngine};
-use shell_core::{Block, BlockHeader, SignedTransaction, calculate_base_fee};
-use shell_crypto::{BatchVerifier, MultiVerifier, PreVerified, Signer, VerifyItem, Verifier};
-use shell_evm::{commit_evm_state, ShellEvm, ShellStateDb, validate_tx_for_import};
+use shell_core::{calculate_base_fee, Block, BlockHeader, SignedTransaction};
+use shell_crypto::{BatchVerifier, MultiVerifier, PreVerified, Signer, Verifier, VerifyItem};
+use shell_evm::{commit_evm_state, validate_tx_for_import, ShellEvm, ShellStateDb};
 use shell_mempool::TxPool;
 use shell_network::NetworkService;
 use shell_primitives::{Address, Bytes, ShellHash, U256};
@@ -61,13 +61,15 @@ impl<S: KvStore + 'static> Node<S> {
         let (shutdown_tx, _) = watch::channel(false);
         let tracker = StateRootTracker::new(config.pruning.clone());
         let state_pruner = StatePruner::new(128);
-        let metrics = Arc::new(
-            Metrics::new().expect("failed to register Prometheus metrics"),
-        );
+        let metrics = Arc::new(Metrics::new().expect("failed to register Prometheus metrics"));
 
         // F-094: Recover finalized state from persistent storage on restart.
         let (fin_number, fin_hash) = {
-            let stored = chain_store.get_finalized_number().ok().flatten().unwrap_or(0);
+            let stored = chain_store
+                .get_finalized_number()
+                .ok()
+                .flatten()
+                .unwrap_or(0);
             if stored > 0 {
                 let hash = chain_store
                     .get_block_by_number(stored)
@@ -197,18 +199,16 @@ impl<S: KvStore + 'static> Node<S> {
 
         // Create a broadcast channel for block events (eth_subscribe).
         // F-042: Use larger capacity to reduce subscriber lag.
-        let (block_event_tx, _) =
-            tokio::sync::broadcast::channel::<BlockEvent>(256);
+        let (block_event_tx, _) = tokio::sync::broadcast::channel::<BlockEvent>(256);
 
         // Start JSON-RPC server.
         // Pass the signer to the RPC layer if this node is a validator,
         // enabling governance RPCs (proposeAddValidator / proposeRemoveValidator).
-        let proposer_signer: Option<Arc<dyn Signer>> =
-            if self.config.proposer_address.is_some() {
-                Some(Arc::clone(&signer))
-            } else {
-                None
-            };
+        let proposer_signer: Option<Arc<dyn Signer>> = if self.config.proposer_address.is_some() {
+            Some(Arc::clone(&signer))
+        } else {
+            None
+        };
         // Shared finalized block number for the RPC layer.
         // F-107: recover persisted finalized_number from ChainStore on restart,
         // falling back to finality state and then 0.
@@ -219,9 +219,7 @@ impl<S: KvStore + 'static> Node<S> {
             .ok()
             .flatten()
             .unwrap_or(0);
-        let finalized_number = Arc::new(parking_lot::RwLock::new(
-            finality_num.max(persisted_num),
-        ));
+        let finalized_number = Arc::new(parking_lot::RwLock::new(finality_num.max(persisted_num)));
 
         let _rpc = start_rpc_server(
             self.config.rpc.clone(),
@@ -578,11 +576,7 @@ impl<S: KvStore + 'static> Node<S> {
     /// Collects up to `max_txs` transactions, executes each through the EVM,
     /// commits state changes after every transaction (so subsequent txs see
     /// prior updates), assembles a block, and commits it to storage.
-    pub fn produce_block(
-        &self,
-        signer: &dyn Signer,
-        max_txs: usize,
-    ) -> Result<Block, NodeError> {
+    pub fn produce_block(&self, signer: &dyn Signer, max_txs: usize) -> Result<Block, NodeError> {
         let head = self
             .chain_store
             .get_head_block()?
@@ -590,12 +584,13 @@ impl<S: KvStore + 'static> Node<S> {
         let head_hash = head.hash();
         let next_number = head.number() + 1;
 
-        let proposer_addr = self
-            .config
-            .proposer_address
-            .ok_or(NodeError::NotProposer)?;
+        let proposer_addr = self.config.proposer_address.ok_or(NodeError::NotProposer)?;
 
-        if !self.consensus.read().is_proposer(next_number, &proposer_addr) {
+        if !self
+            .consensus
+            .read()
+            .is_proposer(next_number, &proposer_addr)
+        {
             return Err(NodeError::NotProposer);
         }
 
@@ -661,12 +656,9 @@ impl<S: KvStore + 'static> Node<S> {
             // validator which skips nonce/balance (EVM handles those).
             let import_cs = ChainStore::new(self.store.clone());
             let pre_verifier = PreVerified;
-            if let Err(e) = validate_tx_for_import(
-                tx,
-                &import_cs,
-                &pre_verifier,
-                self.config.chain_id,
-            ) {
+            if let Err(e) =
+                validate_tx_for_import(tx, &import_cs, &pre_verifier, self.config.chain_id)
+            {
                 debug!(
                     tx_hash = %tx.tx.hash(),
                     error = %e,
@@ -714,11 +706,7 @@ impl<S: KvStore + 'static> Node<S> {
                         // Commit to the node's persistent WorldState.
                         {
                             let mut ws = self.world_state.write();
-                            commit_evm_state(
-                                &result.state_changes,
-                                &mut ws,
-                                &self.chain_store,
-                            )?;
+                            commit_evm_state(&result.state_changes, &mut ws, &self.chain_store)?;
                         }
                     }
                 }
@@ -772,8 +760,7 @@ impl<S: KvStore + 'static> Node<S> {
         // Commit to storage.
         let block_hash = block.hash();
         self.chain_store.put_block(&block)?;
-        self.chain_store
-            .put_receipts(&block_hash, &receipts)?;
+        self.chain_store.put_receipts(&block_hash, &receipts)?;
         self.chain_store
             .set_canonical(block.number(), &block_hash)?;
         self.chain_store.set_head(&block_hash)?;
@@ -797,11 +784,7 @@ impl<S: KvStore + 'static> Node<S> {
     /// the current head but with a different hash, it is treated as a
     /// potential fork and skipped. If there is a gap (block number is
     /// more than one ahead of head), missing blocks are requested.
-    pub fn import_block(
-        &self,
-        block: Block,
-        _verifier: &dyn Verifier,
-    ) -> Result<(), NodeError> {
+    pub fn import_block(&self, block: Block, _verifier: &dyn Verifier) -> Result<(), NodeError> {
         let head = self
             .chain_store
             .get_head_block()?
@@ -839,10 +822,7 @@ impl<S: KvStore + 'static> Node<S> {
                 gap = incoming - expected,
                 "block too far ahead, missing blocks need to be requested"
             );
-            return Err(NodeError::GapDetected {
-                incoming,
-                expected,
-            });
+            return Err(NodeError::GapDetected { incoming, expected });
         }
 
         // Verify consensus rules.
@@ -868,12 +848,9 @@ impl<S: KvStore + 'static> Node<S> {
                 let known = self.known_authorities.read();
                 if let Some(pubkey) = known.get(proposer) {
                     let verifier = MultiVerifier;
-                    self.consensus.read().verify_seal(
-                        &block.header,
-                        seal,
-                        pubkey,
-                        &verifier,
-                    )?;
+                    self.consensus
+                        .read()
+                        .verify_seal(&block.header, seal, pubkey, &verifier)?;
                 } else {
                     // Try chain store as fallback.
                     drop(known);
@@ -886,9 +863,7 @@ impl<S: KvStore + 'static> Node<S> {
                             &verifier,
                         )?;
                         // Cache for future lookups.
-                        self.known_authorities
-                            .write()
-                            .insert(*proposer, pubkey);
+                        self.known_authorities.write().insert(*proposer, pubkey);
                     } else {
                         // F-308: Reject blocks from unknown proposers.
                         return Err(NodeError::Startup(format!(
@@ -919,24 +894,32 @@ impl<S: KvStore + 'static> Node<S> {
             // M5-C2: Batch verify all transaction signatures in parallel.
             // Resolve pubkeys and compute tx hashes, then dispatch to rayon.
             let batch_verifier = MultiVerifier;
-            let tx_hashes: Vec<ShellHash> = block.transactions.iter()
-                .map(|tx| tx.hash())
-                .collect();
+            let tx_hashes: Vec<ShellHash> = block.transactions.iter().map(|tx| tx.hash()).collect();
             let mut resolved_pks: Vec<Vec<u8>> = Vec::with_capacity(block.transactions.len());
             for tx in &block.transactions {
                 let pk = match &tx.sender_pubkey {
                     Some(pk) => pk.clone(),
-                    None => import_cs.get_pubkey(&tx.from)
-                        .map_err(|e| NodeError::Startup(format!(
-                            "block {} pubkey lookup failed: {e}", block.number()
-                        )))?
-                        .ok_or_else(|| NodeError::Startup(format!(
-                            "block {} missing pubkey for {}", block.number(), tx.from
-                        )))?,
+                    None => import_cs
+                        .get_pubkey(&tx.from)
+                        .map_err(|e| {
+                            NodeError::Startup(format!(
+                                "block {} pubkey lookup failed: {e}",
+                                block.number()
+                            ))
+                        })?
+                        .ok_or_else(|| {
+                            NodeError::Startup(format!(
+                                "block {} missing pubkey for {}",
+                                block.number(),
+                                tx.from
+                            ))
+                        })?,
                 };
                 resolved_pks.push(pk);
             }
-            let verify_items: Vec<VerifyItem> = block.transactions.iter()
+            let verify_items: Vec<VerifyItem> = block
+                .transactions
+                .iter()
                 .enumerate()
                 .map(|(i, tx)| VerifyItem {
                     pubkey: &resolved_pks[i],
@@ -944,25 +927,27 @@ impl<S: KvStore + 'static> Node<S> {
                     signature: &tx.signature,
                 })
                 .collect();
-            batch_verifier.verify_batch_all(&verify_items)
-                .map_err(|e| NodeError::Startup(format!(
-                    "block {} batch sig verification failed: {e}", block.number()
-                )))?;
+            batch_verifier
+                .verify_batch_all(&verify_items)
+                .map_err(|e| {
+                    NodeError::Startup(format!(
+                        "block {} batch sig verification failed: {e}",
+                        block.number()
+                    ))
+                })?;
 
             // Non-signature validation (chain-id, gas, access list, address
             // derivation). Uses PreVerified to skip redundant individual
             // sig checks — signatures were already batch-verified above.
             let pre_verified = PreVerified;
             for tx in &block.transactions {
-                validate_tx_for_import(
-                    tx,
-                    &import_cs,
-                    &pre_verified,
-                    self.config.chain_id,
-                ).map_err(|e| NodeError::Startup(format!(
-                    "block {} tx validation failed: {e}",
-                    block.number()
-                )))?;
+                validate_tx_for_import(tx, &import_cs, &pre_verified, self.config.chain_id)
+                    .map_err(|e| {
+                        NodeError::Startup(format!(
+                            "block {} tx validation failed: {e}",
+                            block.number()
+                        ))
+                    })?;
             }
 
             let current_root = {
@@ -1008,11 +993,7 @@ impl<S: KvStore + 'static> Node<S> {
                             )?;
 
                             let mut ws = self.world_state.write();
-                            commit_evm_state(
-                                &result.state_changes,
-                                &mut ws,
-                                &self.chain_store,
-                            )?;
+                            commit_evm_state(&result.state_changes, &mut ws, &self.chain_store)?;
                         }
                     }
                     Err(e) => {
@@ -1036,8 +1017,7 @@ impl<S: KvStore + 'static> Node<S> {
         self.chain_store.set_head(&block_hash)?;
 
         // Remove any included transactions from our mempool.
-        let tx_hashes: Vec<ShellHash> =
-            block.transactions.iter().map(|tx| tx.hash()).collect();
+        let tx_hashes: Vec<ShellHash> = block.transactions.iter().map(|tx| tx.hash()).collect();
         self.tx_pool.remove_batch(&tx_hashes);
 
         // Track the imported state root for pruning decisions.
@@ -1055,12 +1035,10 @@ impl<S: KvStore + 'static> Node<S> {
         let chain_store = &self.chain_store;
         let world_state_guard = self.world_state.read();
 
-        let known_pubkeys = |addr: &Address| -> Option<Vec<u8>> {
-            chain_store.get_pubkey(addr).ok().flatten()
-        };
-        let balance_of = |addr: &Address| -> U256 {
-            world_state_guard.get_balance(addr).unwrap_or(U256::ZERO)
-        };
+        let known_pubkeys =
+            |addr: &Address| -> Option<Vec<u8>> { chain_store.get_pubkey(addr).ok().flatten() };
+        let balance_of =
+            |addr: &Address| -> U256 { world_state_guard.get_balance(addr).unwrap_or(U256::ZERO) };
 
         let dv = MultiVerifier;
         let hash = self
@@ -1072,7 +1050,11 @@ impl<S: KvStore + 'static> Node<S> {
     }
 
     /// Process an incoming attestation from the network.
-    pub fn handle_attestation(&self, attestation: Attestation, verifier: &dyn Verifier) -> Result<(), NodeError> {
+    pub fn handle_attestation(
+        &self,
+        attestation: Attestation,
+        verifier: &dyn Verifier,
+    ) -> Result<(), NodeError> {
         let block_hash = attestation.block_hash;
         let block_number = attestation.block_number;
         let validator = attestation.validator;
@@ -1102,21 +1084,30 @@ impl<S: KvStore + 'static> Node<S> {
 
         // Verify the attesting validator is a known authority.
         let known = self.known_authorities.read();
-        let pubkey = known.get(&validator)
-            .ok_or_else(|| NodeError::Startup(format!("unknown attestation validator: {:?}", validator)))?;
+        let pubkey = known.get(&validator).ok_or_else(|| {
+            NodeError::Startup(format!("unknown attestation validator: {:?}", validator))
+        })?;
 
         // Verify the attestation signature.
         let msg = Attestation::signing_message(&block_hash, block_number);
-        let sig = shell_crypto::PQSignature::new(shell_crypto::SignatureType::Dilithium3, attestation.signature.clone());
-        let valid = verifier.verify(pubkey, &msg, &sig)
+        let sig = shell_crypto::PQSignature::new(
+            shell_crypto::SignatureType::Dilithium3,
+            attestation.signature.clone(),
+        );
+        let valid = verifier
+            .verify(pubkey, &msg, &sig)
             .map_err(|_| NodeError::Startup("invalid attestation signature".into()))?;
         if !valid {
-            return Err(NodeError::Startup("attestation signature verification failed".into()));
+            return Err(NodeError::Startup(
+                "attestation signature verification failed".into(),
+            ));
         }
 
         // Check for equivocation.
         let mut finality = self.finality.write();
-        if let Some(conflicting) = finality.detect_equivocation(&block_hash, block_number, &validator) {
+        if let Some(conflicting) =
+            finality.detect_equivocation(&block_hash, block_number, &validator)
+        {
             tracing::error!(
                 %validator,
                 %block_hash,
@@ -1153,15 +1144,25 @@ impl<S: KvStore + 'static> Node<S> {
     }
 
     /// Create and return an attestation for a block (called after producing/importing a block).
-    pub fn create_attestation(&self, block_hash: ShellHash, block_number: u64, signer: &dyn Signer) -> Result<Attestation, NodeError> {
-        let proposer_addr = self.config.proposer_address
-            .ok_or(NodeError::NotProposer)?;
+    pub fn create_attestation(
+        &self,
+        block_hash: ShellHash,
+        block_number: u64,
+        signer: &dyn Signer,
+    ) -> Result<Attestation, NodeError> {
+        let proposer_addr = self.config.proposer_address.ok_or(NodeError::NotProposer)?;
 
         let msg = Attestation::signing_message(&block_hash, block_number);
-        let sig = signer.sign(&msg)
+        let sig = signer
+            .sign(&msg)
             .map_err(|e| NodeError::Startup(format!("failed to sign attestation: {e}")))?;
 
-        Ok(Attestation::new(block_hash, block_number, proposer_addr, sig.data))
+        Ok(Attestation::new(
+            block_hash,
+            block_number,
+            proposer_addr,
+            sig.data,
+        ))
     }
 }
 
@@ -1183,7 +1184,10 @@ mod tests {
         let db = Arc::new(MemoryDb::new());
         let chain_store = Arc::new(ChainStore::new(db.clone()));
         let world_state = Arc::new(RwLock::new(WorldState::new(db.clone())));
-        let consensus = Arc::new(RwLock::new(PoaEngine::new(PoaConfig::new(vec![authority], 1))));
+        let consensus = Arc::new(RwLock::new(PoaEngine::new(PoaConfig::new(
+            vec![authority],
+            1,
+        ))));
         let tx_pool = Arc::new(TxPool::new(MempoolConfig {
             chain_id: 1337,
             ..MempoolConfig::default()
@@ -1272,7 +1276,10 @@ mod tests {
         // Verify initial balances
         {
             let ws = node.world_state.read();
-            assert_eq!(ws.get_balance(&sender).unwrap(), U256::from(100_000_000_000_000u64));
+            assert_eq!(
+                ws.get_balance(&sender).unwrap(),
+                U256::from(100_000_000_000_000u64)
+            );
             assert_eq!(ws.get_balance(&receiver).unwrap(), U256::ZERO);
         }
 
@@ -1298,18 +1305,17 @@ mod tests {
             shell_primitives::keccak256(&encoded)
         };
         let sig = tx_signer.sign(tx_hash.as_bytes()).expect("sign failed");
-        let signed = SignedTransaction::with_pubkey(
-            sender,
-            tx,
-            sig,
-            tx_signer.public_key().to_vec(),
-        );
+        let signed =
+            SignedTransaction::with_pubkey(sender, tx, sig, tx_signer.public_key().to_vec());
 
         // Insert into mempool with real verification
         let verifier = MultiVerifier;
         let known_pubkeys = |_: &Address| -> Option<Vec<u8>> { None };
         let balance_of = |addr: &Address| -> U256 {
-            node.world_state.read().get_balance(addr).unwrap_or(U256::ZERO)
+            node.world_state
+                .read()
+                .get_balance(addr)
+                .unwrap_or(U256::ZERO)
         };
         node.tx_pool
             .insert(signed, &verifier, &known_pubkeys, &balance_of)
@@ -1324,7 +1330,10 @@ mod tests {
         {
             let ws = node.world_state.read();
             let receiver_balance = ws.get_balance(&receiver).unwrap();
-            assert_eq!(receiver_balance, transfer_value, "receiver should have received the transfer");
+            assert_eq!(
+                receiver_balance, transfer_value,
+                "receiver should have received the transfer"
+            );
 
             // Sender balance should have decreased (value transferred + gas)
             let sender_balance = ws.get_balance(&sender).unwrap();
@@ -1395,7 +1404,10 @@ mod tests {
         let node2_db = Arc::new(MemoryDb::new());
         let node2_cs = Arc::new(ChainStore::new(node2_db.clone()));
         let node2_ws = Arc::new(RwLock::new(WorldState::new(node2_db.clone())));
-        let consensus = Arc::new(RwLock::new(PoaEngine::new(PoaConfig::new(vec![proposer], 1))));
+        let consensus = Arc::new(RwLock::new(PoaEngine::new(PoaConfig::new(
+            vec![proposer],
+            1,
+        ))));
         let tx_pool = Arc::new(TxPool::new(MempoolConfig {
             chain_id: 1337,
             ..MempoolConfig::default()
@@ -1434,7 +1446,10 @@ mod tests {
         let node2_db = Arc::new(MemoryDb::new());
         let node2_cs = Arc::new(ChainStore::new(node2_db.clone()));
         let node2_ws = Arc::new(RwLock::new(WorldState::new(node2_db.clone())));
-        let consensus = Arc::new(RwLock::new(PoaEngine::new(PoaConfig::new(vec![proposer], 1))));
+        let consensus = Arc::new(RwLock::new(PoaEngine::new(PoaConfig::new(
+            vec![proposer],
+            1,
+        ))));
         let tx_pool = Arc::new(TxPool::new(MempoolConfig {
             chain_id: 1337,
             ..MempoolConfig::default()
@@ -1446,7 +1461,10 @@ mod tests {
 
         let verifier = MultiVerifier;
         let result = node2.import_block(block, &verifier);
-        assert!(result.is_err(), "block with invalid seal should be rejected");
+        assert!(
+            result.is_err(),
+            "block with invalid seal should be rejected"
+        );
     }
 
     #[test]
@@ -1497,7 +1515,9 @@ mod tests {
         node.produce_block(&signer, 100).unwrap();
 
         let known = node.known_authorities.read();
-        let pubkey = known.get(&proposer).expect("pubkey should be registered after produce_block");
+        let pubkey = known
+            .get(&proposer)
+            .expect("pubkey should be registered after produce_block");
         assert_eq!(pubkey, signer.public_key());
     }
 
@@ -1558,23 +1578,16 @@ mod tests {
         let db = Arc::new(MemoryDb::new());
         let chain_store = Arc::new(ChainStore::new(db.clone()));
         let world_state = Arc::new(RwLock::new(WorldState::new(db.clone())));
-        let consensus = Arc::new(RwLock::new(
-            PoaEngine::new(PoaConfig::new(vec![authority], 1).with_epoch_length(3)),
-        ));
+        let consensus = Arc::new(RwLock::new(PoaEngine::new(
+            PoaConfig::new(vec![authority], 1).with_epoch_length(3),
+        )));
         let tx_pool = Arc::new(TxPool::new(MempoolConfig {
             chain_id: 1337,
             ..MempoolConfig::default()
         }));
 
         let config = NodeConfig::dev(authority);
-        let node = Node::new(
-            config,
-            db,
-            chain_store,
-            world_state,
-            tx_pool,
-            consensus,
-        );
+        let node = Node::new(config, db, chain_store, world_state, tx_pool, consensus);
         store_genesis(&node);
 
         // Write a new validator set to world state.
@@ -1602,7 +1615,10 @@ mod tests {
                 let validators = ws.get_validators().unwrap();
                 drop(ws);
                 if !validators.is_empty() {
-                    node.consensus.write().config_mut().set_authorities(validators);
+                    node.consensus
+                        .write()
+                        .config_mut()
+                        .set_authorities(validators);
                 }
             }
         }
@@ -1623,23 +1639,16 @@ mod tests {
         let db = Arc::new(MemoryDb::new());
         let chain_store = Arc::new(ChainStore::new(db.clone()));
         let world_state = Arc::new(RwLock::new(WorldState::new(db.clone())));
-        let consensus = Arc::new(RwLock::new(
-            PoaEngine::new(PoaConfig::new(vec![authority], 1).with_epoch_length(2)),
-        ));
+        let consensus = Arc::new(RwLock::new(PoaEngine::new(
+            PoaConfig::new(vec![authority], 1).with_epoch_length(2),
+        )));
         let tx_pool = Arc::new(TxPool::new(MempoolConfig {
             chain_id: 1337,
             ..MempoolConfig::default()
         }));
 
         let config = NodeConfig::dev(authority);
-        let node = Node::new(
-            config,
-            db,
-            chain_store,
-            world_state,
-            tx_pool,
-            consensus,
-        );
+        let node = Node::new(config, db, chain_store, world_state, tx_pool, consensus);
         store_genesis(&node);
 
         // Produce block 1 — not an epoch boundary.
@@ -1668,7 +1677,10 @@ mod tests {
                 let validators = ws.get_validators().unwrap();
                 drop(ws);
                 if !validators.is_empty() {
-                    node.consensus.write().config_mut().set_authorities(validators);
+                    node.consensus
+                        .write()
+                        .config_mut()
+                        .set_authorities(validators);
                 }
             }
         }
@@ -1687,8 +1699,10 @@ mod tests {
         let db = Arc::new(MemoryDb::new());
         let chain_store = Arc::new(ChainStore::new(db.clone()));
         let world_state = Arc::new(RwLock::new(WorldState::new(db.clone())));
-        let consensus =
-            Arc::new(RwLock::new(PoaEngine::new(PoaConfig::new(vec![authority], 1))));
+        let consensus = Arc::new(RwLock::new(PoaEngine::new(PoaConfig::new(
+            vec![authority],
+            1,
+        ))));
         let tx_pool = Arc::new(TxPool::new(MempoolConfig {
             chain_id: 1337,
             ..MempoolConfig::default()
@@ -1732,7 +1746,8 @@ mod tests {
             "history should be capped at keep_recent"
         );
         assert_eq!(
-            tracker.oldest().unwrap().block_number, 4,
+            tracker.oldest().unwrap().block_number,
+            4,
             "blocks 1–3 should have been evicted"
         );
         assert_eq!(tracker.latest().unwrap().block_number, 6);
@@ -1767,11 +1782,8 @@ mod tests {
         let mut parent_base_fee = 0u64;
 
         for i in 1..=5u64 {
-            let base_fee = shell_core::calculate_base_fee(
-                parent_gas_used,
-                parent_gas_limit,
-                parent_base_fee,
-            );
+            let base_fee =
+                shell_core::calculate_base_fee(parent_gas_used, parent_gas_limit, parent_base_fee);
             let block = Block {
                 header: BlockHeader {
                     parent_hash,
@@ -1889,7 +1901,10 @@ mod tests {
         };
         let block1_hash = block1.hash();
         node.import_block(block1, &verifier).unwrap();
-        assert_eq!(node.chain_store.get_head_hash().unwrap().unwrap(), block1_hash);
+        assert_eq!(
+            node.chain_store.get_head_hash().unwrap().unwrap(),
+            block1_hash
+        );
 
         // Try to import a competing block at the same height with different content.
         let fork_block = Block {
@@ -1941,7 +1956,10 @@ mod tests {
         let db2 = Arc::new(MemoryDb::new());
         let cs2 = Arc::new(ChainStore::new(db2.clone()));
         let ws2 = Arc::new(RwLock::new(WorldState::new(db2.clone())));
-        let consensus = Arc::new(RwLock::new(PoaEngine::new(PoaConfig::new(vec![proposer], 1))));
+        let consensus = Arc::new(RwLock::new(PoaEngine::new(PoaConfig::new(
+            vec![proposer],
+            1,
+        ))));
         let tx_pool = Arc::new(TxPool::new(MempoolConfig {
             chain_id: 1337,
             ..MempoolConfig::default()
@@ -2000,12 +2018,21 @@ mod tests {
 
         // First import should succeed.
         node.import_block(block.clone(), &verifier).unwrap();
-        assert_eq!(node.chain_store.get_head_block().unwrap().unwrap().number(), 1);
+        assert_eq!(
+            node.chain_store.get_head_block().unwrap().unwrap().number(),
+            1
+        );
 
         // Second import of same block (now at or below head) should succeed silently.
         let result = node.import_block(block, &verifier);
-        assert!(result.is_ok(), "duplicate import should be handled gracefully");
-        assert_eq!(node.chain_store.get_head_block().unwrap().unwrap().number(), 1);
+        assert!(
+            result.is_ok(),
+            "duplicate import should be handled gracefully"
+        );
+        assert_eq!(
+            node.chain_store.get_head_block().unwrap().unwrap().number(),
+            1
+        );
     }
 
     // ── State consistency tests ────────────────────────────────────────
@@ -2079,17 +2106,16 @@ mod tests {
             shell_primitives::keccak256(&encoded)
         };
         let sig = tx_signer.sign(tx_hash.as_bytes()).expect("sign failed");
-        let signed = SignedTransaction::with_pubkey(
-            sender,
-            tx,
-            sig,
-            tx_signer.public_key().to_vec(),
-        );
+        let signed =
+            SignedTransaction::with_pubkey(sender, tx, sig, tx_signer.public_key().to_vec());
 
         let verifier = MultiVerifier;
         let known_pubkeys = |_: &Address| -> Option<Vec<u8>> { None };
         let balance_of = |addr: &Address| -> U256 {
-            node.world_state.read().get_balance(addr).unwrap_or(U256::ZERO)
+            node.world_state
+                .read()
+                .get_balance(addr)
+                .unwrap_or(U256::ZERO)
         };
         node.tx_pool
             .insert(signed, &verifier, &known_pubkeys, &balance_of)
@@ -2101,7 +2127,10 @@ mod tests {
         // Verify receipts were stored.
         let block_hash = block.hash();
         let receipts = node.chain_store.get_receipts(&block_hash).unwrap();
-        assert!(receipts.is_some(), "receipts should be stored for block with txs");
+        assert!(
+            receipts.is_some(),
+            "receipts should be stored for block with txs"
+        );
         let receipts = receipts.unwrap();
         assert_eq!(receipts.len(), 1);
         assert_eq!(receipts[0].status, 1, "transfer tx should succeed");
@@ -2167,7 +2196,10 @@ mod tests {
         let tracker = node.state_root_tracker.read();
         assert_eq!(tracker.len(), 1);
         assert_eq!(tracker.latest().unwrap().block_number, 1);
-        assert_eq!(tracker.latest().unwrap().state_root, ShellHash::from([0xAB; 32]));
+        assert_eq!(
+            tracker.latest().unwrap().state_root,
+            ShellHash::from([0xAB; 32])
+        );
     }
 
     #[test]
@@ -2205,11 +2237,16 @@ mod tests {
 
         // Create a second attestation from the same validator for the
         // competing block at the same height — this is equivocation.
-        let att2 = node.create_attestation(competing_hash, height, &signer).unwrap();
+        let att2 = node
+            .create_attestation(competing_hash, height, &signer)
+            .unwrap();
         let result = node.handle_attestation(att2, &verifier);
 
         assert!(result.is_err(), "equivocation must be rejected");
         let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("equivocation"), "error should mention equivocation: {err_msg}");
+        assert!(
+            err_msg.contains("equivocation"),
+            "error should mention equivocation: {err_msg}"
+        );
     }
 }

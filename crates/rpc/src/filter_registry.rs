@@ -130,7 +130,9 @@ impl FilterRegistry {
     /// Remove filters that have not been accessed within the TTL window.
     pub fn cleanup_expired(&self) {
         let cutoff = Instant::now() - std::time::Duration::from_secs(self.ttl_secs);
-        self.filters.write().retain(|_, entry| entry.last_access > cutoff);
+        self.filters
+            .write()
+            .retain(|_, entry| entry.last_access > cutoff);
     }
 
     /// Returns the number of active filters.
@@ -236,10 +238,8 @@ mod tests {
 
     #[test]
     fn get_log_filter_returns_raw_for_log_kind() {
-        let raw: RawLogFilter = serde_json::from_str(
-            r#"{"fromBlock":"0x1","toBlock":"0x5"}"#,
-        )
-        .unwrap();
+        let raw: RawLogFilter =
+            serde_json::from_str(r#"{"fromBlock":"0x1","toBlock":"0x5"}"#).unwrap();
         let reg = FilterRegistry::new();
         let id = reg.new_filter(FilterKind::Log(raw), 1).unwrap();
         let retrieved = reg.get_log_filter(&id);

@@ -58,14 +58,16 @@ impl SnapshotMetadata {
 
     /// Serialize metadata to JSON bytes.
     pub fn to_bytes(&self) -> Result<Vec<u8>, StorageError> {
-        serde_json::to_vec_pretty(self)
-            .map_err(|e| StorageError::Serialization(format!("failed to serialize snapshot metadata: {e}")))
+        serde_json::to_vec_pretty(self).map_err(|e| {
+            StorageError::Serialization(format!("failed to serialize snapshot metadata: {e}"))
+        })
     }
 
     /// Deserialize metadata from JSON bytes.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, StorageError> {
-        serde_json::from_slice(bytes)
-            .map_err(|e| StorageError::Serialization(format!("failed to deserialize snapshot metadata: {e}")))
+        serde_json::from_slice(bytes).map_err(|e| {
+            StorageError::Serialization(format!("failed to deserialize snapshot metadata: {e}"))
+        })
     }
 
     /// Validate that this snapshot is compatible with the given chain.
@@ -228,9 +230,7 @@ impl SnapshotReader {
             .map_err(|e| StorageError::Database(format!("read snapshot: {e}")))?;
 
         if lines.is_empty() {
-            return Err(StorageError::Serialization(
-                "empty snapshot file".into(),
-            ));
+            return Err(StorageError::Serialization("empty snapshot file".into()));
         }
 
         // Find metadata line (last line starting with "META:")
@@ -319,13 +319,7 @@ mod tests {
     use std::io::Cursor;
 
     fn test_metadata() -> SnapshotMetadata {
-        SnapshotMetadata::new(
-            1337,
-            100,
-            ShellHash::ZERO,
-            ShellHash::ZERO,
-            ShellHash::ZERO,
-        )
+        SnapshotMetadata::new(1337, 100, ShellHash::ZERO, ShellHash::ZERO, ShellHash::ZERO)
     }
 
     #[test]
@@ -347,7 +341,10 @@ mod tests {
         let meta = test_metadata();
         let result = meta.validate_compatibility(9999, &ShellHash::ZERO);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("chain ID mismatch"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("chain ID mismatch"));
     }
 
     #[test]
@@ -357,12 +354,10 @@ mod tests {
         bad_genesis[0] = 1;
         let result = meta.validate_compatibility(1337, &ShellHash::from(bad_genesis));
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("genesis hash mismatch")
-        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("genesis hash mismatch"));
     }
 
     #[test]
@@ -457,12 +452,10 @@ mod tests {
         meta.version = 99;
         let result = meta.validate_compatibility(1337, &ShellHash::ZERO);
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("unsupported snapshot version")
-        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported snapshot version"));
     }
 
     #[test]
@@ -515,7 +508,10 @@ mod tests {
             // Only test if we actually tampered with something
             let result = SnapshotReader::new(Cursor::new(tampered.as_bytes()));
             assert!(result.is_err());
-            assert!(result.unwrap_err().to_string().contains("checksum mismatch"));
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("checksum mismatch"));
         }
     }
 }

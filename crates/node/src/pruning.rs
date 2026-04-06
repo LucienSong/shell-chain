@@ -63,11 +63,7 @@ impl StateRootTracker {
     /// oldest entry is evicted and returned so the caller can log / act on it.
     /// In archive mode, the tracker is still capped at [`ARCHIVE_MAX_TRACKED`]
     /// entries to bound memory usage.
-    pub fn record(
-        &mut self,
-        block_number: u64,
-        state_root: ShellHash,
-    ) -> Option<StateRootEntry> {
+    pub fn record(&mut self, block_number: u64, state_root: ShellHash) -> Option<StateRootEntry> {
         self.history.push_back(StateRootEntry {
             block_number,
             state_root,

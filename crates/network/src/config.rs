@@ -113,12 +113,10 @@ pub fn validate_bootnode_multiaddr(addr: &str) -> bool {
 
     for proto in ma.iter() {
         match proto {
-            libp2p::multiaddr::Protocol::Ip4(_)
-            | libp2p::multiaddr::Protocol::Ip6(_) => {
+            libp2p::multiaddr::Protocol::Ip4(_) | libp2p::multiaddr::Protocol::Ip6(_) => {
                 has_ip = true;
             }
-            libp2p::multiaddr::Protocol::Tcp(_)
-            | libp2p::multiaddr::Protocol::Udp(_) => {
+            libp2p::multiaddr::Protocol::Tcp(_) | libp2p::multiaddr::Protocol::Udp(_) => {
                 has_transport = true;
             }
             libp2p::multiaddr::Protocol::P2p(_) => {
@@ -138,7 +136,8 @@ mod tests {
 
     #[test]
     fn valid_ipv4_tcp_multiaddr() {
-        let addr = "/ip4/1.2.3.4/tcp/30303/p2p/12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
+        let addr =
+            "/ip4/1.2.3.4/tcp/30303/p2p/12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
         assert!(validate_bootnode_multiaddr(addr));
     }
 
@@ -150,7 +149,8 @@ mod tests {
 
     #[test]
     fn valid_ipv4_udp_multiaddr() {
-        let addr = "/ip4/10.0.0.1/udp/9000/p2p/12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
+        let addr =
+            "/ip4/10.0.0.1/udp/9000/p2p/12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
         assert!(validate_bootnode_multiaddr(addr));
     }
 
@@ -185,7 +185,10 @@ mod tests {
     #[test]
     fn default_config_all_fields() {
         let config = NetworkConfig::default();
-        assert_eq!(config.listen_addr, SocketAddr::from(([127, 0, 0, 1], 30303)));
+        assert_eq!(
+            config.listen_addr,
+            SocketAddr::from(([127, 0, 0, 1], 30303))
+        );
         assert!(config.boot_nodes.is_empty());
         assert_eq!(config.blocks_topic, "/shell/blocks/1");
         assert_eq!(config.txs_topic, "/shell/txs/1");
@@ -210,7 +213,8 @@ mod tests {
 
     #[test]
     fn reject_only_dns_no_transport() {
-        let addr = "/dns4/bootnode.example.com/p2p/12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
+        let addr =
+            "/dns4/bootnode.example.com/p2p/12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
         assert!(!validate_bootnode_multiaddr(addr));
     }
 
@@ -221,7 +225,8 @@ mod tests {
 
     #[test]
     fn valid_ipv6_full_addr() {
-        let addr = "/ip6/2001:db8::1/tcp/4001/p2p/12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
+        let addr =
+            "/ip6/2001:db8::1/tcp/4001/p2p/12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
         assert!(validate_bootnode_multiaddr(addr));
     }
 }

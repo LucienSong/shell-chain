@@ -113,11 +113,8 @@ pub fn validate_tx<S: KvStore + 'static, V: Verifier>(
     }
 
     // 2. Intrinsic gas check
-    let intrinsic = compute_intrinsic_gas(
-        tx.data.as_ref(),
-        tx.is_contract_creation(),
-        &tx.access_list,
-    );
+    let intrinsic =
+        compute_intrinsic_gas(tx.data.as_ref(), tx.is_contract_creation(), &tx.access_list);
     if tx.gas_limit < intrinsic {
         return Err(TxValidationError::GasTooLow(tx.gas_limit));
     }
@@ -127,7 +124,9 @@ pub fn validate_tx<S: KvStore + 'static, V: Verifier>(
 
     // 3b. Algorithm allowlist check (F-170)
     if !shell_crypto::ALLOWED_ALGORITHMS.contains(&signed_tx.signature.sig_type) {
-        return Err(TxValidationError::DisallowedAlgorithm(signed_tx.signature.sig_type));
+        return Err(TxValidationError::DisallowedAlgorithm(
+            signed_tx.signature.sig_type,
+        ));
     }
 
     // 3c. Pubkey binding check (F-154): reject if a DIFFERENT pubkey is
@@ -241,11 +240,8 @@ pub fn validate_tx_for_import<S: KvStore + 'static, V: Verifier>(
     }
 
     // 3. Intrinsic gas
-    let intrinsic = compute_intrinsic_gas(
-        tx.data.as_ref(),
-        tx.is_contract_creation(),
-        &tx.access_list,
-    );
+    let intrinsic =
+        compute_intrinsic_gas(tx.data.as_ref(), tx.is_contract_creation(), &tx.access_list);
     if tx.gas_limit < intrinsic {
         return Err(TxValidationError::GasTooLow(tx.gas_limit));
     }
@@ -253,7 +249,9 @@ pub fn validate_tx_for_import<S: KvStore + 'static, V: Verifier>(
     // 4. Resolve pubkey + algorithm allowlist
     let pubkey = resolve_pubkey(signed_tx, chain_store)?;
     if !shell_crypto::ALLOWED_ALGORITHMS.contains(&signed_tx.signature.sig_type) {
-        return Err(TxValidationError::DisallowedAlgorithm(signed_tx.signature.sig_type));
+        return Err(TxValidationError::DisallowedAlgorithm(
+            signed_tx.signature.sig_type,
+        ));
     }
 
     // 5. Pubkey binding conflict
@@ -336,9 +334,7 @@ pub fn compute_intrinsic_gas(
 mod tests {
     use super::*;
     use shell_core::Transaction;
-    use shell_crypto::{
-        DilithiumSigner, DilithiumVerifier, PQSignature, Signer, SignatureType,
-    };
+    use shell_crypto::{DilithiumSigner, DilithiumVerifier, PQSignature, SignatureType, Signer};
     use shell_primitives::{Bytes, ShellHash};
     use shell_storage::MemoryDb;
     use std::sync::Arc;
@@ -476,7 +472,10 @@ mod tests {
 
         let verifier = DilithiumVerifier;
         let result = validate_tx(&signed, &ws, &cs, &verifier, test_chain_id());
-        assert!(matches!(result, Err(TxValidationError::ChainIdMismatch { .. })));
+        assert!(matches!(
+            result,
+            Err(TxValidationError::ChainIdMismatch { .. })
+        ));
     }
 
     #[test]
@@ -523,16 +522,15 @@ mod tests {
         let tx = simple_transfer(test_chain_id(), 0);
         let tx_hash = tx.hash();
         let sig = signer.sign(tx_hash.as_bytes()).unwrap();
-        let signed = SignedTransaction::with_pubkey(
-            wrong_from,
-            tx,
-            sig,
-            signer.public_key().to_vec(),
-        );
+        let signed =
+            SignedTransaction::with_pubkey(wrong_from, tx, sig, signer.public_key().to_vec());
 
         let verifier = DilithiumVerifier;
         let result = validate_tx(&signed, &ws, &cs, &verifier, test_chain_id());
-        assert!(matches!(result, Err(TxValidationError::AddressMismatch { .. })));
+        assert!(matches!(
+            result,
+            Err(TxValidationError::AddressMismatch { .. })
+        ));
     }
 
     #[test]
@@ -544,12 +542,8 @@ mod tests {
 
         let tx = simple_transfer(test_chain_id(), 0);
         let bad_sig = PQSignature::new(SignatureType::Dilithium3, vec![0xDE; 100]);
-        let signed = SignedTransaction::with_pubkey(
-            from,
-            tx,
-            bad_sig,
-            signer.public_key().to_vec(),
-        );
+        let signed =
+            SignedTransaction::with_pubkey(from, tx, bad_sig, signer.public_key().to_vec());
 
         let verifier = DilithiumVerifier;
         let result = validate_tx(&signed, &ws, &cs, &verifier, test_chain_id());
@@ -568,7 +562,13 @@ mod tests {
 
         let verifier = DilithiumVerifier;
         let result = validate_tx(&signed, &ws, &cs, &verifier, test_chain_id());
-        assert!(matches!(result, Err(TxValidationError::NonceMismatch { expected: 0, got: 5 })));
+        assert!(matches!(
+            result,
+            Err(TxValidationError::NonceMismatch {
+                expected: 0,
+                got: 5
+            })
+        ));
     }
 
     #[test]
@@ -583,7 +583,10 @@ mod tests {
 
         let verifier = DilithiumVerifier;
         let result = validate_tx(&signed, &ws, &cs, &verifier, test_chain_id());
-        assert!(matches!(result, Err(TxValidationError::InsufficientBalance { .. })));
+        assert!(matches!(
+            result,
+            Err(TxValidationError::InsufficientBalance { .. })
+        ));
     }
 
     #[test]
@@ -637,12 +640,7 @@ mod tests {
         let tx = simple_transfer(test_chain_id(), 0);
         let tx_hash = tx.hash();
         let sig = signer1.sign(tx_hash.as_bytes()).unwrap();
-        let signed = SignedTransaction::with_pubkey(
-            from,
-            tx,
-            sig,
-            signer2.public_key().to_vec(),
-        );
+        let signed = SignedTransaction::with_pubkey(from, tx, sig, signer2.public_key().to_vec());
 
         let verifier = DilithiumVerifier;
         let result = validate_tx(&signed, &ws, &cs, &verifier, test_chain_id());
@@ -683,12 +681,8 @@ mod tests {
         // Create a signature with reserved MlDsa65 algorithm type
         let real_sig = signer.sign(tx_hash.as_bytes()).unwrap();
         let bad_algo_sig = PQSignature::new(SignatureType::MlDsa65, real_sig.data.clone());
-        let signed = SignedTransaction::with_pubkey(
-            from,
-            tx,
-            bad_algo_sig,
-            signer.public_key().to_vec(),
-        );
+        let signed =
+            SignedTransaction::with_pubkey(from, tx, bad_algo_sig, signer.public_key().to_vec());
 
         let verifier = DilithiumVerifier;
         let result = validate_tx(&signed, &ws, &cs, &verifier, test_chain_id());

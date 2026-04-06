@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use core::fmt;
+use serde::{Deserialize, Serialize};
 
 /// Variable-length byte container used across Shell-Chain.
 #[derive(Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]

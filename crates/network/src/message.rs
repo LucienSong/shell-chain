@@ -44,14 +44,9 @@ pub enum NetworkMessage {
     /// Announce a block attestation (validator confirmation).
     NewAttestation(Box<Attestation>),
     /// Request a range of blocks by number.
-    BlockRequest {
-        start_number: u64,
-        count: u64,
-    },
+    BlockRequest { start_number: u64, count: u64 },
     /// Response to a block request.
-    BlockResponse {
-        blocks: Vec<Block>,
-    },
+    BlockResponse { blocks: Vec<Block> },
     /// Ping to check liveness.
     Ping,
     /// Pong response to ping.
@@ -211,7 +206,10 @@ mod tests {
         let json = serde_json::to_vec(&msg).unwrap();
         let decoded: NetworkMessage = serde_json::from_slice(&json).unwrap();
         match decoded {
-            NetworkMessage::BlockRequest { start_number, count } => {
+            NetworkMessage::BlockRequest {
+                start_number,
+                count,
+            } => {
                 assert_eq!(start_number, 10);
                 assert_eq!(count, 5);
             }
@@ -228,7 +226,9 @@ mod tests {
         let json = serde_json::to_vec(&msg).unwrap();
         let decoded: NetworkMessage = serde_json::from_slice(&json).unwrap();
         match decoded {
-            NetworkMessage::BlockResponse { blocks: decoded_blocks } => {
+            NetworkMessage::BlockResponse {
+                blocks: decoded_blocks,
+            } => {
                 assert_eq!(decoded_blocks.len(), 2);
                 assert_eq!(decoded_blocks[0].header.number, 1);
                 assert_eq!(decoded_blocks[1].header.number, 2);
@@ -351,10 +351,7 @@ mod tests {
         let bad_data = b"not-json";
         let err = deserialize_checked(bad_data, MAX_MESSAGE_SIZE);
         assert!(err.is_err());
-        assert!(matches!(
-            err.unwrap_err(),
-            NetworkError::Serialization(_)
-        ));
+        assert!(matches!(err.unwrap_err(), NetworkError::Serialization(_)));
     }
 
     #[test]

@@ -57,7 +57,8 @@ impl NetworkBus {
                             continue;
                         }
                         // F-069: validate message size before deserialization.
-                        if let Err(_e) = crate::message::validate_message_size(&data, max_msg_size) {
+                        if let Err(_e) = crate::message::validate_message_size(&data, max_msg_size)
+                        {
                             continue;
                         }
                         if let Ok(message) = serde_json::from_slice::<NetworkMessage>(&data) {
@@ -234,7 +235,7 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(10)).await;
 
-        use shell_core::{Transaction, SignedTransaction};
+        use shell_core::{SignedTransaction, Transaction};
         use shell_crypto::PQSignature;
         use shell_primitives::U256;
 

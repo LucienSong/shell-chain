@@ -89,12 +89,8 @@ pub fn decode_revert_reason(output: &[u8]) -> Option<String> {
     }
     // Read string length from offset 36..68
     let len_bytes = &output[36..68];
-    let len = u32::from_be_bytes([
-        len_bytes[28],
-        len_bytes[29],
-        len_bytes[30],
-        len_bytes[31],
-    ]) as usize;
+    let len =
+        u32::from_be_bytes([len_bytes[28], len_bytes[29], len_bytes[30], len_bytes[31]]) as usize;
 
     if output.len() < 68 + len {
         return None;

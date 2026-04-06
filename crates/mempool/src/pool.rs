@@ -149,10 +149,7 @@ impl TxPool {
         }
 
         // Per-sender limit (checked after possible RBF eviction)
-        let sender_count = inner
-            .by_sender
-            .get(&sender)
-            .map_or(0, |q| q.len());
+        let sender_count = inner.by_sender.get(&sender).map_or(0, |q| q.len());
         if sender_count >= self.config.max_per_sender {
             return Err(MempoolError::SenderQueueFull {
                 sender,
@@ -194,13 +191,7 @@ impl TxPool {
             .entry(sender)
             .or_default()
             .insert(nonce, hash);
-        inner.by_hash.insert(
-            hash,
-            PoolEntry {
-                tx,
-                priority_key,
-            },
-        );
+        inner.by_hash.insert(hash, PoolEntry { tx, priority_key });
 
         Ok(hash)
     }
@@ -354,15 +345,14 @@ impl TxPool {
 
         // Per-tx serialized size limit — protects against oversized PQ
         // signatures and access lists.
-        let tx_size = serde_json::to_vec(tx)
-            .map(|v| v.len())
-            .map_err(|e| MempoolError::InvalidTransaction(
-                format!("tx serialization failed: {e}")
-            ))?;
+        let tx_size = serde_json::to_vec(tx).map(|v| v.len()).map_err(|e| {
+            MempoolError::InvalidTransaction(format!("tx serialization failed: {e}"))
+        })?;
         if tx_size > MAX_TX_SIZE {
-            return Err(MempoolError::InvalidTransaction(
-                format!("transaction too large: {} bytes (max {})", tx_size, MAX_TX_SIZE),
-            ));
+            return Err(MempoolError::InvalidTransaction(format!(
+                "transaction too large: {} bytes (max {})",
+                tx_size, MAX_TX_SIZE
+            )));
         }
 
         Ok(())
@@ -417,7 +407,9 @@ mod tests {
         let tx = Transaction {
             chain_id: 42,
             nonce,
-            to: Some(Address::from_public_key(b"recipient-placeholder-key-data-for-address")),
+            to: Some(Address::from_public_key(
+                b"recipient-placeholder-key-data-for-address",
+            )),
             value: Default::default(),
             data: Bytes::default(),
             gas_limit: 21_000,
@@ -445,7 +437,9 @@ mod tests {
         let tx = Transaction {
             chain_id: 42,
             nonce,
-            to: Some(Address::from_public_key(b"recipient-placeholder-key-data-for-address")),
+            to: Some(Address::from_public_key(
+                b"recipient-placeholder-key-data-for-address",
+            )),
             value: Default::default(),
             data: Bytes::default(),
             gas_limit: 21_000,
@@ -495,8 +489,11 @@ mod tests {
         let verifier = DilithiumVerifier;
         let (tx, _pk) = make_signed_tx(0, 100);
 
-        pool.insert(tx.clone(), &verifier, &no_known_pubkeys, &rich_balance).unwrap();
-        let err = pool.insert(tx, &verifier, &no_known_pubkeys, &rich_balance).unwrap_err();
+        pool.insert(tx.clone(), &verifier, &no_known_pubkeys, &rich_balance)
+            .unwrap();
+        let err = pool
+            .insert(tx, &verifier, &no_known_pubkeys, &rich_balance)
+            .unwrap_err();
         assert!(matches!(err, MempoolError::Duplicate { .. }));
     }
 
@@ -525,7 +522,9 @@ mod tests {
         let sig = signer.sign(tx.hash().as_bytes()).unwrap();
         let signed = SignedTransaction::with_pubkey(from, tx, sig, pubkey);
 
-        let err = pool.insert(signed, &verifier, &no_known_pubkeys, &rich_balance).unwrap_err();
+        let err = pool
+            .insert(signed, &verifier, &no_known_pubkeys, &rich_balance)
+            .unwrap_err();
         assert!(matches!(err, MempoolError::ChainIdMismatch { .. }));
     }
 
@@ -554,7 +553,9 @@ mod tests {
         let sig = signer.sign(tx.hash().as_bytes()).unwrap();
         let signed = SignedTransaction::with_pubkey(from, tx, sig, pubkey);
 
-        let err = pool.insert(signed, &verifier, &no_known_pubkeys, &rich_balance).unwrap_err();
+        let err = pool
+            .insert(signed, &verifier, &no_known_pubkeys, &rich_balance)
+            .unwrap_err();
         assert!(matches!(err, MempoolError::GasPriceTooLow { .. }));
     }
 
@@ -584,7 +585,9 @@ mod tests {
         let bad_sig = signer.sign(b"wrong-message").unwrap();
         let signed = SignedTransaction::with_pubkey(from, tx, bad_sig, pubkey);
 
-        let err = pool.insert(signed, &verifier, &no_known_pubkeys, &rich_balance).unwrap_err();
+        let err = pool
+            .insert(signed, &verifier, &no_known_pubkeys, &rich_balance)
+            .unwrap_err();
         assert!(matches!(err, MempoolError::InvalidSignature(_)));
     }
 
@@ -613,7 +616,9 @@ mod tests {
         let sig = signer.sign(tx.hash().as_bytes()).unwrap();
         let signed = SignedTransaction::with_pubkey(wrong_from, tx, sig, pubkey);
 
-        let err = pool.insert(signed, &verifier, &no_known_pubkeys, &rich_balance).unwrap_err();
+        let err = pool
+            .insert(signed, &verifier, &no_known_pubkeys, &rich_balance)
+            .unwrap_err();
         assert!(matches!(err, MempoolError::AddressMismatch { .. }));
     }
 
@@ -643,7 +648,9 @@ mod tests {
         // No pubkey attached, and lookup returns None
         let signed = SignedTransaction::new(from, tx, sig);
 
-        let err = pool.insert(signed, &verifier, &no_known_pubkeys, &rich_balance).unwrap_err();
+        let err = pool
+            .insert(signed, &verifier, &no_known_pubkeys, &rich_balance)
+            .unwrap_err();
         assert!(matches!(err, MempoolError::PubkeyRequired { .. }));
     }
 
@@ -652,7 +659,9 @@ mod tests {
         let pool = TxPool::new(make_config());
         let verifier = DilithiumVerifier;
         let (tx, _pk) = make_signed_tx(0, 100);
-        let hash = pool.insert(tx, &verifier, &no_known_pubkeys, &rich_balance).unwrap();
+        let hash = pool
+            .insert(tx, &verifier, &no_known_pubkeys, &rich_balance)
+            .unwrap();
 
         assert!(pool.remove(&hash));
         assert!(!pool.contains(&hash));
@@ -667,8 +676,12 @@ mod tests {
 
         let (tx1, _) = make_signed_tx(0, 100);
         let (tx2, _) = make_signed_tx(0, 200);
-        let h1 = pool.insert(tx1, &verifier, &no_known_pubkeys, &rich_balance).unwrap();
-        let h2 = pool.insert(tx2, &verifier, &no_known_pubkeys, &rich_balance).unwrap();
+        let h1 = pool
+            .insert(tx1, &verifier, &no_known_pubkeys, &rich_balance)
+            .unwrap();
+        let h2 = pool
+            .insert(tx2, &verifier, &no_known_pubkeys, &rich_balance)
+            .unwrap();
 
         pool.remove_batch(&[h1, h2]);
         assert_eq!(pool.len(), 0);
@@ -683,9 +696,12 @@ mod tests {
         let (tx_mid, _) = make_signed_tx(0, 50);
         let (tx_high, _) = make_signed_tx(0, 100);
 
-        pool.insert(tx_low, &verifier, &no_known_pubkeys, &rich_balance).unwrap();
-        pool.insert(tx_mid, &verifier, &no_known_pubkeys, &rich_balance).unwrap();
-        pool.insert(tx_high, &verifier, &no_known_pubkeys, &rich_balance).unwrap();
+        pool.insert(tx_low, &verifier, &no_known_pubkeys, &rich_balance)
+            .unwrap();
+        pool.insert(tx_mid, &verifier, &no_known_pubkeys, &rich_balance)
+            .unwrap();
+        pool.insert(tx_high, &verifier, &no_known_pubkeys, &rich_balance)
+            .unwrap();
 
         let pending = pool.pending(10);
         assert_eq!(pending.len(), 3);
@@ -708,9 +724,12 @@ mod tests {
         let tx0 = make_signed_tx_with_signer(&signer, &pubkey, 0, 50);
         let tx1 = make_signed_tx_with_signer(&signer, &pubkey, 1, 50);
 
-        pool.insert(tx2, &verifier, &no_known_pubkeys, &rich_balance).unwrap();
-        pool.insert(tx0, &verifier, &no_known_pubkeys, &rich_balance).unwrap();
-        pool.insert(tx1, &verifier, &no_known_pubkeys, &rich_balance).unwrap();
+        pool.insert(tx2, &verifier, &no_known_pubkeys, &rich_balance)
+            .unwrap();
+        pool.insert(tx0, &verifier, &no_known_pubkeys, &rich_balance)
+            .unwrap();
+        pool.insert(tx1, &verifier, &no_known_pubkeys, &rich_balance)
+            .unwrap();
 
         let sender = Address::from_public_key(&pubkey);
         let sender_hashes = pool.sender_txs(&sender);
@@ -734,9 +753,13 @@ mod tests {
         let tx1 = make_signed_tx_with_signer(&signer, &pubkey, 1, 50);
         let tx2 = make_signed_tx_with_signer(&signer, &pubkey, 2, 50);
 
-        pool.insert(tx0, &verifier, &no_known_pubkeys, &rich_balance).unwrap();
-        pool.insert(tx1, &verifier, &no_known_pubkeys, &rich_balance).unwrap();
-        let err = pool.insert(tx2, &verifier, &no_known_pubkeys, &rich_balance).unwrap_err();
+        pool.insert(tx0, &verifier, &no_known_pubkeys, &rich_balance)
+            .unwrap();
+        pool.insert(tx1, &verifier, &no_known_pubkeys, &rich_balance)
+            .unwrap();
+        let err = pool
+            .insert(tx2, &verifier, &no_known_pubkeys, &rich_balance)
+            .unwrap_err();
         assert!(matches!(err, MempoolError::SenderQueueFull { .. }));
     }
 
@@ -753,12 +776,15 @@ mod tests {
         let (tx_mid, _) = make_signed_tx(0, 50);
         let low_hash = tx_low.hash();
 
-        pool.insert(tx_low, &verifier, &no_known_pubkeys, &rich_balance).unwrap();
-        pool.insert(tx_mid, &verifier, &no_known_pubkeys, &rich_balance).unwrap();
+        pool.insert(tx_low, &verifier, &no_known_pubkeys, &rich_balance)
+            .unwrap();
+        pool.insert(tx_mid, &verifier, &no_known_pubkeys, &rich_balance)
+            .unwrap();
 
         // Pool is full. Insert a higher priority tx — should evict tx_low.
         let (tx_high, _) = make_signed_tx(0, 100);
-        pool.insert(tx_high, &verifier, &no_known_pubkeys, &rich_balance).unwrap();
+        pool.insert(tx_high, &verifier, &no_known_pubkeys, &rich_balance)
+            .unwrap();
 
         assert_eq!(pool.len(), 2);
         assert!(!pool.contains(&low_hash)); // evicted
@@ -775,12 +801,16 @@ mod tests {
 
         let (tx1, _) = make_signed_tx(0, 50);
         let (tx2, _) = make_signed_tx(0, 100);
-        pool.insert(tx1, &verifier, &no_known_pubkeys, &rich_balance).unwrap();
-        pool.insert(tx2, &verifier, &no_known_pubkeys, &rich_balance).unwrap();
+        pool.insert(tx1, &verifier, &no_known_pubkeys, &rich_balance)
+            .unwrap();
+        pool.insert(tx2, &verifier, &no_known_pubkeys, &rich_balance)
+            .unwrap();
 
         // Try to insert a tx with lower priority than worst in pool
         let (tx_too_low, _) = make_signed_tx(0, 5);
-        let err = pool.insert(tx_too_low, &verifier, &no_known_pubkeys, &rich_balance).unwrap_err();
+        let err = pool
+            .insert(tx_too_low, &verifier, &no_known_pubkeys, &rich_balance)
+            .unwrap_err();
         assert!(matches!(err, MempoolError::PoolFull { .. }));
     }
 

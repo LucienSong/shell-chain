@@ -7,9 +7,9 @@ use std::time::Instant;
 
 use shell_e2e::*;
 
+use shell_core::SignedTransaction;
 use shell_primitives::{Address, U256};
 use shell_rpc::api::{EthApiServer, ShellApiServer};
-use shell_core::SignedTransaction;
 
 /// Number of transactions to submit during the stress test.
 const TX_COUNT: usize = 100;
@@ -118,7 +118,12 @@ async fn throughput_multi_block() {
         for j in 0..txs_per_block {
             let sender = make_funded_account(&env);
             // Unique value per tx across all blocks
-            let tx = make_transfer(TEST_CHAIN_ID, 0, recipient, U256::from(50 + (blk * txs_per_block + j) as u64));
+            let tx = make_transfer(
+                TEST_CHAIN_ID,
+                0,
+                recipient,
+                U256::from(50 + (blk * txs_per_block + j) as u64),
+            );
             let signed = sign_tx(&sender.signer, sender.address, tx);
             ShellApiServer::send_transaction(&env.handler, signed.clone())
                 .await

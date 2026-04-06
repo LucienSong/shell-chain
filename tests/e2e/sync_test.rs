@@ -39,7 +39,8 @@ async fn block_chain_parent_hash_integrity() {
 
         // parent_hash in the RPC response should match the hash of block i-1
         assert_eq!(
-            rpc_block.parent_hash, hashes[i as usize - 1],
+            rpc_block.parent_hash,
+            hashes[i as usize - 1],
             "parent hash mismatch at block {i}"
         );
     }
@@ -68,12 +69,7 @@ async fn state_consistency_after_transfers() {
     let mut parent = genesis.hash();
 
     for i in 0..num_transfers {
-        let tx = make_transfer(
-            TEST_CHAIN_ID,
-            i,
-            recipient,
-            U256::from(transfer_amount),
-        );
+        let tx = make_transfer(TEST_CHAIN_ID, i, recipient, U256::from(transfer_amount));
         let signed = sign_tx(&sender.signer, sender.address, tx);
 
         // Manually debit/credit world state to simulate execution
@@ -192,29 +188,16 @@ async fn snapshot_export_import_roundtrip() {
         .unwrap_or(ShellHash::default());
 
     // Export snapshot
-    let metadata = SnapshotMetadata::new(
-        TEST_CHAIN_ID,
-        1,
-        block1.hash(),
-        state_root,
-        genesis_hash,
-    );
+    let metadata = SnapshotMetadata::new(TEST_CHAIN_ID, 1, block1.hash(), state_root, genesis_hash);
     let mut buf: Vec<u8> = Vec::new();
-    let exported_meta = env
-        .chain_store
-        .export_snapshot(metadata, &mut buf)
-        .unwrap();
+    let exported_meta = env.chain_store.export_snapshot(metadata, &mut buf).unwrap();
     assert_eq!(exported_meta.chain_id, TEST_CHAIN_ID);
     assert_eq!(exported_meta.block_number, 1);
 
     // Import into a fresh store
     let db2 = Arc::new(MemoryDb::new());
     let chain_store2 = ChainStore::new(db2.clone());
-    let import_result = chain_store2.import_snapshot(
-        &buf[..],
-        TEST_CHAIN_ID,
-        &genesis_hash,
-    );
+    let import_result = chain_store2.import_snapshot(&buf[..], TEST_CHAIN_ID, &genesis_hash);
 
     // The reference export_snapshot is a no-op placeholder for MemoryDb
     // (it can't iterate keys), so import may succeed trivially or fail

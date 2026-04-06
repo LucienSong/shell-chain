@@ -1,5 +1,5 @@
-use shell_primitives::Address;
 use crate::SignatureType;
+use shell_primitives::Address;
 
 /// A generic key pair container (public key + address).
 ///

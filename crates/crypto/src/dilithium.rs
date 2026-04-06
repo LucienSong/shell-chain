@@ -1,11 +1,7 @@
 use pqcrypto_dilithium::dilithium3;
-use pqcrypto_traits::sign::{
-    DetachedSignature, PublicKey, SecretKey,
-};
+use pqcrypto_traits::sign::{DetachedSignature, PublicKey, SecretKey};
 
-use crate::{
-    CryptoError, KeyPair, PQSignature, SignatureType, Signer, Verifier,
-};
+use crate::{CryptoError, KeyPair, PQSignature, SignatureType, Signer, Verifier};
 
 // ── Signer ───────────────────────────────────────────────────
 
@@ -33,10 +29,7 @@ impl DilithiumSigner {
     }
 
     /// Reconstruct from raw key bytes.
-    pub fn from_bytes(
-        public_key: &[u8],
-        secret_key: &[u8],
-    ) -> Result<Self, CryptoError> {
+    pub fn from_bytes(public_key: &[u8], secret_key: &[u8]) -> Result<Self, CryptoError> {
         // Validate by attempting to parse
         dilithium3::PublicKey::from_bytes(public_key).map_err(|_| {
             CryptoError::InvalidPublicKeyLength {
@@ -58,10 +51,7 @@ impl DilithiumSigner {
 
     /// Export the public half as a [`KeyPair`].
     pub fn key_pair(&self) -> KeyPair {
-        KeyPair::new(
-            self.public_key_bytes.clone(),
-            SignatureType::Dilithium3,
-        )
+        KeyPair::new(self.public_key_bytes.clone(), SignatureType::Dilithium3)
     }
 
     /// Return a reference to the zeroize-protected secret key bytes.
@@ -127,11 +117,12 @@ impl Verifier for DilithiumVerifier {
             }
         })?;
 
-        let sig = dilithium3::DetachedSignature::from_bytes(&signature.data)
-            .map_err(|_| CryptoError::InvalidSignatureLength {
+        let sig = dilithium3::DetachedSignature::from_bytes(&signature.data).map_err(|_| {
+            CryptoError::InvalidSignatureLength {
                 expected: dilithium3::signature_bytes(),
                 got: signature.data.len(),
-            })?;
+            }
+        })?;
 
         let valid = dilithium3::verify_detached_signature(&sig, message, &pk).is_ok();
         Ok(valid)
@@ -157,9 +148,7 @@ mod tests {
         assert!(!sig.is_empty());
 
         let verifier = DilithiumVerifier;
-        let valid = verifier
-            .verify(signer.public_key(), message, &sig)
-            .unwrap();
+        let valid = verifier.verify(signer.public_key(), message, &sig).unwrap();
         assert!(valid);
     }
 
@@ -246,7 +235,9 @@ mod tests {
             let msg = format!("msg-{i}-{}", i.wrapping_mul(2654435761));
             let sig = signer.sign(msg.as_bytes()).unwrap();
             assert!(
-                verifier.verify(signer.public_key(), msg.as_bytes(), &sig).unwrap(),
+                verifier
+                    .verify(signer.public_key(), msg.as_bytes(), &sig)
+                    .unwrap(),
                 "verification failed for message #{i}"
             );
         }
@@ -299,7 +290,9 @@ mod tests {
 
         let mut bad_msg = msg.clone();
         bad_msg[0] ^= 0x01;
-        assert!(!verifier.verify(signer.public_key(), &bad_msg, &sig).unwrap());
+        assert!(!verifier
+            .verify(signer.public_key(), &bad_msg, &sig)
+            .unwrap());
     }
 
     #[test]
@@ -366,7 +359,9 @@ mod tests {
         for i in 0u32..100 {
             let msg = format!("perf-{i}");
             let sig = signer.sign(msg.as_bytes()).unwrap();
-            assert!(verifier.verify(signer.public_key(), msg.as_bytes(), &sig).unwrap());
+            assert!(verifier
+                .verify(signer.public_key(), msg.as_bytes(), &sig)
+                .unwrap());
         }
         let elapsed = start.elapsed();
 

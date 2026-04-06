@@ -136,9 +136,7 @@ format = "json"
         assert_eq!(config.rpc.rate_limit, Some(100));
         assert_eq!(
             config.rpc.api_modules.as_deref(),
-            Some(
-                vec!["eth".to_string(), "net".to_string(), "web3".to_string()].as_slice()
-            )
+            Some(vec!["eth".to_string(), "net".to_string(), "web3".to_string()].as_slice())
         );
 
         assert_eq!(config.p2p.enabled, Some(true));
@@ -221,9 +219,7 @@ listen_addr = "0.0.0.0:8545"
         let cli_chain_id: Option<u64> = Some(1337);
         let cli_db: Option<String> = None;
 
-        let effective_chain_id = cli_chain_id
-            .or(config.node.chain_id)
-            .unwrap_or(1337);
+        let effective_chain_id = cli_chain_id.or(config.node.chain_id).unwrap_or(1337);
         let effective_db = cli_db
             .or(config.node.db.clone())
             .unwrap_or_else(|| "memory".to_string());

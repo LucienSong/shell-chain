@@ -88,8 +88,7 @@ impl ReorgEngine {
                 NodeError::Startup(format!("ancestor block not found: {:?}", ancestor_hash))
             })?;
 
-        let new_ws =
-            WorldState::at_root(Arc::clone(store), &ancestor_block.header.state_root)?;
+        let new_ws = WorldState::at_root(Arc::clone(store), &ancestor_block.header.state_root)?;
         *world_state.write() = new_ws;
 
         info!(
@@ -105,12 +104,9 @@ impl ReorgEngine {
         let mut new_head = ancestor_hash;
         let mut tip_state_root = ancestor_block.header.state_root;
         for hash in new_chain {
-            let block =
-                chain_store
-                    .get_block_by_hash(hash)?
-                    .ok_or_else(|| {
-                        NodeError::Startup(format!("new chain block not found: {:?}", hash))
-                    })?;
+            let block = chain_store.get_block_by_hash(hash)?.ok_or_else(|| {
+                NodeError::Startup(format!("new chain block not found: {:?}", hash))
+            })?;
 
             chain_store.set_canonical(block.number(), hash)?;
             tip_state_root = block.header.state_root;
@@ -139,7 +135,12 @@ impl ReorgEngine {
         let new_chain_tx_hashes: std::collections::HashSet<ShellHash> = new_chain
             .iter()
             .filter_map(|h| chain_store.get_block_by_hash(h).ok().flatten())
-            .flat_map(|b| b.transactions.iter().map(|tx| tx.hash()).collect::<Vec<_>>())
+            .flat_map(|b| {
+                b.transactions
+                    .iter()
+                    .map(|tx| tx.hash())
+                    .collect::<Vec<_>>()
+            })
             .collect();
 
         reverted_txs.retain(|tx| !new_chain_tx_hashes.contains(&tx.hash()));
@@ -251,7 +252,7 @@ mod tests {
             &world_state,
             &store,
             make_hash(0),
-            5,  // ancestor at 5
+            5, // ancestor at 5
             &[],
             &[],
             10, // finalized at 10 — ancestor < finalized
@@ -422,10 +423,7 @@ mod tests {
         assert_eq!(result.rolled_back, 1);
         assert_eq!(result.applied, 1);
         assert_eq!(result.new_head, fork_hash);
-        assert_eq!(
-            chain_store.get_head_hash().unwrap().unwrap(),
-            fork_hash
-        );
+        assert_eq!(chain_store.get_head_hash().unwrap().unwrap(), fork_hash);
     }
 
     #[test]

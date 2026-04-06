@@ -84,8 +84,7 @@ impl GenesisConfig {
 
     /// Parse genesis configuration from a JSON file path.
     pub fn from_file(path: &std::path::Path) -> Result<Self, GenesisError> {
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| GenesisError::Io(e.to_string()))?;
+        let content = std::fs::read_to_string(path).map_err(|e| GenesisError::Io(e.to_string()))?;
         Self::from_json(&content).map_err(|e| GenesisError::Parse(e.to_string()))
     }
 

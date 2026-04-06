@@ -33,8 +33,7 @@ pub fn initialize_genesis<S: KvStore + 'static>(
     // Mark the ValidatorRegistry system contract address with a placeholder
     // code hash so eth_getCode returns non-empty and the address is recognized
     // as a contract account.
-    mark_system_contract(&mut world_state)
-        .map_err(|e| GenesisError::StateInit(e.to_string()))?;
+    mark_system_contract(&mut world_state).map_err(|e| GenesisError::StateInit(e.to_string()))?;
 
     // Compute state root
     let state_root = world_state

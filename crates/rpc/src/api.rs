@@ -3,8 +3,8 @@
 use jsonrpsee::proc_macros::rpc;
 use shell_primitives::{Address, ShellHash};
 
-use crate::types::{RpcBlock, RpcLogWithMeta, RpcReceipt, RpcTransaction, CallRequest};
 use crate::filter::RawLogFilter;
+use crate::types::{CallRequest, RpcBlock, RpcLogWithMeta, RpcReceipt, RpcTransaction};
 
 /// Web3 namespace RPCs (client metadata and utility).
 #[rpc(server, namespace = "web3")]
@@ -299,9 +299,7 @@ pub trait ShellApi {
 
     /// Returns the current validator set from world state.
     #[method(name = "getValidators")]
-    async fn get_validators(
-        &self,
-    ) -> Result<Vec<Address>, jsonrpsee::types::ErrorObjectOwned>;
+    async fn get_validators(&self) -> Result<Vec<Address>, jsonrpsee::types::ErrorObjectOwned>;
 
     /// Add a validator to the active set. Unauthenticated until M3.
     #[method(name = "addValidator")]
@@ -375,13 +373,19 @@ pub trait ShellApi {
 
     /// Returns network statistics for the performance dashboard.
     #[method(name = "getNetworkStats")]
-    async fn get_network_stats(&self) -> Result<serde_json::Value, jsonrpsee::types::ErrorObjectOwned>;
+    async fn get_network_stats(
+        &self,
+    ) -> Result<serde_json::Value, jsonrpsee::types::ErrorObjectOwned>;
 
     /// Returns chain performance statistics for the performance dashboard.
     #[method(name = "getChainStats")]
-    async fn get_chain_stats(&self) -> Result<serde_json::Value, jsonrpsee::types::ErrorObjectOwned>;
+    async fn get_chain_stats(
+        &self,
+    ) -> Result<serde_json::Value, jsonrpsee::types::ErrorObjectOwned>;
 
     /// Returns finality information: last finalized block, current head, and pending attestations.
     #[method(name = "getFinalityInfo")]
-    async fn get_finality_info(&self) -> Result<serde_json::Value, jsonrpsee::types::ErrorObjectOwned>;
+    async fn get_finality_info(
+        &self,
+    ) -> Result<serde_json::Value, jsonrpsee::types::ErrorObjectOwned>;
 }

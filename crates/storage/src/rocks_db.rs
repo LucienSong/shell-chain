@@ -26,8 +26,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use rocksdb::{
-    BlockBasedOptions, BoundColumnFamily, Cache, ColumnFamilyDescriptor,
-    DBCompactionStyle, DBWithThreadMode, MultiThreaded, Options, WriteBatch as RocksWriteBatch,
+    BlockBasedOptions, BoundColumnFamily, Cache, ColumnFamilyDescriptor, DBCompactionStyle,
+    DBWithThreadMode, MultiThreaded, Options, WriteBatch as RocksWriteBatch,
 };
 
 use crate::{KvStore, StorageError, WriteBatch, WriteBatchOp};
@@ -179,32 +179,44 @@ impl RocksDbStore {
             .map(|name| ColumnFamilyDescriptor::new(*name, make_cf_opts()))
             .collect();
 
-        let db = RocksDb::open_cf_descriptors(&db_opts, &path, cf_descriptors)
-            .map_err(|e| {
-                let msg = e.to_string();
-                // F-124: Detect corruption and provide recovery guidance.
-                if msg.contains("Corruption") || msg.contains("corruption") || msg.contains("MANIFEST") {
-                    StorageError::Database(format!(
-                        "database corruption detected at '{}': {msg}. \
+        let db = RocksDb::open_cf_descriptors(&db_opts, &path, cf_descriptors).map_err(|e| {
+            let msg = e.to_string();
+            // F-124: Detect corruption and provide recovery guidance.
+            if msg.contains("Corruption") || msg.contains("corruption") || msg.contains("MANIFEST")
+            {
+                StorageError::Database(format!(
+                    "database corruption detected at '{}': {msg}. \
                          Recovery steps: \
                          1) Stop the node. \
                          2) Back up the database directory. \
                          3) Try `ldb repair --db=<path>` (RocksDB repair tool). \
                          4) If repair fails, re-sync from a snapshot or genesis.",
-                        path.as_ref().display()
-                    ))
-                } else {
-                    StorageError::Database(msg)
-                }
-            })?;
+                    path.as_ref().display()
+                ))
+            } else {
+                StorageError::Database(msg)
+            }
+        })?;
 
         let db = Arc::new(db);
 
         Ok(RocksDbStores {
-            state: RocksDbStore { db: db.clone(), cf_name: CF_STATE },
-            chain: RocksDbStore { db: db.clone(), cf_name: CF_CHAIN },
-            receipts: RocksDbStore { db: db.clone(), cf_name: CF_RECEIPTS },
-            index: RocksDbStore { db, cf_name: CF_INDEX },
+            state: RocksDbStore {
+                db: db.clone(),
+                cf_name: CF_STATE,
+            },
+            chain: RocksDbStore {
+                db: db.clone(),
+                cf_name: CF_CHAIN,
+            },
+            receipts: RocksDbStore {
+                db: db.clone(),
+                cf_name: CF_RECEIPTS,
+            },
+            index: RocksDbStore {
+                db,
+                cf_name: CF_INDEX,
+            },
         })
     }
 
@@ -341,8 +353,14 @@ mod tests {
         stores.state.put(b"key", b"state_val").unwrap();
         stores.chain.put(b"key", b"chain_val").unwrap();
 
-        assert_eq!(stores.state.get(b"key").unwrap(), Some(b"state_val".to_vec()));
-        assert_eq!(stores.chain.get(b"key").unwrap(), Some(b"chain_val".to_vec()));
+        assert_eq!(
+            stores.state.get(b"key").unwrap(),
+            Some(b"state_val".to_vec())
+        );
+        assert_eq!(
+            stores.chain.get(b"key").unwrap(),
+            Some(b"chain_val".to_vec())
+        );
         assert_eq!(stores.receipts.get(b"key").unwrap(), None);
         assert_eq!(stores.index.get(b"key").unwrap(), None);
     }
@@ -369,7 +387,10 @@ mod tests {
         // Reopen and verify
         {
             let stores = RocksDbStore::open_all(dir.path(), None).unwrap();
-            assert_eq!(stores.state.get(b"persist").unwrap(), Some(b"value".to_vec()));
+            assert_eq!(
+                stores.state.get(b"persist").unwrap(),
+                Some(b"value".to_vec())
+            );
             assert_eq!(stores.chain.get(b"block").unwrap(), Some(b"data".to_vec()));
         }
     }

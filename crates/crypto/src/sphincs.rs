@@ -1,11 +1,7 @@
 use pqcrypto_sphincsplus::sphincssha2256fsimple;
-use pqcrypto_traits::sign::{
-    DetachedSignature, PublicKey, SecretKey,
-};
+use pqcrypto_traits::sign::{DetachedSignature, PublicKey, SecretKey};
 
-use crate::{
-    CryptoError, KeyPair, PQSignature, SignatureType, Signer, Verifier,
-};
+use crate::{CryptoError, KeyPair, PQSignature, SignatureType, Signer, Verifier};
 
 // ── Signer ───────────────────────────────────────────────────
 
@@ -31,10 +27,7 @@ impl SphincsSigner {
     }
 
     /// Reconstruct from raw key bytes.
-    pub fn from_bytes(
-        public_key: &[u8],
-        secret_key: &[u8],
-    ) -> Result<Self, CryptoError> {
+    pub fn from_bytes(public_key: &[u8], secret_key: &[u8]) -> Result<Self, CryptoError> {
         sphincssha2256fsimple::PublicKey::from_bytes(public_key).map_err(|_| {
             CryptoError::InvalidPublicKeyLength {
                 expected: sphincssha2256fsimple::public_key_bytes(),
@@ -123,14 +116,14 @@ impl Verifier for SphincsVerifier {
             }
         })?;
 
-        let sig = sphincssha2256fsimple::DetachedSignature::from_bytes(&signature.data)
-            .map_err(|_| CryptoError::InvalidSignatureLength {
+        let sig = sphincssha2256fsimple::DetachedSignature::from_bytes(&signature.data).map_err(
+            |_| CryptoError::InvalidSignatureLength {
                 expected: sphincssha2256fsimple::signature_bytes(),
                 got: signature.data.len(),
-            })?;
+            },
+        )?;
 
-        let valid =
-            sphincssha2256fsimple::verify_detached_signature(&sig, message, &pk).is_ok();
+        let valid = sphincssha2256fsimple::verify_detached_signature(&sig, message, &pk).is_ok();
         Ok(valid)
     }
 
@@ -154,9 +147,7 @@ mod tests {
         assert!(!sig.is_empty());
 
         let verifier = SphincsVerifier;
-        let valid = verifier
-            .verify(signer.public_key(), message, &sig)
-            .unwrap();
+        let valid = verifier.verify(signer.public_key(), message, &sig).unwrap();
         assert!(valid);
     }
 
@@ -209,9 +200,7 @@ mod tests {
         sig.data[mid] ^= 0xff;
 
         let verifier = SphincsVerifier;
-        let valid = verifier
-            .verify(signer.public_key(), b"test", &sig)
-            .unwrap();
+        let valid = verifier.verify(signer.public_key(), b"test", &sig).unwrap();
         assert!(!valid);
     }
 
@@ -221,12 +210,11 @@ mod tests {
         let dil_sig = dil_signer.sign(b"cross-algo test").unwrap();
 
         let sphincs_verifier = SphincsVerifier;
-        let result = sphincs_verifier.verify(
-            dil_signer.public_key(),
-            b"cross-algo test",
-            &dil_sig,
+        let result = sphincs_verifier.verify(dil_signer.public_key(), b"cross-algo test", &dil_sig);
+        assert!(
+            result.is_err(),
+            "SPHINCS+ verifier must reject Dilithium signatures"
         );
-        assert!(result.is_err(), "SPHINCS+ verifier must reject Dilithium signatures");
     }
 
     #[test]
@@ -240,7 +228,10 @@ mod tests {
             b"cross-algo test",
             &sphincs_sig,
         );
-        assert!(result.is_err(), "Dilithium verifier must reject SPHINCS+ signatures");
+        assert!(
+            result.is_err(),
+            "Dilithium verifier must reject SPHINCS+ signatures"
+        );
     }
 
     #[test]

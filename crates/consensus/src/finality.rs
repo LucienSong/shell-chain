@@ -1,7 +1,7 @@
-use std::collections::{HashMap, HashSet};
-use serde::{Serialize, Deserialize};
-use shell_primitives::{Address, ShellHash};
+use serde::{Deserialize, Serialize};
 use shell_crypto::{BatchVerifier, CryptoError, PQSignature, SignatureType, VerifyItem};
+use shell_primitives::{Address, ShellHash};
+use std::collections::{HashMap, HashSet};
 
 /// An attestation is a validator's signed confirmation that they accept a block.
 /// Validators broadcast attestations after importing a valid block.
@@ -20,8 +20,18 @@ pub struct Attestation {
 
 impl Attestation {
     /// Create a new attestation.
-    pub fn new(block_hash: ShellHash, block_number: u64, validator: Address, signature: Vec<u8>) -> Self {
-        Self { block_hash, block_number, validator, signature }
+    pub fn new(
+        block_hash: ShellHash,
+        block_number: u64,
+        validator: Address,
+        signature: Vec<u8>,
+    ) -> Self {
+        Self {
+            block_hash,
+            block_number,
+            validator,
+            signature,
+        }
     }
 
     /// The message that must be signed: block_hash ++ block_number (big-endian).
@@ -69,7 +79,8 @@ impl FinalityState {
 
     /// Record an attestation. Returns true if this is a new (non-duplicate) attestation.
     pub fn record_attestation(&mut self, attestation: Attestation) -> bool {
-        let validators = self.pending_attestations
+        let validators = self
+            .pending_attestations
             .entry(attestation.block_hash)
             .or_default();
         let is_new = validators.insert(attestation.validator);
@@ -84,9 +95,15 @@ impl FinalityState {
 
     /// Check if a block has reached finality given the total validator count.
     /// BFT quorum = ceil(2N/3) to tolerate up to f Byzantine validators.
-    pub fn check_finality(&mut self, block_hash: &ShellHash, block_number: u64, total_validators: usize) -> bool {
+    pub fn check_finality(
+        &mut self,
+        block_hash: &ShellHash,
+        block_number: u64,
+        total_validators: usize,
+    ) -> bool {
         let quorum = Self::quorum_threshold(total_validators);
-        let count = self.pending_attestations
+        let count = self
+            .pending_attestations
             .get(block_hash)
             .map(|s| s.len())
             .unwrap_or(0);
@@ -150,7 +167,12 @@ impl FinalityState {
 
     /// Detect equivocation: a validator attesting to two different blocks at the same height.
     /// Returns the conflicting block hash if equivocation is found.
-    pub fn detect_equivocation(&self, block_hash: &ShellHash, block_number: u64, validator: &Address) -> Option<ShellHash> {
+    pub fn detect_equivocation(
+        &self,
+        block_hash: &ShellHash,
+        block_number: u64,
+        validator: &Address,
+    ) -> Option<ShellHash> {
         for (hash, validators) in &self.pending_attestations {
             if hash != block_hash && validators.contains(validator) {
                 // Check if any attestation for this different hash is at the same block number
@@ -209,7 +231,8 @@ impl FinalityState {
 
     /// Remove attestation data for blocks at or below the given number.
     fn prune_below(&mut self, finalized_number: u64) {
-        let hashes_to_remove: Vec<ShellHash> = self.attestation_store
+        let hashes_to_remove: Vec<ShellHash> = self
+            .attestation_store
             .iter()
             .filter_map(|(hash, atts)| {
                 atts.first()
@@ -381,7 +404,7 @@ mod tests {
         assert!(state.check_finality(&hash2, 15, 3));
 
         assert_eq!(state.attestation_count(&hash1), 0); // pruned
-        // hash2 also pruned since it's <= finalized (15)
+                                                        // hash2 also pruned since it's <= finalized (15)
     }
 
     #[test]
@@ -450,7 +473,11 @@ mod tests {
             state.record_attestation(Attestation::new(hash, 50, make_addr(i), vec![]));
         }
         assert!(!state.check_finality(&hash, 50, 10));
-        assert_eq!(state.last_finalized_number(), 0, "should not have advanced finality");
+        assert_eq!(
+            state.last_finalized_number(),
+            0,
+            "should not have advanced finality"
+        );
     }
 
     #[test]
@@ -522,7 +549,11 @@ mod tests {
             state.record_attestation(Attestation::new(hash15, 15, make_addr(i), vec![]));
         }
         assert!(!state.check_finality(&hash15, 15, 4));
-        assert_eq!(state.last_finalized_number(), 20, "finality must not go backwards");
+        assert_eq!(
+            state.last_finalized_number(),
+            20,
+            "finality must not go backwards"
+        );
 
         // Finalize block 25 (higher) — should succeed
         let hash25 = make_hash(25);
@@ -661,16 +692,14 @@ mod tests {
 
         // Verify the signature using the Dilithium verifier.
         let verifier = DilithiumVerifier;
-        let valid = verifier.verify(&pubkey, &msg, &sig).expect("verify must succeed");
+        let valid = verifier
+            .verify(&pubkey, &msg, &sig)
+            .expect("verify must succeed");
         assert!(valid, "real Dilithium signature must verify");
 
         // Record the attestation with the real signature.
-        let attestation = Attestation::new(
-            block_hash,
-            block_number,
-            validator_addr,
-            sig.data.clone(),
-        );
+        let attestation =
+            Attestation::new(block_hash, block_number, validator_addr, sig.data.clone());
         let mut state = FinalityState::new();
         assert!(state.record_attestation(attestation));
         assert_eq!(state.attestation_count(&block_hash), 1);

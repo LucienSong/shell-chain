@@ -3,8 +3,8 @@ use std::sync::Arc;
 use eth_trie::{EthTrie, Trie};
 use ethereum_types::H256;
 
-use crate::{KvStore, StorageError};
 use crate::trie_adapter::KvStoreTrieDb;
+use crate::{KvStore, StorageError};
 
 /// Ethereum-compatible Merkle Patricia Trie backed by any [`KvStore`].
 ///
@@ -175,8 +175,7 @@ mod tests {
         assert!(!proof.is_empty());
 
         let db2 = Arc::new(MemoryDb::new());
-        let verified =
-            MerkleTrie::<MemoryDb>::verify_proof(db2, &root, b"key1", proof).unwrap();
+        let verified = MerkleTrie::<MemoryDb>::verify_proof(db2, &root, b"key1", proof).unwrap();
         assert_eq!(verified, Some(b"value1".to_vec()));
     }
 

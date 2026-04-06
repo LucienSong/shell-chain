@@ -1,4 +1,4 @@
-use crate::{PQSignature, SignatureType, CryptoError};
+use crate::{CryptoError, PQSignature, SignatureType};
 
 /// Signing trait: holds a private key, used at the wallet / client side.
 pub trait Signer: Send + Sync {

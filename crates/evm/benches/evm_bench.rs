@@ -80,13 +80,18 @@ fn minimal_init_code() -> Vec<u8> {
     let prefix_len: u8 = 12;
     let mut init = Vec::new();
     init.extend_from_slice(&[
-        0x60, runtime_len,  // PUSH1 len
-        0x60, prefix_len,   // PUSH1 offset
-        0x60, 0x00,         // PUSH1 0
-        0x39,               // CODECOPY
-        0x60, runtime_len,  // PUSH1 len
-        0x60, 0x00,         // PUSH1 0
-        0xF3,               // RETURN
+        0x60,
+        runtime_len, // PUSH1 len
+        0x60,
+        prefix_len, // PUSH1 offset
+        0x60,
+        0x00, // PUSH1 0
+        0x39, // CODECOPY
+        0x60,
+        runtime_len, // PUSH1 len
+        0x60,
+        0x00, // PUSH1 0
+        0xF3, // RETURN
     ]);
     init.extend_from_slice(&runtime);
     init

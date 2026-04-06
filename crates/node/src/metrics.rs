@@ -284,7 +284,10 @@ mod tests {
         assert_eq!(body["peer_count"], 3);
         assert_eq!(body["tx_pool_size"], 42);
         assert_eq!(body["blocks_imported"], 500);
-        assert!(body["uptime_seconds"].is_u64(), "uptime_seconds should be a number");
+        assert!(
+            body["uptime_seconds"].is_u64(),
+            "uptime_seconds should be a number"
+        );
     }
 
     #[test]

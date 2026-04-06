@@ -33,7 +33,10 @@ fn encode_rlp<T: Encodable>(value: &T) -> Vec<u8> {
 /// Encode a slice of items as an RLP list with a version prefix byte.
 fn encode_rlp_list<T: Encodable>(items: &[T]) -> Vec<u8> {
     let payload: usize = items.iter().map(|item| item.length()).sum();
-    let header = alloy_rlp::Header { list: true, payload_length: payload };
+    let header = alloy_rlp::Header {
+        list: true,
+        payload_length: payload,
+    };
     let mut buf = Vec::with_capacity(1 + header.length() + payload);
     buf.push(format_version::RLP);
     header.encode(&mut buf);
@@ -56,13 +59,14 @@ fn decode_versioned<T: Decodable + serde::de::DeserializeOwned>(
         return Err(StorageError::Codec("empty data".into()));
     }
     match data[0] {
-        format_version::RLP => T::decode(&mut &data[1..])
-            .map_err(|e| StorageError::Codec(format!("RLP decode: {e}"))),
-        format_version::JSON => serde_json::from_slice(&data[1..])
-            .map_err(|e| StorageError::Codec(e.to_string())),
+        format_version::RLP => {
+            T::decode(&mut &data[1..]).map_err(|e| StorageError::Codec(format!("RLP decode: {e}")))
+        }
+        format_version::JSON => {
+            serde_json::from_slice(&data[1..]).map_err(|e| StorageError::Codec(e.to_string()))
+        }
         // Legacy data without version prefix — fall back to JSON.
-        _ => serde_json::from_slice(data)
-            .map_err(|e| StorageError::Codec(e.to_string())),
+        _ => serde_json::from_slice(data).map_err(|e| StorageError::Codec(e.to_string())),
     }
 }
 
@@ -140,7 +144,8 @@ impl<S: KvStore> ChainStore<S> {
 
         // Store header (RLP with version prefix)
         let header_bytes = encode_rlp(&block.header);
-        self.store.put(&Self::header_key(&block_hash), &header_bytes)?;
+        self.store
+            .put(&Self::header_key(&block_hash), &header_bytes)?;
 
         // Store body (full block RLP)
         let body_bytes = encode_rlp(block);
@@ -151,7 +156,8 @@ impl<S: KvStore> ChainStore<S> {
             let tx_hash = tx.hash();
             let mut index_value = block_hash.as_bytes().to_vec();
             index_value.extend_from_slice(&(i as u32).to_be_bytes());
-            self.store.put(&Self::tx_index_key(&tx_hash), &index_value)?;
+            self.store
+                .put(&Self::tx_index_key(&tx_hash), &index_value)?;
         }
 
         Ok(())
@@ -306,8 +312,9 @@ impl<S: KvStore> ChainStore<S> {
                 let block_hash = ShellHash::try_from_slice(&data[..32])
                     .map_err(|e| StorageError::Codec(e.to_string()))?;
                 let tx_idx = u32::from_be_bytes(
-                    data[32..36].try_into()
-                        .map_err(|_| StorageError::Codec("invalid tx index byte length".into()))?
+                    data[32..36]
+                        .try_into()
+                        .map_err(|_| StorageError::Codec("invalid tx index byte length".into()))?,
                 );
                 Ok(Some((block_hash, tx_idx)))
             }
@@ -320,8 +327,8 @@ impl<S: KvStore> ChainStore<S> {
     /// Persist the chain configuration (chain_id + genesis hash).
     /// Should be called exactly once after genesis initialization.
     pub fn put_chain_config(&self, config: &ChainConfig) -> Result<(), StorageError> {
-        let data = serde_json::to_vec(config)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        let data =
+            serde_json::to_vec(config).map_err(|e| StorageError::Serialization(e.to_string()))?;
         self.store.put(prefix::CHAIN_CONFIG, &data)
     }
 
@@ -449,7 +456,8 @@ impl<S: KvStore> ChainStore<S> {
     pub fn get_finalized_number(&self) -> Result<Option<u64>, StorageError> {
         match self.store.get(b"FINALIZED")? {
             Some(bytes) if bytes.len() == 8 => {
-                let arr: [u8; 8] = bytes.try_into()
+                let arr: [u8; 8] = bytes
+                    .try_into()
                     .map_err(|_| StorageError::Codec("invalid finalized number encoding".into()))?;
                 let n = u64::from_be_bytes(arr);
                 Ok(Some(n))
@@ -762,7 +770,10 @@ mod tests {
         assert_eq!(found, receipt);
 
         // Non-existent tx returns None
-        assert!(cs.get_receipt_by_tx_hash(&ShellHash::ZERO).unwrap().is_none());
+        assert!(cs
+            .get_receipt_by_tx_hash(&ShellHash::ZERO)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -775,9 +786,7 @@ mod tests {
         cs.put_block(&block).unwrap();
         cs.set_canonical(3, &hash).unwrap();
 
-        let event_sig = shell_primitives::keccak256(
-            b"Transfer(address,address,uint256)",
-        );
+        let event_sig = shell_primitives::keccak256(b"Transfer(address,address,uint256)");
         let log = shell_core::Log::new(
             Address::from([0xAB; 20]),
             vec![event_sig],
@@ -794,9 +803,7 @@ mod tests {
                 let h = shell_primitives::keccak256(item);
                 let hb = h.as_bytes();
                 for i in 0..3 {
-                    let bit = ((hb[i * 2] as usize) << 8
-                        | hb[i * 2 + 1] as usize)
-                        & 0x7FF;
+                    let bit = ((hb[i * 2] as usize) << 8 | hb[i * 2 + 1] as usize) & 0x7FF;
                     bloom[bit / 8] |= 1 << (7 - (bit % 8));
                 }
             }
@@ -874,16 +881,11 @@ mod tests {
             ShellHash::default(),
         );
         let mut buf = Vec::new();
-        let writer =
-            crate::SnapshotWriter::new(std::io::Cursor::new(&mut buf), meta).unwrap();
+        let writer = crate::SnapshotWriter::new(std::io::Cursor::new(&mut buf), meta).unwrap();
         writer.finalize().unwrap();
 
         // Import with wrong chain_id
-        let result = cs.import_snapshot(
-            std::io::Cursor::new(&buf),
-            9999,
-            &ShellHash::default(),
-        );
+        let result = cs.import_snapshot(std::io::Cursor::new(&buf), 9999, &ShellHash::default());
         assert!(result.is_err());
     }
 
@@ -911,23 +913,13 @@ mod tests {
 
         // Import
         let imported_meta = cs
-            .import_snapshot(
-                std::io::Cursor::new(&buf),
-                1337,
-                &ShellHash::default(),
-            )
+            .import_snapshot(std::io::Cursor::new(&buf), 1337, &ShellHash::default())
             .unwrap();
         assert_eq!(imported_meta.entry_count, 2);
 
         // Verify data was written
-        assert_eq!(
-            store.get(b"test-key-1").unwrap(),
-            Some(b"value-1".to_vec())
-        );
-        assert_eq!(
-            store.get(b"test-key-2").unwrap(),
-            Some(b"value-2".to_vec())
-        );
+        assert_eq!(store.get(b"test-key-1").unwrap(), Some(b"value-1".to_vec()));
+        assert_eq!(store.get(b"test-key-2").unwrap(), Some(b"value-2".to_vec()));
     }
 
     // ── Snapshot round-trip tests ──────────────────────────────────────
@@ -951,15 +943,12 @@ mod tests {
         .unwrap();
 
         // Export snapshot.
-        let meta = crate::SnapshotMetadata::new(
-            1337,
-            1,
-            b1.hash(),
-            ShellHash::default(),
-            b0.hash(),
-        );
+        let meta =
+            crate::SnapshotMetadata::new(1337, 1, b1.hash(), ShellHash::default(), b0.hash());
         let mut buf = Vec::new();
-        let exported = cs.export_snapshot(meta, std::io::Cursor::new(&mut buf)).unwrap();
+        let exported = cs
+            .export_snapshot(meta, std::io::Cursor::new(&mut buf))
+            .unwrap();
         assert_eq!(exported.chain_id, 1337);
         assert_eq!(exported.block_number, 1);
 
@@ -970,13 +959,8 @@ mod tests {
         // Build a snapshot with actual data entries for the fresh store.
         let mut buf2 = Vec::new();
         {
-            let meta2 = crate::SnapshotMetadata::new(
-                1337,
-                1,
-                b1.hash(),
-                ShellHash::default(),
-                b0.hash(),
-            );
+            let meta2 =
+                crate::SnapshotMetadata::new(1337, 1, b1.hash(), ShellHash::default(), b0.hash());
             let mut writer =
                 crate::SnapshotWriter::new(std::io::Cursor::new(&mut buf2), meta2).unwrap();
             // Manually write the chain config entry.
@@ -1009,15 +993,12 @@ mod tests {
         put_canonical(&cs, &b0);
 
         // Export snapshot referencing block 0.
-        let meta = crate::SnapshotMetadata::new(
-            1337,
-            0,
-            b0.hash(),
-            ShellHash::default(),
-            b0.hash(),
-        );
+        let meta =
+            crate::SnapshotMetadata::new(1337, 0, b0.hash(), ShellHash::default(), b0.hash());
         let mut buf = Vec::new();
-        let exported = cs.export_snapshot(meta, std::io::Cursor::new(&mut buf)).unwrap();
+        let exported = cs
+            .export_snapshot(meta, std::io::Cursor::new(&mut buf))
+            .unwrap();
 
         assert_eq!(exported.block_number, 0);
         assert_eq!(exported.block_hash, b0.hash());
@@ -1029,11 +1010,8 @@ mod tests {
         let cs = ChainStore::new(store);
 
         let corrupted = b"this is not valid snapshot data at all";
-        let result = cs.import_snapshot(
-            std::io::Cursor::new(corrupted),
-            1337,
-            &ShellHash::default(),
-        );
+        let result =
+            cs.import_snapshot(std::io::Cursor::new(corrupted), 1337, &ShellHash::default());
         assert!(result.is_err(), "corrupted snapshot should fail to import");
     }
 
@@ -1052,18 +1030,13 @@ mod tests {
         );
         let mut buf = Vec::new();
         {
-            let writer =
-                crate::SnapshotWriter::new(std::io::Cursor::new(&mut buf), meta).unwrap();
+            let writer = crate::SnapshotWriter::new(std::io::Cursor::new(&mut buf), meta).unwrap();
             writer.finalize().unwrap();
         }
 
         // Import expecting a different genesis hash.
         let wrong_genesis = ShellHash::from([0x99; 32]);
-        let result = cs.import_snapshot(
-            std::io::Cursor::new(&buf),
-            1337,
-            &wrong_genesis,
-        );
+        let result = cs.import_snapshot(std::io::Cursor::new(&buf), 1337, &wrong_genesis);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -1086,17 +1059,12 @@ mod tests {
         );
         let mut buf = Vec::new();
         {
-            let writer =
-                crate::SnapshotWriter::new(std::io::Cursor::new(&mut buf), meta).unwrap();
+            let writer = crate::SnapshotWriter::new(std::io::Cursor::new(&mut buf), meta).unwrap();
             writer.finalize().unwrap();
         }
 
         // Import expecting chain_id=1337 but snapshot has 42.
-        let result = cs.import_snapshot(
-            std::io::Cursor::new(&buf),
-            1337,
-            &ShellHash::default(),
-        );
+        let result = cs.import_snapshot(std::io::Cursor::new(&buf), 1337, &ShellHash::default());
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -1145,7 +1113,9 @@ mod tests {
 
         let log = shell_core::Log {
             address: Address::from([0xAB; 20]),
-            topics: vec![shell_primitives::keccak256(b"Transfer(address,address,uint256)")],
+            topics: vec![shell_primitives::keccak256(
+                b"Transfer(address,address,uint256)",
+            )],
             data: Bytes::from(vec![1, 2, 3]),
         };
         let receipts = vec![TransactionReceipt {
@@ -1220,10 +1190,7 @@ mod tests {
         // Write raw JSON directly
         let json = serde_json::to_vec(&receipts).unwrap();
         store
-            .put(
-                &[prefix::RECEIPTS_BY_HASH, hash.as_bytes()].concat(),
-                &json,
-            )
+            .put(&[prefix::RECEIPTS_BY_HASH, hash.as_bytes()].concat(), &json)
             .unwrap();
 
         // Read back with versioned decoder

@@ -4,8 +4,7 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion};
 
 use alloy_rlp::{Decodable, Encodable};
 use shell_core::{
-    SignedTransaction, Transaction,
-    calculate_base_fee, calc_blob_gas_price, calc_excess_blob_gas,
+    calc_blob_gas_price, calc_excess_blob_gas, calculate_base_fee, SignedTransaction, Transaction,
 };
 use shell_crypto::{PQSignature, SignatureType};
 use shell_primitives::{Address, Bytes, U256};

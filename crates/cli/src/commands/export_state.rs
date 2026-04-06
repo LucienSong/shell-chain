@@ -20,8 +20,8 @@ pub fn export_state(
     }
     #[cfg(feature = "rocksdb")]
     {
-        use std::sync::Arc;
         use shell_storage::{ChainStore, RocksDbStore, SnapshotMetadata};
+        use std::sync::Arc;
 
         let db_path = datadir.join("db");
         if !db_path.exists() {

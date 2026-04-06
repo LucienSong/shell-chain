@@ -20,12 +20,15 @@ pub mod service;
 
 pub use bandwidth::{BandwidthStats, BandwidthTracker};
 pub use channel::{ChannelNetwork, NetworkBus};
-pub use config::NetworkConfig;
 #[cfg(feature = "libp2p")]
 pub use config::validate_bootnode_multiaddr;
+pub use config::NetworkConfig;
 pub use error::NetworkError;
 #[cfg(feature = "libp2p")]
 pub use libp2p_service::Libp2pNetwork;
-pub use message::{deserialize_checked, validate_message_size, NetworkEvent, NetworkMessage, PeerId, MAX_MESSAGE_SIZE};
+pub use message::{
+    deserialize_checked, validate_message_size, NetworkEvent, NetworkMessage, PeerId,
+    MAX_MESSAGE_SIZE,
+};
 pub use security::{PeerBanList, PeerTracker};
 pub use service::NetworkService;

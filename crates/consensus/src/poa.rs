@@ -73,7 +73,10 @@ impl PoaConfig {
 
     /// Replace the authority set. Panics if the new set is empty.
     pub fn set_authorities(&mut self, new_authorities: Vec<Address>) {
-        assert!(!new_authorities.is_empty(), "authority set must not be empty");
+        assert!(
+            !new_authorities.is_empty(),
+            "authority set must not be empty"
+        );
         self.authorities = new_authorities;
     }
 }
@@ -224,11 +227,7 @@ impl PoaEngine {
     }
 
     /// Sign a block header with the proposer's key.
-    pub fn sign_block(
-        &self,
-        block: &mut Block,
-        signer: &dyn Signer,
-    ) -> Result<(), ConsensusError> {
+    pub fn sign_block(&self, block: &mut Block, signer: &dyn Signer) -> Result<(), ConsensusError> {
         let expected = self.config.proposer_for_block(block.header.number);
         if block.header.proposer != expected {
             return Err(ConsensusError::InvalidProposer {
@@ -424,7 +423,11 @@ mod tests {
         let config = PoaConfig::new(make_addrs(3), 1);
         assert_eq!(config.epoch_length, 0);
         for b in 0..20 {
-            assert_eq!(config.epoch_of(b), 0, "epoch_of should always be 0 when disabled");
+            assert_eq!(
+                config.epoch_of(b),
+                0,
+                "epoch_of should always be 0 when disabled"
+            );
         }
     }
 
@@ -443,7 +446,10 @@ mod tests {
     fn is_epoch_boundary_disabled() {
         let config = PoaConfig::new(make_addrs(3), 1);
         for b in 0..20 {
-            assert!(!config.is_epoch_boundary(b), "no boundaries when epoch disabled");
+            assert!(
+                !config.is_epoch_boundary(b),
+                "no boundaries when epoch disabled"
+            );
         }
     }
 
@@ -594,13 +600,12 @@ mod tests {
         // but verify with the correct signer's public key should fail
         let verifier = DilithiumVerifier;
         let seal = block.proposer_seal.as_ref().unwrap();
-        let result = engine.verify_seal(
-            &block.header,
-            seal,
-            _correct_signer.public_key(),
-            &verifier,
+        let result =
+            engine.verify_seal(&block.header, seal, _correct_signer.public_key(), &verifier);
+        assert!(
+            result.is_err(),
+            "seal signed by wrong key should fail verification with correct key"
         );
-        assert!(result.is_err(), "seal signed by wrong key should fail verification with correct key");
     }
 
     #[test]
@@ -678,7 +683,10 @@ mod tests {
             &verifier,
             2000, // current time well in the future
         );
-        assert!(result.is_ok(), "full header verification should pass: {result:?}");
+        assert!(
+            result.is_ok(),
+            "full header verification should pass: {result:?}"
+        );
     }
 
     #[test]

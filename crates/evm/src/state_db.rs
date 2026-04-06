@@ -107,8 +107,9 @@ impl<S: KvStore + 'static> Database for ShellStateDb<S> {
     fn code_by_hash(&mut self, code_hash: B256) -> Result<Bytecode, Self::Error> {
         let hash = b256_to_shell_hash(&code_hash);
         match self.chain_store.get_code(&hash)? {
-            Some(code) => Ok(Bytecode::new_raw_checked(code.into())
-                .unwrap_or_else(|_| Bytecode::default())),
+            Some(code) => {
+                Ok(Bytecode::new_raw_checked(code.into()).unwrap_or_else(|_| Bytecode::default()))
+            }
             None => Ok(Bytecode::default()),
         }
     }
@@ -150,9 +151,9 @@ pub(crate) fn b256_to_shell_hash(b: &B256) -> ShellHash {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use shell_primitives::keccak256;
     use shell_storage::MemoryDb;
+    use std::sync::Arc;
 
     fn setup() -> ShellStateDb<MemoryDb> {
         let state_store = Arc::new(MemoryDb::new());
@@ -189,10 +190,7 @@ mod tests {
             .set_account(&shell_addr, &account)
             .unwrap();
 
-        let info = db
-            .basic(alloy_primitives::Address::ZERO)
-            .unwrap()
-            .unwrap();
+        let info = db.basic(alloy_primitives::Address::ZERO).unwrap().unwrap();
         assert_eq!(info.nonce, 42);
         assert_eq!(info.balance, U256::from(1_000_000));
         // EOA has KECCAK_EMPTY code hash

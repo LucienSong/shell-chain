@@ -156,11 +156,7 @@ impl StatePruner {
         let cutoff = self.prunable_below.min(retention_cutoff);
 
         // Collect block numbers eligible for pruning (below the cutoff).
-        let eligible: Vec<u64> = self
-            .block_roots
-            .range(..cutoff)
-            .map(|(&n, _)| n)
-            .collect();
+        let eligible: Vec<u64> = self.block_roots.range(..cutoff).map(|(&n, _)| n).collect();
 
         let mut pruned_count: u64 = 0;
         let mut protected_count: u64 = 0;
@@ -260,11 +256,7 @@ mod tests {
 
     /// Populate the store with canonical mappings for the given block range
     /// and register them in the pruner.
-    fn setup_blocks(
-        pruner: &mut StatePruner,
-        store: &MemoryDb,
-        range: std::ops::Range<u64>,
-    ) {
+    fn setup_blocks(pruner: &mut StatePruner, store: &MemoryDb, range: std::ops::Range<u64>) {
         for n in range {
             let root = dummy_root(n as u8);
             pruner.register_block(n, root);

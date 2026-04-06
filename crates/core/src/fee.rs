@@ -43,14 +43,12 @@ pub fn calculate_base_fee(
     if parent_gas_used == gas_target {
         parent_base_fee
     } else if parent_gas_used > gas_target {
-        let delta = parent_base_fee
-            .saturating_mul(parent_gas_used - gas_target)
+        let delta = parent_base_fee.saturating_mul(parent_gas_used - gas_target)
             / gas_target
             / BASE_FEE_CHANGE_DENOMINATOR;
         parent_base_fee.saturating_add(delta.max(1))
     } else {
-        let delta = parent_base_fee
-            .saturating_mul(gas_target - parent_gas_used)
+        let delta = parent_base_fee.saturating_mul(gas_target - parent_gas_used)
             / gas_target
             / BASE_FEE_CHANGE_DENOMINATOR;
         (parent_base_fee.saturating_sub(delta)).max(1)
@@ -71,7 +69,11 @@ pub const BLOB_BASE_FEE_UPDATE_FRACTION: u64 = 3_338_477;
 /// Uses the exponential formula: `fake_exponential(MIN_BLOB_BASE_FEE, excess, BLOB_BASE_FEE_UPDATE_FRACTION)`
 /// This is an integer approximation of `min_fee * e^(excess / fraction)`.
 pub fn calc_blob_gas_price(excess_blob_gas: u64) -> u64 {
-    fake_exponential(MIN_BLOB_BASE_FEE, excess_blob_gas, BLOB_BASE_FEE_UPDATE_FRACTION)
+    fake_exponential(
+        MIN_BLOB_BASE_FEE,
+        excess_blob_gas,
+        BLOB_BASE_FEE_UPDATE_FRACTION,
+    )
 }
 
 /// Calculate excess blob gas for the next block.
@@ -111,10 +113,7 @@ mod tests {
 
     #[test]
     fn genesis_returns_initial_base_fee() {
-        assert_eq!(
-            calculate_base_fee(0, GAS_LIMIT, 0),
-            INITIAL_BASE_FEE,
-        );
+        assert_eq!(calculate_base_fee(0, GAS_LIMIT, 0), INITIAL_BASE_FEE,);
     }
 
     #[test]
@@ -292,7 +291,10 @@ mod tests {
     #[test]
     fn blob_gas_price_zero_excess() {
         let price = calc_blob_gas_price(0);
-        assert_eq!(price, MIN_BLOB_BASE_FEE, "zero excess should yield minimum blob fee");
+        assert_eq!(
+            price, MIN_BLOB_BASE_FEE,
+            "zero excess should yield minimum blob fee"
+        );
     }
 
     #[test]
@@ -301,8 +303,14 @@ mod tests {
         // Need enough excess to overcome integer truncation (factor=1)
         let price1 = calc_blob_gas_price(BLOB_BASE_FEE_UPDATE_FRACTION);
         let price2 = calc_blob_gas_price(BLOB_BASE_FEE_UPDATE_FRACTION * 3);
-        assert!(price1 > price0, "blob gas price should increase with excess (got {price1} vs {price0})");
-        assert!(price2 > price1, "blob gas price should keep increasing (got {price2} vs {price1})");
+        assert!(
+            price1 > price0,
+            "blob gas price should increase with excess (got {price1} vs {price0})"
+        );
+        assert!(
+            price2 > price1,
+            "blob gas price should keep increasing (got {price2} vs {price1})"
+        );
     }
 
     #[test]
@@ -340,7 +348,10 @@ mod tests {
         let base = 1_000_000_000u64;
         let above_target = GAS_TARGET + 5_000_000;
         let new = calculate_base_fee(above_target, GAS_LIMIT, base);
-        assert!(new > base, "base fee must increase when usage is above target");
+        assert!(
+            new > base,
+            "base fee must increase when usage is above target"
+        );
         let expected_delta = base * (above_target - GAS_TARGET) / GAS_TARGET / 8;
         assert_eq!(new, base + expected_delta.max(1));
     }
@@ -350,7 +361,10 @@ mod tests {
         let base = 1_000_000_000u64;
         let below_target = GAS_TARGET - 5_000_000;
         let new = calculate_base_fee(below_target, GAS_LIMIT, base);
-        assert!(new < base, "base fee must decrease when usage is below target");
+        assert!(
+            new < base,
+            "base fee must decrease when usage is below target"
+        );
         let expected_delta = base * (GAS_TARGET - below_target) / GAS_TARGET / 8;
         assert_eq!(new, base - expected_delta);
     }
@@ -362,7 +376,10 @@ mod tests {
         assert!(full > base);
         let empty = calculate_base_fee(0, GAS_LIMIT, full);
         assert!(empty < full);
-        assert!(empty > base / 2, "should not drop too far after one oscillation");
+        assert!(
+            empty > base / 2,
+            "should not drop too far after one oscillation"
+        );
     }
 
     #[test]
@@ -372,7 +389,10 @@ mod tests {
         for _ in 0..100 {
             fee = calculate_base_fee(GAS_TARGET, GAS_LIMIT, fee);
         }
-        assert_eq!(fee, base, "base fee should remain constant at 50% utilization");
+        assert_eq!(
+            fee, base,
+            "base fee should remain constant at 50% utilization"
+        );
     }
 
     #[test]
@@ -388,12 +408,20 @@ mod tests {
     fn eip1559_base_fee_max_change_bounded() {
         let base = 1_000_000u64;
         let max_increase = calculate_base_fee(GAS_LIMIT, GAS_LIMIT, base);
-        assert!(max_increase - base <= base / 8 + 1,
-            "increase {} exceeds 12.5% of {}", max_increase - base, base);
+        assert!(
+            max_increase - base <= base / 8 + 1,
+            "increase {} exceeds 12.5% of {}",
+            max_increase - base,
+            base
+        );
 
         let max_decrease = calculate_base_fee(0, GAS_LIMIT, base);
-        assert!(base - max_decrease <= base / 8,
-            "decrease {} exceeds 12.5% of {}", base - max_decrease, base);
+        assert!(
+            base - max_decrease <= base / 8,
+            "decrease {} exceeds 12.5% of {}",
+            base - max_decrease,
+            base
+        );
     }
 
     // ════════════════════════════════════════════════════════════
@@ -412,9 +440,14 @@ mod tests {
             prices.push(price);
         }
         for i in 1..prices.len() {
-            assert!(prices[i] >= prices[i - 1],
+            assert!(
+                prices[i] >= prices[i - 1],
                 "blob gas price should increase: block {} = {}, block {} = {}",
-                i - 1, prices[i - 1], i, prices[i]);
+                i - 1,
+                prices[i - 1],
+                i,
+                prices[i]
+            );
         }
     }
 
@@ -424,7 +457,10 @@ mod tests {
         for _ in 0..20 {
             excess = calc_excess_blob_gas(excess, 0);
         }
-        assert_eq!(excess, 0, "excess should drain to zero when no blobs are used");
+        assert_eq!(
+            excess, 0,
+            "excess should drain to zero when no blobs are used"
+        );
     }
 
     #[test]
@@ -444,7 +480,9 @@ mod tests {
         // Growth should be super-linear (exponential-like)
         let growth1 = p1 - p0;
         let growth2 = p2 - p1;
-        assert!(growth2 > growth1,
-            "growth should accelerate (exponential): g1={growth1}, g2={growth2}");
+        assert!(
+            growth2 > growth1,
+            "growth should accelerate (exponential): g1={growth1}, g2={growth2}"
+        );
     }
 }

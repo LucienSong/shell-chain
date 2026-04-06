@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use core::fmt;
+use serde::{Deserialize, Serialize};
 
 use crate::{PrimitivesError, ShellHash};
 

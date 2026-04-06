@@ -1,6 +1,6 @@
-use serde::{Deserialize, Serialize};
-use serde::de::Error as DeError;
 use alloy_rlp::Encodable;
+use serde::de::Error as DeError;
+use serde::{Deserialize, Serialize};
 
 /// Currently accepted PQ signature algorithms.
 ///
@@ -8,10 +8,8 @@ use alloy_rlp::Encodable;
 /// the validation pipeline. Both algorithms are accepted during the
 /// initial post-quantum migration; the list can be narrowed later to
 /// deprecate or block weaker algorithms.
-pub const ALLOWED_ALGORITHMS: &[SignatureType] = &[
-    SignatureType::Dilithium3,
-    SignatureType::SphincsSha2256f,
-];
+pub const ALLOWED_ALGORITHMS: &[SignatureType] =
+    &[SignatureType::Dilithium3, SignatureType::SphincsSha2256f];
 
 /// Maximum allowed signature size in bytes.
 /// SPHINCS+-SHA2-256f produces ~49856 bytes; we allow some headroom.
@@ -107,7 +105,12 @@ impl Encodable for PQSignature {
 
     fn length(&self) -> usize {
         let payload = self.fields_len();
-        alloy_rlp::Header { list: true, payload_length: payload }.length() + payload
+        alloy_rlp::Header {
+            list: true,
+            payload_length: payload,
+        }
+        .length()
+            + payload
     }
 }
 
@@ -148,7 +151,9 @@ impl PQSignature {
         if self.data.len() > max {
             return Err(format!(
                 "signature too large: {} bytes (max {} for {:?})",
-                self.data.len(), max, self.sig_type
+                self.data.len(),
+                max,
+                self.sig_type
             ));
         }
         Ok(())
@@ -181,12 +186,18 @@ mod tests {
         use alloy_rlp::Decodable;
         // Build an oversized signature manually without going through PQSignature::new
         // (which doesn't enforce size at construction).
-        let oversized = PQSignature { sig_type: SignatureType::Dilithium3, data: vec![0u8; 5000] };
+        let oversized = PQSignature {
+            sig_type: SignatureType::Dilithium3,
+            data: vec![0u8; 5000],
+        };
         let mut encoded = Vec::new();
         oversized.encode(&mut encoded);
 
         let result = PQSignature::decode(&mut encoded.as_slice());
-        assert!(result.is_err(), "RLP decode should reject oversized Dilithium sig");
+        assert!(
+            result.is_err(),
+            "RLP decode should reject oversized Dilithium sig"
+        );
     }
 
     #[test]
@@ -209,7 +220,10 @@ mod tests {
             serde_json::to_string(&oversized_data).unwrap()
         );
         let result: Result<PQSignature, _> = serde_json::from_str(&json);
-        assert!(result.is_err(), "JSON decode should reject oversized Dilithium sig");
+        assert!(
+            result.is_err(),
+            "JSON decode should reject oversized Dilithium sig"
+        );
     }
 
     #[test]

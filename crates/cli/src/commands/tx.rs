@@ -198,8 +198,7 @@ fn cmd_deploy(
         None => U256::ZERO,
     };
 
-    let estimated_gas =
-        rpc_estimate_gas(&rpc_url, &from, None, &value_u256, &code_bytes)?;
+    let estimated_gas = rpc_estimate_gas(&rpc_url, &from, None, &value_u256, &code_bytes)?;
 
     let tx = Transaction {
         chain_id,
@@ -289,7 +288,11 @@ fn load_keystore(path: &PathBuf) -> Result<Box<dyn Signer>, Box<dyn std::error::
 fn parse_address(s: &str) -> Result<Address, Box<dyn std::error::Error>> {
     let s = s.strip_prefix("0x").unwrap_or(s);
     if s.len() != 40 {
-        return Err(format!("invalid address length: expected 40 hex chars, got {}", s.len()).into());
+        return Err(format!(
+            "invalid address length: expected 40 hex chars, got {}",
+            s.len()
+        )
+        .into());
     }
     let bytes = hex::decode(s)?;
     Ok(Address::from_slice(&bytes))
@@ -307,8 +310,8 @@ fn parse_u256(s: &str) -> Result<U256, Box<dyn std::error::Error>> {
         Ok(U256::from_be_slice(&bytes))
     } else {
         // Decimal input
-        let val = U256::from_str_radix(s, 10)
-            .map_err(|e| format!("invalid decimal value '{s}': {e}"))?;
+        let val =
+            U256::from_str_radix(s, 10).map_err(|e| format!("invalid decimal value '{s}': {e}"))?;
         Ok(val)
     }
 }

@@ -1,4 +1,4 @@
-use crate::{PQSignature, SignatureType, CryptoError};
+use crate::{CryptoError, PQSignature, SignatureType};
 
 /// Verification trait: stateless, used at every node for every transaction.
 ///

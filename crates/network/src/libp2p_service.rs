@@ -15,7 +15,10 @@ use libp2p::gossipsub::{self, IdentTopic, PeerScoreParams, PeerScoreThresholds, 
 use libp2p::kad;
 use libp2p::swarm::behaviour::toggle::Toggle;
 use libp2p::swarm::SwarmEvent;
-use libp2p::{autonat, connection_limits, dcutr, identify, mdns, noise, relay, tcp, yamux, Multiaddr, PeerId as Libp2pPeerId, Swarm, SwarmBuilder};
+use libp2p::{
+    autonat, connection_limits, dcutr, identify, mdns, noise, relay, tcp, yamux, Multiaddr,
+    PeerId as Libp2pPeerId, Swarm, SwarmBuilder,
+};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::interval;
 use tracing::{debug, info, warn};
@@ -35,7 +38,10 @@ enum TopicKind {
 
 /// Commands sent to the Swarm background task.
 enum SwarmCommand {
-    Publish { topic: TopicKind, data: Vec<u8> },
+    Publish {
+        topic: TopicKind,
+        data: Vec<u8>,
+    },
     /// Request a snapshot of current peer scores.
     PeerScores {
         reply: oneshot::Sender<Vec<(PeerId, f64)>>,
@@ -140,7 +146,14 @@ impl Libp2pNetwork {
         let bw = bandwidth.clone();
 
         tokio::spawn(swarm_loop(
-            swarm, cmd_rx, event_tx, pc, blocks_topic, txs_topic, attestation_topic, bw,
+            swarm,
+            cmd_rx,
+            event_tx,
+            pc,
+            blocks_topic,
+            txs_topic,
+            attestation_topic,
+            bw,
         ));
 
         Ok(Self {
@@ -162,7 +175,12 @@ impl Libp2pNetwork {
     /// Returns an empty vec if the channel is closed or scoring is disabled.
     pub async fn peer_scores(&self) -> Vec<(PeerId, f64)> {
         let (tx, rx) = oneshot::channel();
-        if self.cmd_tx.send(SwarmCommand::PeerScores { reply: tx }).await.is_err() {
+        if self
+            .cmd_tx
+            .send(SwarmCommand::PeerScores { reply: tx })
+            .await
+            .is_err()
+        {
             return Vec::new();
         }
         rx.await.unwrap_or_default()
@@ -186,7 +204,10 @@ fn build_swarm(config: &NetworkConfig) -> Result<Swarm<ShellBehaviour>, NetworkE
     // Enforce max_peers as an upper bound on total established connections (F-070).
     // When both max_peers and max_connections are set, use the stricter limit.
     let effective_max_established = match (config.max_connections > 0, config.max_peers > 0) {
-        (true, true) => Some(std::cmp::min(config.max_connections, config.max_peers as u32)),
+        (true, true) => Some(std::cmp::min(
+            config.max_connections,
+            config.max_peers as u32,
+        )),
         (true, false) => Some(config.max_connections),
         (false, true) => Some(config.max_peers as u32),
         (false, false) => None,
@@ -224,158 +245,160 @@ fn build_swarm(config: &NetworkConfig) -> Result<Swarm<ShellBehaviour>, NetworkE
         .map_err(|e| NetworkError::Transport(format!("gossipsub config: {e}")))?;
 
     // Helper closure that builds the common behaviours (everything except relay_client).
-    let make_behaviour = move |key: &libp2p::identity::Keypair,
-                               relay_behaviour: Option<relay::client::Behaviour>|
-          -> Result<ShellBehaviour, Box<dyn std::error::Error + Send + Sync>> {
-        let peer_id = key.public().to_peer_id();
+    let make_behaviour =
+        move |key: &libp2p::identity::Keypair,
+              relay_behaviour: Option<relay::client::Behaviour>|
+              -> Result<ShellBehaviour, Box<dyn std::error::Error + Send + Sync>> {
+            let peer_id = key.public().to_peer_id();
 
-        let mut gossipsub = gossipsub::Behaviour::new(
-            gossipsub::MessageAuthenticity::Signed(key.clone()),
-            gs_config,
-        )
-        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
-
-        // Configure peer scoring to penalise misbehaving peers and
-        // reward timely block/tx delivery.
-        if enable_peer_scoring {
-            let blocks_topic_params = TopicScoreParams {
-                topic_weight: 1.0,
-                time_in_mesh_weight: 0.5,
-                time_in_mesh_quantum: Duration::from_secs(1),
-                time_in_mesh_cap: 3600.0,
-                first_message_deliveries_weight: 5.0,
-                first_message_deliveries_cap: 100.0,
-                first_message_deliveries_decay: 0.99,
-                invalid_message_deliveries_weight: -100.0,
-                invalid_message_deliveries_decay: 0.5,
-                mesh_message_deliveries_weight: 0.0,
-                mesh_failure_penalty_weight: 0.0,
-                ..Default::default()
-            };
-
-            let txs_topic_params = TopicScoreParams {
-                topic_weight: 0.5,
-                time_in_mesh_weight: 0.3,
-                time_in_mesh_quantum: Duration::from_secs(1),
-                time_in_mesh_cap: 3600.0,
-                first_message_deliveries_weight: 2.0,
-                first_message_deliveries_cap: 1000.0,
-                first_message_deliveries_decay: 0.99,
-                invalid_message_deliveries_weight: -50.0,
-                invalid_message_deliveries_decay: 0.5,
-                mesh_message_deliveries_weight: 0.0,
-                mesh_failure_penalty_weight: 0.0,
-                ..Default::default()
-            };
-
-            let attestation_topic_params = TopicScoreParams {
-                topic_weight: 0.8,
-                time_in_mesh_weight: 0.4,
-                time_in_mesh_quantum: Duration::from_secs(1),
-                time_in_mesh_cap: 3600.0,
-                first_message_deliveries_weight: 3.0,
-                first_message_deliveries_cap: 200.0,
-                first_message_deliveries_decay: 0.99,
-                invalid_message_deliveries_weight: -80.0,
-                invalid_message_deliveries_decay: 0.5,
-                mesh_message_deliveries_weight: 0.0,
-                mesh_failure_penalty_weight: 0.0,
-                ..Default::default()
-            };
-
-            let blocks_hash = IdentTopic::new(&blocks_topic_name).hash();
-            let txs_hash = IdentTopic::new(&txs_topic_name).hash();
-            let attestation_hash = IdentTopic::new(&attestation_topic_name).hash();
-
-            let mut topic_scores = HashMap::new();
-            topic_scores.insert(blocks_hash, blocks_topic_params);
-            topic_scores.insert(txs_hash, txs_topic_params);
-            topic_scores.insert(attestation_hash, attestation_topic_params);
-
-            let peer_score_params = PeerScoreParams {
-                topics: topic_scores,
-                ..Default::default()
-            };
-
-            let thresholds = PeerScoreThresholds {
-                gossip_threshold: -100.0,
-                publish_threshold: -200.0,
-                graylist_threshold: -300.0,
-                accept_px_threshold: 100.0,
-                opportunistic_graft_threshold: 5.0,
-            };
-
-            gossipsub
-                .with_peer_score(peer_score_params, thresholds)
-                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-                    format!("peer scoring: {e}").into()
-                })?;
-        }
-
-        let kademlia = if enable_kademlia {
-            let store = kad::store::MemoryStore::new(peer_id);
-            let mut kad_config =
-                kad::Config::new(libp2p::StreamProtocol::new("/shell-chain/kad/1.0.0"));
-            kad_config.set_query_timeout(Duration::from_secs(60));
-            let mut behaviour = kad::Behaviour::with_config(peer_id, store, kad_config);
-            behaviour.set_mode(Some(kad::Mode::Server));
-            Some(behaviour)
-        } else {
-            None
-        };
-
-        let mdns = if enable_mdns {
-            Some(
-                mdns::tokio::Behaviour::new(mdns::Config::default(), peer_id)
-                    .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?,
+            let mut gossipsub = gossipsub::Behaviour::new(
+                gossipsub::MessageAuthenticity::Signed(key.clone()),
+                gs_config,
             )
-        } else {
-            None
-        };
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
 
-        let identify = identify::Behaviour::new(identify::Config::new(
-            "/shell-chain/1.0.0".into(),
-            key.public(),
-        ));
+            // Configure peer scoring to penalise misbehaving peers and
+            // reward timely block/tx delivery.
+            if enable_peer_scoring {
+                let blocks_topic_params = TopicScoreParams {
+                    topic_weight: 1.0,
+                    time_in_mesh_weight: 0.5,
+                    time_in_mesh_quantum: Duration::from_secs(1),
+                    time_in_mesh_cap: 3600.0,
+                    first_message_deliveries_weight: 5.0,
+                    first_message_deliveries_cap: 100.0,
+                    first_message_deliveries_decay: 0.99,
+                    invalid_message_deliveries_weight: -100.0,
+                    invalid_message_deliveries_decay: 0.5,
+                    mesh_message_deliveries_weight: 0.0,
+                    mesh_failure_penalty_weight: 0.0,
+                    ..Default::default()
+                };
 
-        let dcutr_behaviour: Option<dcutr::Behaviour> = if enable_dcutr && relay_behaviour.is_some() {
-            Some(dcutr::Behaviour::new(peer_id))
-        } else {
-            None
-        };
+                let txs_topic_params = TopicScoreParams {
+                    topic_weight: 0.5,
+                    time_in_mesh_weight: 0.3,
+                    time_in_mesh_quantum: Duration::from_secs(1),
+                    time_in_mesh_cap: 3600.0,
+                    first_message_deliveries_weight: 2.0,
+                    first_message_deliveries_cap: 1000.0,
+                    first_message_deliveries_decay: 0.99,
+                    invalid_message_deliveries_weight: -50.0,
+                    invalid_message_deliveries_decay: 0.5,
+                    mesh_message_deliveries_weight: 0.0,
+                    mesh_failure_penalty_weight: 0.0,
+                    ..Default::default()
+                };
 
-        let autonat_behaviour: Option<autonat::Behaviour> = if enable_autonat {
-            Some(autonat::Behaviour::new(peer_id, autonat::Config::default()))
-        } else {
-            None
-        };
+                let attestation_topic_params = TopicScoreParams {
+                    topic_weight: 0.8,
+                    time_in_mesh_weight: 0.4,
+                    time_in_mesh_quantum: Duration::from_secs(1),
+                    time_in_mesh_cap: 3600.0,
+                    first_message_deliveries_weight: 3.0,
+                    first_message_deliveries_cap: 200.0,
+                    first_message_deliveries_decay: 0.99,
+                    invalid_message_deliveries_weight: -80.0,
+                    invalid_message_deliveries_decay: 0.5,
+                    mesh_message_deliveries_weight: 0.0,
+                    mesh_failure_penalty_weight: 0.0,
+                    ..Default::default()
+                };
 
-        // Relay server with amplification limits (F-071).
-        let relay_server_behaviour: Option<relay::Behaviour> = if relay_behaviour.is_some() {
-            let relay_cfg = relay::Config {
-                max_reservations: 128,
-                max_circuits: 16,
-                max_circuit_duration: Duration::from_secs(300),
-                max_circuit_bytes: 1024 * 1024, // 1 MB per circuit
-                ..Default::default()
+                let blocks_hash = IdentTopic::new(&blocks_topic_name).hash();
+                let txs_hash = IdentTopic::new(&txs_topic_name).hash();
+                let attestation_hash = IdentTopic::new(&attestation_topic_name).hash();
+
+                let mut topic_scores = HashMap::new();
+                topic_scores.insert(blocks_hash, blocks_topic_params);
+                topic_scores.insert(txs_hash, txs_topic_params);
+                topic_scores.insert(attestation_hash, attestation_topic_params);
+
+                let peer_score_params = PeerScoreParams {
+                    topics: topic_scores,
+                    ..Default::default()
+                };
+
+                let thresholds = PeerScoreThresholds {
+                    gossip_threshold: -100.0,
+                    publish_threshold: -200.0,
+                    graylist_threshold: -300.0,
+                    accept_px_threshold: 100.0,
+                    opportunistic_graft_threshold: 5.0,
+                };
+
+                gossipsub
+                    .with_peer_score(peer_score_params, thresholds)
+                    .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+                        format!("peer scoring: {e}").into()
+                    })?;
+            }
+
+            let kademlia = if enable_kademlia {
+                let store = kad::store::MemoryStore::new(peer_id);
+                let mut kad_config =
+                    kad::Config::new(libp2p::StreamProtocol::new("/shell-chain/kad/1.0.0"));
+                kad_config.set_query_timeout(Duration::from_secs(60));
+                let mut behaviour = kad::Behaviour::with_config(peer_id, store, kad_config);
+                behaviour.set_mode(Some(kad::Mode::Server));
+                Some(behaviour)
+            } else {
+                None
             };
-            Some(relay::Behaviour::new(peer_id, relay_cfg))
-        } else {
-            None
-        };
 
-        Ok(ShellBehaviour {
-            gossipsub,
-            kademlia: kademlia.into(),
-            mdns: mdns.into(),
-            identify,
-            relay_client: relay_behaviour.into(),
-            relay_server: relay_server_behaviour.into(),
-            dcutr: dcutr_behaviour.into(),
-            autonat: autonat_behaviour.into(),
-            connection_limits: connection_limits::Behaviour::new(conn_limits),
-        })
-    };
+            let mdns = if enable_mdns {
+                Some(
+                    mdns::tokio::Behaviour::new(mdns::Config::default(), peer_id)
+                        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?,
+                )
+            } else {
+                None
+            };
+
+            let identify = identify::Behaviour::new(identify::Config::new(
+                "/shell-chain/1.0.0".into(),
+                key.public(),
+            ));
+
+            let dcutr_behaviour: Option<dcutr::Behaviour> =
+                if enable_dcutr && relay_behaviour.is_some() {
+                    Some(dcutr::Behaviour::new(peer_id))
+                } else {
+                    None
+                };
+
+            let autonat_behaviour: Option<autonat::Behaviour> = if enable_autonat {
+                Some(autonat::Behaviour::new(peer_id, autonat::Config::default()))
+            } else {
+                None
+            };
+
+            // Relay server with amplification limits (F-071).
+            let relay_server_behaviour: Option<relay::Behaviour> = if relay_behaviour.is_some() {
+                let relay_cfg = relay::Config {
+                    max_reservations: 128,
+                    max_circuits: 16,
+                    max_circuit_duration: Duration::from_secs(300),
+                    max_circuit_bytes: 1024 * 1024, // 1 MB per circuit
+                    ..Default::default()
+                };
+                Some(relay::Behaviour::new(peer_id, relay_cfg))
+            } else {
+                None
+            };
+
+            Ok(ShellBehaviour {
+                gossipsub,
+                kademlia: kademlia.into(),
+                mdns: mdns.into(),
+                identify,
+                relay_client: relay_behaviour.into(),
+                relay_server: relay_server_behaviour.into(),
+                dcutr: dcutr_behaviour.into(),
+                autonat: autonat_behaviour.into(),
+                connection_limits: connection_limits::Behaviour::new(conn_limits),
+            })
+        };
 
     // Build the swarm. When relay is enabled we add a relay client transport
     // so the node can connect through relay nodes. The builder signature
@@ -392,10 +415,7 @@ fn build_swarm(config: &NetworkConfig) -> Result<Swarm<ShellBehaviour>, NetworkE
             .map_err(|e| NetworkError::Transport(format!("transport: {e}")))?
             .with_dns()
             .map_err(|e| NetworkError::Transport(format!("dns transport: {e}")))?
-            .with_relay_client(
-                noise::Config::new,
-                yamux::Config::default,
-            )
+            .with_relay_client(noise::Config::new, yamux::Config::default)
             .map_err(|e| NetworkError::Transport(format!("relay transport: {e}")))?
             .with_behaviour(|key, relay| make_behaviour(key, Some(relay)))
             .map_err(|e| NetworkError::Transport(format!("behaviour: {e}")))?
@@ -471,7 +491,11 @@ async fn swarm_loop(
     if let Err(e) = swarm.behaviour_mut().gossipsub.subscribe(&txs_topic) {
         warn!("Failed to subscribe to txs topic: {e}");
     }
-    if let Err(e) = swarm.behaviour_mut().gossipsub.subscribe(&attestation_topic) {
+    if let Err(e) = swarm
+        .behaviour_mut()
+        .gossipsub
+        .subscribe(&attestation_topic)
+    {
         warn!("Failed to subscribe to attestation topic: {e}");
     }
 
@@ -562,13 +586,11 @@ async fn handle_swarm_event(
 ) {
     match event {
         // Gossipsub message received.
-        SwarmEvent::Behaviour(ShellBehaviourEvent::Gossipsub(
-            gossipsub::Event::Message {
-                propagation_source,
-                message_id,
-                message,
-            },
-        )) => {
+        SwarmEvent::Behaviour(ShellBehaviourEvent::Gossipsub(gossipsub::Event::Message {
+            propagation_source,
+            message_id,
+            message,
+        })) => {
             let data_len = message.data.len() as u64;
             // F-069: reject messages exceeding the application-level size limit.
             if message.data.len() > crate::message::MAX_MESSAGE_SIZE {
@@ -584,11 +606,14 @@ async fn handle_swarm_event(
                 if banned {
                     warn!(peer = %propagation_source, "peer banned for repeated violations");
                 }
-                swarm.behaviour_mut().gossipsub.report_message_validation_result(
-                    &message_id,
-                    &propagation_source,
-                    gossipsub::MessageAcceptance::Reject,
-                );
+                swarm
+                    .behaviour_mut()
+                    .gossipsub
+                    .report_message_validation_result(
+                        &message_id,
+                        &propagation_source,
+                        gossipsub::MessageAcceptance::Reject,
+                    );
                 return;
             }
             // F-065: drop message when bandwidth limit exceeded.
@@ -598,27 +623,30 @@ async fn handle_swarm_event(
                     peer = %propagation_source,
                     "Inbound bandwidth limit exceeded — dropping message"
                 );
-                swarm.behaviour_mut().gossipsub.report_message_validation_result(
-                    &message_id,
-                    &propagation_source,
-                    gossipsub::MessageAcceptance::Ignore,
-                );
+                swarm
+                    .behaviour_mut()
+                    .gossipsub
+                    .report_message_validation_result(
+                        &message_id,
+                        &propagation_source,
+                        gossipsub::MessageAcceptance::Ignore,
+                    );
                 return;
             }
             let peer = PeerId(propagation_source.to_string());
             match serde_json::from_slice::<NetworkMessage>(&message.data) {
                 Ok(msg) => {
                     // F-062: accept valid message so gossipsub propagates it.
-                    swarm.behaviour_mut().gossipsub.report_message_validation_result(
-                        &message_id,
-                        &propagation_source,
-                        gossipsub::MessageAcceptance::Accept,
-                    );
+                    swarm
+                        .behaviour_mut()
+                        .gossipsub
+                        .report_message_validation_result(
+                            &message_id,
+                            &propagation_source,
+                            gossipsub::MessageAcceptance::Accept,
+                        );
                     let _ = event_tx
-                        .send(NetworkEvent::MessageReceived {
-                            peer,
-                            message: msg,
-                        })
+                        .send(NetworkEvent::MessageReceived { peer, message: msg })
                         .await;
                 }
                 Err(e) => {
@@ -630,18 +658,22 @@ async fn handle_swarm_event(
                     if banned {
                         warn!(peer = %propagation_source, "peer banned for repeated violations");
                     }
-                    swarm.behaviour_mut().gossipsub.report_message_validation_result(
-                        &message_id,
-                        &propagation_source,
-                        gossipsub::MessageAcceptance::Reject,
-                    );
+                    swarm
+                        .behaviour_mut()
+                        .gossipsub
+                        .report_message_validation_result(
+                            &message_id,
+                            &propagation_source,
+                            gossipsub::MessageAcceptance::Reject,
+                        );
                 }
             }
         }
         // Kademlia routing table updated.
-        SwarmEvent::Behaviour(ShellBehaviourEvent::Kademlia(
-            kad::Event::RoutingUpdated { peer, .. },
-        )) => {
+        SwarmEvent::Behaviour(ShellBehaviourEvent::Kademlia(kad::Event::RoutingUpdated {
+            peer,
+            ..
+        })) => {
             debug!("Kademlia routing updated: {peer}");
             // F-064: Do NOT auto-add Kademlia-discovered peers to GossipSub mesh.
             // Peers join gossipsub mesh naturally via subscription protocol;
@@ -674,10 +706,7 @@ async fn handle_swarm_event(
             for (peer_id, addr) in peers {
                 info!("discovered peer on address peer={peer_id} address={addr}");
                 swarm.add_peer_address(peer_id, addr);
-                swarm
-                    .behaviour_mut()
-                    .gossipsub
-                    .add_explicit_peer(&peer_id);
+                swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
                 let _ = event_tx
                     .send(NetworkEvent::PeerConnected(PeerId(peer_id.to_string())))
                     .await;
@@ -693,9 +722,7 @@ async fn handle_swarm_event(
                     .gossipsub
                     .remove_explicit_peer(&peer_id);
                 let _ = event_tx
-                    .send(NetworkEvent::PeerDisconnected(PeerId(
-                        peer_id.to_string(),
-                    )))
+                    .send(NetworkEvent::PeerDisconnected(PeerId(peer_id.to_string())))
                     .await;
             }
             update_peer_count(swarm, peer_count);
@@ -703,7 +730,11 @@ async fn handle_swarm_event(
         // Relay client events.
         SwarmEvent::Behaviour(ShellBehaviourEvent::RelayClient(event)) => {
             match &event {
-                relay::client::Event::ReservationReqAccepted { relay_peer_id, renewal, .. } => {
+                relay::client::Event::ReservationReqAccepted {
+                    relay_peer_id,
+                    renewal,
+                    ..
+                } => {
                     info!(
                         relay = %relay_peer_id,
                         renewal,
@@ -724,46 +755,42 @@ async fn handle_swarm_event(
             debug!("Relay server event: {event:?}");
         }
         // DCUtR hole-punch events.
-        SwarmEvent::Behaviour(ShellBehaviourEvent::Dcutr(event)) => {
-            match &event.result {
-                Ok(_conn_id) => {
-                    info!(
-                        remote = %event.remote_peer_id,
-                        "DCUtR hole-punch succeeded — direct connection established"
-                    );
-                }
-                Err(e) => {
-                    warn!(
-                        remote = %event.remote_peer_id,
-                        error = %e,
-                        "DCUtR hole-punch failed"
-                    );
-                }
+        SwarmEvent::Behaviour(ShellBehaviourEvent::Dcutr(event)) => match &event.result {
+            Ok(_conn_id) => {
+                info!(
+                    remote = %event.remote_peer_id,
+                    "DCUtR hole-punch succeeded — direct connection established"
+                );
             }
-        }
+            Err(e) => {
+                warn!(
+                    remote = %event.remote_peer_id,
+                    error = %e,
+                    "DCUtR hole-punch failed"
+                );
+            }
+        },
         // AutoNAT events.
-        SwarmEvent::Behaviour(ShellBehaviourEvent::Autonat(event)) => {
-            match &event {
-                autonat::Event::StatusChanged { old, new } => {
-                    let status_str = |s: &autonat::NatStatus| match s {
-                        autonat::NatStatus::Public(addr) => format!("Public({addr})"),
-                        autonat::NatStatus::Private => "Private".to_string(),
-                        autonat::NatStatus::Unknown => "Unknown".to_string(),
-                    };
-                    info!(
-                        old_status = %status_str(old),
-                        new_status = %status_str(new),
-                        "AutoNAT status changed"
-                    );
-                }
-                autonat::Event::InboundProbe(e) => {
-                    debug!("AutoNAT inbound probe: {e:?}");
-                }
-                autonat::Event::OutboundProbe(e) => {
-                    debug!("AutoNAT outbound probe: {e:?}");
-                }
+        SwarmEvent::Behaviour(ShellBehaviourEvent::Autonat(event)) => match &event {
+            autonat::Event::StatusChanged { old, new } => {
+                let status_str = |s: &autonat::NatStatus| match s {
+                    autonat::NatStatus::Public(addr) => format!("Public({addr})"),
+                    autonat::NatStatus::Private => "Private".to_string(),
+                    autonat::NatStatus::Unknown => "Unknown".to_string(),
+                };
+                info!(
+                    old_status = %status_str(old),
+                    new_status = %status_str(new),
+                    "AutoNAT status changed"
+                );
             }
-        }
+            autonat::Event::InboundProbe(e) => {
+                debug!("AutoNAT inbound probe: {e:?}");
+            }
+            autonat::Event::OutboundProbe(e) => {
+                debug!("AutoNAT outbound probe: {e:?}");
+            }
+        },
         // New listen address bound.
         SwarmEvent::NewListenAddr { address, .. } => {
             let local_peer_id = *swarm.local_peer_id();
@@ -938,7 +965,10 @@ mod tests {
             ..Default::default()
         };
         let swarm = build_swarm(&config);
-        assert!(swarm.is_ok(), "build_swarm should succeed with peer scoring enabled");
+        assert!(
+            swarm.is_ok(),
+            "build_swarm should succeed with peer scoring enabled"
+        );
     }
 
     #[test]
@@ -950,7 +980,10 @@ mod tests {
             ..Default::default()
         };
         let swarm = build_swarm(&config);
-        assert!(swarm.is_ok(), "build_swarm should succeed with peer scoring disabled");
+        assert!(
+            swarm.is_ok(),
+            "build_swarm should succeed with peer scoring disabled"
+        );
     }
 
     #[test]
@@ -1024,7 +1057,10 @@ mod tests {
             ..Default::default()
         };
         let swarm = build_swarm(&config);
-        assert!(swarm.is_ok(), "build_swarm should succeed with NAT traversal enabled");
+        assert!(
+            swarm.is_ok(),
+            "build_swarm should succeed with NAT traversal enabled"
+        );
     }
 
     #[test]
@@ -1039,7 +1075,10 @@ mod tests {
             ..Default::default()
         };
         let swarm = build_swarm(&config);
-        assert!(swarm.is_ok(), "build_swarm should succeed with NAT traversal disabled");
+        assert!(
+            swarm.is_ok(),
+            "build_swarm should succeed with NAT traversal disabled"
+        );
     }
 
     #[tokio::test]
@@ -1054,7 +1093,10 @@ mod tests {
             ..Default::default()
         };
         let swarm = build_swarm(&config);
-        assert!(swarm.is_ok(), "build_swarm should succeed with all features enabled");
+        assert!(
+            swarm.is_ok(),
+            "build_swarm should succeed with all features enabled"
+        );
     }
 
     #[test]
@@ -1069,7 +1111,10 @@ mod tests {
             ..Default::default()
         };
         let swarm = build_swarm(&config);
-        assert!(swarm.is_ok(), "build_swarm should succeed with all features disabled");
+        assert!(
+            swarm.is_ok(),
+            "build_swarm should succeed with all features disabled"
+        );
     }
 
     #[test]
@@ -1084,7 +1129,10 @@ mod tests {
             ..Default::default()
         };
         let swarm = build_swarm(&config);
-        assert!(swarm.is_ok(), "build_swarm should succeed with kademlia only");
+        assert!(
+            swarm.is_ok(),
+            "build_swarm should succeed with kademlia only"
+        );
     }
 
     #[test]
@@ -1099,7 +1147,10 @@ mod tests {
             ..Default::default()
         };
         let swarm = build_swarm(&config);
-        assert!(swarm.is_ok(), "build_swarm should succeed with relay but no dcutr");
+        assert!(
+            swarm.is_ok(),
+            "build_swarm should succeed with relay but no dcutr"
+        );
     }
 
     #[test]
@@ -1117,7 +1168,10 @@ mod tests {
             ..Default::default()
         };
         let swarm = build_swarm(&config);
-        assert!(swarm.is_ok(), "build_swarm should succeed with custom topic names");
+        assert!(
+            swarm.is_ok(),
+            "build_swarm should succeed with custom topic names"
+        );
     }
 
     #[test]
@@ -1146,7 +1200,10 @@ mod tests {
         // Verify the peer was added by checking kbuckets.
         let kad = swarm.behaviour_mut().kademlia.as_mut().unwrap();
         let entry_count: usize = kad.kbuckets().map(|b| b.num_entries()).sum();
-        assert!(entry_count >= 1, "boot node should be added to Kademlia routing table");
+        assert!(
+            entry_count >= 1,
+            "boot node should be added to Kademlia routing table"
+        );
     }
 
     #[test]
@@ -1163,9 +1220,7 @@ mod tests {
     fn extract_peer_id_ip6_multiaddr() {
         let keypair = libp2p::identity::Keypair::generate_ed25519();
         let peer_id = keypair.public().to_peer_id();
-        let addr: Multiaddr = format!("/ip6/::1/tcp/4001/p2p/{peer_id}")
-            .parse()
-            .unwrap();
+        let addr: Multiaddr = format!("/ip6/::1/tcp/4001/p2p/{peer_id}").parse().unwrap();
         assert_eq!(extract_peer_id(&addr), Some(peer_id));
     }
 
@@ -1197,8 +1252,14 @@ mod tests {
         let gossip: f64 = -100.0;
         let publish: f64 = -200.0;
         let graylist: f64 = -300.0;
-        assert!(gossip > publish, "gossip threshold should be less severe than publish");
-        assert!(publish > graylist, "publish threshold should be less severe than graylist");
+        assert!(
+            gossip > publish,
+            "gossip threshold should be less severe than publish"
+        );
+        assert!(
+            publish > graylist,
+            "publish threshold should be less severe than graylist"
+        );
     }
 
     #[test]
@@ -1208,7 +1269,10 @@ mod tests {
         let txs_weight: f64 = 0.5;
         assert!(blocks_weight > 0.0);
         assert!(txs_weight > 0.0);
-        assert!(blocks_weight >= txs_weight, "block topic should have >= weight than txs");
+        assert!(
+            blocks_weight >= txs_weight,
+            "block topic should have >= weight than txs"
+        );
     }
 
     #[test]
@@ -1236,7 +1300,10 @@ mod tests {
             ..Default::default()
         };
         let swarm = build_swarm(&config);
-        assert!(swarm.is_ok(), "build_swarm should succeed with custom connection limits");
+        assert!(
+            swarm.is_ok(),
+            "build_swarm should succeed with custom connection limits"
+        );
     }
 
     #[test]
@@ -1255,7 +1322,10 @@ mod tests {
             ..Default::default()
         };
         let swarm = build_swarm(&config);
-        assert!(swarm.is_ok(), "build_swarm should succeed with unlimited connections (0)");
+        assert!(
+            swarm.is_ok(),
+            "build_swarm should succeed with unlimited connections (0)"
+        );
     }
 
     #[test]
@@ -1274,6 +1344,9 @@ mod tests {
             ..Default::default()
         };
         let swarm = build_swarm(&config);
-        assert!(swarm.is_ok(), "build_swarm should succeed with connection limits and relay");
+        assert!(
+            swarm.is_ok(),
+            "build_swarm should succeed with connection limits and relay"
+        );
     }
 }

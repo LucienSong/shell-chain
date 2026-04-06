@@ -18,12 +18,8 @@ impl Verifier for MultiVerifier {
         signature: &PQSignature,
     ) -> Result<bool, CryptoError> {
         match signature.sig_type {
-            SignatureType::Dilithium3 => {
-                DilithiumVerifier.verify(pubkey, message, signature)
-            }
-            SignatureType::SphincsSha2256f => {
-                SphincsVerifier.verify(pubkey, message, signature)
-            }
+            SignatureType::Dilithium3 => DilithiumVerifier.verify(pubkey, message, signature),
+            SignatureType::SphincsSha2256f => SphincsVerifier.verify(pubkey, message, signature),
             other => Err(CryptoError::UnsupportedSignatureType(other)),
         }
     }
@@ -114,8 +110,10 @@ mod tests {
         assert!(mv.verify(sph_signer.public_key(), msg, &sph_sig).unwrap());
 
         // Cross-key must fail.
-        assert!(!mv.verify(sph_signer.public_key(), msg, &dil_sig).is_ok()
-            || !mv.verify(sph_signer.public_key(), msg, &dil_sig).unwrap());
+        assert!(
+            !mv.verify(sph_signer.public_key(), msg, &dil_sig).is_ok()
+                || !mv.verify(sph_signer.public_key(), msg, &dil_sig).unwrap()
+        );
     }
 
     #[test]
