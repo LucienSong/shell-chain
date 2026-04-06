@@ -533,9 +533,6 @@ impl<S: KvStore + 'static> Node<S> {
                                         *fn_w = fin;
                                     }
                                 }
-                                _ => {
-                                    debug!(%peer, "received unhandled network message");
-                                }
                             }
                         }
                         Some(_) => {} // PeerConnected / PeerDisconnected

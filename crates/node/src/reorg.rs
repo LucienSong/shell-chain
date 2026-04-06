@@ -48,6 +48,7 @@ impl ReorgEngine {
     /// * `old_chain` – hashes of blocks to roll back, oldest first
     /// * `new_chain` – hashes of blocks to apply, oldest first
     /// * `finalized_number` – latest finalized block height (reorg cannot go past this)
+    #[allow(clippy::too_many_arguments)]
     pub fn execute<S: KvStore>(
         chain_store: &Arc<ChainStore<S>>,
         world_state: &Arc<RwLock<WorldState<S>>>,
