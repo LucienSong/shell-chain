@@ -318,8 +318,26 @@ async fn run_with_store<S: KvStore + 'static>(
             let node = Arc::new(node);
             let node_shutdown = node.clone();
             tokio::spawn(async move {
-                tokio::signal::ctrl_c().await.ok();
-                eprintln!("\n⏹  Ctrl-C received, shutting down...");
+                #[cfg(unix)]
+                {
+                    let mut sigterm =
+                        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                            .expect("failed to register SIGTERM handler");
+
+                    tokio::select! {
+                        _ = tokio::signal::ctrl_c() => {
+                            eprintln!("\n⏹  Ctrl-C received, shutting down...");
+                        }
+                        _ = sigterm.recv() => {
+                            eprintln!("\n⏹  SIGTERM received, shutting down...");
+                        }
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    tokio::signal::ctrl_c().await.ok();
+                    eprintln!("\n⏹  Ctrl-C received, shutting down...");
+                }
                 node_shutdown.shutdown();
             });
 
@@ -356,8 +374,26 @@ async fn run_with_store<S: KvStore + 'static>(
         let node = Arc::new(node);
         let node_shutdown = node.clone();
         tokio::spawn(async move {
-            tokio::signal::ctrl_c().await.ok();
-            eprintln!("\n⏹  Ctrl-C received, shutting down...");
+            #[cfg(unix)]
+            {
+                let mut sigterm =
+                    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                        .expect("failed to register SIGTERM handler");
+
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {
+                        eprintln!("\n⏹  Ctrl-C received, shutting down...");
+                    }
+                    _ = sigterm.recv() => {
+                        eprintln!("\n⏹  SIGTERM received, shutting down...");
+                    }
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                tokio::signal::ctrl_c().await.ok();
+                eprintln!("\n⏹  Ctrl-C received, shutting down...");
+            }
             node_shutdown.shutdown();
         });
 

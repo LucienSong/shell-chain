@@ -12,6 +12,9 @@ if [ "$GENESIS_CREATOR" = "true" ]; then
     shell-node run "$@" &
     NODE_PID=$!
 
+    # Forward signals to the shell-node process.
+    trap "kill -TERM $NODE_PID 2>/dev/null" TERM INT
+
     # Wait for genesis.json to be written by the node during startup.
     for i in $(seq 1 30); do
         if [ -f "$DATADIR/genesis.json" ]; then
@@ -23,6 +26,7 @@ if [ "$GENESIS_CREATOR" = "true" ]; then
     done
 
     wait $NODE_PID
+    exit $?
 else
     # Follower node: wait for shared genesis before starting.
     echo "Waiting for genesis.json from leader..."
