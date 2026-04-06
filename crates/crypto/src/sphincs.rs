@@ -73,10 +73,10 @@ impl Signer for SphincsSigner {
     fn sign(&self, message: &[u8]) -> Result<PQSignature, CryptoError> {
         let sk = self.secret_key();
         let sig = sphincssha2256fsimple::detached_sign(message, &sk);
-        // The temporary SecretKey is dropped here. The canonical key material
+        // Explicitly consume the temporary SecretKey. The canonical key material
         // is held in `self.secret_key_bytes` which is wrapped in `Zeroizing`
         // and will be securely erased when this signer is dropped.
-        drop(sk);
+        let _ = sk;
         Ok(PQSignature::new(
             SignatureType::SphincsSha2256f,
             sig.as_bytes().to_vec(),
