@@ -1,12 +1,15 @@
-# Production shell-chain deployment: 3 validators + RPC node + nginx + monitoring.
-# Usage: docker compose -f docker-compose.prod.yml up -d
+# Alpha testnet deployment: 3 validators + public RPC + nginx reverse proxy.
+# Usage:
+#   cp .env.example .env   # edit as needed
+#   docker compose -f docker-compose.alpha.yml up -d
 
 services:
   node1:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: shell-prod-node1
+    container_name: shell-alpha-node1
+    env_file: .env
     environment:
       - GENESIS_CREATOR=true
       - DATADIR=/data
@@ -18,17 +21,14 @@ services:
       --ws --ws-port 8546
       --p2p --p2p-addr 0.0.0.0:30303
       --enable-mdns
-      --rpc-cors "http://localhost:3000"
-      --rpc-api eth,net,web3,shell
-      --db rocksdb
-      --block-time 2000
+      --rpc-cors "${RPC_CORS:-*}"
+      --rpc-api ${RPC_API:-eth,net,web3,shell}
+      --db ${DB_BACKEND:-rocksdb}
+      --block-time ${BLOCK_TIME:-2000}
+      --chain-id ${CHAIN_ID:-1337}
       --keystore /data/keystore.json
       --metrics-addr 0.0.0.0:9090
       --log-format json
-    ports:
-      - "8545:8545"
-      - "8546:8546"
-      - "30303:30303"
     volumes:
       - genesis:/shared
       - node1-data:/data
@@ -51,10 +51,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: shell-prod-node2
+    container_name: shell-alpha-node2
     depends_on:
       node1:
         condition: service_healthy
+    env_file: .env
     environment:
       - DATADIR=/data
       - SHARED=/shared
@@ -66,17 +67,14 @@ services:
       --p2p --p2p-addr 0.0.0.0:30303
       --bootnode /dns4/node1/tcp/30303
       --enable-mdns
-      --rpc-cors "http://localhost:3000"
-      --rpc-api eth,net,web3,shell
-      --db rocksdb
-      --block-time 2000
+      --rpc-cors "${RPC_CORS:-*}"
+      --rpc-api ${RPC_API:-eth,net,web3,shell}
+      --db ${DB_BACKEND:-rocksdb}
+      --block-time ${BLOCK_TIME:-2000}
+      --chain-id ${CHAIN_ID:-1337}
       --keystore /data/keystore.json
       --metrics-addr 0.0.0.0:9090
       --log-format json
-    ports:
-      - "8555:8545"
-      - "8556:8546"
-      - "30304:30303"
     volumes:
       - genesis:/shared
       - node2-data:/data
@@ -99,10 +97,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: shell-prod-node3
+    container_name: shell-alpha-node3
     depends_on:
       node1:
         condition: service_healthy
+    env_file: .env
     environment:
       - DATADIR=/data
       - SHARED=/shared
@@ -114,17 +113,14 @@ services:
       --p2p --p2p-addr 0.0.0.0:30303
       --bootnode /dns4/node1/tcp/30303
       --enable-mdns
-      --rpc-cors "http://localhost:3000"
-      --rpc-api eth,net,web3,shell
-      --db rocksdb
-      --block-time 2000
+      --rpc-cors "${RPC_CORS:-*}"
+      --rpc-api ${RPC_API:-eth,net,web3,shell}
+      --db ${DB_BACKEND:-rocksdb}
+      --block-time ${BLOCK_TIME:-2000}
+      --chain-id ${CHAIN_ID:-1337}
       --keystore /data/keystore.json
       --metrics-addr 0.0.0.0:9090
       --log-format json
-    ports:
-      - "8565:8545"
-      - "8566:8546"
-      - "30305:30303"
     volumes:
       - genesis:/shared
       - node3-data:/data
@@ -147,10 +143,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: shell-prod-rpc
+    container_name: shell-alpha-rpc
     depends_on:
       node1:
         condition: service_healthy
+    env_file: .env
     environment:
       - DATADIR=/data
       - SHARED=/shared
@@ -162,15 +159,13 @@ services:
       --p2p --p2p-addr 0.0.0.0:30303
       --bootnode /dns4/node1/tcp/30303
       --enable-mdns
-      --rpc-cors "*"
-      --rpc-api eth,net,web3,shell,debug,trace
-      --db rocksdb
+      --rpc-cors "${RPC_CORS:-*}"
+      --rpc-api ${RPC_API:-eth,net,web3,shell}
+      --rpc-rate-limit ${RPC_RATE_LIMIT:-100}
+      --db ${DB_BACKEND:-rocksdb}
+      --chain-id ${CHAIN_ID:-1337}
       --metrics-addr 0.0.0.0:9090
       --log-format json
-    ports:
-      - "8548:8545"
-      - "8549:8546"
-      - "30306:30303"
     volumes:
       - genesis:/shared
       - rpc-data:/data
@@ -192,7 +187,7 @@ services:
 
   nginx:
     image: nginx:1.27-alpine
-    container_name: shell-prod-nginx
+    container_name: shell-alpha-nginx
     depends_on:
       rpc-node:
         condition: service_healthy
@@ -211,45 +206,12 @@ services:
       start_period: 5s
     restart: unless-stopped
 
-  prometheus:
-    image: prom/prometheus:v2.51.0
-    container_name: shell-prod-prometheus
-    volumes:
-      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - prometheus-data:/prometheus
-    ports:
-      - "127.0.0.1:9090:9090"
-    networks:
-      - internal
-    restart: unless-stopped
-
-  grafana:
-    image: grafana/grafana:11.0.0
-    container_name: shell-prod-grafana
-    depends_on:
-      - prometheus
-    volumes:
-      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
-      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
-      - grafana-data:/var/lib/grafana
-    ports:
-      - "3000:3000"
-    environment:
-      - GF_SECURITY_ADMIN_PASSWORD=${GF_ADMIN_PASSWORD:-changeme}
-      - GF_USERS_ALLOW_SIGN_UP=false
-    networks:
-      - internal
-      - frontend
-    restart: unless-stopped
-
 volumes:
   genesis:
   node1-data:
   node2-data:
   node3-data:
   rpc-data:
-  prometheus-data:
-  grafana-data:
 
 networks:
   internal:
