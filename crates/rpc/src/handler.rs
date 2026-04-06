@@ -1647,6 +1647,24 @@ impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
             "pendingAttestations": pending,
         }))
     }
+
+    async fn set_balance(
+        &self,
+        address: Address,
+        balance: String,
+    ) -> Result<bool, ErrorObjectOwned> {
+        let value = if let Some(hex_str) = balance.strip_prefix("0x") {
+            U256::from_str_radix(hex_str, 16)
+                .map_err(|e| internal_err(format!("invalid hex balance: {e}")))?
+        } else {
+            balance
+                .parse::<U256>()
+                .map_err(|e| internal_err(format!("invalid balance: {e}")))?
+        };
+        let mut ws = self.world_state.write();
+        ws.set_balance(&address, value).map_err(internal_err)?;
+        Ok(true)
+    }
 }
 
 #[jsonrpsee::core::async_trait]

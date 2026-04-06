@@ -388,4 +388,12 @@ pub trait ShellApi {
     async fn get_finality_info(
         &self,
     ) -> Result<serde_json::Value, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Set the balance of an address directly (dev/testnet only).
+    #[method(name = "setBalance")]
+    async fn set_balance(
+        &self,
+        address: Address,
+        balance: String,
+    ) -> Result<bool, jsonrpsee::types::ErrorObjectOwned>;
 }
