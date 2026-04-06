@@ -183,10 +183,8 @@ impl PeerBanList {
     /// Remove all expired bans, reclaiming memory.
     pub fn purge_expired(&mut self) {
         let now = Instant::now();
-        self.records.retain(|_, r| match r.banned_until {
-            Some(until) if now >= until => false,
-            _ => true,
-        });
+        self.records
+            .retain(|_, r| !matches!(r.banned_until, Some(until) if now >= until));
     }
 
     /// Total number of peers currently tracked (with or without active ban).
