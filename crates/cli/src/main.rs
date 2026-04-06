@@ -264,7 +264,7 @@ async fn main() {
             };
 
             // Merge: CLI explicit values take priority over config file.
-            let datadir = if cli.datadir != PathBuf::from("shell-data") {
+            let datadir = if cli.datadir != *"shell-data" {
                 cli.datadir
             } else {
                 file_config

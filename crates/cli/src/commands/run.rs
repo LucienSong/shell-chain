@@ -19,6 +19,7 @@ use shell_storage::{ChainStore, KvStore, MemoryDb};
 use tracing::info;
 
 /// Aggregated CLI arguments for the `run` subcommand.
+#[allow(dead_code)]
 pub struct RunArgs {
     pub datadir: PathBuf,
     pub rpc_addr: String,

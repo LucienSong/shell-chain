@@ -153,8 +153,7 @@ fn cmd_send(
     let gas_limit_final = match gas_limit {
         Some(g) => g,
         None => {
-            let estimated = rpc_estimate_gas(&rpc_url, &from, Some(&to_addr), &value_u256, &[])?;
-            estimated
+            rpc_estimate_gas(&rpc_url, &from, Some(&to_addr), &value_u256, &[])?
         }
     };
 
