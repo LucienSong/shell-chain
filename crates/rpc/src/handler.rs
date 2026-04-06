@@ -85,6 +85,7 @@ impl<S: KvStore + 'static> Clone for RpcHandler<S> {
 
 impl<S: KvStore + 'static> RpcHandler<S> {
     /// Create a new RPC handler with access to chain data.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         chain_store: Arc<ChainStore<S>>,
         world_state: Arc<parking_lot::RwLock<WorldState<S>>>,

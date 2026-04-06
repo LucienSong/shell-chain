@@ -54,6 +54,12 @@ pub struct FilterRegistry {
     ttl_secs: u64,
 }
 
+impl Default for FilterRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FilterRegistry {
     /// Create a new registry with the default TTL.
     pub fn new() -> Self {
@@ -138,6 +144,11 @@ impl FilterRegistry {
     /// Returns the number of active filters.
     pub fn len(&self) -> usize {
         self.filters.read().len()
+    }
+
+    /// Returns true if there are no active filters.
+    pub fn is_empty(&self) -> bool {
+        self.filters.read().is_empty()
     }
 
     /// Spawn a periodic cleanup task. Call this once at startup.

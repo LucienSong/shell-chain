@@ -88,6 +88,7 @@ pub struct RpcServerHandle {
 /// handles both HTTP and WebSocket (the jsonrpsee default).
 ///
 /// Returns an [`RpcServerHandle`] for graceful shutdown.
+#[allow(clippy::too_many_arguments)]
 pub async fn start_rpc_server<S: KvStore + 'static>(
     config: RpcConfig,
     chain_store: Arc<ChainStore<S>>,
