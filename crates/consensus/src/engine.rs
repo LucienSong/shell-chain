@@ -39,3 +39,43 @@ pub trait ConsensusEngine: Send + Sync {
     /// Return the engine type identifier.
     fn engine_type(&self) -> EngineType;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn engine_type_poa_eq() {
+        assert_eq!(EngineType::PoA, EngineType::PoA);
+    }
+
+    #[test]
+    fn engine_type_bft_eq() {
+        assert_eq!(EngineType::BFT, EngineType::BFT);
+    }
+
+    #[test]
+    fn engine_type_poa_ne_bft() {
+        assert_ne!(EngineType::PoA, EngineType::BFT);
+    }
+
+    #[test]
+    fn engine_type_clone() {
+        let e = EngineType::PoA;
+        let cloned = e;
+        assert_eq!(e, cloned);
+    }
+
+    #[test]
+    fn engine_type_debug_format() {
+        assert_eq!(format!("{:?}", EngineType::PoA), "PoA");
+        assert_eq!(format!("{:?}", EngineType::BFT), "BFT");
+    }
+
+    #[test]
+    fn engine_type_copy_semantics() {
+        let a = EngineType::BFT;
+        let b = a; // Copy
+        assert_eq!(a, b);
+    }
+}

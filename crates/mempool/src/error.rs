@@ -43,3 +43,117 @@ pub enum MempoolError {
     #[error("invalid transaction: {0}")]
     InvalidTransaction(String),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pool_full_display() {
+        let err = MempoolError::PoolFull { capacity: 4096 };
+        assert_eq!(err.to_string(), "pool is full (4096 transactions)");
+    }
+
+    #[test]
+    fn sender_queue_full_display() {
+        let sender = Address::ZERO;
+        let err = MempoolError::SenderQueueFull {
+            sender,
+            count: 64,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("too many pending transactions"));
+        assert!(msg.contains("64"));
+    }
+
+    #[test]
+    fn duplicate_display() {
+        let hash = ShellHash::default();
+        let err = MempoolError::Duplicate { hash };
+        assert!(err.to_string().contains("duplicate transaction"));
+    }
+
+    #[test]
+    fn chain_id_mismatch_display() {
+        let err = MempoolError::ChainIdMismatch {
+            expected: 1,
+            got: 42,
+        };
+        assert_eq!(
+            err.to_string(),
+            "chain ID mismatch: expected 1, got 42"
+        );
+    }
+
+    #[test]
+    fn gas_price_too_low_display() {
+        let err = MempoolError::GasPriceTooLow { got: 5, min: 10 };
+        assert_eq!(err.to_string(), "gas price 5 below minimum 10");
+    }
+
+    #[test]
+    fn nonce_too_low_display() {
+        let err = MempoolError::NonceTooLow {
+            got: 3,
+            pending: 10,
+        };
+        assert!(err.to_string().contains("nonce 3 too low"));
+        assert!(err.to_string().contains("10"));
+    }
+
+    #[test]
+    fn insufficient_balance_display() {
+        let err = MempoolError::InsufficientBalance {
+            needed: U256::from(1000u64),
+            have: U256::from(100u64),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("insufficient balance"));
+        assert!(msg.contains("1000"));
+        assert!(msg.contains("100"));
+    }
+
+    #[test]
+    fn replacement_fee_too_low_display() {
+        let err = MempoolError::ReplacementFeeTooLow {
+            got: 10,
+            required: 20,
+        };
+        assert!(err.to_string().contains("replacement fee too low"));
+    }
+
+    #[test]
+    fn invalid_signature_display() {
+        let err = MempoolError::InvalidSignature("bad sig".into());
+        assert_eq!(err.to_string(), "invalid signature: bad sig");
+    }
+
+    #[test]
+    fn pubkey_required_display() {
+        let sender = Address::ZERO;
+        let err = MempoolError::PubkeyRequired { sender };
+        assert!(err.to_string().contains("pubkey required"));
+    }
+
+    #[test]
+    fn address_mismatch_display() {
+        let from = Address::from_slice(&[0x01; 20]);
+        let derived = Address::from_slice(&[0x02; 20]);
+        let err = MempoolError::AddressMismatch { from, derived };
+        let msg = err.to_string();
+        assert!(msg.contains("address mismatch"));
+    }
+
+    #[test]
+    fn invalid_transaction_display() {
+        let err = MempoolError::InvalidTransaction("bad tx data".into());
+        assert_eq!(err.to_string(), "invalid transaction: bad tx data");
+    }
+
+    #[test]
+    fn crypto_error_from_conversion() {
+        let crypto_err = shell_crypto::CryptoError::VerificationFailed;
+        let err = MempoolError::from(crypto_err);
+        assert!(err.to_string().contains("crypto error"));
+    }
+}
