@@ -138,7 +138,7 @@ impl StatePruner {
     /// Returns `true` if a prune pass should be triggered at the given block
     /// height (every `prune_interval` blocks).
     pub fn should_prune(&self, block_number: u64) -> bool {
-        block_number > 0 && block_number % self.prune_interval == 0
+        block_number > 0 && block_number.is_multiple_of(self.prune_interval)
     }
 
     /// Execute a prune pass: delete canonical `block_number → block_hash`
@@ -184,7 +184,7 @@ impl StatePruner {
         // Remove pruned entries from the in-memory tracker.
         for block_number in &eligible {
             let root = self.block_roots.get(block_number);
-            let is_protected = root.map_or(false, |r| self.active_roots.contains(r));
+            let is_protected = root.is_some_and(|r| self.active_roots.contains(r));
             if !is_protected {
                 self.block_roots.remove(block_number);
             }

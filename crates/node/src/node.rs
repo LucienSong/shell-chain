@@ -152,7 +152,7 @@ impl<S: KvStore + 'static> Node<S> {
         }
 
         // Periodic status log every 64 blocks.
-        if block_number > 0 && block_number % 64 == 0 {
+        if block_number > 0 && block_number.is_multiple_of(64) {
             let oldest = tracker.oldest().map(|e| e.block_number).unwrap_or(0);
             tracing::info!(
                 tracked = tracker.len(),

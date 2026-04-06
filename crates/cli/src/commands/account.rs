@@ -59,7 +59,7 @@ fn cmd_list(datadir: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     for entry in std::fs::read_dir(&datadir)? {
         let entry = entry?;
         let path = entry.path();
-        if path.extension().map_or(false, |ext| ext == "json") {
+        if path.extension().is_some_and(|ext| ext == "json") {
             if let Ok(contents) = std::fs::read_to_string(&path) {
                 if let Ok(ek) = serde_json::from_str::<EncryptedKey>(&contents) {
                     println!("0x{} ({})", ek.address, path.display());

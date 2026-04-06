@@ -422,7 +422,7 @@ impl<S: KvStore> ChainStore<S> {
             count += 1;
 
             // Flush in batches of 10000 to avoid excessive memory use
-            if count % 10_000 == 0 {
+            if count.is_multiple_of(10_000) {
                 self.store.write_batch(batch)?;
                 batch = crate::WriteBatch::new();
             }

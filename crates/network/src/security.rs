@@ -199,7 +199,7 @@ impl PeerBanList {
         let now = Instant::now();
         self.records
             .values()
-            .filter(|r| r.banned_until.map_or(false, |until| now < until))
+            .filter(|r| r.banned_until.is_some_and(|until| now < until))
             .count()
     }
 }
