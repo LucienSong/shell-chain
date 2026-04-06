@@ -1,0 +1,33 @@
+# Shell-chain read-only RPC node configuration.
+# No keystore — this node does not produce blocks.
+
+[node]
+datadir = "/data"
+chain_id = 31337
+db = "rocksdb"
+pruning = 0  # archive mode
+
+[rpc]
+listen_addr = "0.0.0.0:8545"
+ws_enabled = true
+ws_port = 8546
+cors_origins = ["*"]
+rate_limit = 50
+api_modules = ["eth", "net", "web3", "shell", "debug", "trace"]
+
+[p2p]
+enabled = true
+listen_addr = "0.0.0.0:30303"
+bootnodes = []
+enable_mdns = true
+
+[consensus]
+engine = "poa"
+
+[metrics]
+enabled = true
+listen_addr = "0.0.0.0:9090"
+
+[logging]
+level = "info"
+format = "json"

@@ -1,0 +1,33 @@
+[package]
+name = "shell-storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+rocksdb = ["dep:rocksdb"]
+
+[dependencies]
+thiserror.workspace = true
+eth_trie.workspace = true
+ethereum-types = "0.14"
+alloy-rlp.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+base64 = "0.22"
+sha2 = "0.10"
+hex.workspace = true
+shell-primitives = { path = "../primitives" }
+shell-core = { path = "../core" }
+rocksdb = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+criterion = { workspace = true }
+shell-crypto = { path = "../crypto" }
+
+[[bench]]
+name = "storage_bench"
+harness = false

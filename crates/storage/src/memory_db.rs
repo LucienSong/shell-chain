@@ -1,0 +1,175 @@
+use std::collections::HashMap;
+use std::sync::RwLock;
+
+use crate::{KvStore, StorageError, WriteBatch, WriteBatchOp};
+
+/// In-memory KV store for testing and lightweight use cases.
+///
+/// Write batches are applied under a single write lock but are **not**
+/// rollback-safe — if a panic occurs mid-batch, partial writes persist.
+#[derive(Debug, Default)]
+pub struct MemoryDb {
+    data: RwLock<HashMap<Vec<u8>, Vec<u8>>>,
+}
+
+impl MemoryDb {
+    pub fn new() -> Self {
+        Self {
+            data: RwLock::new(HashMap::new()),
+        }
+    }
+
+    pub fn len(&self) -> Result<usize, StorageError> {
+        let data = self
+            .data
+            .read()
+            .map_err(|e| StorageError::Database(e.to_string()))?;
+        Ok(data.len())
+    }
+
+    pub fn is_empty(&self) -> Result<bool, StorageError> {
+        Ok(self.len()? == 0)
+    }
+}
+
+impl KvStore for MemoryDb {
+    fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+        let data = self
+            .data
+            .read()
+            .map_err(|e| StorageError::Database(e.to_string()))?;
+        Ok(data.get(key).cloned())
+    }
+
+    fn put(&self, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
+        let mut data = self
+            .data
+            .write()
+            .map_err(|e| StorageError::Database(e.to_string()))?;
+        data.insert(key.to_vec(), value.to_vec());
+        Ok(())
+    }
+
+    fn delete(&self, key: &[u8]) -> Result<(), StorageError> {
+        let mut data = self
+            .data
+            .write()
+            .map_err(|e| StorageError::Database(e.to_string()))?;
+        data.remove(key);
+        Ok(())
+    }
+
+    fn flush(&self) -> Result<(), StorageError> {
+        Ok(())
+    }
+
+    fn write_batch(&self, batch: WriteBatch) -> Result<(), StorageError> {
+        let mut data = self
+            .data
+            .write()
+            .map_err(|e| StorageError::Database(e.to_string()))?;
+        for op in batch.ops() {
+            match op {
+                WriteBatchOp::Put { key, value } => {
+                    data.insert(key.clone(), value.clone());
+                }
+                WriteBatchOp::Delete { key } => {
+                    data.remove(key);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn put_get_roundtrip() {
+        let db = MemoryDb::new();
+        db.put(b"key1", b"value1").unwrap();
+        assert_eq!(db.get(b"key1").unwrap(), Some(b"value1".to_vec()));
+    }
+
+    #[test]
+    fn get_missing_returns_none() {
+        let db = MemoryDb::new();
+        assert_eq!(db.get(b"nonexistent").unwrap(), None);
+    }
+
+    #[test]
+    fn put_overwrite() {
+        let db = MemoryDb::new();
+        db.put(b"key", b"v1").unwrap();
+        db.put(b"key", b"v2").unwrap();
+        assert_eq!(db.get(b"key").unwrap(), Some(b"v2".to_vec()));
+    }
+
+    #[test]
+    fn delete_existing() {
+        let db = MemoryDb::new();
+        db.put(b"key", b"value").unwrap();
+        db.delete(b"key").unwrap();
+        assert_eq!(db.get(b"key").unwrap(), None);
+    }
+
+    #[test]
+    fn delete_nonexistent_is_ok() {
+        let db = MemoryDb::new();
+        db.delete(b"nonexistent").unwrap();
+    }
+
+    #[test]
+    fn contains_key() {
+        let db = MemoryDb::new();
+        assert!(!db.contains(b"key").unwrap());
+        db.put(b"key", b"value").unwrap();
+        assert!(db.contains(b"key").unwrap());
+    }
+
+    #[test]
+    fn write_batch_atomic() {
+        let db = MemoryDb::new();
+        db.put(b"to_delete", b"old").unwrap();
+
+        let mut batch = WriteBatch::new();
+        batch.put(b"key1".to_vec(), b"val1".to_vec());
+        batch.put(b"key2".to_vec(), b"val2".to_vec());
+        batch.delete(b"to_delete".to_vec());
+        db.write_batch(batch).unwrap();
+
+        assert_eq!(db.get(b"key1").unwrap(), Some(b"val1".to_vec()));
+        assert_eq!(db.get(b"key2").unwrap(), Some(b"val2".to_vec()));
+        assert_eq!(db.get(b"to_delete").unwrap(), None);
+    }
+
+    #[test]
+    fn empty_batch_is_noop() {
+        let db = MemoryDb::new();
+        let batch = WriteBatch::new();
+        assert!(batch.is_empty());
+        db.write_batch(batch).unwrap();
+        assert!(db.is_empty().unwrap());
+    }
+
+    #[test]
+    fn flush_is_noop() {
+        let db = MemoryDb::new();
+        db.put(b"key", b"val").unwrap();
+        db.flush().unwrap();
+        assert_eq!(db.get(b"key").unwrap(), Some(b"val".to_vec()));
+    }
+
+    #[test]
+    fn len_and_is_empty() {
+        let db = MemoryDb::new();
+        assert!(db.is_empty().unwrap());
+        assert_eq!(db.len().unwrap(), 0);
+        db.put(b"k1", b"v1").unwrap();
+        db.put(b"k2", b"v2").unwrap();
+        assert_eq!(db.len().unwrap(), 2);
+        assert!(!db.is_empty().unwrap());
+    }
+}

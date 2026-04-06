@@ -1,0 +1,86 @@
+# 3-node shell-chain testnet for E2E testing.
+# Node1 is the block producer (genesis creator).
+# Node2 and Node3 sync blocks via libp2p.
+
+services:
+  node1:
+    build: .
+    container_name: shell-node1
+    environment:
+      - GENESIS_CREATOR=true
+      - DATADIR=/data
+      - SHARED=/shared
+    command: >
+      --datadir /data
+      --rpc-addr 0.0.0.0:8545
+      --p2p
+      --p2p-addr 0.0.0.0:30303
+      --enable-mdns
+      --db rocksdb
+      --block-time 2000
+    ports:
+      - "8545:8545"
+      - "30303:30303"
+    volumes:
+      - genesis:/shared
+      - node1-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8545", "-X", "POST", "-H", "Content-Type: application/json", "-d", '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}']
+      interval: 3s
+      timeout: 2s
+      retries: 20
+      start_period: 10s
+
+  node2:
+    build: .
+    container_name: shell-node2
+    depends_on:
+      node1:
+        condition: service_healthy
+    environment:
+      - DATADIR=/data
+      - SHARED=/shared
+    command: >
+      --datadir /data
+      --rpc-addr 0.0.0.0:8545
+      --p2p
+      --p2p-addr 0.0.0.0:30303
+      --bootnode /dns4/node1/tcp/30303
+      --enable-mdns
+      --db rocksdb
+      --block-time 2000
+    ports:
+      - "8546:8545"
+    volumes:
+      - genesis:/shared
+      - node2-data:/data
+
+  node3:
+    build: .
+    container_name: shell-node3
+    depends_on:
+      node1:
+        condition: service_healthy
+    environment:
+      - DATADIR=/data
+      - SHARED=/shared
+    command: >
+      --datadir /data
+      --rpc-addr 0.0.0.0:8545
+      --p2p
+      --p2p-addr 0.0.0.0:30303
+      --bootnode /dns4/node1/tcp/30303
+      --enable-mdns
+      --db rocksdb
+      --block-time 2000
+    ports:
+      - "8547:8545"
+    volumes:
+      - genesis:/shared
+      - node3-data:/data
+
+volumes:
+  genesis:
+  node1-data:
+  node2-data:
+  node3-data:

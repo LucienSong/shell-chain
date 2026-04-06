@@ -1,0 +1,18 @@
+[package]
+name = "shell-primitives"
+description = "Foundational types and hash utilities for Shell-Chain"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+alloy-primitives = { workspace = true }
+alloy-rlp = { workspace = true }
+sha3 = { workspace = true }
+blake3 = { workspace = true }
+serde = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

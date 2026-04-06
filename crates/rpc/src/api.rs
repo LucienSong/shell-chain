@@ -1,0 +1,391 @@
+//! JSON-RPC API trait definitions using jsonrpsee proc macros.
+
+use jsonrpsee::proc_macros::rpc;
+use shell_primitives::{Address, ShellHash};
+
+use crate::filter::RawLogFilter;
+use crate::types::{CallRequest, RpcBlock, RpcLogWithMeta, RpcReceipt, RpcTransaction};
+
+/// Web3 namespace RPCs (client metadata and utility).
+#[rpc(server, namespace = "web3")]
+pub trait Web3Api {
+    /// Returns the current client version string.
+    #[method(name = "clientVersion")]
+    async fn client_version(&self) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns the Keccak-256 hash of the given data.
+    #[method(name = "sha3")]
+    async fn sha3(&self, data: String) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+}
+
+/// Net namespace RPCs (network status).
+#[rpc(server, namespace = "net")]
+pub trait NetApi {
+    /// Returns the chain ID as a decimal string.
+    #[method(name = "version")]
+    async fn version(&self) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns true if the node is listening for connections.
+    #[method(name = "listening")]
+    async fn listening(&self) -> Result<bool, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns the number of connected peers as a hex string.
+    #[method(name = "peerCount")]
+    async fn peer_count(&self) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+}
+
+/// Ethereum-compatible JSON-RPC API.
+#[rpc(server, namespace = "eth")]
+pub trait EthApi {
+    /// Returns the current block number.
+    #[method(name = "blockNumber")]
+    async fn block_number(&self) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns the chain ID.
+    #[method(name = "chainId")]
+    async fn chain_id(&self) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns false when not syncing; will return sync status object later.
+    #[method(name = "syncing")]
+    async fn syncing(&self) -> Result<serde_json::Value, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns true if the node is actively mining (validating).
+    #[method(name = "mining")]
+    async fn mining(&self) -> Result<bool, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns the current hashrate (always 0 for PoA).
+    #[method(name = "hashrate")]
+    async fn hashrate(&self) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns a list of accounts owned by the node (always empty).
+    #[method(name = "accounts")]
+    async fn accounts(&self) -> Result<Vec<Address>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Signs data with a local account (unsupported — node holds no private keys).
+    #[method(name = "sign")]
+    async fn sign(
+        &self,
+        address: Address,
+        data: String,
+    ) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Signs a transaction with a local account (unsupported).
+    #[method(name = "signTransaction")]
+    async fn sign_transaction(
+        &self,
+        tx: serde_json::Value,
+    ) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns a list of available compilers (deprecated, always empty).
+    #[method(name = "getCompilers")]
+    async fn get_compilers(&self) -> Result<Vec<String>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns the current Ethereum protocol version.
+    #[method(name = "protocolVersion")]
+    async fn protocol_version(&self) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns a block by number (hex-encoded or "latest").
+    #[method(name = "getBlockByNumber")]
+    async fn get_block_by_number(
+        &self,
+        number: String,
+        full_txs: bool,
+    ) -> Result<Option<RpcBlock>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns a block by hash.
+    #[method(name = "getBlockByHash")]
+    async fn get_block_by_hash(
+        &self,
+        hash: ShellHash,
+        full_txs: bool,
+    ) -> Result<Option<RpcBlock>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns a transaction by hash.
+    #[method(name = "getTransactionByHash")]
+    async fn get_transaction_by_hash(
+        &self,
+        hash: ShellHash,
+    ) -> Result<Option<RpcTransaction>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns the receipt of a transaction by hash.
+    #[method(name = "getTransactionReceipt")]
+    async fn get_transaction_receipt(
+        &self,
+        hash: ShellHash,
+    ) -> Result<Option<RpcReceipt>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns the balance of an address.
+    #[method(name = "getBalance")]
+    async fn get_balance(
+        &self,
+        address: Address,
+        block: Option<String>,
+    ) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns the nonce (transaction count) of an address.
+    #[method(name = "getTransactionCount")]
+    async fn get_transaction_count(
+        &self,
+        address: Address,
+        block: Option<String>,
+    ) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns the current gas price suggestion.
+    #[method(name = "gasPrice")]
+    async fn gas_price(&self) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns a suggested max priority fee per gas (EIP-1559).
+    #[method(name = "maxPriorityFeePerGas")]
+    async fn max_priority_fee_per_gas(&self) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns base fee history for a range of blocks (EIP-1559).
+    #[method(name = "feeHistory")]
+    async fn fee_history(
+        &self,
+        block_count: String,
+        newest_block: String,
+        reward_percentiles: Option<Vec<f64>>,
+    ) -> Result<serde_json::Value, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Submits a signed transaction to the mempool.
+    #[method(name = "sendRawTransaction")]
+    async fn send_raw_transaction(
+        &self,
+        data: String,
+    ) -> Result<ShellHash, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Executes a call without creating a transaction (read-only).
+    #[method(name = "call")]
+    async fn call(
+        &self,
+        tx: CallRequest,
+        block: Option<String>,
+    ) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Estimates gas needed for a transaction.
+    #[method(name = "estimateGas")]
+    async fn estimate_gas(
+        &self,
+        tx: CallRequest,
+    ) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Creates an EIP-2930 access list for a transaction.
+    #[method(name = "createAccessList")]
+    async fn create_access_list(
+        &self,
+        tx: CallRequest,
+        block: Option<String>,
+    ) -> Result<serde_json::Value, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns the bytecode at a given address.
+    #[method(name = "getCode")]
+    async fn get_code(
+        &self,
+        address: Address,
+        block: Option<String>,
+    ) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns the value from a storage position at a given address.
+    #[method(name = "getStorageAt")]
+    async fn get_storage_at(
+        &self,
+        address: Address,
+        position: String,
+        block: Option<String>,
+    ) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns logs matching the given filter object.
+    #[method(name = "getLogs")]
+    async fn get_logs(
+        &self,
+        filter: RawLogFilter,
+    ) -> Result<Vec<RpcLogWithMeta>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Creates a log filter, returning a filter ID for polling via `eth_getFilterChanges`.
+    #[method(name = "newFilter")]
+    async fn new_filter(
+        &self,
+        filter: RawLogFilter,
+    ) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Creates a block filter that tracks new block hashes.
+    #[method(name = "newBlockFilter")]
+    async fn new_block_filter(&self) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns changes since the last poll for the given filter.
+    #[method(name = "getFilterChanges")]
+    async fn get_filter_changes(
+        &self,
+        id: String,
+    ) -> Result<serde_json::Value, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns all logs matching the filter criteria (for log filters only).
+    #[method(name = "getFilterLogs")]
+    async fn get_filter_logs(
+        &self,
+        id: String,
+    ) -> Result<Vec<RpcLogWithMeta>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Removes a filter. Returns `true` if the filter existed.
+    #[method(name = "uninstallFilter")]
+    async fn uninstall_filter(
+        &self,
+        id: String,
+    ) -> Result<bool, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns the current blob base fee per gas (EIP-4844).
+    #[method(name = "blobBaseFee")]
+    async fn blob_base_fee(&self) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+}
+
+/// Debug namespace RPCs (transaction tracing).
+#[rpc(server, namespace = "debug")]
+pub trait DebugApi {
+    /// Traces the execution of a transaction, returning call frames.
+    #[method(name = "traceTransaction")]
+    async fn trace_transaction(
+        &self,
+        tx_hash: String,
+        opts: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Traces all transactions in a block by number, returning an array of call traces.
+    #[method(name = "traceBlockByNumber")]
+    async fn trace_block_by_number(
+        &self,
+        block_number: String,
+        opts: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, jsonrpsee::types::ErrorObjectOwned>;
+}
+
+/// OpenEthereum-compatible trace namespace RPCs.
+#[rpc(server, namespace = "trace")]
+pub trait TraceApi {
+    /// Returns traces for all transactions in a block (OpenEthereum format).
+    #[method(name = "block")]
+    async fn trace_block(
+        &self,
+        block_number: String,
+    ) -> Result<serde_json::Value, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns traces for a single transaction (OpenEthereum format).
+    #[method(name = "transaction")]
+    async fn trace_oe_transaction(
+        &self,
+        tx_hash: String,
+    ) -> Result<serde_json::Value, jsonrpsee::types::ErrorObjectOwned>;
+}
+
+/// Shell-chain extension API for PQ-specific features.
+#[rpc(server, namespace = "shell")]
+pub trait ShellApi {
+    /// Returns the registered PQ public key for an address.
+    #[method(name = "getPqPubkey")]
+    async fn get_pq_pubkey(
+        &self,
+        address: Address,
+    ) -> Result<Option<String>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns the number of pending transactions in the mempool.
+    #[method(name = "pendingCount")]
+    async fn pending_count(&self) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Submit a signed transaction as structured JSON (developer-friendly).
+    #[method(name = "sendTransaction")]
+    async fn send_transaction(
+        &self,
+        tx: shell_core::SignedTransaction,
+    ) -> Result<ShellHash, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns the current validator set from world state.
+    #[method(name = "getValidators")]
+    async fn get_validators(&self) -> Result<Vec<Address>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Add a validator to the active set. Unauthenticated until M3.
+    #[method(name = "addValidator")]
+    async fn add_validator(
+        &self,
+        address: String,
+    ) -> Result<bool, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Remove a validator from the active set. Unauthenticated until M3.
+    #[method(name = "removeValidator")]
+    async fn remove_validator(
+        &self,
+        address: String,
+    ) -> Result<bool, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Encode calldata for `addValidator(address)` system contract call.
+    #[method(name = "encodeAddValidator")]
+    async fn encode_add_validator(
+        &self,
+        address: String,
+    ) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Encode calldata for `removeValidator(address)` system contract call.
+    #[method(name = "encodeRemoveValidator")]
+    async fn encode_remove_validator(
+        &self,
+        address: String,
+    ) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Propose adding a validator via system contract transaction.
+    /// Requires the node to be configured as a validator.
+    /// Returns the transaction hash on success.
+    #[method(name = "proposeAddValidator")]
+    async fn propose_add_validator(
+        &self,
+        address: String,
+    ) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Propose removing a validator via system contract transaction.
+    /// Requires the node to be configured as a validator.
+    /// Returns the transaction hash on success.
+    #[method(name = "proposeRemoveValidator")]
+    async fn propose_remove_validator(
+        &self,
+        address: String,
+    ) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns whether an address is currently a validator.
+    #[method(name = "getValidatorStatus")]
+    async fn get_validator_status(
+        &self,
+        address: Address,
+    ) -> Result<serde_json::Value, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns governance-related information (validator count, list, system contract address, gas limit).
+    #[method(name = "getGovernanceInfo")]
+    async fn get_governance_info(
+        &self,
+    ) -> Result<serde_json::Value, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns estimated gas for a governance operation ("addValidator" or "removeValidator").
+    #[method(name = "estimateGovernanceGas")]
+    async fn estimate_governance_gas(
+        &self,
+        operation: String,
+    ) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns comprehensive node status information for the performance dashboard.
+    #[method(name = "getNodeInfo")]
+    async fn get_node_info(&self) -> Result<serde_json::Value, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns network statistics for the performance dashboard.
+    #[method(name = "getNetworkStats")]
+    async fn get_network_stats(
+        &self,
+    ) -> Result<serde_json::Value, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns chain performance statistics for the performance dashboard.
+    #[method(name = "getChainStats")]
+    async fn get_chain_stats(
+        &self,
+    ) -> Result<serde_json::Value, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns finality information: last finalized block, current head, and pending attestations.
+    #[method(name = "getFinalityInfo")]
+    async fn get_finality_info(
+        &self,
+    ) -> Result<serde_json::Value, jsonrpsee::types::ErrorObjectOwned>;
+}

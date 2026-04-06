@@ -1,0 +1,566 @@
+use std::sync::Arc;
+
+use alloy_rlp::{Decodable, Encodable};
+use shell_core::Account;
+use shell_primitives::{keccak256, Address, ShellHash, U256};
+
+use crate::{KvStore, MerkleTrie, StorageError};
+
+/// Returns the system address used for the validator registry (0x0000…0001).
+pub fn validator_registry_addr() -> Address {
+    Address::from([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1])
+}
+
+/// Manages the world state (all accounts and their storage).
+///
+/// Accounts are stored in a Merkle Patricia Trie keyed by `keccak256(address)`.
+/// Each account may have its own storage sub-trie whose nodes share the same
+/// underlying [`KvStore`].
+pub struct WorldState<S: KvStore + 'static> {
+    account_trie: MerkleTrie<S>,
+    store: Arc<S>,
+}
+
+impl<S: KvStore + 'static> WorldState<S> {
+    /// Create a new empty world state.
+    pub fn new(store: Arc<S>) -> Self {
+        Self {
+            account_trie: MerkleTrie::new(Arc::clone(&store)),
+            store,
+        }
+    }
+
+    /// Open world state at an existing state root.
+    pub fn at_root(store: Arc<S>, state_root: &ShellHash) -> Result<Self, StorageError> {
+        let trie = MerkleTrie::at_root(Arc::clone(&store), state_root.as_bytes())?;
+        Ok(Self {
+            account_trie: trie,
+            store,
+        })
+    }
+
+    fn account_key(address: &Address) -> Vec<u8> {
+        keccak256(address.as_bytes()).as_bytes().to_vec()
+    }
+
+    /// Retrieve an account by address. Returns `None` if the account does not exist.
+    pub fn get_account(&self, address: &Address) -> Result<Option<Account>, StorageError> {
+        let key = Self::account_key(address);
+        match self.account_trie.get(&key)? {
+            Some(data) => {
+                let account = Account::decode(&mut &data[..])
+                    .map_err(|e| StorageError::Codec(e.to_string()))?;
+                Ok(Some(account))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Write an account to the state trie.
+    pub fn set_account(
+        &mut self,
+        address: &Address,
+        account: &Account,
+    ) -> Result<(), StorageError> {
+        let key = Self::account_key(address);
+        let mut buf = Vec::new();
+        account.encode(&mut buf);
+        self.account_trie.insert(&key, &buf)
+    }
+
+    fn get_or_default(&self, address: &Address) -> Result<Account, StorageError> {
+        Ok(self
+            .get_account(address)?
+            .unwrap_or_else(|| Account::new_eoa(ShellHash::ZERO, U256::ZERO)))
+    }
+
+    // ── Balance helpers ────────────────────────────────────────
+
+    pub fn get_balance(&self, address: &Address) -> Result<U256, StorageError> {
+        Ok(self.get_or_default(address)?.balance)
+    }
+
+    pub fn add_balance(&mut self, address: &Address, amount: U256) -> Result<(), StorageError> {
+        let mut account = self.get_or_default(address)?;
+        account.balance = account
+            .balance
+            .checked_add(amount)
+            .ok_or_else(|| StorageError::State("balance overflow".into()))?;
+        self.set_account(address, &account)
+    }
+
+    pub fn sub_balance(&mut self, address: &Address, amount: U256) -> Result<(), StorageError> {
+        let mut account = self.get_or_default(address)?;
+        if account.balance < amount {
+            return Err(StorageError::State("insufficient balance".into()));
+        }
+        account.balance -= amount;
+        self.set_account(address, &account)
+    }
+
+    // ── Nonce helpers ──────────────────────────────────────────
+
+    pub fn get_nonce(&self, address: &Address) -> Result<u64, StorageError> {
+        Ok(self.get_or_default(address)?.nonce)
+    }
+
+    pub fn increment_nonce(&mut self, address: &Address) -> Result<(), StorageError> {
+        let mut account = self.get_or_default(address)?;
+        account.nonce = account
+            .nonce
+            .checked_add(1)
+            .ok_or_else(|| StorageError::State("nonce overflow".into()))?;
+        self.set_account(address, &account)
+    }
+
+    // ── Contract storage ───────────────────────────────────────
+
+    /// Read a value from an account's storage trie.
+    pub fn get_storage(
+        &self,
+        address: &Address,
+        key: &ShellHash,
+    ) -> Result<ShellHash, StorageError> {
+        let account = match self.get_account(address)? {
+            Some(a) => a,
+            None => return Ok(ShellHash::ZERO),
+        };
+        if account.storage_root == ShellHash::ZERO {
+            return Ok(ShellHash::ZERO);
+        }
+        let storage_trie =
+            MerkleTrie::at_root(Arc::clone(&self.store), account.storage_root.as_bytes())?;
+        let storage_key = keccak256(key.as_bytes());
+        match storage_trie.get(storage_key.as_bytes())? {
+            Some(data) => {
+                ShellHash::try_from_slice(&data).map_err(|e| StorageError::Codec(e.to_string()))
+            }
+            None => Ok(ShellHash::ZERO),
+        }
+    }
+
+    /// Write a value to an account's storage trie.
+    /// Writing `ShellHash::ZERO` removes the key.
+    pub fn set_storage(
+        &mut self,
+        address: &Address,
+        key: &ShellHash,
+        value: &ShellHash,
+    ) -> Result<(), StorageError> {
+        let mut account = self.get_or_default(address)?;
+
+        let mut storage_trie = if account.storage_root == ShellHash::ZERO {
+            MerkleTrie::new(Arc::clone(&self.store))
+        } else {
+            MerkleTrie::at_root(Arc::clone(&self.store), account.storage_root.as_bytes())?
+        };
+
+        let storage_key = keccak256(key.as_bytes());
+        if *value == ShellHash::ZERO {
+            storage_trie.remove(storage_key.as_bytes())?;
+        } else {
+            storage_trie.insert(storage_key.as_bytes(), value.as_bytes())?;
+        }
+
+        let new_root = storage_trie.root_hash()?;
+        account.storage_root = ShellHash::from(new_root);
+        self.set_account(address, &account)
+    }
+
+    // ── Code helpers ───────────────────────────────────────────
+
+    pub fn get_code_hash(&self, address: &Address) -> Result<Option<ShellHash>, StorageError> {
+        Ok(self.get_or_default(address)?.code_hash)
+    }
+
+    pub fn set_code_hash(
+        &mut self,
+        address: &Address,
+        code_hash: ShellHash,
+    ) -> Result<(), StorageError> {
+        let mut account = self.get_or_default(address)?;
+        account.code_hash = Some(code_hash);
+        self.set_account(address, &account)
+    }
+
+    // ── Validator registry ──────────────────────────────────────
+
+    fn validator_count_key() -> ShellHash {
+        keccak256(b"validator_count")
+    }
+
+    fn validator_slot_key(i: u64) -> ShellHash {
+        let label = format!("validator_{i}");
+        keccak256(label.as_bytes())
+    }
+
+    /// Read the current validator set from the validator registry in world state.
+    pub fn get_validators(&self) -> Result<Vec<Address>, StorageError> {
+        let registry = validator_registry_addr();
+        let count_hash = self.get_storage(&registry, &Self::validator_count_key())?;
+        if count_hash == ShellHash::ZERO {
+            return Ok(Vec::new());
+        }
+        let count = u64::from_be_bytes(
+            count_hash.as_bytes()[24..32]
+                .try_into()
+                .map_err(|e: std::array::TryFromSliceError| StorageError::Codec(e.to_string()))?,
+        );
+        let mut validators = Vec::with_capacity(count as usize);
+        for i in 0..count {
+            let slot = self.get_storage(&registry, &Self::validator_slot_key(i))?;
+            // Address::ZERO is a valid validator (slot value is all zeros).
+            // We trust the count field to determine how many validators exist.
+            let addr = Address::try_from_slice(&slot.as_bytes()[12..32])
+                .map_err(|e| StorageError::Codec(e.to_string()))?;
+            validators.push(addr);
+        }
+        Ok(validators)
+    }
+
+    /// Maximum number of validators allowed (F-044: DoS protection).
+    pub const MAX_VALIDATORS: usize = 1000;
+
+    /// Write a validator set to the validator registry in world state.
+    pub fn set_validators(&mut self, validators: &[Address]) -> Result<(), StorageError> {
+        if validators.len() > Self::MAX_VALIDATORS {
+            return Err(StorageError::Codec(format!(
+                "validator set size {} exceeds maximum {}",
+                validators.len(),
+                Self::MAX_VALIDATORS
+            )));
+        }
+        let registry = validator_registry_addr();
+        let old_count_hash = self.get_storage(&registry, &Self::validator_count_key())?;
+        let old_count =
+            if old_count_hash == ShellHash::ZERO {
+                0u64
+            } else {
+                u64::from_be_bytes(old_count_hash.as_bytes()[24..32].try_into().map_err(
+                    |e: std::array::TryFromSliceError| StorageError::Codec(e.to_string()),
+                )?)
+            };
+
+        let new_count = validators.len() as u64;
+        for (i, addr) in validators.iter().enumerate() {
+            let mut slot = [0u8; 32];
+            slot[12..32].copy_from_slice(addr.as_bytes());
+            self.set_storage(
+                &registry,
+                &Self::validator_slot_key(i as u64),
+                &ShellHash::from(slot),
+            )?;
+        }
+
+        for i in new_count..old_count {
+            self.set_storage(&registry, &Self::validator_slot_key(i), &ShellHash::ZERO)?;
+        }
+
+        let mut count_bytes = [0u8; 32];
+        count_bytes[24..32].copy_from_slice(&new_count.to_be_bytes());
+        self.set_storage(
+            &registry,
+            &Self::validator_count_key(),
+            &ShellHash::from(count_bytes),
+        )?;
+
+        Ok(())
+    }
+
+    // ── State root ─────────────────────────────────────────────
+
+    /// Compute and return the current state root hash.
+    pub fn state_root(&mut self) -> Result<ShellHash, StorageError> {
+        let root = self.account_trie.root_hash()?;
+        Ok(ShellHash::from(root))
+    }
+
+    /// Validate the world state by performing a health check (F-123).
+    ///
+    /// Verifies that the state trie can compute a root hash and that
+    /// the validator registry (if populated) is readable and consistent.
+    /// Call this after opening a world state from an existing root to
+    /// detect DB corruption early.
+    pub fn validate(&mut self) -> Result<(), StorageError> {
+        // Verify trie can compute root hash without panic.
+        let _root = self
+            .account_trie
+            .root_hash()
+            .map_err(|e| StorageError::State(format!("state trie integrity check failed: {e}")))?;
+
+        // Verify the validator registry is readable.
+        let validators = self
+            .get_validators()
+            .map_err(|e| StorageError::State(format!("validator registry read failed: {e}")))?;
+
+        // Sanity check: if validators are present, count must be bounded.
+        if validators.len() > Self::MAX_VALIDATORS {
+            return Err(StorageError::State(format!(
+                "validator set size {} exceeds maximum {}",
+                validators.len(),
+                Self::MAX_VALIDATORS
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Check whether an account exists in the state.
+    pub fn exists(&self, address: &Address) -> Result<bool, StorageError> {
+        Ok(self.get_account(address)?.is_some())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::MemoryDb;
+
+    fn test_store() -> Arc<MemoryDb> {
+        Arc::new(MemoryDb::new())
+    }
+
+    fn test_address(seed: &[u8]) -> Address {
+        Address::from_public_key(keccak256(seed).as_bytes())
+    }
+
+    #[test]
+    fn empty_state_has_deterministic_root() {
+        let store = test_store();
+        let mut ws1 = WorldState::new(Arc::clone(&store));
+
+        let store2 = test_store();
+        let mut ws2 = WorldState::new(store2);
+
+        assert_eq!(ws1.state_root().unwrap(), ws2.state_root().unwrap());
+    }
+
+    #[test]
+    fn get_nonexistent_account_returns_none() {
+        let store = test_store();
+        let ws = WorldState::new(store);
+        let addr = test_address(b"nobody");
+        assert!(ws.get_account(&addr).unwrap().is_none());
+    }
+
+    #[test]
+    fn set_and_get_account() {
+        let store = test_store();
+        let mut ws = WorldState::new(store);
+        let addr = test_address(b"alice");
+        let acct = Account::new_eoa(keccak256(b"alice-pk"), U256::from(1000));
+
+        ws.set_account(&addr, &acct).unwrap();
+        let loaded = ws.get_account(&addr).unwrap().unwrap();
+        assert_eq!(loaded.balance, U256::from(1000));
+        assert_eq!(loaded.nonce, 0);
+    }
+
+    #[test]
+    fn balance_add_and_sub() {
+        let store = test_store();
+        let mut ws = WorldState::new(store);
+        let addr = test_address(b"bob");
+
+        ws.add_balance(&addr, U256::from(500)).unwrap();
+        assert_eq!(ws.get_balance(&addr).unwrap(), U256::from(500));
+
+        ws.sub_balance(&addr, U256::from(200)).unwrap();
+        assert_eq!(ws.get_balance(&addr).unwrap(), U256::from(300));
+    }
+
+    #[test]
+    fn sub_balance_insufficient_fails() {
+        let store = test_store();
+        let mut ws = WorldState::new(store);
+        let addr = test_address(b"broke");
+
+        ws.add_balance(&addr, U256::from(100)).unwrap();
+        let err = ws.sub_balance(&addr, U256::from(200)).unwrap_err();
+        assert!(matches!(err, StorageError::State(_)));
+    }
+
+    #[test]
+    fn nonce_increment() {
+        let store = test_store();
+        let mut ws = WorldState::new(store);
+        let addr = test_address(b"carol");
+
+        assert_eq!(ws.get_nonce(&addr).unwrap(), 0);
+        ws.increment_nonce(&addr).unwrap();
+        ws.increment_nonce(&addr).unwrap();
+        assert_eq!(ws.get_nonce(&addr).unwrap(), 2);
+    }
+
+    #[test]
+    fn state_root_changes_with_accounts() {
+        let store = test_store();
+        let mut ws = WorldState::new(store);
+        let root_empty = ws.state_root().unwrap();
+
+        let addr = test_address(b"dave");
+        ws.add_balance(&addr, U256::from(42)).unwrap();
+        let root_with_account = ws.state_root().unwrap();
+
+        assert_ne!(root_empty, root_with_account);
+    }
+
+    #[test]
+    fn state_root_deterministic() {
+        let store1 = test_store();
+        let mut ws1 = WorldState::new(store1);
+        let store2 = test_store();
+        let mut ws2 = WorldState::new(store2);
+
+        let addr = test_address(b"eve");
+        ws1.add_balance(&addr, U256::from(100)).unwrap();
+        ws2.add_balance(&addr, U256::from(100)).unwrap();
+
+        assert_eq!(ws1.state_root().unwrap(), ws2.state_root().unwrap());
+    }
+
+    #[test]
+    fn reopen_at_root() {
+        let store = test_store();
+        let mut ws = WorldState::new(Arc::clone(&store));
+        let addr = test_address(b"frank");
+        ws.add_balance(&addr, U256::from(777)).unwrap();
+        let root = ws.state_root().unwrap();
+
+        let ws2 = WorldState::at_root(store, &root).unwrap();
+        assert_eq!(ws2.get_balance(&addr).unwrap(), U256::from(777));
+    }
+
+    #[test]
+    fn contract_storage_set_and_get() {
+        let store = test_store();
+        let mut ws = WorldState::new(store);
+        let addr = test_address(b"contract");
+
+        let slot = keccak256(b"slot-0");
+        let value = keccak256(b"value-0");
+
+        ws.set_storage(&addr, &slot, &value).unwrap();
+        assert_eq!(ws.get_storage(&addr, &slot).unwrap(), value);
+    }
+
+    #[test]
+    fn contract_storage_delete() {
+        let store = test_store();
+        let mut ws = WorldState::new(store);
+        let addr = test_address(b"contract2");
+
+        let slot = keccak256(b"slot-1");
+        let value = keccak256(b"value-1");
+
+        ws.set_storage(&addr, &slot, &value).unwrap();
+        ws.set_storage(&addr, &slot, &ShellHash::ZERO).unwrap();
+        assert_eq!(ws.get_storage(&addr, &slot).unwrap(), ShellHash::ZERO);
+    }
+
+    #[test]
+    fn exists_check() {
+        let store = test_store();
+        let mut ws = WorldState::new(store);
+        let addr = test_address(b"ghost");
+
+        assert!(!ws.exists(&addr).unwrap());
+        ws.add_balance(&addr, U256::from(1)).unwrap();
+        assert!(ws.exists(&addr).unwrap());
+    }
+
+    // ── Validator registry tests ───────────────────────────────
+
+    #[test]
+    fn get_validators_empty() {
+        let store = test_store();
+        let ws = WorldState::new(store);
+        let validators = ws.get_validators().unwrap();
+        assert!(validators.is_empty());
+    }
+
+    #[test]
+    fn set_and_get_validators_roundtrip() {
+        let store = test_store();
+        let mut ws = WorldState::new(store);
+
+        let v1 = Address::from([0x01; 20]);
+        let v2 = Address::from([0x02; 20]);
+        let v3 = Address::from([0x03; 20]);
+        let validators = vec![v1, v2, v3];
+
+        ws.set_validators(&validators).unwrap();
+        let loaded = ws.get_validators().unwrap();
+        assert_eq!(loaded, validators);
+    }
+
+    #[test]
+    fn set_validators_overwrites_previous() {
+        let store = test_store();
+        let mut ws = WorldState::new(store);
+
+        let old_set = vec![
+            Address::from([0x0A; 20]),
+            Address::from([0x0B; 20]),
+            Address::from([0x0C; 20]),
+        ];
+        ws.set_validators(&old_set).unwrap();
+        assert_eq!(ws.get_validators().unwrap().len(), 3);
+
+        let new_set = vec![Address::from([0xDD; 20]), Address::from([0xEE; 20])];
+        ws.set_validators(&new_set).unwrap();
+        let loaded = ws.get_validators().unwrap();
+        assert_eq!(loaded, new_set);
+    }
+
+    #[test]
+    fn set_validators_single() {
+        let store = test_store();
+        let mut ws = WorldState::new(store);
+
+        let validators = vec![Address::from([0xFF; 20])];
+        ws.set_validators(&validators).unwrap();
+        assert_eq!(ws.get_validators().unwrap(), validators);
+    }
+
+    #[test]
+    fn set_validators_persists_across_root_reopen() {
+        let store = test_store();
+        let mut ws = WorldState::new(Arc::clone(&store));
+
+        let validators = vec![Address::from([0x11; 20]), Address::from([0x22; 20])];
+        ws.set_validators(&validators).unwrap();
+        let root = ws.state_root().unwrap();
+
+        let ws2 = WorldState::at_root(store, &root).unwrap();
+        assert_eq!(ws2.get_validators().unwrap(), validators);
+    }
+
+    #[test]
+    fn validate_empty_state_ok() {
+        let store = test_store();
+        let mut ws = WorldState::new(store);
+        assert!(ws.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_with_validators_ok() {
+        let store = test_store();
+        let mut ws = WorldState::new(store);
+        let validators = vec![Address::from([0x01; 20]), Address::from([0x02; 20])];
+        ws.set_validators(&validators).unwrap();
+        assert!(ws.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_after_reopen_at_root() {
+        let store = test_store();
+        let mut ws = WorldState::new(Arc::clone(&store));
+        let addr = test_address(b"val-test");
+        ws.add_balance(&addr, U256::from(42)).unwrap();
+        let root = ws.state_root().unwrap();
+
+        let mut ws2 = WorldState::at_root(store, &root).unwrap();
+        assert!(ws2.validate().is_ok());
+    }
+}
