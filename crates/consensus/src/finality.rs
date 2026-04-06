@@ -126,7 +126,7 @@ impl FinalityState {
         if total_validators <= 1 {
             return 1;
         }
-        (total_validators * 2 + 2) / 3
+        (total_validators * 2).div_ceil(3)
     }
 
     /// Last finalized block number.
