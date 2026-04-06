@@ -167,7 +167,6 @@ mod tests {
 
     #[test]
     fn encrypted_key_default_key_type_on_missing_field() {
-        // When key_type is absent in JSON, it should default to "dilithium3"
         let json = r#"{
             "version": 1,
             "address": "0x0000",
