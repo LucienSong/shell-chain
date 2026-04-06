@@ -306,10 +306,10 @@ mod tests {
         let mut bad_pk = signer.public_key().to_vec();
         bad_pk[0] ^= 0x01;
         // May return Ok(false) or Err depending on how the bit flip affects parsing
-        match verifier.verify(&bad_pk, msg, &sig) {
-            Ok(valid) => assert!(!valid),
-            Err(_) => {} // also acceptable — corrupted key may fail parsing
+        if let Ok(valid) = verifier.verify(&bad_pk, msg, &sig) {
+            assert!(!valid);
         }
+        // Err is also acceptable — corrupted key may fail parsing
     }
 
     // ── C. Performance / size validation ────────────────────────

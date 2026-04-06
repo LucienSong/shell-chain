@@ -192,7 +192,7 @@ mod tests {
             base = next;
         }
         // Should converge to a small value (≥ 1)
-        assert!(base >= 1 && base <= 8, "converged to {base}");
+        assert!((1..=8).contains(&base), "converged to {base}");
     }
 
     #[test]
@@ -223,7 +223,7 @@ mod tests {
         let base = u64::MAX - 1_000_000_000;
         let new = calculate_base_fee(GAS_LIMIT, GAS_LIMIT, base);
         assert!(new >= base, "fee should not wrap around");
-        assert!(new <= u64::MAX, "fee should cap at u64::MAX");
+        // saturating_add guarantees no overflow past u64::MAX
     }
 
     // ── effective_gas_price tests ──────────────────────────────

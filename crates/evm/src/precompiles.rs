@@ -346,7 +346,7 @@ mod tests {
         input.extend_from_slice(pk);
         input.extend_from_slice(&(message.len() as u32).to_be_bytes());
         input.extend_from_slice(message);
-        input.extend_from_slice(&vec![0xDE; 100]); // bad signature
+        input.extend_from_slice(&[0xDE; 100]); // bad signature
 
         let parsed = parse_pq_verify_input(&input).unwrap();
         let verifier = DilithiumVerifier;

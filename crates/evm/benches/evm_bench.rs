@@ -3,9 +3,9 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use std::sync::Arc;
 
-use shell_core::{Account, Block, BlockHeader, SignedTransaction, Transaction};
+use shell_core::{Account, BlockHeader, SignedTransaction, Transaction};
 use shell_crypto::{PQSignature, SignatureType};
-use shell_evm::{commit_evm_state, ShellEvm, ShellStateDb};
+use shell_evm::{ShellEvm, ShellStateDb};
 use shell_primitives::{Address, Bytes, ShellHash, U256};
 use shell_storage::{ChainStore, MemoryDb, WorldState};
 

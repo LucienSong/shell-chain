@@ -2062,7 +2062,7 @@ mod tests {
         let expected_root = block.header.state_root;
 
         // Verify world state root matches what was written in the header.
-        let ws = node.world_state.read();
+        let _ws = node.world_state.read();
         // The state root won't literally match for empty blocks on a fresh trie,
         // but the produce_block code writes ws.state_root() into the header.
         // We verify the header's state_root is consistent.

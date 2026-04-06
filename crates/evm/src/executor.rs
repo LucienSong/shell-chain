@@ -2077,7 +2077,7 @@ mod tests {
             max_fee_per_gas: 0,
             max_priority_fee_per_gas: 0,
             access_list: Some(vec![shell_core::AccessListItem {
-                address: ShellAddress::from(addr),
+                address: addr,
                 storage_keys: vec![ShellHash::ZERO],
             }]),
             tx_type: 2,
