@@ -162,8 +162,8 @@ services:
       --p2p --p2p-addr 0.0.0.0:30303
       --bootnode /dns4/node1/tcp/30303
       --enable-mdns
-      --rpc-cors "*"
-      --rpc-api eth,net,web3,shell,debug,trace
+      --rpc-cors "http://localhost:3000"
+      --rpc-api eth,net,web3,shell
       --db rocksdb
       --metrics-addr 0.0.0.0:9090
       --log-format json
@@ -235,7 +235,7 @@ services:
     ports:
       - "3000:3000"
     environment:
-      - GF_SECURITY_ADMIN_PASSWORD=${GF_ADMIN_PASSWORD:-changeme}
+      - GF_SECURITY_ADMIN_PASSWORD=${GF_ADMIN_PASSWORD:?GF_ADMIN_PASSWORD must be set in .env}
       - GF_USERS_ALLOW_SIGN_UP=false
     networks:
       - internal
