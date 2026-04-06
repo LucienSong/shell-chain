@@ -102,18 +102,30 @@ impl Default for Metrics {
     }
 }
 
+/// Build a plain-text response (fallback for builder errors, which should never occur).
+fn plain_response(
+    status: StatusCode,
+    text: &'static str,
+) -> Response<http_body_util::Full<hyper::body::Bytes>> {
+    let mut resp = Response::new(http_body_util::Full::new(hyper::body::Bytes::from(text)));
+    *resp.status_mut() = status;
+    resp
+}
+
 /// Build a JSON response with the given status code and body.
 fn json_response(
     status: StatusCode,
     body: serde_json::Value,
 ) -> Response<http_body_util::Full<hyper::body::Bytes>> {
-    Response::builder()
+    match Response::builder()
         .status(status)
         .header("Content-Type", "application/json")
         .body(http_body_util::Full::new(hyper::body::Bytes::from(
             body.to_string(),
-        )))
-        .unwrap()
+        ))) {
+        Ok(resp) => resp,
+        Err(_) => plain_response(StatusCode::INTERNAL_SERVER_ERROR, "response build error"),
+    }
 }
 
 /// Handle a single HTTP request, routing to `/metrics`, `/health`, or `/ready`.
@@ -124,11 +136,14 @@ fn handle_request<B>(
     match (req.method(), req.uri().path()) {
         (&Method::GET, "/metrics") => {
             let body = metrics.gather();
-            Response::builder()
+            match Response::builder()
                 .status(StatusCode::OK)
                 .header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
                 .body(http_body_util::Full::new(hyper::body::Bytes::from(body)))
-                .unwrap()
+            {
+                Ok(resp) => resp,
+                Err(_) => plain_response(StatusCode::INTERNAL_SERVER_ERROR, "response build error"),
+            }
         }
         (&Method::GET, "/health") => {
             let body = serde_json::json!({
@@ -154,12 +169,7 @@ fn handle_request<B>(
                 )
             }
         }
-        _ => Response::builder()
-            .status(StatusCode::NOT_FOUND)
-            .body(http_body_util::Full::new(hyper::body::Bytes::from(
-                "Not Found",
-            )))
-            .unwrap(),
+        _ => plain_response(StatusCode::NOT_FOUND, "Not Found"),
     }
 }
 
