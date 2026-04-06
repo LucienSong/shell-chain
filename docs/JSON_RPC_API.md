@@ -1037,6 +1037,116 @@ Returns finality status.
 
 ---
 
+### shell_getBlockSigners
+
+Returns the post-quantum signature details for validators who signed a specific block.
+
+**Parameters:**
+| # | Type | Required | Description |
+|---|------|----------|-------------|
+| 1 | `String` | Yes | Block number (hex) or block tag |
+
+**Returns:**
+```json
+{
+  "blockNumber": "0x1a",
+  "signers": [
+    {
+      "address": "0x...",
+      "pqPubkey": "0x...",
+      "signatureValid": true
+    }
+  ]
+}
+```
+
+---
+
+### shell_verifyPqSignature
+
+Verifies a Dilithium3 post-quantum signature against a message and public key.
+
+**Parameters:**
+| # | Type | Required | Description |
+|---|------|----------|-------------|
+| 1 | `String` | Yes | Hex-encoded message |
+| 2 | `String` | Yes | Hex-encoded Dilithium3 signature |
+| 3 | `String` | Yes | Hex-encoded Dilithium3 public key |
+
+**Returns:** `Boolean` — `true` if the signature is valid.
+
+```bash
+curl -s http://localhost:8545 \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"shell_verifyPqSignature","params":["0xmessage...","0xsignature...","0xpubkey..."],"id":1}'
+```
+
+---
+
+### shell_getEpochInfo
+
+Returns information about the current consensus epoch.
+
+**Parameters:** None
+
+**Returns:**
+```json
+{
+  "currentEpoch": 5,
+  "epochLength": 0,
+  "blocksInEpoch": 1500,
+  "currentBlockTime": 2.01,
+  "activeValidators": 3
+}
+```
+
+---
+
+### shell_getValidatorVotes
+
+Returns voting activity statistics for validators in recent blocks.
+
+**Parameters:** None
+
+**Returns:**
+```json
+{
+  "validators": [
+    {
+      "address": "0x...",
+      "blocksProduced": 500,
+      "lastBlockProduced": "0x1a",
+      "uptime": 99.8
+    }
+  ]
+}
+```
+
+---
+
+### shell_getPendingGovernanceProposals
+
+Returns pending governance proposals that have not yet been finalized.
+
+**Parameters:** None
+
+**Returns:**
+```json
+{
+  "proposals": [
+    {
+      "type": "addValidator",
+      "target": "0x...",
+      "proposer": "0x...",
+      "proposedAt": "0x18",
+      "status": "pending"
+    }
+  ]
+}
+```
+
+---
+
 ### shell_addValidator / shell_removeValidator *(disabled)*
 
 These methods return error `-32601`. Direct validator set mutation is disabled to prevent split-brain issues. Use `shell_proposeAddValidator` and `shell_proposeRemoveValidator` instead, which go through the governance transaction flow.
@@ -1147,6 +1257,25 @@ curl -s http://localhost:8545 \
 
 ---
 
+### trace_transaction
+
+Returns the trace for a specific transaction in standard format.
+
+**Parameters:**
+| # | Type | Required | Description |
+|---|------|----------|-------------|
+| 1 | `String` | Yes | Transaction hash |
+
+**Returns:** `Array` — Trace objects for the transaction.
+
+```bash
+curl -s http://localhost:8545 \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"trace_transaction","params":["0xabc123..."],"id":1}'
+```
+
+---
+
 ## Method Summary
 
 | Namespace | Method | Params | Description |
@@ -1180,6 +1309,8 @@ curl -s http://localhost:8545 \
 | eth_ | `eth_getFilterLogs` | id | Re-query filter |
 | eth_ | `eth_uninstallFilter` | id | Remove filter |
 | eth_ | `eth_blobBaseFee` | — | Blob gas price |
+| eth_ | `eth_subscribe` | type, filter? | WebSocket subscription |
+| eth_ | `eth_unsubscribe` | id | Cancel subscription |
 | net_ | `net_version` | — | Chain ID (string) |
 | net_ | `net_listening` | — | Always true |
 | net_ | `net_peerCount` | — | Peer count |
@@ -1200,10 +1331,18 @@ curl -s http://localhost:8545 \
 | shell_ | `shell_getNetworkStats` | — | Network stats |
 | shell_ | `shell_getChainStats` | — | Chain statistics |
 | shell_ | `shell_getFinalityInfo` | — | Finality status |
+| shell_ | `shell_getBlockSigners` | num | Block PQ signers |
+| shell_ | `shell_verifyPqSignature` | msg, sig, pubkey | Verify PQ signature |
+| shell_ | `shell_getEpochInfo` | — | Epoch info |
+| shell_ | `shell_getValidatorVotes` | — | Validator activity |
+| shell_ | `shell_getPendingGovernanceProposals` | — | Pending proposals |
 | debug_ | `debug_traceTransaction` | hash, opts? | Tx trace |
 | debug_ | `debug_traceBlockByNumber` | num, opts? | Block trace |
 | trace_ | `trace_block` | num | OE block traces |
 | trace_ | `trace_oeTransaction` | hash | OE tx trace |
+| trace_ | `trace_transaction` | hash | Standard tx trace |
+
+**Total: 61 methods** (31 eth, 3 net, 2 web3, 20 shell, 2 debug, 3 trace)
 
 ---
 

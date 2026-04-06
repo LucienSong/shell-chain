@@ -439,8 +439,10 @@ async fn forward_new_heads(
             Ok(BlockEvent::NewBlock { header, .. }) => {
                 consecutive_lags = 0;
                 let value = header_to_json(&header);
-                let msg = SubscriptionMessage::from_json(&value)
-                    .expect("header serialization cannot fail");
+                let Ok(msg) = SubscriptionMessage::from_json(&value) else {
+                    tracing::error!("failed to serialize header for subscription");
+                    break;
+                };
                 if sink.send(msg).await.is_err() {
                     break;
                 }
@@ -479,8 +481,10 @@ async fn forward_logs(
                                 receipt.tx_index,
                                 global_log_index,
                             );
-                            let msg = SubscriptionMessage::from_json(&value)
-                                .expect("log serialization cannot fail");
+                            let Ok(msg) = SubscriptionMessage::from_json(&value) else {
+                                tracing::error!("failed to serialize log for subscription");
+                                return;
+                            };
                             if sink.send(msg).await.is_err() {
                                 return;
                             }
@@ -519,8 +523,10 @@ async fn forward_pending_txs(
             Ok(tx_hash) => {
                 consecutive_lags = 0;
                 let value = serde_json::json!(tx_hash);
-                let msg =
-                    SubscriptionMessage::from_json(&value).expect("hash serialization cannot fail");
+                let Ok(msg) = SubscriptionMessage::from_json(&value) else {
+                    tracing::error!("failed to serialize tx hash for subscription");
+                    break;
+                };
                 if sink.send(msg).await.is_err() {
                     break;
                 }
@@ -554,7 +560,10 @@ async fn forward_syncing(
 ) {
     // Emit initial status: node is not syncing (no formal sync states yet).
     let initial = serde_json::json!(false);
-    let msg = SubscriptionMessage::from_json(&initial).expect("bool serialization cannot fail");
+    let Ok(msg) = SubscriptionMessage::from_json(&initial) else {
+        tracing::error!("failed to serialize initial sync status");
+        return;
+    };
     if sink.send(msg).await.is_err() {
         return;
     }
@@ -567,8 +576,10 @@ async fn forward_syncing(
             Ok(Ok(status)) => {
                 consecutive_lags = 0;
                 let value = sync_status_to_json(&status);
-                let msg = SubscriptionMessage::from_json(&value)
-                    .expect("sync status serialization cannot fail");
+                let Ok(msg) = SubscriptionMessage::from_json(&value) else {
+                    tracing::error!("failed to serialize sync status for subscription");
+                    break;
+                };
                 if sink.send(msg).await.is_err() {
                     break;
                 }

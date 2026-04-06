@@ -110,10 +110,8 @@ mod tests {
         assert!(mv.verify(sph_signer.public_key(), msg, &sph_sig).unwrap());
 
         // Cross-key must fail.
-        assert!(
-            !mv.verify(sph_signer.public_key(), msg, &dil_sig).is_ok()
-                || !mv.verify(sph_signer.public_key(), msg, &dil_sig).unwrap()
-        );
+        let cross_result = mv.verify(sph_signer.public_key(), msg, &dil_sig);
+        assert!(cross_result.is_err() || !cross_result.unwrap());
     }
 
     #[test]

@@ -11,13 +11,17 @@ This guide covers everything you need to run a shell-chain testnet node — from
 1. [System Requirements](#system-requirements)
 2. [Installation from Source](#installation-from-source)
 3. [Docker Deployment](#docker-deployment)
-4. [Configuration](#configuration)
-5. [Key Generation](#key-generation)
-6. [Genesis Initialization](#genesis-initialization)
-7. [Starting a Node](#starting-a-node)
-8. [Monitoring Setup](#monitoring-setup)
-9. [Upgrading and Maintenance](#upgrading-and-maintenance)
-10. [Troubleshooting](#troubleshooting)
+4. [Alpha Testnet Deployment](#alpha-testnet-deployment)
+5. [Configuration](#configuration)
+6. [Key Generation](#key-generation)
+7. [Genesis Initialization](#genesis-initialization)
+8. [Starting a Node](#starting-a-node)
+9. [Health & Readiness Endpoints](#health--readiness-endpoints)
+10. [Nginx Reverse Proxy](#nginx-reverse-proxy)
+11. [JSON Logging](#json-logging)
+12. [Monitoring Setup](#monitoring-setup)
+13. [Upgrading and Maintenance](#upgrading-and-maintenance)
+14. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -64,7 +68,7 @@ rustup update stable
 ### 2. Clone the repository
 
 ```bash
-git clone https://github.com/shellchain-project/shell-chain.git
+git clone https://github.com/LucienSong/shell-chain.git
 cd shell-chain
 ```
 
@@ -137,6 +141,195 @@ All nodes use an `eth_blockNumber` JSON-RPC health check (10s interval, 5s timeo
 ### Persistent volumes
 
 `node1-data`, `node2-data`, `node3-data`, `rpc-data`, `prometheus-data`, `grafana-data`, and a shared `genesis` volume.
+
+---
+
+## Alpha Testnet Deployment
+
+Shell-Chain provides a dedicated `docker-compose.alpha.yml` for joining the public alpha testnet.
+
+### Quick start
+
+```bash
+# Copy the environment template and configure
+cp .env.example .env
+# Edit .env to set your node name, RPC settings, etc.
+
+# Start the alpha testnet node
+docker compose -f docker-compose.alpha.yml up -d
+```
+
+The `.env.example` file contains all configurable environment variables with sensible defaults. Review and adjust before starting:
+
+```bash
+cat .env.example
+```
+
+### Verify the node is running
+
+```bash
+# Check container status
+docker compose -f docker-compose.alpha.yml ps
+
+# Check block height
+curl -s http://localhost:8545 \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
+```
+
+### Upgrading
+
+```bash
+git pull origin main
+docker compose -f docker-compose.alpha.yml build
+docker compose -f docker-compose.alpha.yml up -d
+```
+
+---
+
+## Health & Readiness Endpoints
+
+Shell-Chain exposes HTTP health and readiness probes on the metrics port (default: 9090). These are designed for use with container orchestrators (Docker, Kubernetes) and load balancers.
+
+### GET /health — Liveness Probe
+
+Returns node liveness status. Use this for Docker `HEALTHCHECK` or Kubernetes `livenessProbe`.
+
+```bash
+curl http://localhost:9090/health
+```
+
+**Response (200 OK):**
+
+```json
+{"status":"ok","version":"0.6.0","block_height":1234}
+```
+
+The node is considered alive if the process is running and can respond to HTTP requests.
+
+### GET /ready — Readiness Probe
+
+Returns whether the node is ready to serve traffic. Use this for Kubernetes `readinessProbe` or load balancer health checks.
+
+```bash
+curl http://localhost:9090/ready
+```
+
+**Response (200 OK) — Ready:**
+
+```json
+{"ready":true}
+```
+
+**Response (503 Service Unavailable) — Not Ready:**
+
+```json
+{"ready":false,"reason":"no blocks produced yet"}
+```
+
+The node reports not-ready if it has not yet imported or produced any blocks. This prevents routing traffic to nodes that are still syncing.
+
+### Using with Docker Compose
+
+```yaml
+healthcheck:
+  test: ["CMD", "curl", "-f", "http://localhost:9090/health"]
+  interval: 10s
+  timeout: 5s
+  retries: 3
+```
+
+---
+
+## Nginx Reverse Proxy
+
+For production deployments, place an nginx reverse proxy in front of the RPC endpoint. Shell-Chain includes a reference configuration at `docker/nginx.conf`.
+
+### Reference configuration
+
+The provided `docker/nginx.conf` handles:
+
+- TLS termination (configure your certificates)
+- Rate limiting for RPC requests
+- Proxy headers (`X-Real-IP`, `X-Forwarded-For`)
+- WebSocket upgrade for `ws://` connections
+- CORS headers
+
+### Example setup
+
+```bash
+# The alpha testnet docker-compose includes nginx
+docker compose -f docker-compose.alpha.yml up -d
+
+# Verify the proxy is working
+curl http://testnet.shell.xyz \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
+```
+
+### Manual nginx setup
+
+If running nginx outside Docker, point it at the RPC endpoint:
+
+```nginx
+upstream shell_rpc {
+    server 127.0.0.1:8545;
+}
+
+server {
+    listen 80;
+    server_name testnet.shell.xyz;
+
+    location / {
+        proxy_pass http://shell_rpc;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+
+        # WebSocket support
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+}
+```
+
+---
+
+## JSON Logging
+
+Shell-Chain supports structured JSON logging for integration with log aggregation systems (ELK, Loki, Datadog, etc.).
+
+### Enable JSON logging
+
+```bash
+shell-node run --log-format json --log-level info ...
+```
+
+Or in TOML config:
+
+```toml
+[logging]
+format = "json"
+level = "info"
+```
+
+### JSON log format
+
+Each log line is a JSON object:
+
+```json
+{"timestamp":"2025-01-15T10:30:00Z","level":"INFO","target":"shell_node::consensus","message":"Block produced","block_number":1234,"block_hash":"0xabc...","tx_count":5}
+```
+
+### Log rotation
+
+When writing logs to a file, use `logrotate` or a similar tool:
+
+```bash
+shell-node run --config config.toml --log-format json 2>&1 | \
+  tee -a /var/log/shell-chain/node.log
+```
 
 ---
 

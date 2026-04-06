@@ -34,4 +34,7 @@ USER shelluser
 
 EXPOSE 8545 30303 9090
 
+HEALTHCHECK --interval=10s --timeout=3s --retries=3 \
+    CMD curl -sf http://localhost:9090/health || exit 1
+
 ENTRYPOINT ["/entrypoint.sh"]
