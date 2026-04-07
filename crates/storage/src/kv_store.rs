@@ -178,9 +178,7 @@ mod tests {
             key: b"k".to_vec(),
             value: b"v".to_vec(),
         };
-        let del = WriteBatchOp::Delete {
-            key: b"k".to_vec(),
-        };
+        let del = WriteBatchOp::Delete { key: b"k".to_vec() };
         assert!(format!("{:?}", put).contains("Put"));
         assert!(format!("{:?}", del).contains("Delete"));
     }

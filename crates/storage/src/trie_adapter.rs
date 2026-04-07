@@ -94,9 +94,7 @@ mod tests {
     fn multiple_keys() {
         let adapter = make_adapter();
         for i in 0..10u8 {
-            adapter
-                .insert(&[i], vec![i + 100])
-                .unwrap();
+            adapter.insert(&[i], vec![i + 100]).unwrap();
         }
         for i in 0..10u8 {
             assert_eq!(adapter.get(&[i]).unwrap(), Some(vec![i + 100]));

@@ -85,7 +85,10 @@ mod tests {
         assert_eq!(cfg.max_per_sender, cloned.max_per_sender);
         assert_eq!(cfg.chain_id, cloned.chain_id);
         assert_eq!(cfg.min_gas_price, cloned.min_gas_price);
-        assert_eq!(cfg.replacement_fee_bump_pct, cloned.replacement_fee_bump_pct);
+        assert_eq!(
+            cfg.replacement_fee_bump_pct,
+            cloned.replacement_fee_bump_pct
+        );
     }
 
     #[test]
