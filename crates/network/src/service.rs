@@ -5,6 +5,9 @@ use async_trait::async_trait;
 use crate::error::NetworkError;
 use crate::message::{NetworkEvent, NetworkMessage};
 
+use std::sync::atomic::AtomicUsize;
+use std::sync::Arc;
+
 /// Trait abstracting the P2P network layer.
 ///
 /// Implementations handle peer management, message serialization,
@@ -21,6 +24,12 @@ pub trait NetworkService: Send + Sync {
 
     /// Returns the number of currently connected peers.
     async fn peer_count(&self) -> usize;
+
+    /// Returns a shared atomic handle to the live peer count.
+    /// External consumers (e.g. RPC) can read this without async.
+    fn peer_count_handle(&self) -> Arc<AtomicUsize> {
+        Arc::new(AtomicUsize::new(0))
+    }
 
     /// Shut down the network service gracefully.
     async fn shutdown(&self) -> Result<(), NetworkError>;

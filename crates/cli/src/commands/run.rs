@@ -39,6 +39,8 @@ pub struct RunArgs {
     pub rpc_rate_limit: Option<u32>,
     pub rpc_api: Option<String>,
     pub metrics_addr: String,
+    /// Maximum seconds between blocks when mempool is empty (0 = disabled).
+    pub max_idle_interval: u64,
 }
 
 /// Maximum genesis file size: 10 MB (F-082).
@@ -270,6 +272,7 @@ async fn run_with_store<S: KvStore + 'static>(
             enabled: true,
             listen_addr: args.metrics_addr.parse()?,
         },
+        max_idle_interval_ms: args.max_idle_interval * 1000,
     };
 
     // Build the node (auto-detects existing state via NodeBuilder).

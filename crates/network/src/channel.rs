@@ -126,6 +126,10 @@ impl NetworkService for ChannelNetwork {
         self.peer_count.load(Ordering::Relaxed).saturating_sub(1)
     }
 
+    fn peer_count_handle(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.peer_count)
+    }
+
     async fn shutdown(&self) -> Result<(), NetworkError> {
         self.running.store(false, Ordering::Relaxed);
         Ok(())

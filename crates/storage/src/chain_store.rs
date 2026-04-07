@@ -465,6 +465,32 @@ impl<S: KvStore> ChainStore<S> {
             _ => Ok(None),
         }
     }
+
+    /// Store the total transaction count across all blocks.
+    pub fn set_total_tx_count(&self, count: u64) -> Result<(), StorageError> {
+        self.store.put(b"TOTAL_TX_COUNT", &count.to_be_bytes())
+    }
+
+    /// Get the total transaction count across all blocks.
+    pub fn get_total_tx_count(&self) -> Result<u64, StorageError> {
+        match self.store.get(b"TOTAL_TX_COUNT")? {
+            Some(bytes) if bytes.len() == 8 => {
+                let arr: [u8; 8] = bytes
+                    .try_into()
+                    .map_err(|_| StorageError::Codec("invalid tx count encoding".into()))?;
+                Ok(u64::from_be_bytes(arr))
+            }
+            _ => Ok(0),
+        }
+    }
+
+    /// Increment the total transaction count by `delta` and persist.
+    pub fn increment_tx_count(&self, delta: u64) -> Result<u64, StorageError> {
+        let current = self.get_total_tx_count()?;
+        let new_count = current + delta;
+        self.set_total_tx_count(new_count)?;
+        Ok(new_count)
+    }
 }
 
 #[cfg(test)]

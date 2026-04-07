@@ -396,4 +396,8 @@ pub trait ShellApi {
         address: Address,
         balance: String,
     ) -> Result<bool, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns the total number of transactions across all blocks.
+    #[method(name = "transactionCount")]
+    async fn transaction_count(&self) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
 }

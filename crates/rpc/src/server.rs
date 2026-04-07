@@ -101,6 +101,7 @@ pub async fn start_rpc_server<S: KvStore + 'static>(
     proposer_address: Option<Address>,
     finalized_number: Arc<parking_lot::RwLock<u64>>,
     finality: Arc<parking_lot::RwLock<FinalityState>>,
+    peer_count: Arc<std::sync::atomic::AtomicUsize>,
 ) -> Result<RpcServerHandle, Box<dyn std::error::Error + Send + Sync>> {
     // Validate TLS configuration if provided.
     match tls::load_tls_config(
@@ -141,7 +142,8 @@ pub async fn start_rpc_server<S: KvStore + 'static>(
         block_events,
         finalized_number,
         finality,
-    );
+    )
+    .with_peer_count(peer_count);
     if let (Some(signer), Some(addr)) = (proposer_signer, proposer_address) {
         handler = handler.with_proposer(signer, addr);
     }

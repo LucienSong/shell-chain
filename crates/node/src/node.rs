@@ -221,6 +221,9 @@ impl<S: KvStore + 'static> Node<S> {
             .unwrap_or(0);
         let finalized_number = Arc::new(parking_lot::RwLock::new(finality_num.max(persisted_num)));
 
+        // Get the peer count handle from the network for RPC.
+        let peer_count_handle = network.peer_count_handle();
+
         let rpc_handle = start_rpc_server(
             self.config.rpc.clone(),
             self.chain_store.clone(),
@@ -233,6 +236,7 @@ impl<S: KvStore + 'static> Node<S> {
             self.config.proposer_address,
             finalized_number.clone(),
             self.finality.clone(),
+            peer_count_handle,
         )
         .await
         .map_err(|e| NodeError::Startup(format!("RPC: {e}")))?;
@@ -245,6 +249,8 @@ impl<S: KvStore + 'static> Node<S> {
         let mut block_timer = interval(Duration::from_millis(self.config.block_time_ms));
         let mut peer_count_timer = interval(Duration::from_secs(10));
         let mut shutdown_rx = self.shutdown_tx.subscribe();
+        // Track the last time a block was produced for idle-block-skip.
+        let mut last_block_time = std::time::Instant::now();
 
         // Skip the first immediate tick.
         block_timer.tick().await;
@@ -277,9 +283,21 @@ impl<S: KvStore + 'static> Node<S> {
             tokio::select! {
                 _ = block_timer.tick() => {
                     if self.config.proposer_address.is_some() {
+                        // Idle-block-skip: when mempool is empty and we haven't
+                        // exceeded max_idle_interval, skip block production.
+                        let max_idle_ms = self.config.max_idle_interval_ms;
+                        if max_idle_ms > 0 && self.tx_pool.len() == 0 {
+                            let idle_dur = std::time::Duration::from_millis(max_idle_ms);
+                            if last_block_time.elapsed() < idle_dur {
+                                continue;
+                            }
+                            // Heartbeat: produce an empty block to keep chain alive.
+                        }
+
                         let start = std::time::Instant::now();
                         match self.produce_block(&*signer, 500) {
                             Ok(block) => {
+                                last_block_time = std::time::Instant::now();
                                 let elapsed = start.elapsed().as_secs_f64();
                                 self.metrics.block_production_ms.observe(elapsed);
                                 self.metrics.blocks_imported.inc();
@@ -780,6 +798,12 @@ impl<S: KvStore + 'static> Node<S> {
         let tx_hashes: Vec<ShellHash> = included_txs.iter().map(|tx| tx.hash()).collect();
         self.tx_pool.remove_batch(&tx_hashes);
 
+        // Update global transaction counter for shell_transactionCount RPC.
+        let new_tx_count = included_txs.len() as u64;
+        if new_tx_count > 0 {
+            let _ = self.chain_store.increment_tx_count(new_tx_count);
+        }
+
         // Track the new state root for pruning decisions.
         self.record_finalized_state_root(block.number(), block.header.state_root);
 
@@ -1030,6 +1054,12 @@ impl<S: KvStore + 'static> Node<S> {
         // Remove any included transactions from our mempool.
         let tx_hashes: Vec<ShellHash> = block.transactions.iter().map(|tx| tx.hash()).collect();
         self.tx_pool.remove_batch(&tx_hashes);
+
+        // Update global transaction counter for shell_transactionCount RPC.
+        let imported_tx_count = block.transactions.len() as u64;
+        if imported_tx_count > 0 {
+            let _ = self.chain_store.increment_tx_count(imported_tx_count);
+        }
 
         // Track the imported state root for pruning decisions.
         self.record_finalized_state_root(block.number(), block.header.state_root);

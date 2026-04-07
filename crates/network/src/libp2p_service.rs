@@ -169,6 +169,11 @@ impl Libp2pNetwork {
         &self.bandwidth
     }
 
+    /// Return a shared handle to the live peer count for external consumers (e.g. RPC).
+    pub fn peer_count_handle(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.peer_count)
+    }
+
     /// Return a snapshot of all known peer scores.
     ///
     /// Sends a request to the swarm background task and awaits the reply.
@@ -906,6 +911,10 @@ impl NetworkService for Libp2pNetwork {
 
     async fn peer_count(&self) -> usize {
         self.peer_count.load(Ordering::Relaxed)
+    }
+
+    fn peer_count_handle(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.peer_count)
     }
 
     async fn shutdown(&self) -> Result<(), NetworkError> {

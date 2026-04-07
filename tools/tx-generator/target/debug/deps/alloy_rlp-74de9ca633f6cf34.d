@@ -1,0 +1,10 @@
+/Users/luciensong/Shell/shell-dev/shell-chain/tools/tx-generator/target/debug/deps/alloy_rlp-74de9ca633f6cf34.d: /Users/luciensong/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/alloy-rlp-0.3.15/src/lib.rs /Users/luciensong/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/alloy-rlp-0.3.15/src/decode.rs /Users/luciensong/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/alloy-rlp-0.3.15/src/error.rs /Users/luciensong/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/alloy-rlp-0.3.15/src/encode.rs /Users/luciensong/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/alloy-rlp-0.3.15/src/header.rs /Users/luciensong/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/alloy-rlp-0.3.15/src/../README.md
+
+/Users/luciensong/Shell/shell-dev/shell-chain/tools/tx-generator/target/debug/deps/liballoy_rlp-74de9ca633f6cf34.rmeta: /Users/luciensong/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/alloy-rlp-0.3.15/src/lib.rs /Users/luciensong/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/alloy-rlp-0.3.15/src/decode.rs /Users/luciensong/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/alloy-rlp-0.3.15/src/error.rs /Users/luciensong/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/alloy-rlp-0.3.15/src/encode.rs /Users/luciensong/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/alloy-rlp-0.3.15/src/header.rs /Users/luciensong/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/alloy-rlp-0.3.15/src/../README.md
+
+/Users/luciensong/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/alloy-rlp-0.3.15/src/lib.rs:
+/Users/luciensong/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/alloy-rlp-0.3.15/src/decode.rs:
+/Users/luciensong/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/alloy-rlp-0.3.15/src/error.rs:
+/Users/luciensong/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/alloy-rlp-0.3.15/src/encode.rs:
+/Users/luciensong/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/alloy-rlp-0.3.15/src/header.rs:
+/Users/luciensong/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/alloy-rlp-0.3.15/src/../README.md:

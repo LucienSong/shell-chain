@@ -58,6 +58,8 @@ pub struct RpcHandler<S: KvStore + 'static> {
     finality: Arc<parking_lot::RwLock<FinalityState>>,
     /// Registry for poll-based filters (eth_newFilter, eth_newBlockFilter, etc.).
     filter_registry: Arc<FilterRegistry>,
+    /// Live peer count from the P2P network layer.
+    peer_count: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl<S: KvStore + 'static> Clone for RpcHandler<S> {
@@ -79,6 +81,7 @@ impl<S: KvStore + 'static> Clone for RpcHandler<S> {
             finalized_number: Arc::clone(&self.finalized_number),
             finality: Arc::clone(&self.finality),
             filter_registry: Arc::clone(&self.filter_registry),
+            peer_count: Arc::clone(&self.peer_count),
         }
     }
 }
@@ -116,6 +119,7 @@ impl<S: KvStore + 'static> RpcHandler<S> {
             finalized_number,
             finality,
             filter_registry: Arc::new(FilterRegistry::new()),
+            peer_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
         FilterRegistry::start_cleanup(Arc::clone(&handler.filter_registry));
         handler
@@ -126,6 +130,12 @@ impl<S: KvStore + 'static> RpcHandler<S> {
     pub fn with_proposer(mut self, signer: Arc<dyn Signer>, address: Address) -> Self {
         self.proposer_signer = Some(signer);
         self.proposer_address = Some(address);
+        self
+    }
+
+    /// Set the live peer count handle from the P2P network layer.
+    pub fn with_peer_count(mut self, peer_count: Arc<std::sync::atomic::AtomicUsize>) -> Self {
+        self.peer_count = peer_count;
         self
     }
 
@@ -1665,6 +1675,11 @@ impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
         ws.set_balance(&address, value).map_err(internal_err)?;
         Ok(true)
     }
+
+    async fn transaction_count(&self) -> Result<String, ErrorObjectOwned> {
+        let count = self.chain_store.get_total_tx_count().map_err(internal_err)?;
+        Ok(hex_u64(count))
+    }
 }
 
 #[jsonrpsee::core::async_trait]
@@ -1697,8 +1712,8 @@ impl<S: KvStore + 'static> NetApiServer for RpcHandler<S> {
     }
 
     async fn peer_count(&self) -> Result<String, ErrorObjectOwned> {
-        // No peer tracking yet; report 0 peers.
-        Ok(hex_u64(0))
+        let count = self.peer_count.load(std::sync::atomic::Ordering::Relaxed);
+        Ok(hex_u64(count as u64))
     }
 }
 
