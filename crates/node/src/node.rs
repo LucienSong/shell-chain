@@ -1,6 +1,6 @@
 //! Running node with event loop and block production.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -15,6 +15,7 @@ use shell_evm::{commit_evm_state, validate_tx_for_import, ShellEvm, ShellStateDb
 use shell_mempool::TxPool;
 use shell_network::NetworkService;
 use shell_primitives::{Address, Bytes, ShellHash, U256};
+use shell_rpc::DevRpcControl;
 use shell_storage::{ChainStore, KvStore, StatePruner, WorldState};
 
 use crate::config::NodeConfig;
@@ -45,7 +46,27 @@ pub struct Node<S: KvStore + 'static> {
     pub fork_choice: Arc<RwLock<ForkChoice>>,
     /// Prometheus metrics.
     pub metrics: Arc<Metrics>,
+    /// Runtime signer retained so dev RPCs can force block production.
+    runtime_signer: RwLock<Option<Arc<dyn Signer>>>,
+    /// Dev-only runtime controls for Hardhat/Foundry compatibility.
+    dev_state: RwLock<DevState>,
     shutdown_tx: watch::Sender<bool>,
+}
+
+struct DevSnapshot {
+    head_hash: ShellHash,
+    head_number: u64,
+    state_root: ShellHash,
+    total_tx_count: u64,
+    finalized_number: u64,
+    pending_txs: Vec<SignedTransaction>,
+    next_block_timestamp: Option<u64>,
+}
+
+struct DevState {
+    next_block_timestamp: Option<u64>,
+    next_snapshot_id: u64,
+    snapshots: BTreeMap<String, DevSnapshot>,
 }
 
 impl<S: KvStore + 'static> Node<S> {
@@ -101,6 +122,12 @@ impl<S: KvStore + 'static> Node<S> {
             finality: Arc::new(RwLock::new(finality_state)),
             fork_choice: Arc::new(RwLock::new(ForkChoice::new(ShellHash::ZERO))),
             metrics,
+            runtime_signer: RwLock::new(None),
+            dev_state: RwLock::new(DevState {
+                next_block_timestamp: None,
+                next_snapshot_id: 1,
+                snapshots: BTreeMap::new(),
+            }),
             shutdown_tx,
         }
     }
@@ -108,6 +135,114 @@ impl<S: KvStore + 'static> Node<S> {
     /// Register an authority's public key for seal verification.
     pub fn register_authority_pubkey(&self, address: Address, pubkey: Vec<u8>) {
         self.known_authorities.write().insert(address, pubkey);
+    }
+
+    fn current_block_timestamp(&self, parent_timestamp: u64) -> u64 {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let mut dev = self.dev_state.write();
+        let ts = if let Some(next) = dev.next_block_timestamp.take() {
+            next
+        } else {
+            now
+        };
+        ts.max(parent_timestamp.saturating_add(1))
+    }
+
+    fn snapshot_inner(&self) -> Result<String, NodeError> {
+        let head = self
+            .chain_store
+            .get_head_block()?
+            .ok_or(NodeError::NoGenesis)?;
+        let total_tx_count = self.chain_store.get_total_tx_count()?;
+        let finalized_number = self.chain_store.get_finalized_number()?.unwrap_or(0);
+        let pending_txs = self.tx_pool.pending(self.tx_pool.len());
+
+        let mut dev = self.dev_state.write();
+        let id = format!("0x{:x}", dev.next_snapshot_id);
+        dev.next_snapshot_id = dev.next_snapshot_id.saturating_add(1);
+        let next_block_timestamp = dev.next_block_timestamp;
+        dev.snapshots.insert(
+            id.clone(),
+                DevSnapshot {
+                    head_hash: head.hash(),
+                    head_number: head.number(),
+                    state_root: head.header.state_root,
+                    total_tx_count,
+                    finalized_number,
+                    pending_txs,
+                    next_block_timestamp,
+                },
+            );
+        Ok(id)
+    }
+
+    fn revert_inner(&self, snapshot_id: &str) -> Result<bool, NodeError> {
+        let snapshot = {
+            let dev = self.dev_state.read();
+            match dev.snapshots.get(snapshot_id) {
+                Some(s) => DevSnapshot {
+                    head_hash: s.head_hash,
+                    head_number: s.head_number,
+                    state_root: s.state_root,
+                    total_tx_count: s.total_tx_count,
+                    finalized_number: s.finalized_number,
+                    pending_txs: s.pending_txs.clone(),
+                    next_block_timestamp: s.next_block_timestamp,
+                },
+                None => return Ok(false),
+            }
+        };
+
+        let current_head = self
+            .chain_store
+            .get_head_block()?
+            .ok_or(NodeError::NoGenesis)?;
+        if current_head.number() > snapshot.head_number {
+            for number in (snapshot.head_number + 1)..=current_head.number() {
+                self.chain_store.delete_canonical(number)?;
+            }
+        }
+
+        self.chain_store.set_head(&snapshot.head_hash)?;
+        self.chain_store
+            .set_total_tx_count(snapshot.total_tx_count)?;
+        self.chain_store
+            .set_finalized_number(snapshot.finalized_number)?;
+
+        let restored_ws = WorldState::at_root(self.store.clone(), &snapshot.state_root)?;
+        *self.world_state.write() = restored_ws;
+
+        let finalized_hash = if snapshot.finalized_number == 0 {
+            ShellHash::ZERO
+        } else {
+            self.chain_store
+                .get_block_by_number(snapshot.finalized_number)?
+                .map(|b| b.hash())
+                .unwrap_or(ShellHash::ZERO)
+        };
+        *self.finality.write() = if snapshot.finalized_number > 0 {
+            shell_consensus::FinalityState::with_finalized(snapshot.finalized_number, finalized_hash)
+        } else {
+            shell_consensus::FinalityState::new()
+        };
+
+        self.tx_pool.clear();
+        let known_pubkeys =
+            |addr: &Address| -> Option<Vec<u8>> { self.chain_store.get_pubkey(addr).ok().flatten() };
+        let balance_of = |addr: &Address| -> U256 {
+            self.world_state.read().get_balance(addr).unwrap_or(U256::ZERO)
+        };
+        let verifier = MultiVerifier;
+        for tx in snapshot.pending_txs {
+            let _ = self.tx_pool.insert(tx, &verifier, &known_pubkeys, &balance_of);
+        }
+
+        self.dev_state.write().next_block_timestamp = snapshot.next_block_timestamp;
+
+        Ok(true)
     }
 
     /// Signal the node to shut down.
@@ -177,13 +312,15 @@ impl<S: KvStore + 'static> Node<S> {
     /// - **RPC server**: serves JSON-RPC on the configured address.
     /// - **Shutdown**: stops on `shutdown()` call or Ctrl-C.
     pub async fn run(
-        &self,
+        self: Arc<Self>,
         signer: Arc<dyn Signer>,
         network: &mut dyn NetworkService,
     ) -> Result<(), NodeError> {
         use shell_network::{NetworkEvent, NetworkMessage};
         use shell_rpc::{start_rpc_server, BlockEvent};
         use tokio::time::{interval, Duration};
+
+        *self.runtime_signer.write() = Some(Arc::clone(&signer));
 
         // Spawn the Prometheus metrics HTTP server if enabled.
         if self.config.metrics.enabled {
@@ -237,6 +374,7 @@ impl<S: KvStore + 'static> Node<S> {
             finalized_number.clone(),
             self.finality.clone(),
             peer_count_handle,
+            Some(self.clone() as Arc<dyn DevRpcControl>),
         )
         .await
         .map_err(|e| NodeError::Startup(format!("RPC: {e}")))?;
@@ -636,10 +774,7 @@ impl<S: KvStore + 'static> Node<S> {
         let state_db = ShellStateDb::new(ws, cs);
         let mut evm = ShellEvm::new(state_db, self.config.chain_id);
 
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+        let now = self.current_block_timestamp(head.header.timestamp);
 
         // Calculate EIP-1559 base fee from parent block.
         let base_fee = calculate_base_fee(
@@ -1207,6 +1342,61 @@ impl<S: KvStore + 'static> Node<S> {
     }
 }
 
+impl<S: KvStore + 'static> DevRpcControl for Node<S> {
+    fn mine_blocks(&self, blocks: u64) -> Result<(), String> {
+        let signer = self
+            .runtime_signer
+            .read()
+            .clone()
+            .ok_or_else(|| "node signer is not initialized".to_string())?;
+        for _ in 0..blocks.max(1) {
+            self.produce_block(signer.as_ref(), 500)
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    fn set_next_block_timestamp(&self, timestamp: u64) -> Result<u64, String> {
+        let head = self
+            .chain_store
+            .get_head_block()
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "missing head block".to_string())?;
+        let min_timestamp = head.header.timestamp.saturating_add(1);
+        if timestamp < min_timestamp {
+            return Err(format!(
+                "timestamp must be >= next valid block timestamp {min_timestamp}"
+            ));
+        }
+        self.dev_state.write().next_block_timestamp = Some(timestamp);
+        Ok(timestamp)
+    }
+
+    fn increase_time(&self, seconds: u64) -> Result<u64, String> {
+        let head = self
+            .chain_store
+            .get_head_block()
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "missing head block".to_string())?;
+        let mut dev = self.dev_state.write();
+        let base_timestamp = dev
+            .next_block_timestamp
+            .unwrap_or(head.header.timestamp)
+            .max(head.header.timestamp);
+        let next_timestamp = base_timestamp.saturating_add(seconds);
+        dev.next_block_timestamp = Some(next_timestamp);
+        Ok(next_timestamp.saturating_sub(head.header.timestamp))
+    }
+
+    fn snapshot(&self) -> Result<String, String> {
+        self.snapshot_inner().map_err(|e| e.to_string())
+    }
+
+    fn revert(&self, snapshot_id: &str) -> Result<bool, String> {
+        self.revert_inner(snapshot_id).map_err(|e| e.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1215,6 +1405,7 @@ mod tests {
     use shell_core::Transaction;
     use shell_crypto::DilithiumSigner;
     use shell_mempool::MempoolConfig;
+    use shell_rpc::DevRpcControl;
     use shell_storage::MemoryDb;
 
     fn setup_node() -> (Node<MemoryDb>, DilithiumSigner) {
@@ -1298,6 +1489,59 @@ mod tests {
         assert_eq!(block.number(), 1);
         assert!(block.transactions.is_empty());
         assert!(block.proposer_seal.is_some());
+    }
+
+    #[test]
+    fn dev_rpc_mine_blocks_advances_head() {
+        let (node, signer) = setup_node();
+        store_genesis(&node);
+        *node.runtime_signer.write() = Some(Arc::new(signer));
+
+        node.mine_blocks(2).unwrap();
+
+        let head = node.chain_store.get_head_block().unwrap().unwrap();
+        assert_eq!(head.number(), 2);
+    }
+
+    #[test]
+    fn dev_rpc_time_controls_affect_next_block() {
+        let (node, signer) = setup_node();
+        store_genesis(&node);
+        *node.runtime_signer.write() = Some(Arc::new(signer));
+
+        let genesis = node.chain_store.get_head_block().unwrap().unwrap();
+        let next_ts = genesis.header.timestamp + 10;
+        assert_eq!(node.set_next_block_timestamp(next_ts).unwrap(), next_ts);
+        node.mine_blocks(1).unwrap();
+
+        let block1 = node.chain_store.get_head_block().unwrap().unwrap();
+        assert_eq!(block1.header.timestamp, next_ts);
+
+        let offset = node.increase_time(30).unwrap();
+        assert_eq!(offset, 30);
+        node.mine_blocks(1).unwrap();
+
+        let block2 = node.chain_store.get_head_block().unwrap().unwrap();
+        assert_eq!(block2.header.timestamp, block1.header.timestamp + 30);
+    }
+
+    #[test]
+    fn dev_rpc_snapshot_and_revert_restore_head() {
+        let (node, signer) = setup_node();
+        store_genesis(&node);
+        *node.runtime_signer.write() = Some(Arc::new(signer));
+
+        node.mine_blocks(1).unwrap();
+        let snapshot_id = node.snapshot().unwrap();
+        node.mine_blocks(2).unwrap();
+        let head_before_revert = node.chain_store.get_head_block().unwrap().unwrap();
+        assert_eq!(head_before_revert.number(), 3);
+
+        assert!(node.revert(&snapshot_id).unwrap());
+
+        let head_after_revert = node.chain_store.get_head_block().unwrap().unwrap();
+        assert_eq!(head_after_revert.number(), 1);
+        assert!(!node.revert("0xdeadbeef").unwrap());
     }
 
     #[test]

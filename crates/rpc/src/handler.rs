@@ -17,8 +17,10 @@ use shell_primitives::{Address, Bytes, ShellHash, U256};
 use shell_storage::{ChainStore, KvStore, WorldState};
 
 use crate::api::{
-    DebugApiServer, EthApiServer, NetApiServer, ShellApiServer, TraceApiServer, Web3ApiServer,
+    DebugApiServer, EthApiServer, EvmApiServer, NetApiServer, ShellApiServer, TraceApiServer,
+    Web3ApiServer,
 };
+use crate::dev_control::DynDevRpcControl;
 use crate::filter::{RawLogFilter, MAX_BLOCK_RANGE};
 use crate::filter_registry::{FilterKind, FilterRegistry};
 use crate::subscriptions::{BlockEvent, SubscriptionTracker, SyncStatus};
@@ -60,6 +62,8 @@ pub struct RpcHandler<S: KvStore + 'static> {
     filter_registry: Arc<FilterRegistry>,
     /// Live peer count from the P2P network layer.
     peer_count: Arc<std::sync::atomic::AtomicUsize>,
+    /// Optional runtime dev-control handle for Hardhat/Foundry compatibility.
+    dev_control: Option<DynDevRpcControl>,
 }
 
 impl<S: KvStore + 'static> Clone for RpcHandler<S> {
@@ -82,6 +86,7 @@ impl<S: KvStore + 'static> Clone for RpcHandler<S> {
             finality: Arc::clone(&self.finality),
             filter_registry: Arc::clone(&self.filter_registry),
             peer_count: Arc::clone(&self.peer_count),
+            dev_control: self.dev_control.clone(),
         }
     }
 }
@@ -120,6 +125,7 @@ impl<S: KvStore + 'static> RpcHandler<S> {
             finality,
             filter_registry: Arc::new(FilterRegistry::new()),
             peer_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            dev_control: None,
         };
         FilterRegistry::start_cleanup(Arc::clone(&handler.filter_registry));
         handler
@@ -136,6 +142,12 @@ impl<S: KvStore + 'static> RpcHandler<S> {
     /// Set the live peer count handle from the P2P network layer.
     pub fn with_peer_count(mut self, peer_count: Arc<std::sync::atomic::AtomicUsize>) -> Self {
         self.peer_count = peer_count;
+        self
+    }
+
+    /// Set the runtime dev-control surface for `evm_*` RPC methods.
+    pub fn with_dev_control(mut self, dev_control: DynDevRpcControl) -> Self {
+        self.dev_control = Some(dev_control);
         self
     }
 
@@ -509,6 +521,55 @@ impl<S: KvStore + 'static> RpcHandler<S> {
             transaction_hash: tx.hash(),
             transaction_position: tx_position,
         }
+    }
+}
+
+#[jsonrpsee::core::async_trait]
+impl<S: KvStore + 'static> EvmApiServer for RpcHandler<S> {
+    async fn mine(&self, blocks: Option<u64>) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let count = blocks.unwrap_or(1).max(1);
+        let dev = self.dev_control.as_ref().ok_or_else(|| {
+            ErrorObjectOwned::owned(-32601, "evm namespace not enabled on this node", None::<()>)
+        })?;
+        dev.mine_blocks(count).map_err(internal_err)?;
+        Ok(serde_json::json!({
+            "blocksMined": hex_u64(count),
+        }))
+    }
+
+    async fn set_next_block_timestamp(
+        &self,
+        timestamp: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let dev = self.dev_control.as_ref().ok_or_else(|| {
+            ErrorObjectOwned::owned(-32601, "evm namespace not enabled on this node", None::<()>)
+        })?;
+        let applied = dev
+            .set_next_block_timestamp(timestamp)
+            .map_err(internal_err)?;
+        Ok(serde_json::json!(hex_u64(applied)))
+    }
+
+    async fn increase_time(&self, seconds: u64) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let dev = self.dev_control.as_ref().ok_or_else(|| {
+            ErrorObjectOwned::owned(-32601, "evm namespace not enabled on this node", None::<()>)
+        })?;
+        let total = dev.increase_time(seconds).map_err(internal_err)?;
+        Ok(serde_json::json!(hex_u64(total)))
+    }
+
+    async fn snapshot(&self) -> Result<String, ErrorObjectOwned> {
+        let dev = self.dev_control.as_ref().ok_or_else(|| {
+            ErrorObjectOwned::owned(-32601, "evm namespace not enabled on this node", None::<()>)
+        })?;
+        dev.snapshot().map_err(internal_err)
+    }
+
+    async fn revert(&self, snapshot_id: String) -> Result<bool, ErrorObjectOwned> {
+        let dev = self.dev_control.as_ref().ok_or_else(|| {
+            ErrorObjectOwned::owned(-32601, "evm namespace not enabled on this node", None::<()>)
+        })?;
+        dev.revert(&snapshot_id).map_err(internal_err)
     }
 }
 
@@ -2015,10 +2076,41 @@ impl<S: KvStore + 'static> TraceApiServer for RpcHandler<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dev_control::DevRpcControl;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use shell_core::{Block, BlockHeader, Transaction, TransactionReceipt};
     use shell_crypto::{DilithiumSigner, Signer};
     use shell_primitives::Bytes;
     use shell_storage::MemoryDb;
+
+    #[derive(Default)]
+    struct MockDevControl {
+        mined: AtomicU64,
+        increased: AtomicU64,
+    }
+
+    impl DevRpcControl for MockDevControl {
+        fn mine_blocks(&self, blocks: u64) -> Result<(), String> {
+            self.mined.fetch_add(blocks, Ordering::Relaxed);
+            Ok(())
+        }
+
+        fn set_next_block_timestamp(&self, timestamp: u64) -> Result<u64, String> {
+            Ok(timestamp)
+        }
+
+        fn increase_time(&self, seconds: u64) -> Result<u64, String> {
+            Ok(self.increased.fetch_add(seconds, Ordering::Relaxed) + seconds)
+        }
+
+        fn snapshot(&self) -> Result<String, String> {
+            Ok("0x1".into())
+        }
+
+        fn revert(&self, snapshot_id: &str) -> Result<bool, String> {
+            Ok(snapshot_id == "0x1")
+        }
+    }
 
     fn setup() -> RpcHandler<MemoryDb> {
         let db = Arc::new(MemoryDb::new());
@@ -2074,6 +2166,29 @@ mod tests {
         let handler = setup();
         let result = EthApiServer::block_number(&handler).await.unwrap();
         assert_eq!(result, "0x0");
+    }
+
+    #[tokio::test]
+    async fn evm_rpc_methods_delegate_to_dev_control() {
+        let dev = Arc::new(MockDevControl::default());
+        let handler = setup().with_dev_control(dev.clone());
+
+        let mined = EvmApiServer::mine(&handler, Some(2)).await.unwrap();
+        assert_eq!(mined["blocksMined"], "0x2");
+        assert_eq!(dev.mined.load(Ordering::Relaxed), 2);
+
+        let next = EvmApiServer::set_next_block_timestamp(&handler, 1_700_000_123)
+            .await
+            .unwrap();
+        assert_eq!(next, serde_json::json!("0x6553f17b"));
+
+        let increased = EvmApiServer::increase_time(&handler, 30).await.unwrap();
+        assert_eq!(increased, serde_json::json!("0x1e"));
+
+        let snapshot = EvmApiServer::snapshot(&handler).await.unwrap();
+        assert_eq!(snapshot, "0x1");
+        assert!(EvmApiServer::revert(&handler, "0x1".into()).await.unwrap());
+        assert!(!EvmApiServer::revert(&handler, "0x2".into()).await.unwrap());
     }
 
     #[tokio::test]

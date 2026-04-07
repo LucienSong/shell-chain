@@ -259,7 +259,15 @@ async fn run_with_store<S: KvStore + 'static>(
                 .rpc_api
                 .as_ref()
                 .map(|s| s.split(',').map(|n| n.trim().to_string()).collect())
-                .unwrap_or_else(|| vec!["eth".into(), "net".into(), "web3".into(), "shell".into()]),
+                .unwrap_or_else(|| {
+                    vec![
+                        "eth".into(),
+                        "net".into(),
+                        "web3".into(),
+                        "shell".into(),
+                        "evm".into(),
+                    ]
+                }),
             max_request_body_size: 5 * 1024 * 1024,
             ..RpcConfig::default()
         },
@@ -344,7 +352,7 @@ async fn run_with_store<S: KvStore + 'static>(
                 node_shutdown.shutdown();
             });
 
-            node.run(signer, &mut network).await?;
+            node.clone().run(signer, &mut network).await?;
         }
         #[cfg(not(feature = "libp2p"))]
         {
@@ -400,7 +408,7 @@ async fn run_with_store<S: KvStore + 'static>(
             node_shutdown.shutdown();
         });
 
-        node.run(signer, &mut network).await?;
+        node.clone().run(signer, &mut network).await?;
     }
 
     eprintln!("✓ Node stopped gracefully");

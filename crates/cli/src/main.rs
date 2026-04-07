@@ -117,7 +117,7 @@ enum Commands {
         #[arg(long)]
         rpc_rate_limit: Option<u32>,
 
-        /// API namespaces to enable (comma-separated: eth,net,web3,shell,debug,trace).
+        /// API namespaces to enable (comma-separated: eth,net,web3,shell,evm,debug,trace).
         #[arg(long)]
         rpc_api: Option<String>,
 

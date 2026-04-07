@@ -212,6 +212,14 @@ impl TxPool {
         }
     }
 
+    /// Remove all transactions from the pool.
+    pub fn clear(&self) {
+        let mut inner = self.inner.write();
+        inner.by_hash.clear();
+        inner.by_sender.clear();
+        inner.by_priority.clear();
+    }
+
     /// Get a transaction by hash.
     pub fn get(&self, hash: &ShellHash) -> Option<SignedTransaction> {
         let inner = self.inner.read();

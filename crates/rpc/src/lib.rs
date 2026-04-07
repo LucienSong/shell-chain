@@ -4,6 +4,7 @@
 //! extension `shell_*` endpoints for post-quantum features.
 
 pub mod api;
+pub mod dev_control;
 pub mod filter;
 pub mod filter_registry;
 pub mod handler;
@@ -13,6 +14,7 @@ pub mod tls;
 pub mod types;
 
 pub use handler::RpcHandler;
+pub use dev_control::{DevRpcControl, DynDevRpcControl};
 pub use server::{start_rpc_server, RpcConfig, RpcServerHandle};
 pub use subscriptions::{BlockEvent, SubscriptionTracker, SyncStatus};
 pub use tls::TlsConfig;
