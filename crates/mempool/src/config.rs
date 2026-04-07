@@ -26,3 +26,75 @@ impl Default for MempoolConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_max_pool_size() {
+        let cfg = MempoolConfig::default();
+        assert_eq!(cfg.max_pool_size, 4096);
+    }
+
+    #[test]
+    fn default_max_per_sender() {
+        let cfg = MempoolConfig::default();
+        assert_eq!(cfg.max_per_sender, 64);
+    }
+
+    #[test]
+    fn default_chain_id() {
+        let cfg = MempoolConfig::default();
+        assert_eq!(cfg.chain_id, 1);
+    }
+
+    #[test]
+    fn default_min_gas_price_is_zero() {
+        let cfg = MempoolConfig::default();
+        assert_eq!(cfg.min_gas_price, 0);
+    }
+
+    #[test]
+    fn default_replacement_fee_bump_pct() {
+        let cfg = MempoolConfig::default();
+        assert_eq!(cfg.replacement_fee_bump_pct, 10);
+    }
+
+    #[test]
+    fn custom_config() {
+        let cfg = MempoolConfig {
+            max_pool_size: 100,
+            max_per_sender: 5,
+            chain_id: 42,
+            min_gas_price: 1_000_000_000,
+            replacement_fee_bump_pct: 25,
+        };
+        assert_eq!(cfg.max_pool_size, 100);
+        assert_eq!(cfg.max_per_sender, 5);
+        assert_eq!(cfg.chain_id, 42);
+        assert_eq!(cfg.min_gas_price, 1_000_000_000);
+        assert_eq!(cfg.replacement_fee_bump_pct, 25);
+    }
+
+    #[test]
+    fn clone_produces_equal_copy() {
+        let cfg = MempoolConfig::default();
+        let cloned = cfg.clone();
+        assert_eq!(cfg.max_pool_size, cloned.max_pool_size);
+        assert_eq!(cfg.max_per_sender, cloned.max_per_sender);
+        assert_eq!(cfg.chain_id, cloned.chain_id);
+        assert_eq!(cfg.min_gas_price, cloned.min_gas_price);
+        assert_eq!(
+            cfg.replacement_fee_bump_pct,
+            cloned.replacement_fee_bump_pct
+        );
+    }
+
+    #[test]
+    fn debug_format() {
+        let cfg = MempoolConfig::default();
+        let debug = format!("{:?}", cfg);
+        assert!(debug.contains("MempoolConfig"));
+    }
+}
