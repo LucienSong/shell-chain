@@ -82,6 +82,8 @@ mod prefix {
     pub const CHAIN_CONFIG: &[u8] = b"CFG";
     pub const CODE_BY_HASH: &[u8] = b"c/";
     pub const PUBKEY_BY_ADDR: &[u8] = b"pk/";
+    /// Address → tx_hash index: key = "a/" + address(20) + block_number(8) + tx_index(4)
+    pub const ADDR_TX_INDEX: &[u8] = b"a/";
 }
 
 /// Block/receipt/transaction-index storage.
@@ -124,6 +126,24 @@ impl<S: KvStore> ChainStore<S> {
         [prefix::TX_INDEX, tx_hash.as_bytes()].concat()
     }
 
+    /// Key for address→tx index: "a/" + address(20) + block_number(8 BE) + tx_index(4 BE)
+    fn addr_tx_key(address: &Address, block_number: u64, tx_index: u32) -> Vec<u8> {
+        let mut key = Vec::with_capacity(2 + 20 + 8 + 4);
+        key.extend_from_slice(prefix::ADDR_TX_INDEX);
+        key.extend_from_slice(address.as_ref());
+        key.extend_from_slice(&block_number.to_be_bytes());
+        key.extend_from_slice(&tx_index.to_be_bytes());
+        key
+    }
+
+    /// Prefix for scanning all txs of a given address.
+    fn addr_tx_prefix(address: &Address) -> Vec<u8> {
+        let mut key = Vec::with_capacity(2 + 20);
+        key.extend_from_slice(prefix::ADDR_TX_INDEX);
+        key.extend_from_slice(address.as_ref());
+        key
+    }
+
     fn code_key(code_hash: &ShellHash) -> Vec<u8> {
         [prefix::CODE_BY_HASH, code_hash.as_bytes()].concat()
     }
@@ -141,6 +161,7 @@ impl<S: KvStore> ChainStore<S> {
     /// to mark a block as part of the canonical chain.
     pub fn put_block(&self, block: &Block) -> Result<(), StorageError> {
         let block_hash = block.hash();
+        let block_number = block.number();
 
         // Store header (RLP with version prefix)
         let header_bytes = encode_rlp(&block.header);
@@ -151,13 +172,29 @@ impl<S: KvStore> ChainStore<S> {
         let body_bytes = encode_rlp(block);
         self.store.put(&Self::body_key(&block_hash), &body_bytes)?;
 
-        // Transaction → (block_hash, tx_index) mapping
+        // Transaction → (block_hash, tx_index) mapping + address index
         for (i, tx) in block.transactions.iter().enumerate() {
             let tx_hash = tx.hash();
             let mut index_value = block_hash.as_bytes().to_vec();
             index_value.extend_from_slice(&(i as u32).to_be_bytes());
             self.store
                 .put(&Self::tx_index_key(&tx_hash), &index_value)?;
+
+            // Address index: sender
+            let idx = i as u32;
+            self.store.put(
+                &Self::addr_tx_key(&tx.sender(), block_number, idx),
+                tx_hash.as_bytes(),
+            )?;
+            // Address index: recipient (if not contract creation)
+            if let Some(to) = tx.tx.to {
+                if to != tx.sender() {
+                    self.store.put(
+                        &Self::addr_tx_key(&to, block_number, idx),
+                        tx_hash.as_bytes(),
+                    )?;
+                }
+            }
         }
 
         Ok(())
@@ -320,6 +357,45 @@ impl<S: KvStore> ChainStore<S> {
             }
             None => Ok(None),
         }
+    }
+
+    /// Get transaction hashes involving a given address, with pagination.
+    ///
+    /// Scans the address→tx index for `address` within the specified block range.
+    /// Returns tx hashes in ascending block order, paginated by `offset` and `limit`.
+    pub fn get_txs_by_address(
+        &self,
+        address: &Address,
+        from_block: u64,
+        to_block: u64,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<ShellHash>, StorageError> {
+        let prefix = Self::addr_tx_prefix(address);
+        let entries = self.store.scan_prefix(&prefix)?;
+
+        let mut tx_hashes = Vec::new();
+        for (key, value) in &entries {
+            // key layout: "a/" (2) + addr (20) + block_number (8) + tx_index (4) = 34
+            if key.len() < prefix.len() + 12 {
+                continue;
+            }
+            let block_bytes: [u8; 8] = key[prefix.len()..prefix.len() + 8]
+                .try_into()
+                .map_err(|_| StorageError::Codec("invalid addr index key".into()))?;
+            let block_number = u64::from_be_bytes(block_bytes);
+            if block_number < from_block || block_number > to_block {
+                continue;
+            }
+            if value.len() == 32 {
+                let hash = ShellHash::try_from_slice(value)
+                    .map_err(|e| StorageError::Codec(e.to_string()))?;
+                tx_hashes.push(hash);
+            }
+        }
+
+        // Apply pagination (offset/limit)
+        Ok(tx_hashes.into_iter().skip(offset).take(limit).collect())
     }
 
     // ── Chain config ───────────────────────────────────────────

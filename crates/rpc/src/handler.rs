@@ -1002,6 +1002,85 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
         Ok(None)
     }
 
+    async fn get_block_receipts(
+        &self,
+        block: String,
+    ) -> Result<Vec<RpcReceipt>, ErrorObjectOwned> {
+        // Resolve block identifier (number, tag, or hash)
+        let block_obj = if block.starts_with("0x") && block.len() == 66 {
+            let hex_str = block.strip_prefix("0x").unwrap_or(&block);
+            let hash_bytes = hex::decode(hex_str)
+                .map_err(|e| internal_err(format!("invalid block hash hex: {e}")))?;
+            let hash = ShellHash::try_from_slice(&hash_bytes)
+                .map_err(|e| internal_err(format!("invalid block hash: {e}")))?;
+            self.chain_store
+                .get_block_by_hash(&hash)
+                .map_err(internal_err)?
+        } else {
+            match self.parse_block_number(&block)? {
+                Some(num) => self
+                    .chain_store
+                    .get_block_by_number(num)
+                    .map_err(internal_err)?,
+                None => self.chain_store.get_head_block().map_err(internal_err)?,
+            }
+        };
+
+        let block_obj = match block_obj {
+            Some(b) => b,
+            None => return Ok(vec![]),
+        };
+
+        let block_hash = block_obj.hash();
+        let receipts = self
+            .chain_store
+            .get_receipts(&block_hash)
+            .map_err(internal_err)?
+            .unwrap_or_default();
+
+        let mut rpc_receipts = Vec::with_capacity(receipts.len());
+        for (i, receipt) in receipts.iter().enumerate() {
+            let (from, to, eff_gas_price, tx_type_val) =
+                if let Some(tx) = block_obj.transactions.get(i) {
+                    let price = shell_core::effective_gas_price(
+                        tx.tx.max_fee_per_gas,
+                        tx.tx.max_priority_fee_per_gas,
+                        block_obj.header.base_fee_per_gas,
+                    );
+                    (tx.sender(), tx.tx.to, price, tx.tx.tx_type)
+                } else {
+                    (Address::ZERO, None, 0, 2u8)
+                };
+
+            rpc_receipts.push(RpcReceipt {
+                transaction_hash: receipt.tx_hash,
+                block_hash,
+                block_number: hex_u64(receipt.block_number),
+                transaction_index: hex_u64(i as u64),
+                from,
+                to,
+                status: hex_u64(receipt.status as u64),
+                gas_used: hex_u64(receipt.gas_used),
+                cumulative_gas_used: hex_u64(receipt.cumulative_gas_used),
+                effective_gas_price: hex_u64(eff_gas_price),
+                contract_address: receipt.contract_address,
+                logs: receipt
+                    .logs
+                    .iter()
+                    .map(|log| RpcLog {
+                        address: log.address,
+                        topics: log.topics.clone(),
+                        data: hex_bytes(log.data.as_ref()),
+                    })
+                    .collect(),
+                logs_bloom: hex_bytes(receipt.logs_bloom.as_ref()),
+                tx_type: format!("{:#x}", tx_type_val),
+            });
+        }
+
+        Ok(rpc_receipts)
+    }
+
     async fn get_balance(
         &self,
         address: Address,
@@ -1679,6 +1758,73 @@ impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
     async fn transaction_count(&self) -> Result<String, ErrorObjectOwned> {
         let count = self.chain_store.get_total_tx_count().map_err(internal_err)?;
         Ok(hex_u64(count))
+    }
+
+    async fn get_transactions_by_address(
+        &self,
+        address: Address,
+        from_block: Option<u64>,
+        to_block: Option<u64>,
+        page: Option<u64>,
+        limit: Option<u64>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let from = from_block.unwrap_or(0);
+        let to = to_block.unwrap_or_else(|| {
+            self.chain_store
+                .get_head_block()
+                .ok()
+                .flatten()
+                .map(|b| b.number())
+                .unwrap_or(0)
+        });
+        let page = page.unwrap_or(0);
+        let limit = limit.unwrap_or(20).min(100);
+        let offset = (page * limit) as usize;
+
+        let tx_hashes = self
+            .chain_store
+            .get_txs_by_address(&address, from, to, offset, limit as usize)
+            .map_err(internal_err)?;
+
+        // Resolve each tx hash to a full RPC transaction
+        let mut txs = Vec::with_capacity(tx_hashes.len());
+        for hash in &tx_hashes {
+            let location = self
+                .chain_store
+                .get_tx_location(hash)
+                .map_err(internal_err)?;
+            if let Some((block_hash, tx_index)) = location {
+                let block = self
+                    .chain_store
+                    .get_block_by_hash(&block_hash)
+                    .map_err(internal_err)?;
+                if let Some(block) = block {
+                    if let Some(tx) = block.transactions.get(tx_index as usize) {
+                        txs.push(serde_json::json!({
+                            "hash": hash,
+                            "blockNumber": hex_u64(block.number()),
+                            "blockHash": block_hash,
+                            "transactionIndex": hex_u64(tx_index as u64),
+                            "from": tx.sender(),
+                            "to": tx.tx.to,
+                            "value": hex_u256(tx.tx.value),
+                            "gasLimit": hex_u64(tx.tx.gas_limit),
+                            "nonce": hex_u64(tx.tx.nonce),
+                        }));
+                    }
+                }
+            }
+        }
+
+        Ok(serde_json::json!({
+            "address": address,
+            "fromBlock": hex_u64(from),
+            "toBlock": hex_u64(to),
+            "page": page,
+            "limit": limit,
+            "total": txs.len(),
+            "transactions": txs,
+        }))
     }
 }
 

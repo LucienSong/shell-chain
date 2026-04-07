@@ -277,6 +277,26 @@ impl KvStore for RocksDbStore {
             .map(|v| v.is_some())
             .map_err(|e| StorageError::Database(e.to_string()))
     }
+
+    fn scan_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
+        let cf = self.cf();
+        let mut opts = rocksdb::ReadOptions::default();
+        opts.set_iterate_range(rocksdb::PrefixRange(prefix));
+        let iter = self.db.iterator_cf_opt(
+            &cf,
+            opts,
+            rocksdb::IteratorMode::From(prefix, rocksdb::Direction::Forward),
+        );
+        let mut results = Vec::new();
+        for item in iter {
+            let (k, v) = item.map_err(|e| StorageError::Database(e.to_string()))?;
+            if !k.starts_with(prefix) {
+                break;
+            }
+            results.push((k.to_vec(), v.to_vec()));
+        }
+        Ok(results)
+    }
 }
 
 impl std::fmt::Debug for RocksDbStore {

@@ -114,6 +114,13 @@ pub trait EthApi {
         hash: ShellHash,
     ) -> Result<Option<RpcReceipt>, jsonrpsee::types::ErrorObjectOwned>;
 
+    /// Returns all receipts for a given block by number or hash.
+    #[method(name = "getBlockReceipts")]
+    async fn get_block_receipts(
+        &self,
+        block: String,
+    ) -> Result<Vec<RpcReceipt>, jsonrpsee::types::ErrorObjectOwned>;
+
     /// Returns the balance of an address.
     #[method(name = "getBalance")]
     async fn get_balance(
@@ -400,4 +407,16 @@ pub trait ShellApi {
     /// Returns the total number of transactions across all blocks.
     #[method(name = "transactionCount")]
     async fn transaction_count(&self) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns transactions involving a given address (sender or recipient).
+    /// Supports pagination: `from_block`, `to_block`, `page` (0-based), `limit` (default 20).
+    #[method(name = "getTransactionsByAddress")]
+    async fn get_transactions_by_address(
+        &self,
+        address: Address,
+        from_block: Option<u64>,
+        to_block: Option<u64>,
+        page: Option<u64>,
+        limit: Option<u64>,
+    ) -> Result<serde_json::Value, jsonrpsee::types::ErrorObjectOwned>;
 }

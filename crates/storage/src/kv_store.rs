@@ -60,6 +60,10 @@ pub trait KvStore: Send + Sync {
     fn contains(&self, key: &[u8]) -> Result<bool, StorageError> {
         Ok(self.get(key)?.is_some())
     }
+
+    /// Scan all keys with the given prefix, returning (key, value) pairs.
+    /// Results are sorted by key in ascending byte order.
+    fn scan_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError>;
 }
 
 #[cfg(test)]
