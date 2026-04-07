@@ -149,7 +149,10 @@ mod tests {
     #[test]
     fn dev_config_rpc_listen_addr() {
         let cfg = NodeConfig::dev(Address::ZERO);
-        assert_eq!(cfg.rpc.listen_addr, SocketAddr::from(([127, 0, 0, 1], 8545)));
+        assert_eq!(
+            cfg.rpc.listen_addr,
+            SocketAddr::from(([127, 0, 0, 1], 8545))
+        );
     }
 
     #[test]
