@@ -116,10 +116,7 @@ mod tests {
         // Write directly to the store
         store.put(b"via_store", b"also").unwrap();
         // Read through the adapter
-        assert_eq!(
-            adapter.get(b"via_store").unwrap(),
-            Some(b"also".to_vec())
-        );
+        assert_eq!(adapter.get(b"via_store").unwrap(), Some(b"also".to_vec()));
     }
 
     #[test]

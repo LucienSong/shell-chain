@@ -57,10 +57,7 @@ mod tests {
     #[test]
     fn sender_queue_full_display() {
         let sender = Address::ZERO;
-        let err = MempoolError::SenderQueueFull {
-            sender,
-            count: 64,
-        };
+        let err = MempoolError::SenderQueueFull { sender, count: 64 };
         let msg = err.to_string();
         assert!(msg.contains("too many pending transactions"));
         assert!(msg.contains("64"));
@@ -75,10 +72,7 @@ mod tests {
 
     #[test]
     fn chain_id_mismatch_display() {
-        let err = MempoolError::ChainIdMismatch {
-            expected: 1,
-            got: 42,
-        };
+        let err = MempoolError::ChainIdMismatch { expected: 1, got: 42 };
         assert_eq!(
             err.to_string(),
             "chain ID mismatch: expected 1, got 42"
