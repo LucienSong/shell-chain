@@ -458,7 +458,7 @@ impl<S: KvStore + 'static> Node<S> {
                         // Idle-block-skip: when mempool is empty and we haven't
                         // exceeded max_idle_interval, skip block production.
                         let max_idle_ms = self.config.max_idle_interval_ms;
-                        if max_idle_ms > 0 && self.tx_pool.len() == 0 {
+                        if max_idle_ms > 0 && self.tx_pool.is_empty() {
                             let idle_dur = std::time::Duration::from_millis(max_idle_ms);
                             if last_block_time.elapsed() < idle_dur {
                                 continue;
