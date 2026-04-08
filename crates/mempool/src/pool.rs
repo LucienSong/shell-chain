@@ -302,24 +302,39 @@ impl TxPool {
             });
         }
 
-        // Resolve public key: from tx itself, or from known-pubkey lookup
+        let registered_pubkey = known_pubkeys(&tx.sender());
         let pubkey = if let Some(ref pk) = tx.sender_pubkey {
             pk.clone()
-        } else if let Some(pk) = known_pubkeys(&tx.sender()) {
-            pk
+        } else if let Some(pk) = registered_pubkey.as_ref() {
+            pk.clone()
         } else {
             return Err(MempoolError::PubkeyRequired {
                 sender: tx.sender(),
             });
         };
 
-        // Address derivation check
-        let derived = Address::from_public_key(&pubkey);
-        if derived != tx.sender() {
-            return Err(MempoolError::AddressMismatch {
-                from: tx.sender(),
-                derived,
-            });
+        if tx.sender_pubkey.is_some() {
+            if let Some(registered) = registered_pubkey.as_ref() {
+                if registered != &pubkey {
+                    return Err(MempoolError::InvalidTransaction(
+                        "pubkey conflict: address already registered with a different pubkey"
+                            .into(),
+                    ));
+                }
+            }
+        }
+
+        // First use still binds the sender address to the pubkey derivation.
+        // Once a pubkey is registered, we intentionally skip re-deriving the
+        // address so the steady-state path can support future key rotation.
+        if registered_pubkey.is_none() {
+            let derived = Address::from_public_key(&pubkey, tx.signature.sig_type.as_u8());
+            if derived != tx.sender() {
+                return Err(MempoolError::AddressMismatch {
+                    from: tx.sender(),
+                    derived,
+                });
+            }
         }
 
         // Algorithm allowlist check (F-301)
@@ -396,6 +411,10 @@ mod tests {
     use shell_crypto::{DilithiumSigner, DilithiumVerifier, Signer};
     use shell_primitives::Bytes;
 
+    fn test_address(seed: &[u8]) -> Address {
+        Address::from_public_key(seed, 0)
+    }
+
     fn make_config() -> MempoolConfig {
         MempoolConfig {
             max_pool_size: 10,
@@ -410,14 +429,12 @@ mod tests {
     fn make_signed_tx(nonce: u64, priority_fee: u64) -> (SignedTransaction, Vec<u8>) {
         let signer = DilithiumSigner::generate();
         let pubkey = signer.public_key().to_vec();
-        let from = Address::from_public_key(&pubkey);
+        let from = test_address(&pubkey);
 
         let tx = Transaction {
             chain_id: 42,
             nonce,
-            to: Some(Address::from_public_key(
-                b"recipient-placeholder-key-data-for-address",
-            )),
+            to: Some(test_address(b"recipient-placeholder-key-data-for-address")),
             value: Default::default(),
             data: Bytes::default(),
             gas_limit: 21_000,
@@ -441,13 +458,11 @@ mod tests {
         nonce: u64,
         priority_fee: u64,
     ) -> SignedTransaction {
-        let from = Address::from_public_key(pubkey);
+        let from = test_address(pubkey);
         let tx = Transaction {
             chain_id: 42,
             nonce,
-            to: Some(Address::from_public_key(
-                b"recipient-placeholder-key-data-for-address",
-            )),
+            to: Some(test_address(b"recipient-placeholder-key-data-for-address")),
             value: Default::default(),
             data: Bytes::default(),
             gas_limit: 21_000,
@@ -512,7 +527,7 @@ mod tests {
 
         let signer = DilithiumSigner::generate();
         let pubkey = signer.public_key().to_vec();
-        let from = Address::from_public_key(&pubkey);
+        let from = test_address(&pubkey);
         let tx = Transaction {
             chain_id: 999, // wrong
             nonce: 0,
@@ -543,7 +558,7 @@ mod tests {
 
         let signer = DilithiumSigner::generate();
         let pubkey = signer.public_key().to_vec();
-        let from = Address::from_public_key(&pubkey);
+        let from = test_address(&pubkey);
         let tx = Transaction {
             chain_id: 42,
             nonce: 0,
@@ -574,7 +589,7 @@ mod tests {
 
         let signer = DilithiumSigner::generate();
         let pubkey = signer.public_key().to_vec();
-        let from = Address::from_public_key(&pubkey);
+        let from = test_address(&pubkey);
         let tx = Transaction {
             chain_id: 42,
             nonce: 0,
@@ -606,7 +621,7 @@ mod tests {
 
         let signer = DilithiumSigner::generate();
         let pubkey = signer.public_key().to_vec();
-        let wrong_from = Address::from_public_key(b"different-key-bytes");
+        let wrong_from = test_address(b"different-key-bytes");
         let tx = Transaction {
             chain_id: 42,
             nonce: 0,
@@ -637,7 +652,7 @@ mod tests {
 
         let signer = DilithiumSigner::generate();
         let pubkey = signer.public_key().to_vec();
-        let from = Address::from_public_key(&pubkey);
+        let from = test_address(&pubkey);
         let tx = Transaction {
             chain_id: 42,
             nonce: 0,
@@ -739,7 +754,7 @@ mod tests {
         pool.insert(tx1, &verifier, &no_known_pubkeys, &rich_balance)
             .unwrap();
 
-        let sender = Address::from_public_key(&pubkey);
+        let sender = test_address(&pubkey);
         let sender_hashes = pool.sender_txs(&sender);
         assert_eq!(sender_hashes.len(), 3);
         assert_eq!(pool.sender_count(&sender), 3);
@@ -829,7 +844,7 @@ mod tests {
 
         let signer = DilithiumSigner::generate();
         let pubkey = signer.public_key().to_vec();
-        let from = Address::from_public_key(&pubkey);
+        let from = test_address(&pubkey);
         let tx = Transaction {
             chain_id: 42,
             nonce: 0,
@@ -850,7 +865,7 @@ mod tests {
 
         let pk_clone = pubkey.clone();
         let lookup = move |addr: &Address| -> Option<Vec<u8>> {
-            if *addr == Address::from_public_key(&pk_clone) {
+            if *addr == test_address(&pk_clone) {
                 Some(pk_clone.clone())
             } else {
                 None

@@ -475,7 +475,7 @@ mod tests {
         let mut evm = setup_evm();
 
         let signer = DilithiumSigner::generate();
-        let from = ShellAddress::from_public_key(signer.public_key());
+        let from = ShellAddress::from_public_key(signer.public_key(), signer.sig_type().as_u8());
         let to = ShellAddress::from([0x01; 20]);
 
         // Fund sender with plenty of balance

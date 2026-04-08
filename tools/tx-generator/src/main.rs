@@ -60,7 +60,7 @@ impl TestAccount {
     fn generate() -> Self {
         let signer = DilithiumSigner::generate();
         let pubkey = signer.public_key().to_vec();
-        let address = Address::from_public_key(&pubkey);
+        let address = Address::from_public_key(&pubkey, signer.sig_type().as_u8());
         Self {
             signer,
             address,

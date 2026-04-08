@@ -270,7 +270,7 @@ mod tests {
     #[test]
     fn genesis_with_contract_code() {
         let mut config = test_genesis();
-        let contract_addr = Address::from_public_key(keccak256(b"contract").as_bytes());
+        let contract_addr = Address::from_public_key(keccak256(b"contract").as_bytes(), 0);
         config.alloc.insert(
             contract_addr,
             AllocEntry {
@@ -293,7 +293,7 @@ mod tests {
     #[test]
     fn genesis_with_storage() {
         let mut config = test_genesis();
-        let addr = Address::from_public_key(keccak256(b"storage-test").as_bytes());
+        let addr = Address::from_public_key(keccak256(b"storage-test").as_bytes(), 0);
 
         let slot = keccak256(b"slot-0");
         let value = keccak256(b"value-0");

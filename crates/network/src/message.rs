@@ -115,7 +115,7 @@ mod tests {
                 gas_used: 0,
                 timestamp: 1_700_000_000 + number,
                 extra_data: Bytes::default(),
-                proposer: Address::from_public_key(b"test-proposer"),
+                proposer: Address::from_public_key(b"test-proposer", 0),
                 sig_aggregate_proof: None,
                 base_fee_per_gas: 0,
                 withdrawals_root: ShellHash::ZERO,
@@ -130,7 +130,7 @@ mod tests {
 
     fn test_signed_tx() -> SignedTransaction {
         SignedTransaction::new(
-            Address::from_public_key(b"sender-key"),
+            Address::from_public_key(b"sender-key", 0),
             Transaction {
                 chain_id: 1,
                 nonce: 0,
@@ -281,7 +281,7 @@ mod tests {
         let attestation = Attestation {
             block_hash: ShellHash::default(),
             block_number: 99,
-            validator: Address::from_public_key(b"validator-key"),
+            validator: Address::from_public_key(b"validator-key", 0),
             signature: vec![1, 2, 3, 4],
         };
         let msg = NetworkMessage::NewAttestation(Box::new(attestation));

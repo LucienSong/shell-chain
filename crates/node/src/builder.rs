@@ -99,7 +99,7 @@ mod tests {
 
     #[test]
     fn build_dev_node() {
-        let authority = Address::from_public_key(b"test-authority");
+        let authority = Address::from_public_key(b"test-authority", 0);
         let config = NodeConfig::dev(authority);
         let (node, _store) = NodeBuilder::new_dev(config).build();
 

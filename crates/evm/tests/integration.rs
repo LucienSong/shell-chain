@@ -76,7 +76,7 @@ fn e2e_transfer_with_real_dilithium_sig() {
     let verifier = DilithiumVerifier;
 
     let signer = DilithiumSigner::generate();
-    let from = ShellAddress::from_public_key(signer.public_key());
+    let from = ShellAddress::from_public_key(signer.public_key(), signer.sig_type().as_u8());
     let to = ShellAddress::from([0xBB; 20]);
 
     fund_account(&mut evm, &from, U256::from(10_000_000_000u64));
@@ -136,7 +136,7 @@ fn e2e_reject_invalid_signature() {
     let verifier = DilithiumVerifier;
 
     let signer = DilithiumSigner::generate();
-    let from = ShellAddress::from_public_key(signer.public_key());
+    let from = ShellAddress::from_public_key(signer.public_key(), signer.sig_type().as_u8());
 
     fund_account(&mut evm, &from, U256::from(10_000_000_000u64));
 
@@ -222,7 +222,7 @@ fn e2e_hybrid_pubkey_second_tx_from_registry() {
     let verifier = DilithiumVerifier;
 
     let signer = DilithiumSigner::generate();
-    let from = ShellAddress::from_public_key(signer.public_key());
+    let from = ShellAddress::from_public_key(signer.public_key(), signer.sig_type().as_u8());
     let to = ShellAddress::from([0xDD; 20]);
 
     fund_account(&mut evm, &from, U256::from(10_000_000_000u64));
