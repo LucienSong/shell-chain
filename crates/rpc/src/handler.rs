@@ -306,36 +306,25 @@ impl<S: KvStore + 'static> RpcHandler<S> {
             .map_err(|e| internal_err(format!("invalid call data hex: {e}")))?
             .unwrap_or_default();
 
-        let access_list = req.access_list.as_ref().map(|list| {
-            list.iter()
-                .map(|item| {
-                    let addr_str = item.address.strip_prefix("0x").unwrap_or(&item.address);
-                    let addr_bytes = hex::decode(addr_str).unwrap_or_default();
-                    let address = if addr_bytes.len() == 20 {
-                        Address::from_slice(&addr_bytes)
-                    } else {
-                        Address::ZERO
-                    };
-                    let storage_keys = item
-                        .storage_keys
-                        .iter()
-                        .map(|k| {
-                            let k_str = k.strip_prefix("0x").unwrap_or(k);
-                            let k_bytes = hex::decode(k_str).unwrap_or_default();
-                            let mut hash = ShellHash::ZERO;
-                            if k_bytes.len() == 32 {
-                                hash = ShellHash::from_slice(&k_bytes);
-                            }
-                            hash
+        let access_list = req
+            .access_list
+            .as_ref()
+            .map(|list| {
+                list.iter()
+                    .map(|item| {
+                        let storage_keys = item
+                            .storage_keys
+                            .iter()
+                            .map(|k| parse_hex_hash(k))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        Ok(shell_core::AccessListItem {
+                            address: item.address,
+                            storage_keys,
                         })
-                        .collect();
-                    shell_core::AccessListItem {
-                        address,
-                        storage_keys,
-                    }
-                })
-                .collect()
-        });
+                    })
+                    .collect::<Result<Vec<_>, ErrorObjectOwned>>()
+            })
+            .transpose()?;
 
         let tx = Transaction {
             chain_id: self.chain_id,
@@ -578,13 +567,16 @@ fn internal_err(msg: impl std::fmt::Display) -> ErrorObjectOwned {
     ErrorObjectOwned::owned(-32603, msg.to_string(), None::<()>)
 }
 
-/// Parse a hex-encoded address string ("0x..." with 20 bytes).
+/// Parse a user-facing address string (`pq1...` or legacy hex).
 fn parse_address(s: &str) -> Result<Address, ErrorObjectOwned> {
+    Address::parse(s).map_err(|e| internal_err(format!("invalid address: {e}")))
+}
+
+/// Parse a 32-byte hex string into `ShellHash`.
+fn parse_hex_hash(s: &str) -> Result<ShellHash, ErrorObjectOwned> {
     let hex_str = s.strip_prefix("0x").unwrap_or(s);
-    let bytes =
-        hex::decode(hex_str).map_err(|e| internal_err(format!("invalid address hex: {e}")))?;
-    Address::try_from_slice(&bytes)
-        .map_err(|e| internal_err(format!("invalid address length: {e}")))
+    let bytes = hex::decode(hex_str).map_err(|e| internal_err(format!("invalid hash hex: {e}")))?;
+    ShellHash::try_from_slice(&bytes).map_err(|e| internal_err(format!("invalid hash length: {e}")))
 }
 
 /// Parse a hex string "0x..." into u64.
@@ -780,7 +772,7 @@ fn tx_to_rpc(
         access_list: tx.tx.access_list.as_ref().map(|list| {
             list.iter()
                 .map(|item| RpcAccessListItem {
-                    address: format!("{}", item.address),
+                    address: item.address,
                     storage_keys: item.storage_keys.iter().map(|k| format!("{}", k)).collect(),
                 })
                 .collect()
@@ -2949,7 +2941,7 @@ mod tests {
     #[tokio::test]
     async fn propose_add_validator_creates_correct_tx() {
         let (handler, _signer, _addr) = setup_with_proposer();
-        let target = format!("0x{}", "ab".repeat(20));
+        let target = Address::from([0xAB; 20]).to_string();
         let result = ShellApiServer::propose_add_validator(&handler, target.clone()).await;
         assert!(
             result.is_ok(),
@@ -2975,7 +2967,7 @@ mod tests {
     #[tokio::test]
     async fn propose_remove_validator_creates_correct_tx() {
         let (handler, _signer, _addr) = setup_with_proposer();
-        let target = format!("0x{}", "cc".repeat(20));
+        let target = Address::from([0xCC; 20]).to_string();
         let result = ShellApiServer::propose_remove_validator(&handler, target.clone()).await;
         assert!(
             result.is_ok(),
@@ -3003,7 +2995,7 @@ mod tests {
             }
         }
 
-        let target = format!("0x{}", "ab".repeat(20));
+        let target = Address::from([0xAB; 20]).to_string();
         let result = ShellApiServer::propose_add_validator(&handler, target).await;
         assert!(
             result.is_ok(),
@@ -3257,9 +3249,9 @@ mod tests {
     async fn encode_add_validator_returns_correct_hex() {
         let handler = setup();
         let target = Address::from([0xAB; 20]);
-        let hex_addr = format!("0x{}", hex::encode(target.as_bytes()));
+        let bech32_addr = target.to_string();
 
-        let result = ShellApiServer::encode_add_validator(&handler, hex_addr)
+        let result = ShellApiServer::encode_add_validator(&handler, bech32_addr)
             .await
             .unwrap();
 
@@ -3275,9 +3267,9 @@ mod tests {
     async fn encode_remove_validator_returns_correct_hex() {
         let handler = setup();
         let target = Address::from([0xCD; 20]);
-        let hex_addr = format!("0x{}", hex::encode(target.as_bytes()));
+        let bech32_addr = target.to_string();
 
-        let result = ShellApiServer::encode_remove_validator(&handler, hex_addr)
+        let result = ShellApiServer::encode_remove_validator(&handler, bech32_addr)
             .await
             .unwrap();
 

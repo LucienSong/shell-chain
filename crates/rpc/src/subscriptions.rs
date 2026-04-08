@@ -31,11 +31,9 @@ const MAX_SUBSCRIPTIONS_PER_CONNECTION: u32 = 16;
 /// Auto-disconnect a subscriber after this many consecutive lag events (F-042).
 const MAX_CONSECUTIVE_LAGS: u32 = 3;
 
-/// Parse a hex address string like "0xaaaa..." into an `Address`.
-fn parse_address_hex(s: &str) -> Option<Address> {
-    let s = s.strip_prefix("0x").unwrap_or(s);
-    let bytes = hex::decode(s).ok()?;
-    Address::try_from_slice(&bytes).ok()
+/// Parse a user-facing address string (`pq1...` or legacy hex) into an `Address`.
+fn parse_address_input(s: &str) -> Option<Address> {
+    Address::parse(s).ok()
 }
 
 /// Parse a hex hash string like "0x0000..." into a `ShellHash`.
@@ -197,14 +195,14 @@ impl LogFilter {
             if let Some(addr_val) = obj.get("address") {
                 match addr_val {
                     serde_json::Value::String(s) => {
-                        if let Some(addr) = parse_address_hex(s) {
+                        if let Some(addr) = parse_address_input(s) {
                             filter.addresses.push(addr);
                         }
                     }
                     serde_json::Value::Array(arr) => {
                         for item in arr {
                             if let Some(s) = item.as_str() {
-                                if let Some(addr) = parse_address_hex(s) {
+                                if let Some(addr) = parse_address_input(s) {
                                     filter.addresses.push(addr);
                                 }
                             }
@@ -761,7 +759,7 @@ mod tests {
     #[test]
     fn log_filter_from_json() {
         let json = serde_json::json!({
-            "address": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "address": Address::from([0xAA; 20]),
             "topics": [null, "0x0000000000000000000000000000000000000000000000000000000000000000"]
         });
         let filter = LogFilter::from_value(&json);
@@ -1064,7 +1062,7 @@ mod tests {
     fn log_filter_from_json_array_of_addresses() {
         let json = serde_json::json!({
             "address": [
-                "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                Address::from([0xAA; 20]).to_string(),
                 "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
             ],
             "topics": []

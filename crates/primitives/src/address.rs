@@ -68,6 +68,19 @@ impl Address {
         Ok((Self::try_from_slice(raw_addr)?, *version))
     }
 
+    /// Parse a user-facing address string.
+    ///
+    /// Accepts the canonical `pq1...` Bech32m format and legacy hex strings
+    /// (`0x...` or bare 40-hex form) during the migration window.
+    pub fn parse(s: &str) -> Result<Self, PrimitivesError> {
+        if Self::looks_like_bech32m(s) {
+            let (addr, _) = Self::from_bech32m(s)?;
+            return Ok(addr);
+        }
+
+        Self::from_hex(s)
+    }
+
     pub fn to_hex(&self) -> String {
         format!("0x{}", hex::encode(self.0))
     }
@@ -99,6 +112,11 @@ impl Address {
 
         let hash = hasher.finalize();
         Self::from_slice(&hash.as_bytes()[..20])
+    }
+
+    fn looks_like_bech32m(s: &str) -> bool {
+        s.to_ascii_lowercase()
+            .starts_with(&format!("{}1", Self::BECH32_HRP))
     }
 }
 
@@ -189,14 +207,7 @@ impl<'de> Deserialize<'de> for Address {
         D: Deserializer<'de>,
     {
         let raw = String::deserialize(deserializer)?;
-        if raw
-            .to_ascii_lowercase()
-            .starts_with(&format!("{}1", Self::BECH32_HRP))
-        {
-            return Self::from_str(&raw).map_err(D::Error::custom);
-        }
-
-        Self::from_hex(&raw).map_err(D::Error::custom)
+        Self::parse(&raw).map_err(D::Error::custom)
     }
 }
 
@@ -291,6 +302,18 @@ mod tests {
         let addr: Address =
             serde_json::from_str("\"0x0101010101010101010101010101010101010101\"").unwrap();
         assert_eq!(addr, Address::from([0x01; 20]));
+    }
+
+    #[test]
+    fn address_parse_accepts_bech32_and_legacy_hex() {
+        let addr = Address::from([0x22; 20]);
+
+        assert_eq!(Address::parse(&addr.to_string()).unwrap(), addr);
+        assert_eq!(Address::parse(&addr.to_hex()).unwrap(), addr);
+        assert_eq!(
+            Address::parse(addr.to_hex().trim_start_matches("0x")).unwrap(),
+            addr
+        );
     }
 
     #[test]

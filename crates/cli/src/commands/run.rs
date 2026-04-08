@@ -151,12 +151,14 @@ async fn run_with_store<S: KvStore + 'static>(
             info!("Loading keystore from {}", path.display());
             let json = std::fs::read_to_string(&path)?;
             let encrypted: EncryptedKey = serde_json::from_str(&json)?;
+            let unlocked_address = Address::parse(&encrypted.address)
+                .map_err(|e| format!("invalid keystore address '{}': {e}", encrypted.address))?;
 
             eprint!("Enter keystore password: ");
             let password = rpassword::read_password()?;
 
             let signer = decrypt(&encrypted, password.as_bytes())?;
-            info!("Keystore unlocked: 0x{}", encrypted.address);
+            info!("Keystore unlocked: {unlocked_address}");
             Arc::new(signer)
         }
         None => {
@@ -170,7 +172,7 @@ async fn run_with_store<S: KvStore + 'static>(
     };
 
     let authority = Address::from_public_key(signer.public_key(), signer.sig_type().as_u8());
-    info!("Node authority: 0x{}", hex::encode(authority.as_bytes()));
+    info!("Node authority: {authority}");
 
     // Check if chain is already initialized (persistent storage resume).
     let chain_store = ChainStore::new(store.clone());
@@ -371,7 +373,7 @@ async fn run_with_store<S: KvStore + 'static>(
                 eprintln!("   WS:          ws://{ws}");
             }
             eprintln!("   P2P:         {p2p_listen} (libp2p)");
-            eprintln!("   Authority:   0x{}", hex::encode(authority.as_bytes()));
+            eprintln!("   Authority:   {authority}");
             eprintln!("   Metrics:     http://{}", args.metrics_addr);
             eprintln!("   Block time:  {}ms", args.block_time);
             if args.pruning > 0 {
@@ -427,7 +429,7 @@ async fn run_with_store<S: KvStore + 'static>(
         if let Some(ws) = ws_addr {
             eprintln!("   WS:          ws://{ws}");
         }
-        eprintln!("   Authority:   0x{}", hex::encode(authority.as_bytes()));
+        eprintln!("   Authority:   {authority}");
         eprintln!("   Metrics:     http://{}", args.metrics_addr);
         eprintln!("   Block time:  {}ms", args.block_time);
         if args.pruning > 0 {

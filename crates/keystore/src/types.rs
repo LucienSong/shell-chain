@@ -55,8 +55,9 @@ pub struct CipherParams {
 /// Encrypted private key in JSON-serializable format.
 ///
 /// Compatible with a PQ-adapted variant of the Web3 Secret Storage
-/// definition. The `address` field uses the same keccak256(pubkey)[12:]
-/// derivation as Ethereum but from a PQ public key.
+/// definition. The `address` field stores the Shell account as a legacy hex
+/// string for compatibility, while CLI/RPC surfaces display the canonical
+/// `pq1...` form derived from `blake3(version || algo_id || pubkey)[0..20]`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EncryptedKey {
     /// Format version (always 1).

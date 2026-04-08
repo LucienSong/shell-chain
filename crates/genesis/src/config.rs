@@ -121,34 +121,37 @@ pub enum GenesisError {
 mod tests {
     use super::*;
 
-    fn sample_genesis_json() -> &'static str {
-        r#"{
+    fn sample_genesis_json() -> String {
+        let authority = Address::from([0x01; 20]);
+        let funded = Address::from([0x02; 20]);
+        serde_json::json!({
             "chain_id": 1337,
             "chain_name": "shell-testnet",
-            "timestamp": 1700000000,
-            "gas_limit": 30000000,
+            "timestamp": 1700000000u64,
+            "gas_limit": 30000000u64,
             "extra_data": "shell-genesis",
             "consensus": {
                 "engine": "poa",
-                "authorities": ["0x0000000000000000000000000000000000000001"],
+                "authorities": [authority],
                 "authority_pubkeys": ["0x1234"],
-                "block_time_secs": 2
+                "block_time_secs": 2u64
             },
             "alloc": {
-                "0x0000000000000000000000000000000000000001": {
+                authority.to_string(): {
                     "balance": "0x3635c9adc5dea00000"
                 },
-                "0x0000000000000000000000000000000000000002": {
+                funded.to_string(): {
                     "balance": "0xde0b6b3a7640000",
-                    "nonce": 5
+                    "nonce": 5u64
                 }
             }
-        }"#
+        })
+        .to_string()
     }
 
     #[test]
     fn parse_genesis_json() {
-        let config = GenesisConfig::from_json(sample_genesis_json()).unwrap();
+        let config = GenesisConfig::from_json(&sample_genesis_json()).unwrap();
         assert_eq!(config.chain_id, 1337);
         assert_eq!(config.chain_name, "shell-testnet");
         assert_eq!(config.gas_limit, 30_000_000);
@@ -157,7 +160,7 @@ mod tests {
 
     #[test]
     fn consensus_config_is_poa() {
-        let config = GenesisConfig::from_json(sample_genesis_json()).unwrap();
+        let config = GenesisConfig::from_json(&sample_genesis_json()).unwrap();
         match &config.consensus {
             ConsensusConfig::PoA {
                 authorities,
@@ -174,7 +177,7 @@ mod tests {
 
     #[test]
     fn alloc_entry_with_nonce() {
-        let config = GenesisConfig::from_json(sample_genesis_json()).unwrap();
+        let config = GenesisConfig::from_json(&sample_genesis_json()).unwrap();
         // Find the entry with nonce=5
         let entry = config
             .alloc
@@ -186,11 +189,19 @@ mod tests {
 
     #[test]
     fn roundtrip_json() {
-        let config = GenesisConfig::from_json(sample_genesis_json()).unwrap();
+        let config = GenesisConfig::from_json(&sample_genesis_json()).unwrap();
         let json = config.to_json_pretty().unwrap();
         let config2 = GenesisConfig::from_json(&json).unwrap();
         assert_eq!(config.chain_id, config2.chain_id);
         assert_eq!(config.alloc.len(), config2.alloc.len());
+    }
+
+    #[test]
+    fn serialized_genesis_uses_bech32m_addresses() {
+        let config = GenesisConfig::from_json(&sample_genesis_json()).unwrap();
+        let json = config.to_json_pretty().unwrap();
+        assert!(json.contains(&Address::from([0x01; 20]).to_string()));
+        assert!(json.contains(&Address::from([0x02; 20]).to_string()));
     }
 
     #[test]
