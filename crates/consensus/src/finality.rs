@@ -681,7 +681,7 @@ mod tests {
 
         let signer = DilithiumSigner::generate();
         let pubkey = signer.public_key().to_vec();
-        let validator_addr = Address::from_public_key(&pubkey);
+        let validator_addr = Address::from_public_key(&pubkey, signer.sig_type().as_u8());
         let block_hash = make_hash(42);
         let block_number: u64 = 100;
 

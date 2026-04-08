@@ -327,7 +327,7 @@ mod tests {
     }
 
     fn test_address(seed: &[u8]) -> Address {
-        Address::from_public_key(keccak256(seed).as_bytes())
+        Address::from_public_key(keccak256(seed).as_bytes(), 0)
     }
 
     #[test]

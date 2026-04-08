@@ -169,7 +169,7 @@ async fn run_with_store<S: KvStore + 'static>(
         }
     };
 
-    let authority = Address::from_public_key(signer.public_key());
+    let authority = Address::from_public_key(signer.public_key(), signer.sig_type().as_u8());
     info!("Node authority: 0x{}", hex::encode(authority.as_bytes()));
 
     // Check if chain is already initialized (persistent storage resume).

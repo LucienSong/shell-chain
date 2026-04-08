@@ -9,7 +9,7 @@
 
 use shell_core::SignedTransaction;
 use shell_crypto::Verifier;
-use shell_primitives::{Address, U256};
+use shell_primitives::{blake3_hash, Address, U256};
 use shell_storage::{ChainStore, KvStore, StorageError, WorldState};
 
 /// Errors returned during transaction validation.
@@ -75,9 +75,10 @@ const ACCESS_LIST_STORAGE_KEY_COST: u64 = 1900;
 /// 1. **Chain ID** — must match the expected chain ID
 /// 2. **Intrinsic gas** — gas_limit must cover base cost + calldata
 /// 3. **PQ pubkey resolution** — resolves via tx field or on-chain registry
-/// 4. **Address derivation** — `from` must equal `keccak256(pubkey)[12..]`
-/// 5. **Signature verification** — Dilithium3 sig over tx hash
-/// 6. **Pubkey registration** — if first time, writes pubkey to ChainStore
+/// 4. **Sender binding** — first use checks address derivation, later use checks
+///    the registered pubkey binding
+/// 5. **Signature verification** — PQ signature over tx hash
+/// 6. **Pubkey registration** — if first use, writes pubkey to ChainStore
 /// 7. **Nonce** — must equal account's current nonce
 /// 8. **Balance** — must afford `gas_limit * max_fee_per_gas + value`
 ///
@@ -119,8 +120,8 @@ pub fn validate_tx<S: KvStore + 'static, V: Verifier>(
         return Err(TxValidationError::GasTooLow(tx.gas_limit));
     }
 
-    // 3. Resolve PQ public key (hybrid model)
-    let pubkey = resolve_pubkey(signed_tx, chain_store)?;
+    let registered_pubkey = chain_store.get_pubkey(&signed_tx.from)?;
+    let pubkey = resolve_pubkey(signed_tx.sender_pubkey.as_ref(), registered_pubkey.as_ref())?;
 
     // 3b. Algorithm allowlist check (F-170)
     if !shell_crypto::ALLOWED_ALGORITHMS.contains(&signed_tx.signature.sig_type) {
@@ -133,21 +134,23 @@ pub fn validate_tx<S: KvStore + 'static, V: Verifier>(
     //     already registered for this address. Same pubkey re-registration
     //     is allowed (idempotent).
     if signed_tx.sender_pubkey.is_some() {
-        if let Some(registered) = chain_store.get_pubkey(&signed_tx.from)? {
-            if registered != pubkey {
+        if let Some(registered) = registered_pubkey.as_ref() {
+            if registered != &pubkey {
                 return Err(TxValidationError::PubkeyConflict);
             }
         }
     }
 
-    // 4. Address derivation: from must match keccak256(pubkey)[12..]
-    let derived = Address::from_public_key(&pubkey);
-    if signed_tx.from != derived {
-        return Err(TxValidationError::AddressMismatch {
-            from: signed_tx.from,
-            derived,
-        });
-    }
+    // 4. Sender binding:
+    //    - first use (no registered pubkey): address must match the derivation
+    //    - later use: a registered pubkey anchors the account, so address
+    //      derivation is intentionally skipped to allow future key rotation
+    validate_sender_binding(
+        signed_tx,
+        world_state,
+        registered_pubkey.as_deref(),
+        &pubkey,
+    )?;
 
     // 5. Signature verification
     let tx_hash = signed_tx.hash();
@@ -157,11 +160,8 @@ pub fn validate_tx<S: KvStore + 'static, V: Verifier>(
     }
 
     // 6. Register pubkey if this is the first transaction (sender_pubkey present)
-    if signed_tx.sender_pubkey.is_some() {
-        // Only register if not already registered
-        if chain_store.get_pubkey(&signed_tx.from)?.is_none() {
-            chain_store.put_pubkey(&signed_tx.from, &pubkey)?;
-        }
+    if signed_tx.sender_pubkey.is_some() && registered_pubkey.is_none() {
+        chain_store.put_pubkey(&signed_tx.from, &pubkey)?;
     }
 
     // 7. Nonce check
@@ -213,6 +213,7 @@ pub fn validate_tx<S: KvStore + 'static, V: Verifier>(
 /// 7. Signature verification
 pub fn validate_tx_for_import<S: KvStore + 'static, V: Verifier>(
     signed_tx: &SignedTransaction,
+    world_state: &WorldState<S>,
     chain_store: &ChainStore<S>,
     verifier: &V,
     expected_chain_id: u64,
@@ -246,8 +247,8 @@ pub fn validate_tx_for_import<S: KvStore + 'static, V: Verifier>(
         return Err(TxValidationError::GasTooLow(tx.gas_limit));
     }
 
-    // 4. Resolve pubkey + algorithm allowlist
-    let pubkey = resolve_pubkey(signed_tx, chain_store)?;
+    let registered_pubkey = chain_store.get_pubkey(&signed_tx.from)?;
+    let pubkey = resolve_pubkey(signed_tx.sender_pubkey.as_ref(), registered_pubkey.as_ref())?;
     if !shell_crypto::ALLOWED_ALGORITHMS.contains(&signed_tx.signature.sig_type) {
         return Err(TxValidationError::DisallowedAlgorithm(
             signed_tx.signature.sig_type,
@@ -256,21 +257,20 @@ pub fn validate_tx_for_import<S: KvStore + 'static, V: Verifier>(
 
     // 5. Pubkey binding conflict
     if signed_tx.sender_pubkey.is_some() {
-        if let Some(registered) = chain_store.get_pubkey(&signed_tx.from)? {
-            if registered != pubkey {
+        if let Some(registered) = registered_pubkey.as_ref() {
+            if registered != &pubkey {
                 return Err(TxValidationError::PubkeyConflict);
             }
         }
     }
 
-    // 6. Address derivation
-    let derived = Address::from_public_key(&pubkey);
-    if signed_tx.from != derived {
-        return Err(TxValidationError::AddressMismatch {
-            from: signed_tx.from,
-            derived,
-        });
-    }
+    // 6. Sender binding
+    validate_sender_binding(
+        signed_tx,
+        world_state,
+        registered_pubkey.as_deref(),
+        &pubkey,
+    )?;
 
     // 7. Signature verification
     let tx_hash = signed_tx.hash();
@@ -287,17 +287,48 @@ pub fn validate_tx_for_import<S: KvStore + 'static, V: Verifier>(
 /// Hybrid model:
 /// - If `sender_pubkey` is in the tx, use it (first-time registration)
 /// - Otherwise, look up the on-chain registry
-fn resolve_pubkey<S: KvStore>(
-    signed_tx: &SignedTransaction,
-    chain_store: &ChainStore<S>,
+fn resolve_pubkey(
+    sender_pubkey: Option<&Vec<u8>>,
+    registered_pubkey: Option<&Vec<u8>>,
 ) -> Result<Vec<u8>, TxValidationError> {
-    if let Some(pk) = &signed_tx.sender_pubkey {
+    if let Some(pk) = sender_pubkey {
         return Ok(pk.clone());
     }
-    match chain_store.get_pubkey(&signed_tx.from)? {
-        Some(pk) => Ok(pk),
+    match registered_pubkey {
+        Some(pk) => Ok(pk.clone()),
         None => Err(TxValidationError::PubkeyNotFound),
     }
+}
+
+fn validate_sender_binding<S: KvStore + 'static>(
+    signed_tx: &SignedTransaction,
+    world_state: &WorldState<S>,
+    registered_pubkey: Option<&[u8]>,
+    pubkey: &[u8],
+) -> Result<(), TxValidationError> {
+    if registered_pubkey.is_none() {
+        let derived = Address::from_public_key(pubkey, signed_tx.signature.sig_type.as_u8());
+        if signed_tx.from != derived {
+            return Err(TxValidationError::AddressMismatch {
+                from: signed_tx.from,
+                derived,
+            });
+        }
+        return Ok(());
+    }
+
+    if let Some(account) = world_state.get_account(&signed_tx.from)? {
+        if account.validation_code_hash.is_none()
+            && account.pq_pubkey_hash != shell_primitives::ShellHash::ZERO
+        {
+            let pubkey_hash = blake3_hash(pubkey);
+            if account.pq_pubkey_hash != pubkey_hash {
+                return Err(TxValidationError::PubkeyConflict);
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Compute intrinsic gas cost for a transaction.
@@ -347,6 +378,10 @@ mod tests {
         DilithiumSigner::generate()
     }
 
+    fn signer_address(signer: &DilithiumSigner) -> Address {
+        Address::from_public_key(signer.public_key(), signer.sig_type().as_u8())
+    }
+
     fn setup_stores() -> (WorldState<MemoryDb>, ChainStore<MemoryDb>) {
         let ws = WorldState::new(Arc::new(MemoryDb::new()));
         let cs = ChainStore::new(Arc::new(MemoryDb::new()));
@@ -388,7 +423,7 @@ mod tests {
         tx: Transaction,
         include_pubkey: bool,
     ) -> SignedTransaction {
-        let from = Address::from_public_key(signer.public_key());
+        let from = signer_address(signer);
         let tx_hash = tx.hash();
         let sig = signer.sign(tx_hash.as_bytes()).unwrap();
         if include_pubkey {
@@ -423,7 +458,7 @@ mod tests {
     fn validate_first_tx_with_pubkey() {
         let signer = make_signer();
         let (mut ws, cs) = setup_stores();
-        let from = Address::from_public_key(signer.public_key());
+        let from = signer_address(&signer);
         fund_account(&mut ws, &from, U256::from(1_000_000));
 
         let tx = simple_transfer(test_chain_id(), 0);
@@ -443,7 +478,7 @@ mod tests {
     fn validate_subsequent_tx_from_registry() {
         let signer = make_signer();
         let (mut ws, cs) = setup_stores();
-        let from = Address::from_public_key(signer.public_key());
+        let from = signer_address(&signer);
         fund_account(&mut ws, &from, U256::from(1_000_000));
 
         // Pre-register pubkey
@@ -464,7 +499,7 @@ mod tests {
     fn validate_wrong_chain_id() {
         let signer = make_signer();
         let (mut ws, cs) = setup_stores();
-        let from = Address::from_public_key(signer.public_key());
+        let from = signer_address(&signer);
         fund_account(&mut ws, &from, U256::from(1_000_000));
 
         let tx = simple_transfer(9999, 0); // wrong chain_id
@@ -482,7 +517,7 @@ mod tests {
     fn validate_gas_too_low() {
         let signer = make_signer();
         let (mut ws, cs) = setup_stores();
-        let from = Address::from_public_key(signer.public_key());
+        let from = signer_address(&signer);
         fund_account(&mut ws, &from, U256::from(1_000_000));
 
         let mut tx = simple_transfer(test_chain_id(), 0);
@@ -498,7 +533,7 @@ mod tests {
     fn validate_no_pubkey_anywhere() {
         let signer = make_signer();
         let (mut ws, cs) = setup_stores();
-        let from = Address::from_public_key(signer.public_key());
+        let from = signer_address(&signer);
         fund_account(&mut ws, &from, U256::from(1_000_000));
 
         // No sender_pubkey and not registered
@@ -537,7 +572,7 @@ mod tests {
     fn validate_bad_signature() {
         let signer = make_signer();
         let (mut ws, cs) = setup_stores();
-        let from = Address::from_public_key(signer.public_key());
+        let from = signer_address(&signer);
         fund_account(&mut ws, &from, U256::from(1_000_000));
 
         let tx = simple_transfer(test_chain_id(), 0);
@@ -554,7 +589,7 @@ mod tests {
     fn validate_nonce_mismatch() {
         let signer = make_signer();
         let (mut ws, cs) = setup_stores();
-        let from = Address::from_public_key(signer.public_key());
+        let from = signer_address(&signer);
         fund_account(&mut ws, &from, U256::from(1_000_000));
 
         let tx = simple_transfer(test_chain_id(), 5); // nonce should be 0
@@ -575,7 +610,7 @@ mod tests {
     fn validate_insufficient_balance() {
         let signer = make_signer();
         let (mut ws, cs) = setup_stores();
-        let from = Address::from_public_key(signer.public_key());
+        let from = signer_address(&signer);
         fund_account(&mut ws, &from, U256::from(1)); // only 1 wei
 
         let tx = simple_transfer(test_chain_id(), 0); // needs 21000*10 + 100 = 210100
@@ -593,7 +628,7 @@ mod tests {
     fn validate_overflow_gas_cost_does_not_panic() {
         let signer = make_signer();
         let (mut ws, cs) = setup_stores();
-        let from = Address::from_public_key(signer.public_key());
+        let from = signer_address(&signer);
         fund_account(&mut ws, &from, U256::MAX);
 
         // Craft a tx where gas_limit * max_fee_per_gas + value overflows U256
@@ -630,7 +665,7 @@ mod tests {
         let signer1 = make_signer();
         let signer2 = DilithiumSigner::generate();
         let (mut ws, cs) = setup_stores();
-        let from = Address::from_public_key(signer1.public_key());
+        let from = signer_address(&signer1);
         fund_account(&mut ws, &from, U256::from(1_000_000));
 
         // Pre-register signer1's pubkey
@@ -652,7 +687,7 @@ mod tests {
     fn validate_same_pubkey_reregistration_ok() {
         let signer = make_signer();
         let (mut ws, cs) = setup_stores();
-        let from = Address::from_public_key(signer.public_key());
+        let from = signer_address(&signer);
         fund_account(&mut ws, &from, U256::from(1_000_000));
 
         // Pre-register same pubkey
@@ -673,7 +708,7 @@ mod tests {
     fn validate_disallowed_algorithm_rejected() {
         let signer = make_signer();
         let (mut ws, cs) = setup_stores();
-        let from = Address::from_public_key(signer.public_key());
+        let from = signer_address(&signer);
         fund_account(&mut ws, &from, U256::from(1_000_000));
 
         let tx = simple_transfer(test_chain_id(), 0);

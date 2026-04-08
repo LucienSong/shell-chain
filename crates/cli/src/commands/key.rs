@@ -21,7 +21,7 @@ pub fn key_generate(output: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Generating Dilithium3 keypair...");
     let signer = DilithiumSigner::generate();
-    let address = Address::from_public_key(signer.public_key());
+    let address = Address::from_public_key(signer.public_key(), signer.sig_type().as_u8());
 
     info!("Encrypting with argon2id + XChaCha20-Poly1305...");
     let encrypted = encrypt(&signer, password.as_bytes())?;

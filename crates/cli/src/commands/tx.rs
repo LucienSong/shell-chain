@@ -120,7 +120,7 @@ fn cmd_send(
     gas_limit: Option<u64>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let signer = load_keystore(&keystore)?;
-    let from = Address::from_public_key(signer.public_key());
+    let from = Address::from_public_key(signer.public_key(), signer.sig_type().as_u8());
     let to_addr = parse_address(&to)?;
 
     let chain_id = match chain_id {
@@ -180,7 +180,7 @@ fn cmd_deploy(
     value: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let signer = load_keystore(&keystore)?;
-    let from = Address::from_public_key(signer.public_key());
+    let from = Address::from_public_key(signer.public_key(), signer.sig_type().as_u8());
 
     let chain_id = match chain_id {
         Some(id) => id,

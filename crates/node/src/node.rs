@@ -909,9 +909,13 @@ impl<S: KvStore + 'static> Node<S> {
             // validator which skips nonce/balance (EVM handles those).
             let import_cs = ChainStore::new(self.store.clone());
             let pre_verifier = PreVerified;
-            if let Err(e) =
-                validate_tx_for_import(tx, &import_cs, &pre_verifier, self.config.chain_id)
-            {
+            if let Err(e) = validate_tx_for_import(
+                tx,
+                evm.state_db().world_state(),
+                &import_cs,
+                &pre_verifier,
+                self.config.chain_id,
+            ) {
                 debug!(
                     tx_hash = %tx.tx.hash(),
                     error = %e,
@@ -1195,20 +1199,6 @@ impl<S: KvStore + 'static> Node<S> {
                     ))
                 })?;
 
-            // Non-signature validation (chain-id, gas, access list, address
-            // derivation). Uses PreVerified to skip redundant individual
-            // sig checks — signatures were already batch-verified above.
-            let pre_verified = PreVerified;
-            for tx in &block.transactions {
-                validate_tx_for_import(tx, &import_cs, &pre_verified, self.config.chain_id)
-                    .map_err(|e| {
-                        NodeError::Startup(format!(
-                            "block {} tx validation failed: {e}",
-                            block.number()
-                        ))
-                    })?;
-            }
-
             let current_root = {
                 let mut ws = self.world_state.write();
                 ws.state_root()?
@@ -1217,6 +1207,26 @@ impl<S: KvStore + 'static> Node<S> {
             let cs = ChainStore::new(self.store.clone());
             let state_db = ShellStateDb::new(ws, cs);
             let mut evm = ShellEvm::new(state_db, self.config.chain_id);
+
+            // Non-signature validation (chain-id, gas, sender binding).
+            // Uses PreVerified to skip redundant individual
+            // sig checks — signatures were already batch-verified above.
+            let pre_verified = PreVerified;
+            for tx in &block.transactions {
+                validate_tx_for_import(
+                    tx,
+                    evm.state_db().world_state(),
+                    &import_cs,
+                    &pre_verified,
+                    self.config.chain_id,
+                )
+                .map_err(|e| {
+                    NodeError::Startup(format!(
+                        "block {} tx validation failed: {e}",
+                        block.number()
+                    ))
+                })?;
+            }
             let mut cumulative_gas: u64 = 0;
 
             for (idx, tx) in block.transactions.iter().enumerate() {
@@ -1492,7 +1502,7 @@ mod tests {
     use crate::pruning::PruningConfig;
     use shell_consensus::PoaConfig;
     use shell_core::Transaction;
-    use shell_crypto::DilithiumSigner;
+    use shell_crypto::{DilithiumSigner, Signer};
     use shell_mempool::MempoolConfig;
     use shell_rpc::DevRpcControl;
     use shell_storage::MemoryDb;
@@ -1500,7 +1510,7 @@ mod tests {
     fn setup_node() -> (Node<MemoryDb>, DilithiumSigner) {
         let signer = DilithiumSigner::generate();
         let pubkey = signer.public_key().to_vec();
-        let authority = Address::from_public_key(&pubkey);
+        let authority = Address::from_public_key(&pubkey, signer.sig_type().as_u8());
 
         let db = Arc::new(MemoryDb::new());
         let chain_store = Arc::new(ChainStore::new(db.clone()));
@@ -1648,7 +1658,7 @@ mod tests {
 
         // Create sender and receiver
         let tx_signer = DilithiumSigner::generate();
-        let sender = Address::from_public_key(tx_signer.public_key());
+        let sender = Address::from_public_key(tx_signer.public_key(), tx_signer.sig_type().as_u8());
         let receiver = Address::from([0xBB; 20]);
         let transfer_value = U256::from(1_000_000);
 
@@ -1955,7 +1965,7 @@ mod tests {
     #[test]
     fn epoch_boundary_reloads_validators() {
         let signer = DilithiumSigner::generate();
-        let authority = Address::from_public_key(signer.public_key());
+        let authority = Address::from_public_key(signer.public_key(), signer.sig_type().as_u8());
 
         let db = Arc::new(MemoryDb::new());
         let chain_store = Arc::new(ChainStore::new(db.clone()));
@@ -2016,7 +2026,7 @@ mod tests {
     #[test]
     fn validator_change_takes_effect_at_next_epoch() {
         let signer = DilithiumSigner::generate();
-        let authority = Address::from_public_key(signer.public_key());
+        let authority = Address::from_public_key(signer.public_key(), signer.sig_type().as_u8());
 
         let db = Arc::new(MemoryDb::new());
         let chain_store = Arc::new(ChainStore::new(db.clone()));
@@ -2076,7 +2086,7 @@ mod tests {
     fn setup_node_with_pruning(keep_recent: u64) -> (Node<MemoryDb>, DilithiumSigner) {
         let signer = DilithiumSigner::generate();
         let pubkey = signer.public_key().to_vec();
-        let authority = Address::from_public_key(&pubkey);
+        let authority = Address::from_public_key(&pubkey, signer.sig_type().as_u8());
 
         let db = Arc::new(MemoryDb::new());
         let chain_store = Arc::new(ChainStore::new(db.clone()));
@@ -2473,7 +2483,7 @@ mod tests {
         store_genesis(&node);
 
         let tx_signer = DilithiumSigner::generate();
-        let sender = Address::from_public_key(tx_signer.public_key());
+        let sender = Address::from_public_key(tx_signer.public_key(), tx_signer.sig_type().as_u8());
         let receiver = Address::from([0xCC; 20]);
 
         fund_account(&node, &sender, U256::from(100_000_000_000_000u64));

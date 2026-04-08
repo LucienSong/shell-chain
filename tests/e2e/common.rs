@@ -9,7 +9,7 @@ use parking_lot::RwLock;
 
 use shell_consensus::FinalityState;
 use shell_core::{Block, BlockHeader, SignedTransaction, Transaction, TransactionReceipt};
-use shell_crypto::{DilithiumSigner, Signer};
+use shell_crypto::{DilithiumSigner, SignatureType, Signer};
 use shell_mempool::TxPool;
 use shell_primitives::{Address, Bytes, ShellHash, U256};
 use shell_rpc::RpcHandler;
@@ -76,7 +76,10 @@ pub fn make_block(number: u64, parent_hash: ShellHash) -> Block {
             gas_used: 0,
             timestamp: 1_700_000_000 + number * 2,
             extra_data: Bytes::default(),
-            proposer: Address::from_public_key(b"proposer-key-data"),
+            proposer: Address::from_public_key(
+                b"proposer-key-data",
+                SignatureType::Dilithium3.as_u8(),
+            ),
             sig_aggregate_proof: None,
             base_fee_per_gas: 0,
             withdrawals_root: ShellHash::ZERO,
@@ -115,7 +118,7 @@ pub struct FundedAccount {
 pub fn make_funded_account(env: &TestEnv) -> FundedAccount {
     let signer = DilithiumSigner::generate();
     let pubkey = signer.public_key().to_vec();
-    let address = Address::from_public_key(&pubkey);
+    let address = Address::from_public_key(&pubkey, signer.sig_type().as_u8());
 
     {
         let mut ws = env.world_state.write();

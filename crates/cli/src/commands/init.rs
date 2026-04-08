@@ -58,7 +58,8 @@ pub fn init(
         None => {
             info!("No genesis.json provided, generating dev genesis");
             let signer = DilithiumSigner::generate();
-            let authority = Address::from_public_key(signer.public_key());
+            let authority =
+                Address::from_public_key(signer.public_key(), signer.sig_type().as_u8());
 
             let mut alloc = HashMap::new();
             alloc.insert(
