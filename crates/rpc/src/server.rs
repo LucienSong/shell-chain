@@ -15,8 +15,10 @@ use shell_primitives::Address;
 use shell_storage::{ChainStore, KvStore, WorldState};
 
 use crate::api::{
-    DebugApiServer, EthApiServer, NetApiServer, ShellApiServer, TraceApiServer, Web3ApiServer,
+    DebugApiServer, EthApiServer, EvmApiServer, NetApiServer, ShellApiServer, TraceApiServer,
+    Web3ApiServer,
 };
+use crate::dev_control::DynDevRpcControl;
 use crate::handler::RpcHandler;
 use crate::subscriptions::{BlockEvent, EthPubSubServer};
 use crate::tls;
@@ -101,6 +103,8 @@ pub async fn start_rpc_server<S: KvStore + 'static>(
     proposer_address: Option<Address>,
     finalized_number: Arc<parking_lot::RwLock<u64>>,
     finality: Arc<parking_lot::RwLock<FinalityState>>,
+    peer_count: Arc<std::sync::atomic::AtomicUsize>,
+    dev_control: Option<DynDevRpcControl>,
 ) -> Result<RpcServerHandle, Box<dyn std::error::Error + Send + Sync>> {
     // Validate TLS configuration if provided.
     match tls::load_tls_config(
@@ -141,7 +145,11 @@ pub async fn start_rpc_server<S: KvStore + 'static>(
         block_events,
         finalized_number,
         finality,
-    );
+    )
+    .with_peer_count(peer_count);
+    if let Some(dev_control) = dev_control {
+        handler = handler.with_dev_control(dev_control);
+    }
     if let (Some(signer), Some(addr)) = (proposer_signer, proposer_address) {
         handler = handler.with_proposer(signer, addr);
     }
@@ -183,6 +191,9 @@ pub async fn start_rpc_server<S: KvStore + 'static>(
     if ns.iter().any(|n| n == "eth") {
         module.merge(EthApiServer::into_rpc(handler.clone()))?;
         module.merge(EthPubSubServer::into_rpc(handler.clone()))?;
+    }
+    if ns.iter().any(|n| n == "evm") {
+        module.merge(EvmApiServer::into_rpc(handler.clone()))?;
     }
     if ns.iter().any(|n| n == "shell") {
         module.merge(ShellApiServer::into_rpc(handler.clone()))?;

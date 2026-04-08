@@ -19,3 +19,4 @@ Thumbs.db
 # Logs
 *.log
 diff_m6b2.txt
+tools/tx-generator/target/

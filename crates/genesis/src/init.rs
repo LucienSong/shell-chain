@@ -96,6 +96,42 @@ pub fn initialize_genesis<S: KvStore + 'static>(
     Ok(block)
 }
 
+/// Persist authority PQ public keys from genesis into the shared pubkey registry.
+pub fn initialize_authority_pubkeys<S: KvStore + 'static>(
+    config: &GenesisConfig,
+    chain_store: &ChainStore<S>,
+) -> Result<(), GenesisError> {
+    let (authorities, authority_pubkeys) = match &config.consensus {
+        ConsensusConfig::PoA {
+            authorities,
+            authority_pubkeys,
+            ..
+        } => (authorities, authority_pubkeys),
+    };
+
+    if authority_pubkeys.is_empty() {
+        return Ok(());
+    }
+
+    if authority_pubkeys.len() != authorities.len() {
+        return Err(GenesisError::Validation(format!(
+            "authority_pubkeys length {} does not match authorities length {}",
+            authority_pubkeys.len(),
+            authorities.len()
+        )));
+    }
+
+    for (address, pubkey_hex) in authorities.iter().zip(authority_pubkeys.iter()) {
+        let pubkey = hex::decode(pubkey_hex.trim_start_matches("0x"))
+            .map_err(|e| GenesisError::Validation(format!("invalid authority pubkey hex: {e}")))?;
+        chain_store
+            .put_pubkey(address, &pubkey)
+            .map_err(|e| GenesisError::StateInit(e.to_string()))?;
+    }
+
+    Ok(())
+}
+
 fn apply_alloc<S: KvStore + 'static>(
     world_state: &mut WorldState<S>,
     address: &Address,
@@ -163,6 +199,7 @@ mod tests {
             extra_data: "genesis".to_string(),
             consensus: ConsensusConfig::PoA {
                 authorities: vec![addr1],
+                authority_pubkeys: vec!["0x1234".to_string()],
                 block_time_secs: 1,
                 epoch_length: 0,
             },
@@ -216,6 +253,18 @@ mod tests {
 
         assert_eq!(block1.hash(), block2.hash());
         assert_eq!(block1.header.state_root, block2.header.state_root);
+    }
+
+    #[test]
+    fn authority_pubkeys_are_persisted() {
+        let config = test_genesis();
+        let store = Arc::new(MemoryDb::new());
+        let chain_store = ChainStore::new(Arc::clone(&store));
+
+        initialize_authority_pubkeys(&config, &chain_store).unwrap();
+
+        let loaded = chain_store.get_pubkey(&Address::ZERO).unwrap().unwrap();
+        assert_eq!(loaded, vec![0x12, 0x34]);
     }
 
     #[test]

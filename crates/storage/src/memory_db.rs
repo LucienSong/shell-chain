@@ -80,6 +80,20 @@ impl KvStore for MemoryDb {
         }
         Ok(())
     }
+
+    fn scan_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
+        let data = self
+            .data
+            .read()
+            .map_err(|e| StorageError::Database(e.to_string()))?;
+        let mut results: Vec<(Vec<u8>, Vec<u8>)> = data
+            .iter()
+            .filter(|(k, _)| k.starts_with(prefix))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        results.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(results)
+    }
 }
 
 #[cfg(test)]

@@ -1,5 +1,7 @@
 target/
+**/target/
 .git/
-tests/
+tests/e2e/src/
+tests/e2e/*.sh
 *.md
 .gitignore

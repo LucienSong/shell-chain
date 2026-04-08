@@ -85,7 +85,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 rpassword = "7"
 
 # --- metrics ---
-prometheus = "0.13"
+prometheus = "0.14"
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
@@ -95,3 +95,7 @@ rayon = "1.10"
 
 # --- benchmarks ---
 criterion = { version = "0.5", features = ["html_reports"] }
+
+[patch.crates-io]
+ark-relations = { path = "deps/ark-relations" }
+libp2p-yamux = { path = "deps/libp2p-yamux" }

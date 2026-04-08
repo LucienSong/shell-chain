@@ -17,8 +17,10 @@ use shell_primitives::{Address, Bytes, ShellHash, U256};
 use shell_storage::{ChainStore, KvStore, WorldState};
 
 use crate::api::{
-    DebugApiServer, EthApiServer, NetApiServer, ShellApiServer, TraceApiServer, Web3ApiServer,
+    DebugApiServer, EthApiServer, EvmApiServer, NetApiServer, ShellApiServer, TraceApiServer,
+    Web3ApiServer,
 };
+use crate::dev_control::DynDevRpcControl;
 use crate::filter::{RawLogFilter, MAX_BLOCK_RANGE};
 use crate::filter_registry::{FilterKind, FilterRegistry};
 use crate::subscriptions::{BlockEvent, SubscriptionTracker, SyncStatus};
@@ -58,6 +60,10 @@ pub struct RpcHandler<S: KvStore + 'static> {
     finality: Arc<parking_lot::RwLock<FinalityState>>,
     /// Registry for poll-based filters (eth_newFilter, eth_newBlockFilter, etc.).
     filter_registry: Arc<FilterRegistry>,
+    /// Live peer count from the P2P network layer.
+    peer_count: Arc<std::sync::atomic::AtomicUsize>,
+    /// Optional runtime dev-control handle for Hardhat/Foundry compatibility.
+    dev_control: Option<DynDevRpcControl>,
 }
 
 impl<S: KvStore + 'static> Clone for RpcHandler<S> {
@@ -79,6 +85,8 @@ impl<S: KvStore + 'static> Clone for RpcHandler<S> {
             finalized_number: Arc::clone(&self.finalized_number),
             finality: Arc::clone(&self.finality),
             filter_registry: Arc::clone(&self.filter_registry),
+            peer_count: Arc::clone(&self.peer_count),
+            dev_control: self.dev_control.clone(),
         }
     }
 }
@@ -116,6 +124,8 @@ impl<S: KvStore + 'static> RpcHandler<S> {
             finalized_number,
             finality,
             filter_registry: Arc::new(FilterRegistry::new()),
+            peer_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            dev_control: None,
         };
         FilterRegistry::start_cleanup(Arc::clone(&handler.filter_registry));
         handler
@@ -126,6 +136,18 @@ impl<S: KvStore + 'static> RpcHandler<S> {
     pub fn with_proposer(mut self, signer: Arc<dyn Signer>, address: Address) -> Self {
         self.proposer_signer = Some(signer);
         self.proposer_address = Some(address);
+        self
+    }
+
+    /// Set the live peer count handle from the P2P network layer.
+    pub fn with_peer_count(mut self, peer_count: Arc<std::sync::atomic::AtomicUsize>) -> Self {
+        self.peer_count = peer_count;
+        self
+    }
+
+    /// Set the runtime dev-control surface for `evm_*` RPC methods.
+    pub fn with_dev_control(mut self, dev_control: DynDevRpcControl) -> Self {
+        self.dev_control = Some(dev_control);
         self
     }
 
@@ -499,6 +521,55 @@ impl<S: KvStore + 'static> RpcHandler<S> {
             transaction_hash: tx.hash(),
             transaction_position: tx_position,
         }
+    }
+}
+
+#[jsonrpsee::core::async_trait]
+impl<S: KvStore + 'static> EvmApiServer for RpcHandler<S> {
+    async fn mine(&self, blocks: Option<u64>) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let count = blocks.unwrap_or(1).max(1);
+        let dev = self.dev_control.as_ref().ok_or_else(|| {
+            ErrorObjectOwned::owned(-32601, "evm namespace not enabled on this node", None::<()>)
+        })?;
+        dev.mine_blocks(count).map_err(internal_err)?;
+        Ok(serde_json::json!({
+            "blocksMined": hex_u64(count),
+        }))
+    }
+
+    async fn set_next_block_timestamp(
+        &self,
+        timestamp: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let dev = self.dev_control.as_ref().ok_or_else(|| {
+            ErrorObjectOwned::owned(-32601, "evm namespace not enabled on this node", None::<()>)
+        })?;
+        let applied = dev
+            .set_next_block_timestamp(timestamp)
+            .map_err(internal_err)?;
+        Ok(serde_json::json!(hex_u64(applied)))
+    }
+
+    async fn increase_time(&self, seconds: u64) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let dev = self.dev_control.as_ref().ok_or_else(|| {
+            ErrorObjectOwned::owned(-32601, "evm namespace not enabled on this node", None::<()>)
+        })?;
+        let total = dev.increase_time(seconds).map_err(internal_err)?;
+        Ok(serde_json::json!(hex_u64(total)))
+    }
+
+    async fn snapshot(&self) -> Result<String, ErrorObjectOwned> {
+        let dev = self.dev_control.as_ref().ok_or_else(|| {
+            ErrorObjectOwned::owned(-32601, "evm namespace not enabled on this node", None::<()>)
+        })?;
+        dev.snapshot().map_err(internal_err)
+    }
+
+    async fn revert(&self, snapshot_id: String) -> Result<bool, ErrorObjectOwned> {
+        let dev = self.dev_control.as_ref().ok_or_else(|| {
+            ErrorObjectOwned::owned(-32601, "evm namespace not enabled on this node", None::<()>)
+        })?;
+        dev.revert(&snapshot_id).map_err(internal_err)
     }
 }
 
@@ -990,6 +1061,82 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
         }
 
         Ok(None)
+    }
+
+    async fn get_block_receipts(&self, block: String) -> Result<Vec<RpcReceipt>, ErrorObjectOwned> {
+        // Resolve block identifier (number, tag, or hash)
+        let block_obj = if block.starts_with("0x") && block.len() == 66 {
+            let hex_str = block.strip_prefix("0x").unwrap_or(&block);
+            let hash_bytes = hex::decode(hex_str)
+                .map_err(|e| internal_err(format!("invalid block hash hex: {e}")))?;
+            let hash = ShellHash::try_from_slice(&hash_bytes)
+                .map_err(|e| internal_err(format!("invalid block hash: {e}")))?;
+            self.chain_store
+                .get_block_by_hash(&hash)
+                .map_err(internal_err)?
+        } else {
+            match self.parse_block_number(&block)? {
+                Some(num) => self
+                    .chain_store
+                    .get_block_by_number(num)
+                    .map_err(internal_err)?,
+                None => self.chain_store.get_head_block().map_err(internal_err)?,
+            }
+        };
+
+        let block_obj = match block_obj {
+            Some(b) => b,
+            None => return Ok(vec![]),
+        };
+
+        let block_hash = block_obj.hash();
+        let receipts = self
+            .chain_store
+            .get_receipts(&block_hash)
+            .map_err(internal_err)?
+            .unwrap_or_default();
+
+        let mut rpc_receipts = Vec::with_capacity(receipts.len());
+        for (i, receipt) in receipts.iter().enumerate() {
+            let (from, to, eff_gas_price, tx_type_val) =
+                if let Some(tx) = block_obj.transactions.get(i) {
+                    let price = shell_core::effective_gas_price(
+                        tx.tx.max_fee_per_gas,
+                        tx.tx.max_priority_fee_per_gas,
+                        block_obj.header.base_fee_per_gas,
+                    );
+                    (tx.sender(), tx.tx.to, price, tx.tx.tx_type)
+                } else {
+                    (Address::ZERO, None, 0, 2u8)
+                };
+
+            rpc_receipts.push(RpcReceipt {
+                transaction_hash: receipt.tx_hash,
+                block_hash,
+                block_number: hex_u64(receipt.block_number),
+                transaction_index: hex_u64(i as u64),
+                from,
+                to,
+                status: hex_u64(receipt.status as u64),
+                gas_used: hex_u64(receipt.gas_used),
+                cumulative_gas_used: hex_u64(receipt.cumulative_gas_used),
+                effective_gas_price: hex_u64(eff_gas_price),
+                contract_address: receipt.contract_address,
+                logs: receipt
+                    .logs
+                    .iter()
+                    .map(|log| RpcLog {
+                        address: log.address,
+                        topics: log.topics.clone(),
+                        data: hex_bytes(log.data.as_ref()),
+                    })
+                    .collect(),
+                logs_bloom: hex_bytes(receipt.logs_bloom.as_ref()),
+                tx_type: format!("{:#x}", tx_type_val),
+            });
+        }
+
+        Ok(rpc_receipts)
     }
 
     async fn get_balance(
@@ -1647,6 +1794,103 @@ impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
             "pendingAttestations": pending,
         }))
     }
+
+    async fn set_balance(
+        &self,
+        address: Address,
+        balance: String,
+    ) -> Result<bool, ErrorObjectOwned> {
+        // Require dev mode — shell_setBalance is a state-mutation endpoint.
+        self.dev_control.as_ref().ok_or_else(|| {
+            ErrorObjectOwned::owned(-32601, "shell_setBalance requires dev mode", None::<()>)
+        })?;
+        let value = if let Some(hex_str) = balance.strip_prefix("0x") {
+            U256::from_str_radix(hex_str, 16)
+                .map_err(|e| internal_err(format!("invalid hex balance: {e}")))?
+        } else {
+            balance
+                .parse::<U256>()
+                .map_err(|e| internal_err(format!("invalid balance: {e}")))?
+        };
+        let mut ws = self.world_state.write();
+        ws.set_balance(&address, value).map_err(internal_err)?;
+        Ok(true)
+    }
+
+    async fn transaction_count(&self) -> Result<String, ErrorObjectOwned> {
+        let count = self
+            .chain_store
+            .get_total_tx_count()
+            .map_err(internal_err)?;
+        Ok(hex_u64(count))
+    }
+
+    async fn get_transactions_by_address(
+        &self,
+        address: Address,
+        from_block: Option<u64>,
+        to_block: Option<u64>,
+        page: Option<u64>,
+        limit: Option<u64>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let from = from_block.unwrap_or(0);
+        let to = to_block.unwrap_or_else(|| {
+            self.chain_store
+                .get_head_block()
+                .ok()
+                .flatten()
+                .map(|b| b.number())
+                .unwrap_or(0)
+        });
+        let page = page.unwrap_or(0);
+        let limit = limit.unwrap_or(20).min(100);
+        let offset = (page * limit) as usize;
+
+        let tx_hashes = self
+            .chain_store
+            .get_txs_by_address(&address, from, to, offset, limit as usize)
+            .map_err(internal_err)?;
+
+        // Resolve each tx hash to a full RPC transaction
+        let mut txs = Vec::with_capacity(tx_hashes.len());
+        for hash in &tx_hashes {
+            let location = self
+                .chain_store
+                .get_tx_location(hash)
+                .map_err(internal_err)?;
+            if let Some((block_hash, tx_index)) = location {
+                let block = self
+                    .chain_store
+                    .get_block_by_hash(&block_hash)
+                    .map_err(internal_err)?;
+                if let Some(block) = block {
+                    if let Some(tx) = block.transactions.get(tx_index as usize) {
+                        txs.push(serde_json::json!({
+                            "hash": hash,
+                            "blockNumber": hex_u64(block.number()),
+                            "blockHash": block_hash,
+                            "transactionIndex": hex_u64(tx_index as u64),
+                            "from": tx.sender(),
+                            "to": tx.tx.to,
+                            "value": hex_u256(tx.tx.value),
+                            "gasLimit": hex_u64(tx.tx.gas_limit),
+                            "nonce": hex_u64(tx.tx.nonce),
+                        }));
+                    }
+                }
+            }
+        }
+
+        Ok(serde_json::json!({
+            "address": address,
+            "fromBlock": hex_u64(from),
+            "toBlock": hex_u64(to),
+            "page": page,
+            "limit": limit,
+            "total": txs.len(),
+            "transactions": txs,
+        }))
+    }
 }
 
 #[jsonrpsee::core::async_trait]
@@ -1679,8 +1923,8 @@ impl<S: KvStore + 'static> NetApiServer for RpcHandler<S> {
     }
 
     async fn peer_count(&self) -> Result<String, ErrorObjectOwned> {
-        // No peer tracking yet; report 0 peers.
-        Ok(hex_u64(0))
+        let count = self.peer_count.load(std::sync::atomic::Ordering::Relaxed);
+        Ok(hex_u64(count as u64))
     }
 }
 
@@ -1836,10 +2080,41 @@ impl<S: KvStore + 'static> TraceApiServer for RpcHandler<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dev_control::DevRpcControl;
     use shell_core::{Block, BlockHeader, Transaction, TransactionReceipt};
     use shell_crypto::{DilithiumSigner, Signer};
     use shell_primitives::Bytes;
     use shell_storage::MemoryDb;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[derive(Default)]
+    struct MockDevControl {
+        mined: AtomicU64,
+        increased: AtomicU64,
+    }
+
+    impl DevRpcControl for MockDevControl {
+        fn mine_blocks(&self, blocks: u64) -> Result<(), String> {
+            self.mined.fetch_add(blocks, Ordering::Relaxed);
+            Ok(())
+        }
+
+        fn set_next_block_timestamp(&self, timestamp: u64) -> Result<u64, String> {
+            Ok(timestamp)
+        }
+
+        fn increase_time(&self, seconds: u64) -> Result<u64, String> {
+            Ok(self.increased.fetch_add(seconds, Ordering::Relaxed) + seconds)
+        }
+
+        fn snapshot(&self) -> Result<String, String> {
+            Ok("0x1".into())
+        }
+
+        fn revert(&self, snapshot_id: &str) -> Result<bool, String> {
+            Ok(snapshot_id == "0x1")
+        }
+    }
 
     fn setup() -> RpcHandler<MemoryDb> {
         let db = Arc::new(MemoryDb::new());
@@ -1895,6 +2170,29 @@ mod tests {
         let handler = setup();
         let result = EthApiServer::block_number(&handler).await.unwrap();
         assert_eq!(result, "0x0");
+    }
+
+    #[tokio::test]
+    async fn evm_rpc_methods_delegate_to_dev_control() {
+        let dev = Arc::new(MockDevControl::default());
+        let handler = setup().with_dev_control(dev.clone());
+
+        let mined = EvmApiServer::mine(&handler, Some(2)).await.unwrap();
+        assert_eq!(mined["blocksMined"], "0x2");
+        assert_eq!(dev.mined.load(Ordering::Relaxed), 2);
+
+        let next = EvmApiServer::set_next_block_timestamp(&handler, 1_700_000_123)
+            .await
+            .unwrap();
+        assert_eq!(next, serde_json::json!("0x6553f17b"));
+
+        let increased = EvmApiServer::increase_time(&handler, 30).await.unwrap();
+        assert_eq!(increased, serde_json::json!("0x1e"));
+
+        let snapshot = EvmApiServer::snapshot(&handler).await.unwrap();
+        assert_eq!(snapshot, "0x1");
+        assert!(EvmApiServer::revert(&handler, "0x1".into()).await.unwrap());
+        assert!(!EvmApiServer::revert(&handler, "0x2".into()).await.unwrap());
     }
 
     #[tokio::test]

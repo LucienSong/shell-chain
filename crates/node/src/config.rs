@@ -51,6 +51,9 @@ pub struct NodeConfig {
     pub pruning: PruningConfig,
     /// Prometheus metrics endpoint configuration.
     pub metrics: MetricsConfig,
+    /// Maximum idle interval in ms before producing a heartbeat block.
+    /// When 0, every block_time tick produces a block (legacy behavior).
+    pub max_idle_interval_ms: u64,
 }
 
 impl NodeConfig {
@@ -74,6 +77,7 @@ impl NodeConfig {
             data_dir: "shell-data".into(),
             pruning: PruningConfig::default(),
             metrics: MetricsConfig::default(),
+            max_idle_interval_ms: 0,
         }
     }
 }

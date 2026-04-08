@@ -117,13 +117,17 @@ enum Commands {
         #[arg(long)]
         rpc_rate_limit: Option<u32>,
 
-        /// API namespaces to enable (comma-separated: eth,net,web3,shell,debug,trace).
+        /// API namespaces to enable (comma-separated: eth,net,web3,shell,evm,debug,trace).
         #[arg(long)]
         rpc_api: Option<String>,
 
         /// Metrics HTTP server listen address (ip:port).
         #[arg(long)]
         metrics_addr: Option<String>,
+
+        /// Max idle seconds before producing a heartbeat block (0 = always produce).
+        #[arg(long, default_value = "0")]
+        max_idle_interval: u64,
     },
 
     /// Initialize genesis block and data directory.
@@ -250,6 +254,7 @@ async fn main() {
             rpc_rate_limit,
             rpc_api,
             metrics_addr,
+            max_idle_interval,
         } => {
             // Load config file if specified (CLI args override file values).
             let file_config = match &config_path {
@@ -365,6 +370,7 @@ async fn main() {
                 rpc_rate_limit: effective_rpc_rate_limit,
                 rpc_api: effective_rpc_api,
                 metrics_addr: effective_metrics_addr,
+                max_idle_interval,
             })
             .await
         }

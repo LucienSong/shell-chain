@@ -1,6 +1,6 @@
 //! Running node with event loop and block production.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -13,8 +13,9 @@ use shell_core::{calculate_base_fee, Block, BlockHeader, SignedTransaction};
 use shell_crypto::{BatchVerifier, MultiVerifier, PreVerified, Signer, Verifier, VerifyItem};
 use shell_evm::{commit_evm_state, validate_tx_for_import, ShellEvm, ShellStateDb};
 use shell_mempool::TxPool;
-use shell_network::NetworkService;
+use shell_network::{NetworkMessage, NetworkService};
 use shell_primitives::{Address, Bytes, ShellHash, U256};
+use shell_rpc::DevRpcControl;
 use shell_storage::{ChainStore, KvStore, StatePruner, WorldState};
 
 use crate::config::NodeConfig;
@@ -45,7 +46,31 @@ pub struct Node<S: KvStore + 'static> {
     pub fork_choice: Arc<RwLock<ForkChoice>>,
     /// Prometheus metrics.
     pub metrics: Arc<Metrics>,
+    /// Runtime signer retained so dev RPCs can force block production.
+    runtime_signer: RwLock<Option<Arc<dyn Signer>>>,
+    /// Dev-only runtime controls for Hardhat/Foundry compatibility.
+    dev_state: RwLock<DevState>,
     shutdown_tx: watch::Sender<bool>,
+}
+
+const SYNC_RETRY_BASE_INTERVAL_SECS: u64 = 5;
+const SYNC_RETRY_MAX_INTERVAL_SECS: u64 = 30;
+const SYNC_RETRY_BACKOFF_THRESHOLD: u32 = 3;
+
+struct DevSnapshot {
+    head_hash: ShellHash,
+    head_number: u64,
+    state_root: ShellHash,
+    total_tx_count: u64,
+    finalized_number: u64,
+    pending_txs: Vec<SignedTransaction>,
+    next_block_timestamp: Option<u64>,
+}
+
+struct DevState {
+    next_block_timestamp: Option<u64>,
+    next_snapshot_id: u64,
+    snapshots: BTreeMap<String, DevSnapshot>,
 }
 
 impl<S: KvStore + 'static> Node<S> {
@@ -101,6 +126,12 @@ impl<S: KvStore + 'static> Node<S> {
             finality: Arc::new(RwLock::new(finality_state)),
             fork_choice: Arc::new(RwLock::new(ForkChoice::new(ShellHash::ZERO))),
             metrics,
+            runtime_signer: RwLock::new(None),
+            dev_state: RwLock::new(DevState {
+                next_block_timestamp: None,
+                next_snapshot_id: 1,
+                snapshots: BTreeMap::new(),
+            }),
             shutdown_tx,
         }
     }
@@ -108,6 +139,156 @@ impl<S: KvStore + 'static> Node<S> {
     /// Register an authority's public key for seal verification.
     pub fn register_authority_pubkey(&self, address: Address, pubkey: Vec<u8>) {
         self.known_authorities.write().insert(address, pubkey);
+    }
+
+    fn head_number(&self) -> u64 {
+        self.chain_store
+            .get_head_block()
+            .ok()
+            .flatten()
+            .map(|b| b.number())
+            .unwrap_or(0)
+    }
+
+    fn sync_retry_delay_secs(attempts_without_progress: u32) -> u64 {
+        if attempts_without_progress < SYNC_RETRY_BACKOFF_THRESHOLD {
+            SYNC_RETRY_BASE_INTERVAL_SECS
+        } else {
+            SYNC_RETRY_MAX_INTERVAL_SECS
+        }
+    }
+
+    async fn request_missing_blocks<N: NetworkService + ?Sized>(
+        &self,
+        network: &mut N,
+        sync_requested: &mut bool,
+        reason: &'static str,
+    ) {
+        let head_number = self.head_number();
+        info!(head = head_number, reason, "requesting blocks from peers");
+        let req = NetworkMessage::BlockRequest {
+            start_number: head_number + 1,
+            count: 128,
+        };
+        let _ = network.broadcast(req).await;
+        *sync_requested = true;
+    }
+
+    fn current_block_timestamp(&self, parent_timestamp: u64) -> u64 {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let mut dev = self.dev_state.write();
+        let ts = if let Some(next) = dev.next_block_timestamp.take() {
+            next
+        } else {
+            now
+        };
+        ts.max(parent_timestamp.saturating_add(1))
+    }
+
+    fn snapshot_inner(&self) -> Result<String, NodeError> {
+        let head = self
+            .chain_store
+            .get_head_block()?
+            .ok_or(NodeError::NoGenesis)?;
+        let total_tx_count = self.chain_store.get_total_tx_count()?;
+        let finalized_number = self.chain_store.get_finalized_number()?.unwrap_or(0);
+        let pending_txs = self.tx_pool.pending(self.tx_pool.len());
+
+        let mut dev = self.dev_state.write();
+        let id = format!("0x{:x}", dev.next_snapshot_id);
+        dev.next_snapshot_id = dev.next_snapshot_id.saturating_add(1);
+        let next_block_timestamp = dev.next_block_timestamp;
+        dev.snapshots.insert(
+            id.clone(),
+            DevSnapshot {
+                head_hash: head.hash(),
+                head_number: head.number(),
+                state_root: head.header.state_root,
+                total_tx_count,
+                finalized_number,
+                pending_txs,
+                next_block_timestamp,
+            },
+        );
+        Ok(id)
+    }
+
+    fn revert_inner(&self, snapshot_id: &str) -> Result<bool, NodeError> {
+        let snapshot = {
+            let dev = self.dev_state.read();
+            match dev.snapshots.get(snapshot_id) {
+                Some(s) => DevSnapshot {
+                    head_hash: s.head_hash,
+                    head_number: s.head_number,
+                    state_root: s.state_root,
+                    total_tx_count: s.total_tx_count,
+                    finalized_number: s.finalized_number,
+                    pending_txs: s.pending_txs.clone(),
+                    next_block_timestamp: s.next_block_timestamp,
+                },
+                None => return Ok(false),
+            }
+        };
+
+        let current_head = self
+            .chain_store
+            .get_head_block()?
+            .ok_or(NodeError::NoGenesis)?;
+        if current_head.number() > snapshot.head_number {
+            for number in (snapshot.head_number + 1)..=current_head.number() {
+                self.chain_store.delete_canonical(number)?;
+            }
+        }
+
+        self.chain_store.set_head(&snapshot.head_hash)?;
+        self.chain_store
+            .set_total_tx_count(snapshot.total_tx_count)?;
+        self.chain_store
+            .set_finalized_number(snapshot.finalized_number)?;
+
+        let restored_ws = WorldState::at_root(self.store.clone(), &snapshot.state_root)?;
+        *self.world_state.write() = restored_ws;
+
+        let finalized_hash = if snapshot.finalized_number == 0 {
+            ShellHash::ZERO
+        } else {
+            self.chain_store
+                .get_block_by_number(snapshot.finalized_number)?
+                .map(|b| b.hash())
+                .unwrap_or(ShellHash::ZERO)
+        };
+        *self.finality.write() = if snapshot.finalized_number > 0 {
+            shell_consensus::FinalityState::with_finalized(
+                snapshot.finalized_number,
+                finalized_hash,
+            )
+        } else {
+            shell_consensus::FinalityState::new()
+        };
+
+        self.tx_pool.clear();
+        let known_pubkeys = |addr: &Address| -> Option<Vec<u8>> {
+            self.chain_store.get_pubkey(addr).ok().flatten()
+        };
+        let balance_of = |addr: &Address| -> U256 {
+            self.world_state
+                .read()
+                .get_balance(addr)
+                .unwrap_or(U256::ZERO)
+        };
+        let verifier = MultiVerifier;
+        for tx in snapshot.pending_txs {
+            let _ = self
+                .tx_pool
+                .insert(tx, &verifier, &known_pubkeys, &balance_of);
+        }
+
+        self.dev_state.write().next_block_timestamp = snapshot.next_block_timestamp;
+
+        Ok(true)
     }
 
     /// Signal the node to shut down.
@@ -177,13 +358,15 @@ impl<S: KvStore + 'static> Node<S> {
     /// - **RPC server**: serves JSON-RPC on the configured address.
     /// - **Shutdown**: stops on `shutdown()` call or Ctrl-C.
     pub async fn run(
-        &self,
+        self: Arc<Self>,
         signer: Arc<dyn Signer>,
         network: &mut dyn NetworkService,
     ) -> Result<(), NodeError> {
         use shell_network::{NetworkEvent, NetworkMessage};
         use shell_rpc::{start_rpc_server, BlockEvent};
         use tokio::time::{interval, Duration};
+
+        *self.runtime_signer.write() = Some(Arc::clone(&signer));
 
         // Spawn the Prometheus metrics HTTP server if enabled.
         if self.config.metrics.enabled {
@@ -221,6 +404,9 @@ impl<S: KvStore + 'static> Node<S> {
             .unwrap_or(0);
         let finalized_number = Arc::new(parking_lot::RwLock::new(finality_num.max(persisted_num)));
 
+        // Get the peer count handle from the network for RPC.
+        let peer_count_handle = network.peer_count_handle();
+
         let rpc_handle = start_rpc_server(
             self.config.rpc.clone(),
             self.chain_store.clone(),
@@ -233,6 +419,12 @@ impl<S: KvStore + 'static> Node<S> {
             self.config.proposer_address,
             finalized_number.clone(),
             self.finality.clone(),
+            peer_count_handle,
+            if self.config.rpc.api_namespaces.iter().any(|ns| ns == "evm") {
+                Some(self.clone() as Arc<dyn DevRpcControl>)
+            } else {
+                None
+            },
         )
         .await
         .map_err(|e| NodeError::Startup(format!("RPC: {e}")))?;
@@ -244,42 +436,44 @@ impl<S: KvStore + 'static> Node<S> {
 
         let mut block_timer = interval(Duration::from_millis(self.config.block_time_ms));
         let mut peer_count_timer = interval(Duration::from_secs(10));
+        let mut sync_retry_timer = interval(Duration::from_secs(SYNC_RETRY_BASE_INTERVAL_SECS));
         let mut shutdown_rx = self.shutdown_tx.subscribe();
+        // Track the last time a block was produced for idle-block-skip.
+        let mut last_block_time = std::time::Instant::now();
+        let mut sync_retry_attempts_without_progress = 0u32;
 
         // Skip the first immediate tick.
         block_timer.tick().await;
         peer_count_timer.tick().await;
+        sync_retry_timer.tick().await;
 
         // Startup sync: request blocks we don't have from peers.
         // Track whether we are catching up so we don't spam requests.
         let mut sync_requested = false;
         if network.peer_count().await > 0 {
-            let head_number = self
-                .chain_store
-                .get_head_block()
-                .ok()
-                .flatten()
-                .map(|b| b.number())
-                .unwrap_or(0);
-            info!(
-                head = head_number,
-                "requesting blocks from peers for initial sync"
-            );
-            let req = NetworkMessage::BlockRequest {
-                start_number: head_number + 1,
-                count: 128,
-            };
-            let _ = network.broadcast(req).await;
-            sync_requested = true;
+            self.request_missing_blocks(network, &mut sync_requested, "initial-sync")
+                .await;
         }
 
         loop {
             tokio::select! {
                 _ = block_timer.tick() => {
                     if self.config.proposer_address.is_some() {
+                        // Idle-block-skip: when mempool is empty and we haven't
+                        // exceeded max_idle_interval, skip block production.
+                        let max_idle_ms = self.config.max_idle_interval_ms;
+                        if max_idle_ms > 0 && self.tx_pool.is_empty() {
+                            let idle_dur = std::time::Duration::from_millis(max_idle_ms);
+                            if last_block_time.elapsed() < idle_dur {
+                                continue;
+                            }
+                            // Heartbeat: produce an empty block to keep chain alive.
+                        }
+
                         let start = std::time::Instant::now();
                         match self.produce_block(&*signer, 500) {
                             Ok(block) => {
+                                last_block_time = std::time::Instant::now();
                                 let elapsed = start.elapsed().as_secs_f64();
                                 self.metrics.block_production_ms.observe(elapsed);
                                 self.metrics.blocks_imported.inc();
@@ -368,6 +562,10 @@ impl<S: KvStore + 'static> Node<S> {
                                     match self.import_block(*block, &verifier) {
                                         Ok(()) => {
                                             sync_requested = false;
+                                            sync_retry_attempts_without_progress = 0;
+                                            sync_retry_timer.reset_after(Duration::from_secs(
+                                                SYNC_RETRY_BASE_INTERVAL_SECS,
+                                            ));
                                             self.metrics.blocks_imported.inc();
                                             self.metrics.block_height.set(imported_number as i64);
                                             self.metrics.tx_pool_size.set(self.tx_pool.len() as i64);
@@ -389,24 +587,13 @@ impl<S: KvStore + 'static> Node<S> {
                                         Err(NodeError::GapDetected { .. }) => {
                                             // Only request missing blocks on genuine gap,
                                             // NOT on invalid signatures or other errors (F-037).
-                                            let head_num = self
-                                                .chain_store
-                                                .get_head_block()
-                                                .ok()
-                                                .flatten()
-                                                .map(|b| b.number())
-                                                .unwrap_or(0);
                                             if !sync_requested {
-                                                info!(
-                                                    head = head_num,
-                                                    "requesting missing blocks for sync"
-                                                );
-                                                let req = NetworkMessage::BlockRequest {
-                                                    start_number: head_num + 1,
-                                                    count: 128,
-                                                };
-                                                let _ = network.broadcast(req).await;
-                                                sync_requested = true;
+                                                self.request_missing_blocks(
+                                                    network,
+                                                    &mut sync_requested,
+                                                    "gap-detected",
+                                                )
+                                                .await;
                                             }
                                         }
                                         Err(e) => {
@@ -510,8 +697,16 @@ impl<S: KvStore + 'static> Node<S> {
                                         };
                                         let _ = network.broadcast(req).await;
                                         sync_requested = true;
+                                        sync_retry_attempts_without_progress = 0;
+                                        sync_retry_timer.reset_after(Duration::from_secs(
+                                            SYNC_RETRY_BASE_INTERVAL_SECS,
+                                        ));
                                     } else {
                                         sync_requested = false;
+                                        sync_retry_attempts_without_progress = 0;
+                                        sync_retry_timer.reset_after(Duration::from_secs(
+                                            SYNC_RETRY_BASE_INTERVAL_SECS,
+                                        ));
                                     }
                                 }
                                 NetworkMessage::Ping => {
@@ -535,7 +730,41 @@ impl<S: KvStore + 'static> Node<S> {
                                 }
                             }
                         }
-                        Some(_) => {} // PeerConnected / PeerDisconnected
+                        Some(NetworkEvent::PeerConnected(peer)) => {
+                            info!(%peer, "peer connected");
+                            sync_requested = false;
+                            sync_retry_attempts_without_progress = 0;
+                            sync_retry_timer
+                                .reset_after(Duration::from_secs(SYNC_RETRY_BASE_INTERVAL_SECS));
+                            self.request_missing_blocks(
+                                network,
+                                &mut sync_requested,
+                                "peer-connected",
+                            )
+                            .await;
+                        }
+                        Some(NetworkEvent::PeerDisconnected(peer)) => {
+                            info!(%peer, "peer disconnected");
+                            sync_requested = false;
+                            sync_retry_attempts_without_progress = 0;
+                            sync_retry_timer
+                                .reset_after(Duration::from_secs(SYNC_RETRY_BASE_INTERVAL_SECS));
+                        }
+                        Some(NetworkEvent::RoutingTableUpdated { peer_count }) => {
+                            debug!(peer_count, "routing table updated");
+                            if peer_count > 0 && !sync_requested {
+                                sync_retry_attempts_without_progress = 0;
+                                sync_retry_timer.reset_after(Duration::from_secs(
+                                    SYNC_RETRY_BASE_INTERVAL_SECS,
+                                ));
+                                self.request_missing_blocks(
+                                    network,
+                                    &mut sync_requested,
+                                    "routing-update",
+                                )
+                                .await;
+                            }
+                        }
                         None => {
                             eprintln!("Network channel closed, shutting down");
                             break;
@@ -553,6 +782,22 @@ impl<S: KvStore + 'static> Node<S> {
                 _ = peer_count_timer.tick() => {
                     let peers = network.peer_count().await;
                     self.metrics.peer_count.set(peers as i64);
+                }
+
+                _ = sync_retry_timer.tick() => {
+                    if sync_requested && network.peer_count().await > 0 {
+                        self.request_missing_blocks(
+                            network,
+                            &mut sync_requested,
+                            "sync-retry",
+                        )
+                        .await;
+                        sync_retry_attempts_without_progress =
+                            sync_retry_attempts_without_progress.saturating_add(1);
+                        sync_retry_timer.reset_after(Duration::from_secs(
+                            Self::sync_retry_delay_secs(sync_retry_attempts_without_progress),
+                        ));
+                    }
                 }
 
                 _ = shutdown_rx.changed() => {
@@ -618,10 +863,7 @@ impl<S: KvStore + 'static> Node<S> {
         let state_db = ShellStateDb::new(ws, cs);
         let mut evm = ShellEvm::new(state_db, self.config.chain_id);
 
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+        let now = self.current_block_timestamp(head.header.timestamp);
 
         // Calculate EIP-1559 base fee from parent block.
         let base_fee = calculate_base_fee(
@@ -779,6 +1021,12 @@ impl<S: KvStore + 'static> Node<S> {
         // Remove included transactions from mempool.
         let tx_hashes: Vec<ShellHash> = included_txs.iter().map(|tx| tx.hash()).collect();
         self.tx_pool.remove_batch(&tx_hashes);
+
+        // Update global transaction counter for shell_transactionCount RPC.
+        let new_tx_count = included_txs.len() as u64;
+        if new_tx_count > 0 {
+            self.chain_store.increment_tx_count(new_tx_count)?;
+        }
 
         // Track the new state root for pruning decisions.
         self.record_finalized_state_root(block.number(), block.header.state_root);
@@ -1031,6 +1279,12 @@ impl<S: KvStore + 'static> Node<S> {
         let tx_hashes: Vec<ShellHash> = block.transactions.iter().map(|tx| tx.hash()).collect();
         self.tx_pool.remove_batch(&tx_hashes);
 
+        // Update global transaction counter for shell_transactionCount RPC.
+        let imported_tx_count = block.transactions.len() as u64;
+        if imported_tx_count > 0 {
+            let _ = self.chain_store.increment_tx_count(imported_tx_count);
+        }
+
         // Track the imported state root for pruning decisions.
         self.record_finalized_state_root(block.number(), block.header.state_root);
 
@@ -1177,6 +1431,61 @@ impl<S: KvStore + 'static> Node<S> {
     }
 }
 
+impl<S: KvStore + 'static> DevRpcControl for Node<S> {
+    fn mine_blocks(&self, blocks: u64) -> Result<(), String> {
+        let signer = self
+            .runtime_signer
+            .read()
+            .clone()
+            .ok_or_else(|| "node signer is not initialized".to_string())?;
+        for _ in 0..blocks.max(1) {
+            self.produce_block(signer.as_ref(), 500)
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    fn set_next_block_timestamp(&self, timestamp: u64) -> Result<u64, String> {
+        let head = self
+            .chain_store
+            .get_head_block()
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "missing head block".to_string())?;
+        let min_timestamp = head.header.timestamp.saturating_add(1);
+        if timestamp < min_timestamp {
+            return Err(format!(
+                "timestamp must be >= next valid block timestamp {min_timestamp}"
+            ));
+        }
+        self.dev_state.write().next_block_timestamp = Some(timestamp);
+        Ok(timestamp)
+    }
+
+    fn increase_time(&self, seconds: u64) -> Result<u64, String> {
+        let head = self
+            .chain_store
+            .get_head_block()
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "missing head block".to_string())?;
+        let mut dev = self.dev_state.write();
+        let base_timestamp = dev
+            .next_block_timestamp
+            .unwrap_or(head.header.timestamp)
+            .max(head.header.timestamp);
+        let next_timestamp = base_timestamp.saturating_add(seconds);
+        dev.next_block_timestamp = Some(next_timestamp);
+        Ok(next_timestamp.saturating_sub(head.header.timestamp))
+    }
+
+    fn snapshot(&self) -> Result<String, String> {
+        self.snapshot_inner().map_err(|e| e.to_string())
+    }
+
+    fn revert(&self, snapshot_id: &str) -> Result<bool, String> {
+        self.revert_inner(snapshot_id).map_err(|e| e.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1185,6 +1494,7 @@ mod tests {
     use shell_core::Transaction;
     use shell_crypto::DilithiumSigner;
     use shell_mempool::MempoolConfig;
+    use shell_rpc::DevRpcControl;
     use shell_storage::MemoryDb;
 
     fn setup_node() -> (Node<MemoryDb>, DilithiumSigner) {
@@ -1260,6 +1570,14 @@ mod tests {
     }
 
     #[test]
+    fn sync_retry_delay_uses_backoff_after_threshold() {
+        assert_eq!(Node::<MemoryDb>::sync_retry_delay_secs(0), 5);
+        assert_eq!(Node::<MemoryDb>::sync_retry_delay_secs(2), 5);
+        assert_eq!(Node::<MemoryDb>::sync_retry_delay_secs(3), 30);
+        assert_eq!(Node::<MemoryDb>::sync_retry_delay_secs(10), 30);
+    }
+
+    #[test]
     fn produce_empty_block() {
         let (node, signer) = setup_node();
         store_genesis(&node);
@@ -1268,6 +1586,59 @@ mod tests {
         assert_eq!(block.number(), 1);
         assert!(block.transactions.is_empty());
         assert!(block.proposer_seal.is_some());
+    }
+
+    #[test]
+    fn dev_rpc_mine_blocks_advances_head() {
+        let (node, signer) = setup_node();
+        store_genesis(&node);
+        *node.runtime_signer.write() = Some(Arc::new(signer));
+
+        node.mine_blocks(2).unwrap();
+
+        let head = node.chain_store.get_head_block().unwrap().unwrap();
+        assert_eq!(head.number(), 2);
+    }
+
+    #[test]
+    fn dev_rpc_time_controls_affect_next_block() {
+        let (node, signer) = setup_node();
+        store_genesis(&node);
+        *node.runtime_signer.write() = Some(Arc::new(signer));
+
+        let genesis = node.chain_store.get_head_block().unwrap().unwrap();
+        let next_ts = genesis.header.timestamp + 10;
+        assert_eq!(node.set_next_block_timestamp(next_ts).unwrap(), next_ts);
+        node.mine_blocks(1).unwrap();
+
+        let block1 = node.chain_store.get_head_block().unwrap().unwrap();
+        assert_eq!(block1.header.timestamp, next_ts);
+
+        let offset = node.increase_time(30).unwrap();
+        assert_eq!(offset, 30);
+        node.mine_blocks(1).unwrap();
+
+        let block2 = node.chain_store.get_head_block().unwrap().unwrap();
+        assert_eq!(block2.header.timestamp, block1.header.timestamp + 30);
+    }
+
+    #[test]
+    fn dev_rpc_snapshot_and_revert_restore_head() {
+        let (node, signer) = setup_node();
+        store_genesis(&node);
+        *node.runtime_signer.write() = Some(Arc::new(signer));
+
+        node.mine_blocks(1).unwrap();
+        let snapshot_id = node.snapshot().unwrap();
+        node.mine_blocks(2).unwrap();
+        let head_before_revert = node.chain_store.get_head_block().unwrap().unwrap();
+        assert_eq!(head_before_revert.number(), 3);
+
+        assert!(node.revert(&snapshot_id).unwrap());
+
+        let head_after_revert = node.chain_store.get_head_block().unwrap().unwrap();
+        assert_eq!(head_after_revert.number(), 1);
+        assert!(!node.revert("0xdeadbeef").unwrap());
     }
 
     #[test]
@@ -2044,6 +2415,16 @@ mod tests {
             node.chain_store.get_head_block().unwrap().unwrap().number(),
             1
         );
+    }
+
+    #[test]
+    fn head_number_returns_current_height() {
+        let (node, signer) = setup_node();
+        store_genesis(&node);
+        assert_eq!(node.head_number(), 0);
+
+        node.produce_block(&signer, 100).unwrap();
+        assert_eq!(node.head_number(), 1);
     }
 
     // ── State consistency tests ────────────────────────────────────────

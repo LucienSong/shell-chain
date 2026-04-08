@@ -1,0 +1,25 @@
+[workspace]
+
+[package]
+name = "shell-tx-generator"
+version = "0.1.0"
+edition = "2021"
+description = "Testnet stress-testing transaction generator for Shell-Chain"
+publish = false
+
+[[bin]]
+name = "shell-tx-generator"
+path = "src/main.rs"
+
+[dependencies]
+shell-crypto = { path = "../../crates/crypto", default-features = false, features = [] }
+shell-core = { path = "../../crates/core" }
+shell-primitives = { path = "../../crates/primitives" }
+
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["json"] }
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+rand = "0.8"
+hex = "0.4"
+clap = { version = "4", features = ["derive"] }

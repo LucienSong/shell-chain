@@ -114,6 +114,13 @@ pub trait EthApi {
         hash: ShellHash,
     ) -> Result<Option<RpcReceipt>, jsonrpsee::types::ErrorObjectOwned>;
 
+    /// Returns all receipts for a given block by number or hash.
+    #[method(name = "getBlockReceipts")]
+    async fn get_block_receipts(
+        &self,
+        block: String,
+    ) -> Result<Vec<RpcReceipt>, jsonrpsee::types::ErrorObjectOwned>;
+
     /// Returns the balance of an address.
     #[method(name = "getBalance")]
     async fn get_balance(
@@ -276,6 +283,40 @@ pub trait TraceApi {
     ) -> Result<serde_json::Value, jsonrpsee::types::ErrorObjectOwned>;
 }
 
+/// Hardhat/Foundry-compatible dev RPCs.
+#[rpc(server, namespace = "evm")]
+pub trait EvmApi {
+    /// Mine one or more blocks immediately.
+    #[method(name = "mine")]
+    async fn mine(
+        &self,
+        blocks: Option<u64>,
+    ) -> Result<serde_json::Value, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Set the timestamp for the next block to be produced.
+    #[method(name = "setNextBlockTimestamp")]
+    async fn set_next_block_timestamp(
+        &self,
+        timestamp: u64,
+    ) -> Result<serde_json::Value, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Increase the virtual clock used for future blocks.
+    #[method(name = "increaseTime")]
+    async fn increase_time(
+        &self,
+        seconds: u64,
+    ) -> Result<serde_json::Value, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Capture a snapshot of the current execution state.
+    #[method(name = "snapshot")]
+    async fn snapshot(&self) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Revert to a previously captured snapshot.
+    #[method(name = "revert")]
+    async fn revert(&self, snapshot_id: String)
+        -> Result<bool, jsonrpsee::types::ErrorObjectOwned>;
+}
+
 /// Shell-chain extension API for PQ-specific features.
 #[rpc(server, namespace = "shell")]
 pub trait ShellApi {
@@ -387,5 +428,29 @@ pub trait ShellApi {
     #[method(name = "getFinalityInfo")]
     async fn get_finality_info(
         &self,
+    ) -> Result<serde_json::Value, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Set the balance of an address directly (dev/testnet only).
+    #[method(name = "setBalance")]
+    async fn set_balance(
+        &self,
+        address: Address,
+        balance: String,
+    ) -> Result<bool, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns the total number of transactions across all blocks.
+    #[method(name = "transactionCount")]
+    async fn transaction_count(&self) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns transactions involving a given address (sender or recipient).
+    /// Supports pagination: `from_block`, `to_block`, `page` (0-based), `limit` (default 20).
+    #[method(name = "getTransactionsByAddress")]
+    async fn get_transactions_by_address(
+        &self,
+        address: Address,
+        from_block: Option<u64>,
+        to_block: Option<u64>,
+        page: Option<u64>,
+        limit: Option<u64>,
     ) -> Result<serde_json::Value, jsonrpsee::types::ErrorObjectOwned>;
 }

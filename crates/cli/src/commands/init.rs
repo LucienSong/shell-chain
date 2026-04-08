@@ -79,6 +79,7 @@ pub fn init(
                 extra_data: String::new(),
                 consensus: ConsensusConfig::PoA {
                     authorities: vec![authority],
+                    authority_pubkeys: vec![format!("0x{}", hex::encode(signer.public_key()))],
                     block_time_secs: 2,
                     epoch_length: 0,
                 },

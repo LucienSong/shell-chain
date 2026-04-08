@@ -80,6 +80,12 @@ impl<S: KvStore + 'static> WorldState<S> {
         Ok(self.get_or_default(address)?.balance)
     }
 
+    pub fn set_balance(&mut self, address: &Address, balance: U256) -> Result<(), StorageError> {
+        let mut account = self.get_or_default(address)?;
+        account.balance = balance;
+        self.set_account(address, &account)
+    }
+
     pub fn add_balance(&mut self, address: &Address, amount: U256) -> Result<(), StorageError> {
         let mut account = self.get_or_default(address)?;
         account.balance = account

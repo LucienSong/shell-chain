@@ -1,12 +1,15 @@
 //! `shell-node run` — start the node.
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
 use shell_consensus::PoaConfig;
 use shell_crypto::{DilithiumSigner, Signer};
-use shell_genesis::{initialize_genesis, AllocEntry, ConsensusConfig, GenesisConfig};
+use shell_genesis::{
+    initialize_authority_pubkeys, initialize_genesis, AllocEntry, ConsensusConfig, GenesisConfig,
+};
 use shell_keystore::{decrypt, EncryptedKey};
 use shell_mempool::MempoolConfig;
 use shell_network::{NetworkBus, NetworkConfig};
@@ -16,7 +19,7 @@ use shell_primitives::Address;
 use shell_rpc::RpcConfig;
 use shell_storage::{ChainStore, KvStore, MemoryDb};
 
-use tracing::info;
+use tracing::{error, info};
 
 /// Aggregated CLI arguments for the `run` subcommand.
 #[allow(dead_code)]
@@ -39,10 +42,51 @@ pub struct RunArgs {
     pub rpc_rate_limit: Option<u32>,
     pub rpc_api: Option<String>,
     pub metrics_addr: String,
+    /// Maximum seconds between blocks when mempool is empty (0 = disabled).
+    pub max_idle_interval: u64,
 }
 
 /// Maximum genesis file size: 10 MB (F-082).
 const MAX_GENESIS_FILE_SIZE: u64 = 10 * 1024 * 1024;
+const DEV_AUTHORITY_KEY_FILE: &str = "dev-authority.json";
+
+#[derive(Debug, Serialize, Deserialize)]
+struct DevAuthorityKeyFile {
+    public_key: String,
+    secret_key: String,
+}
+
+fn load_or_create_dev_signer(path: &Path) -> Result<DilithiumSigner, Box<dyn std::error::Error>> {
+    if path.exists() {
+        let json = std::fs::read_to_string(path)?;
+        let stored: DevAuthorityKeyFile = serde_json::from_str(&json)?;
+        let public_key = hex::decode(stored.public_key.trim_start_matches("0x"))?;
+        let secret_key = hex::decode(stored.secret_key.trim_start_matches("0x"))?;
+        let signer = DilithiumSigner::from_bytes(&public_key, &secret_key)?;
+        info!("Loaded persisted dev authority key from {}", path.display());
+        return Ok(signer);
+    }
+
+    let signer = DilithiumSigner::generate();
+    let stored = DevAuthorityKeyFile {
+        public_key: format!("0x{}", hex::encode(signer.public_key())),
+        secret_key: format!("0x{}", hex::encode(signer.secret_key_bytes().as_slice())),
+    };
+    let json = serde_json::to_string_pretty(&stored)?;
+    {
+        use std::io::Write;
+        #[cfg(unix)]
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        opts.mode(0o600);
+        let mut file = opts.open(path)?;
+        file.write_all(json.as_bytes())?;
+    }
+    info!("Persisted dev authority key to {}", path.display());
+    Ok(signer)
+}
 
 /// Start the node: load genesis, initialize state, and run the event loop.
 pub async fn run(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
@@ -116,8 +160,12 @@ async fn run_with_store<S: KvStore + 'static>(
             Arc::new(signer)
         }
         None => {
-            info!("No keystore provided, generating ephemeral key (dev mode)");
-            Arc::new(DilithiumSigner::generate())
+            let path = args.datadir.join(DEV_AUTHORITY_KEY_FILE);
+            info!(
+                "No keystore provided, loading or creating persisted dev key at {}",
+                path.display()
+            );
+            Arc::new(load_or_create_dev_signer(&path)?)
         }
     };
 
@@ -174,6 +222,7 @@ async fn run_with_store<S: KvStore + 'static>(
             extra_data: String::new(),
             consensus: ConsensusConfig::PoA {
                 authorities: vec![authority],
+                authority_pubkeys: vec![format!("0x{}", hex::encode(signer.public_key()))],
                 block_time_secs: args.block_time / 1000,
                 epoch_length: 0,
             },
@@ -200,6 +249,8 @@ async fn run_with_store<S: KvStore + 'static>(
         );
     }
 
+    initialize_authority_pubkeys(&genesis_config, &chain_store)?;
+
     // Checkpoint sync: download and import snapshot if --checkpoint-url is set
     // and the chain has no blocks beyond genesis.
     if let Some(ref url) = args.checkpoint_url {
@@ -222,13 +273,20 @@ async fn run_with_store<S: KvStore + 'static>(
     }
 
     // Extract authorities and epoch_length from genesis.
-    let (authorities, _block_time_secs, epoch_length) = match &genesis_config.consensus {
-        ConsensusConfig::PoA {
-            authorities,
-            block_time_secs,
-            epoch_length,
-        } => (authorities.clone(), *block_time_secs, *epoch_length),
-    };
+    let (authorities, authority_pubkeys, _block_time_secs, epoch_length) =
+        match &genesis_config.consensus {
+            ConsensusConfig::PoA {
+                authorities,
+                authority_pubkeys,
+                block_time_secs,
+                epoch_length,
+            } => (
+                authorities.clone(),
+                authority_pubkeys.clone(),
+                *block_time_secs,
+                *epoch_length,
+            ),
+        };
 
     // Build node configuration.
     let listen_addr: SocketAddr = args.rpc_addr.parse()?;
@@ -239,7 +297,7 @@ async fn run_with_store<S: KvStore + 'static>(
     };
     let node_config = NodeConfig {
         chain_id: genesis_config.chain_id,
-        consensus: PoaConfig::new(authorities, args.block_time / 1000)
+        consensus: PoaConfig::new(authorities.clone(), args.block_time / 1000)
             .with_epoch_length(epoch_length),
         mempool: MempoolConfig {
             chain_id: genesis_config.chain_id,
@@ -270,10 +328,20 @@ async fn run_with_store<S: KvStore + 'static>(
             enabled: true,
             listen_addr: args.metrics_addr.parse()?,
         },
+        max_idle_interval_ms: args.max_idle_interval * 1000,
     };
 
     // Build the node (auto-detects existing state via NodeBuilder).
     let (node, _store) = shell_node::builder::NodeBuilder::new(node_config, store).build();
+
+    for (address, pubkey_hex) in authorities.iter().zip(authority_pubkeys.iter()) {
+        let trimmed = pubkey_hex.trim_start_matches("0x");
+        let pubkey = hex::decode(trimmed).map_err(|e| {
+            error!(%address, pubkey_hex, error = %e, "failed to decode authority pubkey");
+            format!("invalid authority pubkey for {address}: {e}")
+        })?;
+        node.register_authority_pubkey(*address, pubkey);
+    }
 
     // Set up the network backend.
     if args.p2p {
@@ -291,6 +359,7 @@ async fn run_with_store<S: KvStore + 'static>(
                 listen_addr: p2p_listen,
                 boot_nodes,
                 enable_mdns: args.enable_mdns,
+                identity_key_path: Some(args.datadir.join("libp2p.key")),
                 ..NetworkConfig::default()
             };
             let mut network = shell_network::Libp2pNetwork::new(&net_config).await?;
@@ -341,7 +410,7 @@ async fn run_with_store<S: KvStore + 'static>(
                 node_shutdown.shutdown();
             });
 
-            node.run(signer, &mut network).await?;
+            node.clone().run(signer, &mut network).await?;
         }
         #[cfg(not(feature = "libp2p"))]
         {
@@ -397,9 +466,37 @@ async fn run_with_store<S: KvStore + 'static>(
             node_shutdown.shutdown();
         });
 
-        node.run(signer, &mut network).await?;
+        node.clone().run(signer, &mut network).await?;
     }
 
     eprintln!("✓ Node stopped gracefully");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dev_authority_signer_is_persisted() {
+        let unique = format!(
+            "shell-cli-dev-authority-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let dir = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(DEV_AUTHORITY_KEY_FILE);
+
+        let signer1 = load_or_create_dev_signer(&path).unwrap();
+        let signer2 = load_or_create_dev_signer(&path).unwrap();
+
+        assert_eq!(signer1.public_key(), signer2.public_key());
+        assert_eq!(signer1.secret_key_bytes(), signer2.secret_key_bytes());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

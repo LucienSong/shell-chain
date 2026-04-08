@@ -124,7 +124,8 @@ DELAY_US=$(( (DURATION * 1000000) / TX_COUNT ))
 
 # Generate random hex addresses for variety.
 rand_addr() {
-    printf "0x%040x" $((RANDOM * RANDOM * RANDOM % 2**64))
+    printf "0x%08x%08x%08x%08x%08x" \
+        "$RANDOM" "$RANDOM" "$RANDOM" "$RANDOM" "$RANDOM"
 }
 
 > "$LATENCY_FILE"
