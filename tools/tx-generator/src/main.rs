@@ -23,7 +23,7 @@ struct Cli {
     rpc_url: String,
 
     /// Number of test accounts to generate.
-    #[arg(long, default_value_t = 5)]
+    #[arg(long = "accounts", default_value_t = 5)]
     num_accounts: usize,
 
     /// How long to run, in seconds.
