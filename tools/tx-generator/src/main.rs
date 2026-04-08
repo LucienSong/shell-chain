@@ -24,7 +24,7 @@ struct Cli {
 
     /// Number of test accounts to generate.
     #[arg(long, default_value_t = 5)]
-    accounts: usize,
+    num_accounts: usize,
 
     /// How long to run, in seconds.
     #[arg(long, default_value_t = 60)]
@@ -350,15 +350,15 @@ async fn main() {
         "\n{BOLD}{CYAN}═══ Shell-Chain Transaction Generator ═══{RESET}\n"
     );
     println!("  RPC endpoint : {}", cli.rpc_url);
-    println!("  Accounts     : {}", cli.accounts);
+    println!("  Accounts     : {}", cli.num_accounts);
     println!("  Duration     : {}s", cli.duration);
     println!("  Interval     : {}–{}ms", cli.min_interval, cli.max_interval);
     println!("  Chain ID     : {}", cli.chain_id);
     println!();
 
     // ── 1. Generate accounts ────────────────────────────────────────
-    println!("{BOLD}▸ Generating {} Dilithium3 keypairs …{RESET}", cli.accounts);
-    let mut accounts: Vec<TestAccount> = (0..cli.accounts).map(|_| TestAccount::generate()).collect();
+    println!("{BOLD}▸ Generating {} Dilithium3 keypairs …{RESET}", cli.num_accounts);
+    let mut accounts: Vec<TestAccount> = (0..cli.num_accounts).map(|_| TestAccount::generate()).collect();
     for (i, acct) in accounts.iter().enumerate() {
         println!(
             "  {CYAN}[{}]{RESET} {}  (pubkey {}…)",
