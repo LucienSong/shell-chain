@@ -13,8 +13,8 @@ pub mod subscriptions;
 pub mod tls;
 pub mod types;
 
-pub use handler::RpcHandler;
 pub use dev_control::{DevRpcControl, DynDevRpcControl};
+pub use handler::RpcHandler;
 pub use server::{start_rpc_server, RpcConfig, RpcServerHandle};
 pub use subscriptions::{BlockEvent, SubscriptionTracker, SyncStatus};
 pub use tls::TlsConfig;

@@ -1063,10 +1063,7 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
         Ok(None)
     }
 
-    async fn get_block_receipts(
-        &self,
-        block: String,
-    ) -> Result<Vec<RpcReceipt>, ErrorObjectOwned> {
+    async fn get_block_receipts(&self, block: String) -> Result<Vec<RpcReceipt>, ErrorObjectOwned> {
         // Resolve block identifier (number, tag, or hash)
         let block_obj = if block.starts_with("0x") && block.len() == 66 {
             let hex_str = block.strip_prefix("0x").unwrap_or(&block);
@@ -1817,7 +1814,10 @@ impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
     }
 
     async fn transaction_count(&self) -> Result<String, ErrorObjectOwned> {
-        let count = self.chain_store.get_total_tx_count().map_err(internal_err)?;
+        let count = self
+            .chain_store
+            .get_total_tx_count()
+            .map_err(internal_err)?;
         Ok(hex_u64(count))
     }
 
@@ -2077,11 +2077,11 @@ impl<S: KvStore + 'static> TraceApiServer for RpcHandler<S> {
 mod tests {
     use super::*;
     use crate::dev_control::DevRpcControl;
-    use std::sync::atomic::{AtomicU64, Ordering};
     use shell_core::{Block, BlockHeader, Transaction, TransactionReceipt};
     use shell_crypto::{DilithiumSigner, Signer};
     use shell_primitives::Bytes;
     use shell_storage::MemoryDb;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     #[derive(Default)]
     struct MockDevControl {

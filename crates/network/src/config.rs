@@ -1,6 +1,7 @@
 //! Network configuration.
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 
 /// Configuration for the P2P network service.
 ///
@@ -61,6 +62,8 @@ pub struct NetworkConfig {
     pub ban_threshold: u32,
     /// F-071: Duration of a temporary ban in seconds.
     pub ban_duration_secs: u64,
+    /// Optional path to a persisted libp2p identity keypair.
+    pub identity_key_path: Option<PathBuf>,
 }
 
 impl Default for NetworkConfig {
@@ -87,6 +90,7 @@ impl Default for NetworkConfig {
             max_message_size: 4 * 1024 * 1024, // 4 MiB
             ban_threshold: 5,
             ban_duration_secs: 600, // 10 minutes
+            identity_key_path: None,
         }
     }
 }

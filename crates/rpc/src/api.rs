@@ -313,10 +313,8 @@ pub trait EvmApi {
 
     /// Revert to a previously captured snapshot.
     #[method(name = "revert")]
-    async fn revert(
-        &self,
-        snapshot_id: String,
-    ) -> Result<bool, jsonrpsee::types::ErrorObjectOwned>;
+    async fn revert(&self, snapshot_id: String)
+        -> Result<bool, jsonrpsee::types::ErrorObjectOwned>;
 }
 
 /// Shell-chain extension API for PQ-specific features.

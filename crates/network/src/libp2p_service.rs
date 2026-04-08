@@ -5,6 +5,8 @@
 //! global peer discovery.
 
 use std::collections::HashMap;
+use std::fs;
+use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -88,7 +90,8 @@ impl Libp2pNetwork {
             config.max_outbound_bandwidth,
         ));
 
-        let mut swarm = build_swarm(config)?;
+        let keypair = load_or_create_identity(config.identity_key_path.as_deref())?;
+        let mut swarm = build_swarm_with_identity(config, keypair)?;
 
         // Listen on configured address.
         let listen_addr: Multiaddr = format!(
@@ -192,7 +195,36 @@ impl Libp2pNetwork {
     }
 }
 
+fn load_or_create_identity(path: Option<&Path>) -> Result<libp2p::identity::Keypair, NetworkError> {
+    match path {
+        Some(path) if path.exists() => {
+            let bytes = fs::read(path).map_err(|e| NetworkError::Transport(e.to_string()))?;
+            libp2p::identity::Keypair::from_protobuf_encoding(&bytes)
+                .map_err(|e| NetworkError::Transport(format!("invalid libp2p identity: {e}")))
+        }
+        Some(path) => {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).map_err(|e| NetworkError::Transport(e.to_string()))?;
+            }
+            let keypair = libp2p::identity::Keypair::generate_ed25519();
+            let encoded = keypair
+                .to_protobuf_encoding()
+                .map_err(|e| NetworkError::Transport(format!("encode libp2p identity: {e}")))?;
+            fs::write(path, encoded).map_err(|e| NetworkError::Transport(e.to_string()))?;
+            Ok(keypair)
+        }
+        None => Ok(libp2p::identity::Keypair::generate_ed25519()),
+    }
+}
+
 fn build_swarm(config: &NetworkConfig) -> Result<Swarm<ShellBehaviour>, NetworkError> {
+    build_swarm_with_identity(config, libp2p::identity::Keypair::generate_ed25519())
+}
+
+fn build_swarm_with_identity(
+    config: &NetworkConfig,
+    keypair: libp2p::identity::Keypair,
+) -> Result<Swarm<ShellBehaviour>, NetworkError> {
     let enable_mdns = config.enable_mdns;
     let enable_kademlia = config.enable_kademlia;
     let enable_peer_scoring = config.enable_peer_scoring;
@@ -236,6 +268,32 @@ fn build_swarm(config: &NetworkConfig) -> Result<Swarm<ShellBehaviour>, NetworkE
     // CRITICAL: Do NOT use DefaultHasher — its random per-process seed
     // makes MessageIds differ across nodes, breaking dedup (F-031).
     let message_id_fn = |msg: &gossipsub::Message| {
+        let control_message = serde_json::from_slice::<NetworkMessage>(&msg.data)
+            .ok()
+            .map(|message| {
+                matches!(
+                    message,
+                    NetworkMessage::BlockRequest { .. }
+                        | NetworkMessage::BlockResponse { .. }
+                        | NetworkMessage::Ping
+                        | NetworkMessage::Pong
+                )
+            })
+            .unwrap_or(false);
+
+        if control_message {
+            let source = msg
+                .source
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "unknown".to_string());
+            let sequence = msg
+                .sequence_number
+                .map(|seq| seq.to_string())
+                .unwrap_or_else(|| "none".to_string());
+            return gossipsub::MessageId::from(format!("control:{source}:{sequence}"));
+        }
+
         let hash = blake3::hash(&msg.data);
         gossipsub::MessageId::from(hash.to_hex().as_str().to_owned())
     };
@@ -410,7 +468,7 @@ fn build_swarm(config: &NetworkConfig) -> Result<Swarm<ShellBehaviour>, NetworkE
     // differs (two-arg vs one-arg closure for `with_behaviour`), hence two
     // code paths.
     let swarm = if enable_relay {
-        SwarmBuilder::with_new_identity()
+        SwarmBuilder::with_existing_identity(keypair.clone())
             .with_tokio()
             .with_tcp(
                 tcp::Config::default(),
@@ -427,7 +485,7 @@ fn build_swarm(config: &NetworkConfig) -> Result<Swarm<ShellBehaviour>, NetworkE
             .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
             .build()
     } else {
-        SwarmBuilder::with_new_identity()
+        SwarmBuilder::with_existing_identity(keypair)
             .with_tokio()
             .with_tcp(
                 tcp::Config::default(),

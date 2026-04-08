@@ -13,7 +13,7 @@ use shell_core::{calculate_base_fee, Block, BlockHeader, SignedTransaction};
 use shell_crypto::{BatchVerifier, MultiVerifier, PreVerified, Signer, Verifier, VerifyItem};
 use shell_evm::{commit_evm_state, validate_tx_for_import, ShellEvm, ShellStateDb};
 use shell_mempool::TxPool;
-use shell_network::NetworkService;
+use shell_network::{NetworkMessage, NetworkService};
 use shell_primitives::{Address, Bytes, ShellHash, U256};
 use shell_rpc::DevRpcControl;
 use shell_storage::{ChainStore, KvStore, StatePruner, WorldState};
@@ -52,6 +52,10 @@ pub struct Node<S: KvStore + 'static> {
     dev_state: RwLock<DevState>,
     shutdown_tx: watch::Sender<bool>,
 }
+
+const SYNC_RETRY_BASE_INTERVAL_SECS: u64 = 5;
+const SYNC_RETRY_MAX_INTERVAL_SECS: u64 = 30;
+const SYNC_RETRY_BACKOFF_THRESHOLD: u32 = 3;
 
 struct DevSnapshot {
     head_hash: ShellHash,
@@ -137,6 +141,39 @@ impl<S: KvStore + 'static> Node<S> {
         self.known_authorities.write().insert(address, pubkey);
     }
 
+    fn head_number(&self) -> u64 {
+        self.chain_store
+            .get_head_block()
+            .ok()
+            .flatten()
+            .map(|b| b.number())
+            .unwrap_or(0)
+    }
+
+    fn sync_retry_delay_secs(attempts_without_progress: u32) -> u64 {
+        if attempts_without_progress < SYNC_RETRY_BACKOFF_THRESHOLD {
+            SYNC_RETRY_BASE_INTERVAL_SECS
+        } else {
+            SYNC_RETRY_MAX_INTERVAL_SECS
+        }
+    }
+
+    async fn request_missing_blocks<N: NetworkService + ?Sized>(
+        &self,
+        network: &mut N,
+        sync_requested: &mut bool,
+        reason: &'static str,
+    ) {
+        let head_number = self.head_number();
+        info!(head = head_number, reason, "requesting blocks from peers");
+        let req = NetworkMessage::BlockRequest {
+            start_number: head_number + 1,
+            count: 128,
+        };
+        let _ = network.broadcast(req).await;
+        *sync_requested = true;
+    }
+
     fn current_block_timestamp(&self, parent_timestamp: u64) -> u64 {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -166,16 +203,16 @@ impl<S: KvStore + 'static> Node<S> {
         let next_block_timestamp = dev.next_block_timestamp;
         dev.snapshots.insert(
             id.clone(),
-                DevSnapshot {
-                    head_hash: head.hash(),
-                    head_number: head.number(),
-                    state_root: head.header.state_root,
-                    total_tx_count,
-                    finalized_number,
-                    pending_txs,
-                    next_block_timestamp,
-                },
-            );
+            DevSnapshot {
+                head_hash: head.hash(),
+                head_number: head.number(),
+                state_root: head.header.state_root,
+                total_tx_count,
+                finalized_number,
+                pending_txs,
+                next_block_timestamp,
+            },
+        );
         Ok(id)
     }
 
@@ -224,20 +261,29 @@ impl<S: KvStore + 'static> Node<S> {
                 .unwrap_or(ShellHash::ZERO)
         };
         *self.finality.write() = if snapshot.finalized_number > 0 {
-            shell_consensus::FinalityState::with_finalized(snapshot.finalized_number, finalized_hash)
+            shell_consensus::FinalityState::with_finalized(
+                snapshot.finalized_number,
+                finalized_hash,
+            )
         } else {
             shell_consensus::FinalityState::new()
         };
 
         self.tx_pool.clear();
-        let known_pubkeys =
-            |addr: &Address| -> Option<Vec<u8>> { self.chain_store.get_pubkey(addr).ok().flatten() };
+        let known_pubkeys = |addr: &Address| -> Option<Vec<u8>> {
+            self.chain_store.get_pubkey(addr).ok().flatten()
+        };
         let balance_of = |addr: &Address| -> U256 {
-            self.world_state.read().get_balance(addr).unwrap_or(U256::ZERO)
+            self.world_state
+                .read()
+                .get_balance(addr)
+                .unwrap_or(U256::ZERO)
         };
         let verifier = MultiVerifier;
         for tx in snapshot.pending_txs {
-            let _ = self.tx_pool.insert(tx, &verifier, &known_pubkeys, &balance_of);
+            let _ = self
+                .tx_pool
+                .insert(tx, &verifier, &known_pubkeys, &balance_of);
         }
 
         self.dev_state.write().next_block_timestamp = snapshot.next_block_timestamp;
@@ -386,35 +432,23 @@ impl<S: KvStore + 'static> Node<S> {
 
         let mut block_timer = interval(Duration::from_millis(self.config.block_time_ms));
         let mut peer_count_timer = interval(Duration::from_secs(10));
+        let mut sync_retry_timer = interval(Duration::from_secs(SYNC_RETRY_BASE_INTERVAL_SECS));
         let mut shutdown_rx = self.shutdown_tx.subscribe();
         // Track the last time a block was produced for idle-block-skip.
         let mut last_block_time = std::time::Instant::now();
+        let mut sync_retry_attempts_without_progress = 0u32;
 
         // Skip the first immediate tick.
         block_timer.tick().await;
         peer_count_timer.tick().await;
+        sync_retry_timer.tick().await;
 
         // Startup sync: request blocks we don't have from peers.
         // Track whether we are catching up so we don't spam requests.
         let mut sync_requested = false;
         if network.peer_count().await > 0 {
-            let head_number = self
-                .chain_store
-                .get_head_block()
-                .ok()
-                .flatten()
-                .map(|b| b.number())
-                .unwrap_or(0);
-            info!(
-                head = head_number,
-                "requesting blocks from peers for initial sync"
-            );
-            let req = NetworkMessage::BlockRequest {
-                start_number: head_number + 1,
-                count: 128,
-            };
-            let _ = network.broadcast(req).await;
-            sync_requested = true;
+            self.request_missing_blocks(network, &mut sync_requested, "initial-sync")
+                .await;
         }
 
         loop {
@@ -524,6 +558,10 @@ impl<S: KvStore + 'static> Node<S> {
                                     match self.import_block(*block, &verifier) {
                                         Ok(()) => {
                                             sync_requested = false;
+                                            sync_retry_attempts_without_progress = 0;
+                                            sync_retry_timer.reset_after(Duration::from_secs(
+                                                SYNC_RETRY_BASE_INTERVAL_SECS,
+                                            ));
                                             self.metrics.blocks_imported.inc();
                                             self.metrics.block_height.set(imported_number as i64);
                                             self.metrics.tx_pool_size.set(self.tx_pool.len() as i64);
@@ -545,24 +583,13 @@ impl<S: KvStore + 'static> Node<S> {
                                         Err(NodeError::GapDetected { .. }) => {
                                             // Only request missing blocks on genuine gap,
                                             // NOT on invalid signatures or other errors (F-037).
-                                            let head_num = self
-                                                .chain_store
-                                                .get_head_block()
-                                                .ok()
-                                                .flatten()
-                                                .map(|b| b.number())
-                                                .unwrap_or(0);
                                             if !sync_requested {
-                                                info!(
-                                                    head = head_num,
-                                                    "requesting missing blocks for sync"
-                                                );
-                                                let req = NetworkMessage::BlockRequest {
-                                                    start_number: head_num + 1,
-                                                    count: 128,
-                                                };
-                                                let _ = network.broadcast(req).await;
-                                                sync_requested = true;
+                                                self.request_missing_blocks(
+                                                    network,
+                                                    &mut sync_requested,
+                                                    "gap-detected",
+                                                )
+                                                .await;
                                             }
                                         }
                                         Err(e) => {
@@ -666,8 +693,16 @@ impl<S: KvStore + 'static> Node<S> {
                                         };
                                         let _ = network.broadcast(req).await;
                                         sync_requested = true;
+                                        sync_retry_attempts_without_progress = 0;
+                                        sync_retry_timer.reset_after(Duration::from_secs(
+                                            SYNC_RETRY_BASE_INTERVAL_SECS,
+                                        ));
                                     } else {
                                         sync_requested = false;
+                                        sync_retry_attempts_without_progress = 0;
+                                        sync_retry_timer.reset_after(Duration::from_secs(
+                                            SYNC_RETRY_BASE_INTERVAL_SECS,
+                                        ));
                                     }
                                 }
                                 NetworkMessage::Ping => {
@@ -691,7 +726,41 @@ impl<S: KvStore + 'static> Node<S> {
                                 }
                             }
                         }
-                        Some(_) => {} // PeerConnected / PeerDisconnected
+                        Some(NetworkEvent::PeerConnected(peer)) => {
+                            info!(%peer, "peer connected");
+                            sync_requested = false;
+                            sync_retry_attempts_without_progress = 0;
+                            sync_retry_timer
+                                .reset_after(Duration::from_secs(SYNC_RETRY_BASE_INTERVAL_SECS));
+                            self.request_missing_blocks(
+                                network,
+                                &mut sync_requested,
+                                "peer-connected",
+                            )
+                            .await;
+                        }
+                        Some(NetworkEvent::PeerDisconnected(peer)) => {
+                            info!(%peer, "peer disconnected");
+                            sync_requested = false;
+                            sync_retry_attempts_without_progress = 0;
+                            sync_retry_timer
+                                .reset_after(Duration::from_secs(SYNC_RETRY_BASE_INTERVAL_SECS));
+                        }
+                        Some(NetworkEvent::RoutingTableUpdated { peer_count }) => {
+                            debug!(peer_count, "routing table updated");
+                            if peer_count > 0 && !sync_requested {
+                                sync_retry_attempts_without_progress = 0;
+                                sync_retry_timer.reset_after(Duration::from_secs(
+                                    SYNC_RETRY_BASE_INTERVAL_SECS,
+                                ));
+                                self.request_missing_blocks(
+                                    network,
+                                    &mut sync_requested,
+                                    "routing-update",
+                                )
+                                .await;
+                            }
+                        }
                         None => {
                             eprintln!("Network channel closed, shutting down");
                             break;
@@ -709,6 +778,22 @@ impl<S: KvStore + 'static> Node<S> {
                 _ = peer_count_timer.tick() => {
                     let peers = network.peer_count().await;
                     self.metrics.peer_count.set(peers as i64);
+                }
+
+                _ = sync_retry_timer.tick() => {
+                    if sync_requested && network.peer_count().await > 0 {
+                        self.request_missing_blocks(
+                            network,
+                            &mut sync_requested,
+                            "sync-retry",
+                        )
+                        .await;
+                        sync_retry_attempts_without_progress =
+                            sync_retry_attempts_without_progress.saturating_add(1);
+                        sync_retry_timer.reset_after(Duration::from_secs(
+                            Self::sync_retry_delay_secs(sync_retry_attempts_without_progress),
+                        ));
+                    }
                 }
 
                 _ = shutdown_rx.changed() => {
@@ -1478,6 +1563,14 @@ mod tests {
         let (node, _signer) = setup_node();
         assert_eq!(node.config.chain_id, 1337);
         assert!(node.config.proposer_address.is_some());
+    }
+
+    #[test]
+    fn sync_retry_delay_uses_backoff_after_threshold() {
+        assert_eq!(Node::<MemoryDb>::sync_retry_delay_secs(0), 5);
+        assert_eq!(Node::<MemoryDb>::sync_retry_delay_secs(2), 5);
+        assert_eq!(Node::<MemoryDb>::sync_retry_delay_secs(3), 30);
+        assert_eq!(Node::<MemoryDb>::sync_retry_delay_secs(10), 30);
     }
 
     #[test]
@@ -2318,6 +2411,16 @@ mod tests {
             node.chain_store.get_head_block().unwrap().unwrap().number(),
             1
         );
+    }
+
+    #[test]
+    fn head_number_returns_current_height() {
+        let (node, signer) = setup_node();
+        store_genesis(&node);
+        assert_eq!(node.head_number(), 0);
+
+        node.produce_block(&signer, 100).unwrap();
+        assert_eq!(node.head_number(), 1);
     }
 
     // ── State consistency tests ────────────────────────────────────────

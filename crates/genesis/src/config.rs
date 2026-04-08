@@ -52,6 +52,12 @@ pub enum ConsensusConfig {
     PoA {
         /// Ordered list of authority addresses.
         authorities: Vec<Address>,
+        /// Ordered authority PQ public keys encoded as hex strings.
+        ///
+        /// Entries must align with `authorities` by index so followers can
+        /// verify proposer seals immediately on first block import.
+        #[serde(default)]
+        authority_pubkeys: Vec<String>,
         /// Minimum seconds between blocks.
         block_time_secs: u64,
         /// Number of blocks per epoch. Defaults to 0 (no epochs).
@@ -125,6 +131,7 @@ mod tests {
             "consensus": {
                 "engine": "poa",
                 "authorities": ["0x0000000000000000000000000000000000000001"],
+                "authority_pubkeys": ["0x1234"],
                 "block_time_secs": 2
             },
             "alloc": {
@@ -154,10 +161,12 @@ mod tests {
         match &config.consensus {
             ConsensusConfig::PoA {
                 authorities,
+                authority_pubkeys,
                 block_time_secs,
                 ..
             } => {
                 assert_eq!(authorities.len(), 1);
+                assert_eq!(authority_pubkeys, &vec!["0x1234".to_string()]);
                 assert_eq!(*block_time_secs, 2);
             }
         }
