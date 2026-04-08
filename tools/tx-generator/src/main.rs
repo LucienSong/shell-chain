@@ -179,7 +179,10 @@ async fn rpc_send_tx(
     if let Some(err) = body.error {
         Err(format!("[{}] {}", err.code, err.message))
     } else if let Some(result) = body.result {
-        Ok(result.to_string())
+        Ok(result
+            .as_str()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| result.to_string()))
     } else {
         Err("empty response".into())
     }
@@ -208,8 +211,18 @@ async fn rpc_set_balance(
     let body: RpcResponse = resp.json().await.map_err(|e| format!("decode: {e}"))?;
     if let Some(err) = body.error {
         Err(format!("[{}] {}", err.code, err.message))
-    } else {
+    } else if body
+        .result
+        .as_ref()
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
         Ok(true)
+    } else {
+        Err(format!(
+            "unexpected result: {:?}",
+            body.result.unwrap_or(serde_json::Value::Null)
+        ))
     }
 }
 

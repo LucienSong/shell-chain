@@ -73,7 +73,17 @@ fn load_or_create_dev_signer(path: &Path) -> Result<DilithiumSigner, Box<dyn std
         secret_key: format!("0x{}", hex::encode(signer.secret_key_bytes().as_slice())),
     };
     let json = serde_json::to_string_pretty(&stored)?;
-    std::fs::write(path, json)?;
+    {
+        use std::io::Write;
+        #[cfg(unix)]
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        opts.mode(0o600);
+        let mut file = opts.open(path)?;
+        file.write_all(json.as_bytes())?;
+    }
     info!("Persisted dev authority key to {}", path.display());
     Ok(signer)
 }
@@ -311,7 +321,6 @@ async fn run_with_store<S: KvStore + 'static>(
                         "net".into(),
                         "web3".into(),
                         "shell".into(),
-                        "evm".into(),
                     ]
                 }),
             max_request_body_size: 5 * 1024 * 1024,

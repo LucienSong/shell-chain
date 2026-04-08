@@ -210,7 +210,20 @@ fn load_or_create_identity(path: Option<&Path>) -> Result<libp2p::identity::Keyp
             let encoded = keypair
                 .to_protobuf_encoding()
                 .map_err(|e| NetworkError::Transport(format!("encode libp2p identity: {e}")))?;
-            fs::write(path, encoded).map_err(|e| NetworkError::Transport(e.to_string()))?;
+            {
+                use std::io::Write;
+                #[cfg(unix)]
+                use std::os::unix::fs::OpenOptionsExt;
+                let mut opts = fs::OpenOptions::new();
+                opts.write(true).create(true).truncate(true);
+                #[cfg(unix)]
+                opts.mode(0o600);
+                let mut file = opts
+                    .open(path)
+                    .map_err(|e| NetworkError::Transport(e.to_string()))?;
+                file.write_all(&encoded)
+                    .map_err(|e| NetworkError::Transport(e.to_string()))?;
+            }
             Ok(keypair)
         }
         None => Ok(libp2p::identity::Keypair::generate_ed25519()),

@@ -1800,6 +1800,14 @@ impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
         address: Address,
         balance: String,
     ) -> Result<bool, ErrorObjectOwned> {
+        // Require dev mode — shell_setBalance is a state-mutation endpoint.
+        self.dev_control.as_ref().ok_or_else(|| {
+            ErrorObjectOwned::owned(
+                -32601,
+                "shell_setBalance requires dev mode",
+                None::<()>,
+            )
+        })?;
         let value = if let Some(hex_str) = balance.strip_prefix("0x") {
             U256::from_str_radix(hex_str, 16)
                 .map_err(|e| internal_err(format!("invalid hex balance: {e}")))?

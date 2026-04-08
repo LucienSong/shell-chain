@@ -420,7 +420,11 @@ impl<S: KvStore + 'static> Node<S> {
             finalized_number.clone(),
             self.finality.clone(),
             peer_count_handle,
-            Some(self.clone() as Arc<dyn DevRpcControl>),
+            if self.config.rpc.api_namespaces.iter().any(|ns| ns == "evm") {
+                Some(self.clone() as Arc<dyn DevRpcControl>)
+            } else {
+                None
+            },
         )
         .await
         .map_err(|e| NodeError::Startup(format!("RPC: {e}")))?;
@@ -1021,7 +1025,7 @@ impl<S: KvStore + 'static> Node<S> {
         // Update global transaction counter for shell_transactionCount RPC.
         let new_tx_count = included_txs.len() as u64;
         if new_tx_count > 0 {
-            let _ = self.chain_store.increment_tx_count(new_tx_count);
+            self.chain_store.increment_tx_count(new_tx_count)?;
         }
 
         // Track the new state root for pruning decisions.
