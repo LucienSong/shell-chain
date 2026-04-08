@@ -5,24 +5,24 @@ use crate::{PrimitivesError, ShellHash};
 
 /// 20-byte address, identical layout to Ethereum addresses.
 ///
-/// Derived from PQ public keys via `keccak256(pubkey)[12..]`.
+/// Shell EOAs are derived from PQ public keys via
+/// `blake3(version || algo_id || pubkey)[0..20]`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Address(pub alloy_primitives::Address);
 
 impl Address {
     pub const ZERO: Self = Self(alloy_primitives::Address::ZERO);
+    pub const DERIVATION_VERSION_V1: u8 = 0x01;
 
     pub fn from_slice(slice: &[u8]) -> Self {
         Self(alloy_primitives::Address::from_slice(slice))
     }
 
-    /// Derive an address from a raw public key: `keccak256(pubkey)[12..]`
-    pub fn from_public_key(pubkey: &[u8]) -> Self {
-        let hash = crate::keccak256(pubkey);
-        let mut addr = [0u8; 20];
-        addr.copy_from_slice(&hash.as_bytes()[12..]);
-        Self(alloy_primitives::Address::from(addr))
+    /// Derive an address from a raw public key:
+    /// `blake3(version || algo_id || pubkey)[0..20]`.
+    pub fn from_public_key(pubkey: &[u8], algo_id: u8) -> Self {
+        Self::from_public_key_with_version(pubkey, Self::DERIVATION_VERSION_V1, algo_id)
     }
 
     pub fn as_bytes(&self) -> &[u8; 20] {
@@ -38,6 +38,15 @@ impl Address {
             });
         }
         Ok(Self(alloy_primitives::Address::from_slice(slice)))
+    }
+
+    fn from_public_key_with_version(pubkey: &[u8], version: u8, algo_id: u8) -> Self {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&[version, algo_id]);
+        hasher.update(pubkey);
+
+        let hash = hasher.finalize();
+        Self::from_slice(&hash.as_bytes()[..20])
     }
 }
 
@@ -111,10 +120,28 @@ mod tests {
     #[test]
     fn address_from_public_key() {
         let fake_pubkey = [0xABu8; 64];
-        let addr = Address::from_public_key(&fake_pubkey);
+        let addr = Address::from_public_key(&fake_pubkey, 0);
         assert_eq!(addr.as_bytes().len(), 20);
         // Deterministic
-        assert_eq!(addr, Address::from_public_key(&fake_pubkey));
+        assert_eq!(addr, Address::from_public_key(&fake_pubkey, 0));
+    }
+
+    #[test]
+    fn address_derivation_binds_algorithm() {
+        let fake_pubkey = [0xABu8; 64];
+        let dilithium = Address::from_public_key(&fake_pubkey, 0);
+        let sphincs = Address::from_public_key(&fake_pubkey, 2);
+
+        assert_ne!(dilithium, sphincs);
+    }
+
+    #[test]
+    fn address_derivation_binds_version() {
+        let fake_pubkey = [0xCDu8; 64];
+        let current = Address::from_public_key(&fake_pubkey, 0);
+        let future = Address::from_public_key_with_version(&fake_pubkey, 2, 0);
+
+        assert_ne!(current, future);
     }
 
     #[test]

@@ -14,7 +14,7 @@ pub struct KeyPair {
 
 impl KeyPair {
     pub fn new(public_key: Vec<u8>, sig_type: SignatureType) -> Self {
-        let address = Address::from_public_key(&public_key);
+        let address = Address::from_public_key(&public_key, sig_type.as_u8());
         Self {
             public_key,
             address,
@@ -35,7 +35,10 @@ mod tests {
 
         assert_eq!(kp.public_key, pubkey);
         assert_eq!(kp.sig_type, SignatureType::Dilithium3);
-        assert_eq!(kp.address, Address::from_public_key(&pubkey));
+        assert_eq!(
+            kp.address,
+            Address::from_public_key(&pubkey, SignatureType::Dilithium3.as_u8())
+        );
     }
 
     #[test]
@@ -67,7 +70,7 @@ mod tests {
         let signer = DilithiumSigner::generate();
         let kp = KeyPair::new(signer.public_key().to_vec(), signer.sig_type());
 
-        let expected = Address::from_public_key(signer.public_key());
+        let expected = Address::from_public_key(signer.public_key(), signer.sig_type().as_u8());
         assert_eq!(kp.address, expected);
     }
 
@@ -76,7 +79,7 @@ mod tests {
         let signer = SphincsSigner::generate();
         let kp = KeyPair::new(signer.public_key().to_vec(), signer.sig_type());
 
-        let expected = Address::from_public_key(signer.public_key());
+        let expected = Address::from_public_key(signer.public_key(), signer.sig_type().as_u8());
         assert_eq!(kp.address, expected);
     }
 
@@ -94,7 +97,10 @@ mod tests {
         let kp = KeyPair::new(vec![], SignatureType::Dilithium3);
         assert_eq!(kp.public_key, Vec::<u8>::new());
         // Address is still derived (from empty hash)
-        assert_eq!(kp.address, Address::from_public_key(&[]));
+        assert_eq!(
+            kp.address,
+            Address::from_public_key(&[], SignatureType::Dilithium3.as_u8())
+        );
     }
 
     #[test]
