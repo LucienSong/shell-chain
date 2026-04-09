@@ -1,0 +1,31 @@
+[
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "txHash",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "bytes",
+        "name": "sig",
+        "type": "bytes"
+      },
+      {
+        "internalType": "bytes",
+        "name": "pubkey",
+        "type": "bytes"
+      }
+    ],
+    "name": "validateTransaction",
+    "outputs": [
+      {
+        "internalType": "bytes1",
+        "name": "",
+        "type": "bytes1"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  }
+]

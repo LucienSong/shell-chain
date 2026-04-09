@@ -1,4 +1,6 @@
-//! Native system contract: ValidatorRegistry at address 0x0000…0001.
+//! Native system contracts:
+//! - ValidatorRegistry at address 0x0000…0001
+//! - AccountManager at address 0x0000…0002
 //!
 //! Instead of deploying Solidity bytecode, this contract is intercepted by the
 //! EVM executor and executed as native Rust code. This avoids the need for a
@@ -6,16 +8,20 @@
 //!
 //! # Supported Functions
 //!
-//! | Selector | Signature                  | Access     |
-//! |----------|----------------------------|------------|
-//! | `execute_system_contract` dispatches: |            |
-//! | 0x4d238c8e | `addValidator(address)`   | validators |
-//! | 0x40a141ff | `removeValidator(address)` | validators |
-//! | 0xb7ab4db5 | `getValidators()`          | anyone     |
-//! | 0xfacd743b | `isValidator(address)`     | anyone     |
+//! | Contract | Signature | Access |
+//! |----------|-----------|--------|
+//! | ValidatorRegistry | `addValidator(address)` | validators |
+//! | ValidatorRegistry | `removeValidator(address)` | validators |
+//! | ValidatorRegistry | `getValidators()` | anyone |
+//! | ValidatorRegistry | `isValidator(address)` | anyone |
+//! | AccountManager | `rotateKey(bytes,uint8)` | self |
+//! | AccountManager | `setValidationCode(bytes32)` | self |
+//! | AccountManager | `clearValidationCode()` | self |
 
-use shell_primitives::{keccak256, Address};
-use shell_storage::{KvStore, WorldState};
+use shell_core::Account;
+use shell_crypto::SignatureType;
+use shell_primitives::{blake3_hash, keccak256, Address, ShellHash, U256};
+use shell_storage::{ChainStore, KvStore, WorldState};
 
 // ── Contract address ───────────────────────────────────────────────
 
@@ -26,9 +32,25 @@ pub const VALIDATOR_REGISTRY_ADDR: [u8; 20] = {
     addr
 };
 
+/// System contract address for AccountManager: 0x0000…0002.
+pub const ACCOUNT_MANAGER_ADDR: [u8; 20] = {
+    let mut addr = [0u8; 20];
+    addr[19] = 2;
+    addr
+};
+
 /// Return the system contract address as a shell `Address`.
 pub fn registry_address() -> Address {
     Address::from(VALIDATOR_REGISTRY_ADDR)
+}
+
+/// Return the AccountManager address as a shell `Address`.
+pub fn account_manager_address() -> Address {
+    Address::from(ACCOUNT_MANAGER_ADDR)
+}
+
+pub fn is_system_contract(address: &Address) -> bool {
+    *address == registry_address() || *address == account_manager_address()
 }
 
 // ── Function selectors (keccak256 of signature, first 4 bytes) ────
@@ -41,6 +63,12 @@ pub const REMOVE_VALIDATOR_SELECTOR: [u8; 4] = compute_selector(b"removeValidato
 pub const GET_VALIDATORS_SELECTOR: [u8; 4] = compute_selector(b"getValidators()");
 /// keccak256("isValidator(address)")[..4]
 pub const IS_VALIDATOR_SELECTOR: [u8; 4] = compute_selector(b"isValidator(address)");
+/// keccak256("rotateKey(bytes,uint8)")[..4]
+pub const ROTATE_KEY_SELECTOR: [u8; 4] = compute_selector(b"rotateKey(bytes,uint8)");
+/// keccak256("setValidationCode(bytes32)")[..4]
+pub const SET_VALIDATION_CODE_SELECTOR: [u8; 4] = compute_selector(b"setValidationCode(bytes32)");
+/// keccak256("clearValidationCode()")[..4]
+pub const CLEAR_VALIDATION_CODE_SELECTOR: [u8; 4] = compute_selector(b"clearValidationCode()");
 
 /// Compute a 4-byte function selector at compile time.
 const fn compute_selector(sig: &[u8]) -> [u8; 4] {
@@ -67,6 +95,19 @@ pub const SYSTEM_CALL_BASE_GAS: u64 = 21_000;
 /// Additional gas per state-mutating operation.
 pub const SYSTEM_CALL_OP_GAS: u64 = 5_000;
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SystemContractEffects {
+    pub validator_set_changed: bool,
+    pub updated_accounts: Vec<Address>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SystemContractOutcome {
+    pub output: Vec<u8>,
+    pub gas_used: u64,
+    pub effects: SystemContractEffects,
+}
+
 // ── Errors ─────────────────────────────────────────────────────────
 
 #[derive(Debug, thiserror::Error)]
@@ -75,6 +116,8 @@ pub enum SystemContractError {
     InputTooShort,
     #[error("unknown function selector: 0x{}", hex::encode(.0))]
     UnknownSelector([u8; 4]),
+    #[error("unknown system contract: {0}")]
+    UnknownSystemContract(Address),
     #[error("unauthorized: caller is not a validator")]
     Unauthorized,
     #[error("validator already exists: {0}")]
@@ -83,6 +126,12 @@ pub enum SystemContractError {
     NotFound(Address),
     #[error("cannot remove last validator")]
     LastValidator,
+    #[error("empty pubkey is not allowed")]
+    EmptyPubkey,
+    #[error("invalid signature algorithm id: {0}")]
+    InvalidAlgorithm(u8),
+    #[error("validation code missing for hash {0}")]
+    ValidationCodeMissing(ShellHash),
     #[error("invalid ABI parameter: {0}")]
     AbiDecode(String),
     #[error("storage error: {0}")]
@@ -99,13 +148,49 @@ pub fn execute_system_contract<S: KvStore + 'static>(
     input: &[u8],
     world_state: &mut WorldState<S>,
 ) -> Result<(Vec<u8>, u64), SystemContractError> {
+    execute_validator_registry(caller, input, world_state)
+}
+
+/// Execute any native system contract and return both the ABI output and the
+/// state surfaces that must be synchronized back to the canonical node state.
+pub fn execute_system_contract_call<S: KvStore + 'static>(
+    target: &Address,
+    caller: &Address,
+    input: &[u8],
+    world_state: &mut WorldState<S>,
+    chain_store: &ChainStore<S>,
+) -> Result<SystemContractOutcome, SystemContractError> {
+    if *target == registry_address() {
+        let (output, gas_used) = execute_validator_registry(caller, input, world_state)?;
+        let mut effects = SystemContractEffects::default();
+        let selector = decode_selector(input)?;
+        if selector == ADD_VALIDATOR_SELECTOR || selector == REMOVE_VALIDATOR_SELECTOR {
+            effects.validator_set_changed = true;
+        }
+        return Ok(SystemContractOutcome {
+            output,
+            gas_used,
+            effects,
+        });
+    }
+
+    if *target == account_manager_address() {
+        return execute_account_manager(caller, input, world_state, chain_store);
+    }
+
+    Err(SystemContractError::UnknownSystemContract(*target))
+}
+
+fn execute_validator_registry<S: KvStore + 'static>(
+    caller: &Address,
+    input: &[u8],
+    world_state: &mut WorldState<S>,
+) -> Result<(Vec<u8>, u64), SystemContractError> {
     if input.len() < 4 {
         return Err(SystemContractError::InputTooShort);
     }
 
-    let selector: [u8; 4] = input[..4]
-        .try_into()
-        .map_err(|_| SystemContractError::InputTooShort)?;
+    let selector = decode_selector(input)?;
     let params = &input[4..];
 
     match selector {
@@ -134,6 +219,50 @@ pub fn execute_system_contract<S: KvStore + 'static>(
                 .map_err(|e| SystemContractError::Storage(e.to_string()))?;
             let is_val = validators.contains(&addr);
             Ok((encode_bool(is_val), SYSTEM_CALL_BASE_GAS))
+        }
+        _ => Err(SystemContractError::UnknownSelector(selector)),
+    }
+}
+
+fn execute_account_manager<S: KvStore + 'static>(
+    caller: &Address,
+    input: &[u8],
+    world_state: &mut WorldState<S>,
+    chain_store: &ChainStore<S>,
+) -> Result<SystemContractOutcome, SystemContractError> {
+    let selector = decode_selector(input)?;
+    let params = &input[4..];
+    let mut effects = SystemContractEffects::default();
+
+    match selector {
+        s if s == ROTATE_KEY_SELECTOR => {
+            let (pubkey, algo_id) = decode_rotate_key_params(params)?;
+            rotate_key(caller, &pubkey, algo_id, world_state, chain_store)?;
+            effects.updated_accounts.push(*caller);
+            Ok(SystemContractOutcome {
+                output: encode_bool(true),
+                gas_used: SYSTEM_CALL_BASE_GAS + SYSTEM_CALL_OP_GAS,
+                effects,
+            })
+        }
+        s if s == SET_VALIDATION_CODE_SELECTOR => {
+            let code_hash = decode_hash(params)?;
+            set_validation_code(caller, code_hash, world_state, chain_store)?;
+            effects.updated_accounts.push(*caller);
+            Ok(SystemContractOutcome {
+                output: encode_bool(true),
+                gas_used: SYSTEM_CALL_BASE_GAS + SYSTEM_CALL_OP_GAS,
+                effects,
+            })
+        }
+        s if s == CLEAR_VALIDATION_CODE_SELECTOR => {
+            clear_validation_code(caller, world_state)?;
+            effects.updated_accounts.push(*caller);
+            Ok(SystemContractOutcome {
+                output: encode_bool(true),
+                gas_used: SYSTEM_CALL_BASE_GAS + SYSTEM_CALL_OP_GAS,
+                effects,
+            })
         }
         _ => Err(SystemContractError::UnknownSelector(selector)),
     }
@@ -200,7 +329,181 @@ fn remove_validator<S: KvStore + 'static>(
     Ok(())
 }
 
+fn rotate_key<S: KvStore + 'static>(
+    caller: &Address,
+    pubkey: &[u8],
+    algo_id: u8,
+    world_state: &mut WorldState<S>,
+    chain_store: &ChainStore<S>,
+) -> Result<(), SystemContractError> {
+    if pubkey.is_empty() {
+        return Err(SystemContractError::EmptyPubkey);
+    }
+    let Some(_algo) = SignatureType::from_u8(algo_id) else {
+        return Err(SystemContractError::InvalidAlgorithm(algo_id));
+    };
+
+    let mut account = world_state
+        .get_account(caller)
+        .map_err(|e| SystemContractError::Storage(e.to_string()))?
+        .unwrap_or(Account {
+            pq_pubkey_hash: ShellHash::ZERO,
+            nonce: 0,
+            balance: U256::ZERO,
+            validation_code_hash: None,
+            code_hash: None,
+            storage_root: ShellHash::ZERO,
+        });
+    account.pq_pubkey_hash = blake3_hash(pubkey);
+    world_state
+        .set_account(caller, &account)
+        .map_err(|e| SystemContractError::Storage(e.to_string()))?;
+    chain_store
+        .put_pubkey(caller, pubkey)
+        .map_err(|e| SystemContractError::Storage(e.to_string()))?;
+    Ok(())
+}
+
+fn set_validation_code<S: KvStore + 'static>(
+    caller: &Address,
+    code_hash: ShellHash,
+    world_state: &mut WorldState<S>,
+    chain_store: &ChainStore<S>,
+) -> Result<(), SystemContractError> {
+    if chain_store
+        .get_code(&code_hash)
+        .map_err(|e| SystemContractError::Storage(e.to_string()))?
+        .is_none()
+    {
+        return Err(SystemContractError::ValidationCodeMissing(code_hash));
+    }
+
+    let mut account = world_state
+        .get_account(caller)
+        .map_err(|e| SystemContractError::Storage(e.to_string()))?
+        .unwrap_or(Account {
+            pq_pubkey_hash: ShellHash::ZERO,
+            nonce: 0,
+            balance: U256::ZERO,
+            validation_code_hash: None,
+            code_hash: None,
+            storage_root: ShellHash::ZERO,
+        });
+    account.validation_code_hash = Some(code_hash);
+    world_state
+        .set_account(caller, &account)
+        .map_err(|e| SystemContractError::Storage(e.to_string()))?;
+    Ok(())
+}
+
+fn clear_validation_code<S: KvStore + 'static>(
+    caller: &Address,
+    world_state: &mut WorldState<S>,
+) -> Result<(), SystemContractError> {
+    let mut account = world_state
+        .get_account(caller)
+        .map_err(|e| SystemContractError::Storage(e.to_string()))?
+        .unwrap_or(Account {
+            pq_pubkey_hash: ShellHash::ZERO,
+            nonce: 0,
+            balance: U256::ZERO,
+            validation_code_hash: None,
+            code_hash: None,
+            storage_root: ShellHash::ZERO,
+        });
+    account.validation_code_hash = None;
+    world_state
+        .set_account(caller, &account)
+        .map_err(|e| SystemContractError::Storage(e.to_string()))?;
+    Ok(())
+}
+
 // ── ABI helpers ────────────────────────────────────────────────────
+
+fn decode_selector(input: &[u8]) -> Result<[u8; 4], SystemContractError> {
+    if input.len() < 4 {
+        return Err(SystemContractError::InputTooShort);
+    }
+    input[..4]
+        .try_into()
+        .map_err(|_| SystemContractError::InputTooShort)
+}
+
+fn decode_word_usize(word: &[u8]) -> Result<usize, SystemContractError> {
+    if word.len() < 32 {
+        return Err(SystemContractError::AbiDecode(format!(
+            "expected 32 bytes for ABI word, got {}",
+            word.len()
+        )));
+    }
+    if word[..24].iter().any(|b| *b != 0) {
+        return Err(SystemContractError::AbiDecode(
+            "ABI word exceeds usize range".into(),
+        ));
+    }
+    let tail: [u8; 8] = word[24..32]
+        .try_into()
+        .map_err(|e: std::array::TryFromSliceError| {
+            SystemContractError::AbiDecode(e.to_string())
+        })?;
+    Ok(u64::from_be_bytes(tail) as usize)
+}
+
+fn decode_hash(input: &[u8]) -> Result<ShellHash, SystemContractError> {
+    if input.len() < 32 {
+        return Err(SystemContractError::AbiDecode(format!(
+            "expected 32 bytes for bytes32, got {}",
+            input.len()
+        )));
+    }
+    ShellHash::try_from_slice(&input[..32])
+        .map_err(|e| SystemContractError::AbiDecode(e.to_string()))
+}
+
+fn decode_u8(input: &[u8]) -> Result<u8, SystemContractError> {
+    if input.len() < 32 {
+        return Err(SystemContractError::AbiDecode(format!(
+            "expected 32 bytes for uint8, got {}",
+            input.len()
+        )));
+    }
+    if input[..31].iter().any(|b| *b != 0) {
+        return Err(SystemContractError::AbiDecode(
+            "uint8 must be right-aligned in ABI word".into(),
+        ));
+    }
+    Ok(input[31])
+}
+
+fn decode_rotate_key_params(input: &[u8]) -> Result<(Vec<u8>, u8), SystemContractError> {
+    if input.len() < 64 {
+        return Err(SystemContractError::AbiDecode(format!(
+            "expected at least 64 bytes for rotateKey head, got {}",
+            input.len()
+        )));
+    }
+
+    let offset = decode_word_usize(&input[..32])?;
+    let algo_id = decode_u8(&input[32..64])?;
+    if offset + 32 > input.len() {
+        return Err(SystemContractError::AbiDecode(
+            "bytes offset points beyond calldata".into(),
+        ));
+    }
+
+    let bytes_len = decode_word_usize(&input[offset..offset + 32])?;
+    let data_start = offset + 32;
+    let data_end = data_start
+        .checked_add(bytes_len)
+        .ok_or_else(|| SystemContractError::AbiDecode("bytes length overflow".into()))?;
+    if data_end > input.len() {
+        return Err(SystemContractError::AbiDecode(
+            "bytes payload truncated".into(),
+        ));
+    }
+
+    Ok((input[data_start..data_end].to_vec(), algo_id))
+}
 
 /// Decode a single ABI-encoded `address` parameter (32 bytes, left-padded with zeros).
 pub fn decode_address(input: &[u8]) -> Result<Address, SystemContractError> {
@@ -252,6 +555,45 @@ pub fn encode_address_array(addrs: &[Address]) -> Vec<u8> {
     }
 
     out
+}
+
+fn encode_usize_word(value: usize) -> [u8; 32] {
+    let mut word = [0u8; 32];
+    word[24..32].copy_from_slice(&(value as u64).to_be_bytes());
+    word
+}
+
+fn encode_u8_word(value: u8) -> [u8; 32] {
+    let mut word = [0u8; 32];
+    word[31] = value;
+    word
+}
+
+pub fn encode_rotate_key_calldata(pubkey: &[u8], algo_id: u8) -> Vec<u8> {
+    let padded_len = if pubkey.is_empty() {
+        0
+    } else {
+        pubkey.len().div_ceil(32) * 32
+    };
+    let mut data = Vec::with_capacity(4 + 96 + padded_len);
+    data.extend_from_slice(&ROTATE_KEY_SELECTOR);
+    data.extend_from_slice(&encode_usize_word(64));
+    data.extend_from_slice(&encode_u8_word(algo_id));
+    data.extend_from_slice(&encode_usize_word(pubkey.len()));
+    data.extend_from_slice(pubkey);
+    data.resize(4 + 96 + padded_len, 0);
+    data
+}
+
+pub fn encode_set_validation_code_calldata(code_hash: &ShellHash) -> Vec<u8> {
+    let mut data = Vec::with_capacity(4 + 32);
+    data.extend_from_slice(&SET_VALIDATION_CODE_SELECTOR);
+    data.extend_from_slice(code_hash.as_bytes());
+    data
+}
+
+pub fn encode_clear_validation_code_calldata() -> Vec<u8> {
+    CLEAR_VALIDATION_CODE_SELECTOR.to_vec()
 }
 
 /// Encode calldata for `addValidator(address)`.
@@ -426,11 +768,13 @@ const fn keccak_f1600(mut state: [u64; 25]) -> [u64; 25] {
 // ── Placeholder code hash for the system contract ──────────────────
 
 /// A deterministic code hash for the ValidatorRegistry system contract.
-/// Used so `eth_getCode` returns a non-empty marker for this address.
-///
-/// Value: keccak256("ValidatorRegistry")
 pub fn system_contract_code_hash() -> shell_primitives::ShellHash {
     keccak256(b"ValidatorRegistry")
+}
+
+/// A deterministic code hash for the AccountManager system contract.
+pub fn account_manager_code_hash() -> shell_primitives::ShellHash {
+    keccak256(b"AccountManager")
 }
 
 // ── Tests ──────────────────────────────────────────────────────────
@@ -438,7 +782,7 @@ pub fn system_contract_code_hash() -> shell_primitives::ShellHash {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shell_storage::MemoryDb;
+    use shell_storage::{ChainStore, MemoryDb};
     use std::sync::Arc;
 
     fn setup_with_validators(validators: &[Address]) -> WorldState<MemoryDb> {
@@ -448,6 +792,23 @@ mod tests {
             ws.set_validators(validators).unwrap();
         }
         ws
+    }
+
+    fn setup_account_manager() -> (WorldState<MemoryDb>, ChainStore<MemoryDb>) {
+        let ws = WorldState::new(Arc::new(MemoryDb::new()));
+        let cs = ChainStore::new(Arc::new(MemoryDb::new()));
+        (ws, cs)
+    }
+
+    fn account_with_balance(balance: u64) -> Account {
+        Account {
+            pq_pubkey_hash: ShellHash::ZERO,
+            nonce: 0,
+            balance: U256::from(balance),
+            validation_code_hash: None,
+            code_hash: None,
+            storage_root: ShellHash::ZERO,
+        }
     }
 
     // ── Selector computation ───────────────────────────────────
@@ -478,6 +839,27 @@ mod tests {
         let hash = keccak256(b"isValidator(address)");
         let expected = &hash.as_bytes()[..4];
         assert_eq!(&IS_VALIDATOR_SELECTOR, expected);
+    }
+
+    #[test]
+    fn selector_rotate_key() {
+        let hash = keccak256(b"rotateKey(bytes,uint8)");
+        let expected = &hash.as_bytes()[..4];
+        assert_eq!(&ROTATE_KEY_SELECTOR, expected);
+    }
+
+    #[test]
+    fn selector_set_validation_code() {
+        let hash = keccak256(b"setValidationCode(bytes32)");
+        let expected = &hash.as_bytes()[..4];
+        assert_eq!(&SET_VALIDATION_CODE_SELECTOR, expected);
+    }
+
+    #[test]
+    fn selector_clear_validation_code() {
+        let hash = keccak256(b"clearValidationCode()");
+        let expected = &hash.as_bytes()[..4];
+        assert_eq!(&CLEAR_VALIDATION_CODE_SELECTOR, expected);
     }
 
     // ── addValidator ───────────────────────────────────────────
@@ -571,6 +953,142 @@ mod tests {
         let calldata = encode_remove_validator_calldata(&v2);
         let err = execute_system_contract(&outsider, &calldata, &mut ws).unwrap_err();
         assert!(matches!(err, SystemContractError::Unauthorized));
+    }
+
+    // ── AccountManager ──────────────────────────────────────────
+
+    #[test]
+    fn rotate_key_updates_caller_account_and_registry() {
+        let caller = Address::from([0x11; 20]);
+        let (mut ws, cs) = setup_account_manager();
+        ws.set_account(&caller, &account_with_balance(1_000_000))
+            .unwrap();
+
+        let new_pubkey = vec![0xAB; 1312];
+        let calldata = encode_rotate_key_calldata(&new_pubkey, SignatureType::Dilithium3.as_u8());
+        let outcome = execute_system_contract_call(
+            &account_manager_address(),
+            &caller,
+            &calldata,
+            &mut ws,
+            &cs,
+        )
+        .unwrap();
+
+        assert_eq!(outcome.output, encode_bool(true));
+        assert_eq!(outcome.gas_used, SYSTEM_CALL_BASE_GAS + SYSTEM_CALL_OP_GAS);
+        assert_eq!(outcome.effects.updated_accounts, vec![caller]);
+
+        let account = ws.get_account(&caller).unwrap().unwrap();
+        assert_eq!(account.pq_pubkey_hash, blake3_hash(&new_pubkey));
+        assert_eq!(cs.get_pubkey(&caller).unwrap().unwrap(), new_pubkey);
+    }
+
+    #[test]
+    fn rotate_key_rejects_unknown_algorithm() {
+        let caller = Address::from([0x12; 20]);
+        let (mut ws, cs) = setup_account_manager();
+        let calldata = encode_rotate_key_calldata(&[0x42; 32], 99);
+
+        let err = execute_system_contract_call(
+            &account_manager_address(),
+            &caller,
+            &calldata,
+            &mut ws,
+            &cs,
+        )
+        .unwrap_err();
+        assert!(matches!(err, SystemContractError::InvalidAlgorithm(99)));
+    }
+
+    #[test]
+    fn rotate_key_only_updates_caller() {
+        let caller = Address::from([0x13; 20]);
+        let other = Address::from([0x14; 20]);
+        let (mut ws, cs) = setup_account_manager();
+        let mut other_account = account_with_balance(100);
+        other_account.pq_pubkey_hash = keccak256(b"other");
+        ws.set_account(&caller, &account_with_balance(100)).unwrap();
+        ws.set_account(&other, &other_account).unwrap();
+
+        let calldata = encode_rotate_key_calldata(&[0x55; 64], SignatureType::Dilithium3.as_u8());
+        execute_system_contract_call(&account_manager_address(), &caller, &calldata, &mut ws, &cs)
+            .unwrap();
+
+        let loaded_other = ws.get_account(&other).unwrap().unwrap();
+        assert_eq!(loaded_other, other_account);
+    }
+
+    #[test]
+    fn set_validation_code_updates_account() {
+        let caller = Address::from([0x21; 20]);
+        let (mut ws, cs) = setup_account_manager();
+        ws.set_account(&caller, &account_with_balance(1_000_000))
+            .unwrap();
+
+        let code_hash = keccak256(b"default-validator");
+        cs.put_code(&code_hash, b"\x60\x00").unwrap();
+
+        let calldata = encode_set_validation_code_calldata(&code_hash);
+        let outcome = execute_system_contract_call(
+            &account_manager_address(),
+            &caller,
+            &calldata,
+            &mut ws,
+            &cs,
+        )
+        .unwrap();
+
+        assert_eq!(outcome.output, encode_bool(true));
+        assert_eq!(outcome.effects.updated_accounts, vec![caller]);
+        let account = ws.get_account(&caller).unwrap().unwrap();
+        assert_eq!(account.validation_code_hash, Some(code_hash));
+    }
+
+    #[test]
+    fn set_validation_code_rejects_missing_code() {
+        let caller = Address::from([0x22; 20]);
+        let (mut ws, cs) = setup_account_manager();
+        let code_hash = keccak256(b"missing-validator");
+        let calldata = encode_set_validation_code_calldata(&code_hash);
+
+        let err = execute_system_contract_call(
+            &account_manager_address(),
+            &caller,
+            &calldata,
+            &mut ws,
+            &cs,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            SystemContractError::ValidationCodeMissing(hash) if hash == code_hash
+        ));
+    }
+
+    #[test]
+    fn clear_validation_code_restores_builtin_mode() {
+        let caller = Address::from([0x23; 20]);
+        let (mut ws, cs) = setup_account_manager();
+        let code_hash = keccak256(b"custom-validator");
+        let mut account = account_with_balance(1_000_000);
+        account.validation_code_hash = Some(code_hash);
+        ws.set_account(&caller, &account).unwrap();
+
+        let calldata = encode_clear_validation_code_calldata();
+        let outcome = execute_system_contract_call(
+            &account_manager_address(),
+            &caller,
+            &calldata,
+            &mut ws,
+            &cs,
+        )
+        .unwrap();
+
+        assert_eq!(outcome.output, encode_bool(true));
+        assert_eq!(outcome.effects.updated_accounts, vec![caller]);
+        let account = ws.get_account(&caller).unwrap().unwrap();
+        assert_eq!(account.validation_code_hash, None);
     }
 
     // ── getValidators ──────────────────────────────────────────
@@ -762,6 +1280,18 @@ mod tests {
         let runtime = keccak256(b"isValidator(address)");
         let compile_time = const_keccak256(b"isValidator(address)");
         assert_eq!(runtime.as_bytes(), &compile_time);
+
+        let runtime = keccak256(b"rotateKey(bytes,uint8)");
+        let compile_time = const_keccak256(b"rotateKey(bytes,uint8)");
+        assert_eq!(runtime.as_bytes(), &compile_time);
+
+        let runtime = keccak256(b"setValidationCode(bytes32)");
+        let compile_time = const_keccak256(b"setValidationCode(bytes32)");
+        assert_eq!(runtime.as_bytes(), &compile_time);
+
+        let runtime = keccak256(b"clearValidationCode()");
+        let compile_time = const_keccak256(b"clearValidationCode()");
+        assert_eq!(runtime.as_bytes(), &compile_time);
     }
 
     // ── Multiple sequential operations ─────────────────────────
@@ -907,9 +1437,23 @@ mod tests {
     }
 
     #[test]
+    fn account_manager_code_hash_is_deterministic() {
+        let h1 = account_manager_code_hash();
+        let h2 = account_manager_code_hash();
+        assert_eq!(h1, h2);
+        assert_ne!(h1, shell_primitives::ShellHash::ZERO);
+    }
+
+    #[test]
     fn registry_address_matches_constant() {
         let addr = registry_address();
         assert_eq!(addr.as_bytes(), &VALIDATOR_REGISTRY_ADDR);
+    }
+
+    #[test]
+    fn account_manager_address_matches_constant() {
+        let addr = account_manager_address();
+        assert_eq!(addr.as_bytes(), &ACCOUNT_MANAGER_ADDR);
     }
 
     // ── Gas accounting ─────────────────────────────────────────

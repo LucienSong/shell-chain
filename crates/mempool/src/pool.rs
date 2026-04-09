@@ -5,8 +5,10 @@ use std::collections::{BTreeMap, HashMap};
 use parking_lot::RwLock;
 
 use shell_core::SignedTransaction;
-use shell_crypto::{Verifier, ALLOWED_ALGORITHMS};
+use shell_crypto::Verifier;
+use shell_evm::{validate_aa_tx, AaValidationError};
 use shell_primitives::{Address, ShellHash, U256};
+use shell_storage::{ChainStore, KvStore, WorldState};
 
 use crate::{MempoolConfig, MempoolError};
 
@@ -82,19 +84,15 @@ impl TxPool {
     /// address derivation, balance floor check, duplicate/RBF detection,
     /// and capacity enforcement.
     ///
-    /// # Callbacks
-    ///
-    /// - `known_pubkeys`: resolve a sender's public key from on-chain registry
-    /// - `balance_of`: query a sender's current balance for DoS prevention
-    pub fn insert<V: Verifier>(
+    pub fn insert<S: KvStore + 'static, V: Verifier>(
         &self,
         tx: SignedTransaction,
+        world_state: &mut WorldState<S>,
+        chain_store: &ChainStore<S>,
         verifier: &V,
-        known_pubkeys: &dyn Fn(&Address) -> Option<Vec<u8>>,
-        balance_of: &dyn Fn(&Address) -> U256,
     ) -> Result<ShellHash, MempoolError> {
         // --- Stateless checks (before acquiring lock) ---
-        self.validate_stateless(&tx, verifier, known_pubkeys)?;
+        self.validate_stateless(&tx, world_state, chain_store, verifier)?;
 
         // --- Balance floor check (F-020) ---
         let sender = tx.sender();
@@ -102,7 +100,7 @@ impl TxPool {
             .checked_mul(U256::from(tx.tx.max_fee_per_gas))
             .unwrap_or(U256::MAX);
         let needed = gas_cost.checked_add(tx.tx.value).unwrap_or(U256::MAX);
-        let balance = balance_of(&sender);
+        let balance = world_state.get_balance(&sender).unwrap_or(U256::ZERO);
         if balance < needed {
             return Err(MempoolError::InsufficientBalance {
                 needed,
@@ -280,11 +278,12 @@ impl TxPool {
     // --- Private helpers ---
 
     /// Lightweight validation performed before acquiring the pool lock.
-    fn validate_stateless<V: Verifier>(
+    fn validate_stateless<S: KvStore + 'static, V: Verifier>(
         &self,
         tx: &SignedTransaction,
+        world_state: &mut WorldState<S>,
+        chain_store: &ChainStore<S>,
         verifier: &V,
-        known_pubkeys: &dyn Fn(&Address) -> Option<Vec<u8>>,
     ) -> Result<(), MempoolError> {
         // Chain ID
         if tx.tx.chain_id != self.config.chain_id {
@@ -300,58 +299,6 @@ impl TxPool {
                 got: tx.tx.max_fee_per_gas,
                 min: self.config.min_gas_price,
             });
-        }
-
-        let registered_pubkey = known_pubkeys(&tx.sender());
-        let pubkey = if let Some(ref pk) = tx.sender_pubkey {
-            pk.clone()
-        } else if let Some(pk) = registered_pubkey.as_ref() {
-            pk.clone()
-        } else {
-            return Err(MempoolError::PubkeyRequired {
-                sender: tx.sender(),
-            });
-        };
-
-        if tx.sender_pubkey.is_some() {
-            if let Some(registered) = registered_pubkey.as_ref() {
-                if registered != &pubkey {
-                    return Err(MempoolError::InvalidTransaction(
-                        "pubkey conflict: address already registered with a different pubkey"
-                            .into(),
-                    ));
-                }
-            }
-        }
-
-        // First use still binds the sender address to the pubkey derivation.
-        // Once a pubkey is registered, we intentionally skip re-deriving the
-        // address so the steady-state path can support future key rotation.
-        if registered_pubkey.is_none() {
-            let derived = Address::from_public_key(&pubkey, tx.signature.sig_type.as_u8());
-            if derived != tx.sender() {
-                return Err(MempoolError::AddressMismatch {
-                    from: tx.sender(),
-                    derived,
-                });
-            }
-        }
-
-        // Algorithm allowlist check (F-301)
-        if !ALLOWED_ALGORITHMS.contains(&tx.signature.sig_type) {
-            return Err(MempoolError::InvalidTransaction(format!(
-                "disallowed signature algorithm: {:?}",
-                tx.signature.sig_type
-            )));
-        }
-
-        // Signature verification
-        let msg = tx.tx.hash();
-        let valid = verifier.verify(&pubkey, msg.as_bytes(), &tx.signature)?;
-        if !valid {
-            return Err(MempoolError::InvalidSignature(
-                "PQ signature verification failed".into(),
-            ));
         }
 
         // Access list size limits
@@ -377,6 +324,9 @@ impl TxPool {
                 tx_size, MAX_TX_SIZE
             )));
         }
+
+        validate_aa_tx(tx, world_state, chain_store, verifier)
+            .map_err(|err| map_aa_validation_error(tx, err))?;
 
         Ok(())
     }
@@ -404,12 +354,33 @@ impl TxPool {
     }
 }
 
+fn map_aa_validation_error(tx: &SignedTransaction, err: AaValidationError) -> MempoolError {
+    match err {
+        AaValidationError::PubkeyNotFound => MempoolError::PubkeyRequired {
+            sender: tx.sender(),
+        },
+        AaValidationError::AddressMismatch { from, derived } => {
+            MempoolError::AddressMismatch { from, derived }
+        }
+        AaValidationError::SignatureInvalid => {
+            MempoolError::InvalidSignature("PQ signature verification failed".into())
+        }
+        AaValidationError::Crypto(err) => MempoolError::Crypto(err),
+        AaValidationError::DisallowedAlgorithm(sig_type) => MempoolError::InvalidTransaction(
+            format!("disallowed signature algorithm: {sig_type:?}"),
+        ),
+        other => MempoolError::InvalidTransaction(other.to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use shell_core::Transaction;
     use shell_crypto::{DilithiumSigner, DilithiumVerifier, Signer};
     use shell_primitives::Bytes;
+    use shell_storage::{ChainStore, MemoryDb, WorldState};
+    use std::sync::Arc;
 
     fn test_address(seed: &[u8]) -> Address {
         Address::from_public_key(seed, 0)
@@ -477,28 +448,53 @@ mod tests {
         SignedTransaction::with_pubkey(from, tx, sig, pubkey.to_vec())
     }
 
-    fn no_known_pubkeys(_addr: &Address) -> Option<Vec<u8>> {
-        None
+    fn setup_validation_ctx() -> (WorldState<MemoryDb>, ChainStore<MemoryDb>) {
+        let ws = WorldState::new(Arc::new(MemoryDb::new()));
+        let cs = ChainStore::new(Arc::new(MemoryDb::new()));
+        (ws, cs)
     }
 
-    /// Default balance callback: every address has plenty of funds.
-    fn rich_balance(_addr: &Address) -> U256 {
-        U256::from(1_000_000_000_000u64)
+    fn insert_with_balance(
+        pool: &TxPool,
+        tx: SignedTransaction,
+        verifier: &DilithiumVerifier,
+        ws: &mut WorldState<MemoryDb>,
+        cs: &ChainStore<MemoryDb>,
+        balance: U256,
+    ) -> Result<ShellHash, MempoolError> {
+        ws.set_balance(&tx.sender(), balance).unwrap();
+        pool.insert(tx, ws, cs, verifier)
     }
 
-    /// Zero balance callback: every address is broke.
-    fn zero_balance(_addr: &Address) -> U256 {
-        U256::ZERO
+    fn insert_rich(
+        pool: &TxPool,
+        tx: SignedTransaction,
+        verifier: &DilithiumVerifier,
+        ws: &mut WorldState<MemoryDb>,
+        cs: &ChainStore<MemoryDb>,
+    ) -> Result<ShellHash, MempoolError> {
+        insert_with_balance(pool, tx, verifier, ws, cs, U256::from(1_000_000_000_000u64))
+    }
+
+    fn insert_broke(
+        pool: &TxPool,
+        tx: SignedTransaction,
+        verifier: &DilithiumVerifier,
+        ws: &mut WorldState<MemoryDb>,
+        cs: &ChainStore<MemoryDb>,
+    ) -> Result<ShellHash, MempoolError> {
+        insert_with_balance(pool, tx, verifier, ws, cs, U256::ZERO)
     }
 
     #[test]
     fn insert_and_get() {
         let pool = TxPool::new(make_config());
         let verifier = DilithiumVerifier;
+        let (mut ws, cs) = setup_validation_ctx();
         let (tx, _pk) = make_signed_tx(0, 100);
         let hash = tx.hash();
 
-        let result = pool.insert(tx, &verifier, &no_known_pubkeys, &rich_balance);
+        let result = insert_rich(&pool, tx, &verifier, &mut ws, &cs);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), hash);
         assert_eq!(pool.len(), 1);
@@ -510,13 +506,11 @@ mod tests {
     fn reject_duplicate() {
         let pool = TxPool::new(make_config());
         let verifier = DilithiumVerifier;
+        let (mut ws, cs) = setup_validation_ctx();
         let (tx, _pk) = make_signed_tx(0, 100);
 
-        pool.insert(tx.clone(), &verifier, &no_known_pubkeys, &rich_balance)
-            .unwrap();
-        let err = pool
-            .insert(tx, &verifier, &no_known_pubkeys, &rich_balance)
-            .unwrap_err();
+        insert_rich(&pool, tx.clone(), &verifier, &mut ws, &cs).unwrap();
+        let err = insert_rich(&pool, tx, &verifier, &mut ws, &cs).unwrap_err();
         assert!(matches!(err, MempoolError::Duplicate { .. }));
     }
 
@@ -524,6 +518,7 @@ mod tests {
     fn reject_wrong_chain_id() {
         let pool = TxPool::new(make_config());
         let verifier = DilithiumVerifier;
+        let (mut ws, cs) = setup_validation_ctx();
 
         let signer = DilithiumSigner::generate();
         let pubkey = signer.public_key().to_vec();
@@ -545,9 +540,7 @@ mod tests {
         let sig = signer.sign(tx.hash().as_bytes()).unwrap();
         let signed = SignedTransaction::with_pubkey(from, tx, sig, pubkey);
 
-        let err = pool
-            .insert(signed, &verifier, &no_known_pubkeys, &rich_balance)
-            .unwrap_err();
+        let err = insert_rich(&pool, signed, &verifier, &mut ws, &cs).unwrap_err();
         assert!(matches!(err, MempoolError::ChainIdMismatch { .. }));
     }
 
@@ -555,6 +548,7 @@ mod tests {
     fn reject_gas_price_too_low() {
         let pool = TxPool::new(make_config());
         let verifier = DilithiumVerifier;
+        let (mut ws, cs) = setup_validation_ctx();
 
         let signer = DilithiumSigner::generate();
         let pubkey = signer.public_key().to_vec();
@@ -576,9 +570,7 @@ mod tests {
         let sig = signer.sign(tx.hash().as_bytes()).unwrap();
         let signed = SignedTransaction::with_pubkey(from, tx, sig, pubkey);
 
-        let err = pool
-            .insert(signed, &verifier, &no_known_pubkeys, &rich_balance)
-            .unwrap_err();
+        let err = insert_rich(&pool, signed, &verifier, &mut ws, &cs).unwrap_err();
         assert!(matches!(err, MempoolError::GasPriceTooLow { .. }));
     }
 
@@ -586,6 +578,7 @@ mod tests {
     fn reject_invalid_signature() {
         let pool = TxPool::new(make_config());
         let verifier = DilithiumVerifier;
+        let (mut ws, cs) = setup_validation_ctx();
 
         let signer = DilithiumSigner::generate();
         let pubkey = signer.public_key().to_vec();
@@ -608,9 +601,7 @@ mod tests {
         let bad_sig = signer.sign(b"wrong-message").unwrap();
         let signed = SignedTransaction::with_pubkey(from, tx, bad_sig, pubkey);
 
-        let err = pool
-            .insert(signed, &verifier, &no_known_pubkeys, &rich_balance)
-            .unwrap_err();
+        let err = insert_rich(&pool, signed, &verifier, &mut ws, &cs).unwrap_err();
         assert!(matches!(err, MempoolError::InvalidSignature(_)));
     }
 
@@ -618,6 +609,7 @@ mod tests {
     fn reject_address_mismatch() {
         let pool = TxPool::new(make_config());
         let verifier = DilithiumVerifier;
+        let (mut ws, cs) = setup_validation_ctx();
 
         let signer = DilithiumSigner::generate();
         let pubkey = signer.public_key().to_vec();
@@ -639,9 +631,7 @@ mod tests {
         let sig = signer.sign(tx.hash().as_bytes()).unwrap();
         let signed = SignedTransaction::with_pubkey(wrong_from, tx, sig, pubkey);
 
-        let err = pool
-            .insert(signed, &verifier, &no_known_pubkeys, &rich_balance)
-            .unwrap_err();
+        let err = insert_rich(&pool, signed, &verifier, &mut ws, &cs).unwrap_err();
         assert!(matches!(err, MempoolError::AddressMismatch { .. }));
     }
 
@@ -649,6 +639,7 @@ mod tests {
     fn reject_missing_pubkey() {
         let pool = TxPool::new(make_config());
         let verifier = DilithiumVerifier;
+        let (mut ws, cs) = setup_validation_ctx();
 
         let signer = DilithiumSigner::generate();
         let pubkey = signer.public_key().to_vec();
@@ -671,9 +662,7 @@ mod tests {
         // No pubkey attached, and lookup returns None
         let signed = SignedTransaction::new(from, tx, sig);
 
-        let err = pool
-            .insert(signed, &verifier, &no_known_pubkeys, &rich_balance)
-            .unwrap_err();
+        let err = insert_rich(&pool, signed, &verifier, &mut ws, &cs).unwrap_err();
         assert!(matches!(err, MempoolError::PubkeyRequired { .. }));
     }
 
@@ -681,10 +670,9 @@ mod tests {
     fn remove_transaction() {
         let pool = TxPool::new(make_config());
         let verifier = DilithiumVerifier;
+        let (mut ws, cs) = setup_validation_ctx();
         let (tx, _pk) = make_signed_tx(0, 100);
-        let hash = pool
-            .insert(tx, &verifier, &no_known_pubkeys, &rich_balance)
-            .unwrap();
+        let hash = insert_rich(&pool, tx, &verifier, &mut ws, &cs).unwrap();
 
         assert!(pool.remove(&hash));
         assert!(!pool.contains(&hash));
@@ -696,15 +684,12 @@ mod tests {
     fn remove_batch() {
         let pool = TxPool::new(make_config());
         let verifier = DilithiumVerifier;
+        let (mut ws, cs) = setup_validation_ctx();
 
         let (tx1, _) = make_signed_tx(0, 100);
         let (tx2, _) = make_signed_tx(0, 200);
-        let h1 = pool
-            .insert(tx1, &verifier, &no_known_pubkeys, &rich_balance)
-            .unwrap();
-        let h2 = pool
-            .insert(tx2, &verifier, &no_known_pubkeys, &rich_balance)
-            .unwrap();
+        let h1 = insert_rich(&pool, tx1, &verifier, &mut ws, &cs).unwrap();
+        let h2 = insert_rich(&pool, tx2, &verifier, &mut ws, &cs).unwrap();
 
         pool.remove_batch(&[h1, h2]);
         assert_eq!(pool.len(), 0);
@@ -714,17 +699,15 @@ mod tests {
     fn pending_ordered_by_priority_fee() {
         let pool = TxPool::new(make_config());
         let verifier = DilithiumVerifier;
+        let (mut ws, cs) = setup_validation_ctx();
 
         let (tx_low, _) = make_signed_tx(0, 10);
         let (tx_mid, _) = make_signed_tx(0, 50);
         let (tx_high, _) = make_signed_tx(0, 100);
 
-        pool.insert(tx_low, &verifier, &no_known_pubkeys, &rich_balance)
-            .unwrap();
-        pool.insert(tx_mid, &verifier, &no_known_pubkeys, &rich_balance)
-            .unwrap();
-        pool.insert(tx_high, &verifier, &no_known_pubkeys, &rich_balance)
-            .unwrap();
+        insert_rich(&pool, tx_low, &verifier, &mut ws, &cs).unwrap();
+        insert_rich(&pool, tx_mid, &verifier, &mut ws, &cs).unwrap();
+        insert_rich(&pool, tx_high, &verifier, &mut ws, &cs).unwrap();
 
         let pending = pool.pending(10);
         assert_eq!(pending.len(), 3);
@@ -738,6 +721,7 @@ mod tests {
     fn per_sender_nonce_ordering() {
         let pool = TxPool::new(make_config());
         let verifier = DilithiumVerifier;
+        let (mut ws, cs) = setup_validation_ctx();
 
         let signer = DilithiumSigner::generate();
         let pubkey = signer.public_key().to_vec();
@@ -747,12 +731,9 @@ mod tests {
         let tx0 = make_signed_tx_with_signer(&signer, &pubkey, 0, 50);
         let tx1 = make_signed_tx_with_signer(&signer, &pubkey, 1, 50);
 
-        pool.insert(tx2, &verifier, &no_known_pubkeys, &rich_balance)
-            .unwrap();
-        pool.insert(tx0, &verifier, &no_known_pubkeys, &rich_balance)
-            .unwrap();
-        pool.insert(tx1, &verifier, &no_known_pubkeys, &rich_balance)
-            .unwrap();
+        insert_rich(&pool, tx2, &verifier, &mut ws, &cs).unwrap();
+        insert_rich(&pool, tx0, &verifier, &mut ws, &cs).unwrap();
+        insert_rich(&pool, tx1, &verifier, &mut ws, &cs).unwrap();
 
         let sender = test_address(&pubkey);
         let sender_hashes = pool.sender_txs(&sender);
@@ -768,6 +749,7 @@ mod tests {
         };
         let pool = TxPool::new(config);
         let verifier = DilithiumVerifier;
+        let (mut ws, cs) = setup_validation_ctx();
 
         let signer = DilithiumSigner::generate();
         let pubkey = signer.public_key().to_vec();
@@ -776,13 +758,9 @@ mod tests {
         let tx1 = make_signed_tx_with_signer(&signer, &pubkey, 1, 50);
         let tx2 = make_signed_tx_with_signer(&signer, &pubkey, 2, 50);
 
-        pool.insert(tx0, &verifier, &no_known_pubkeys, &rich_balance)
-            .unwrap();
-        pool.insert(tx1, &verifier, &no_known_pubkeys, &rich_balance)
-            .unwrap();
-        let err = pool
-            .insert(tx2, &verifier, &no_known_pubkeys, &rich_balance)
-            .unwrap_err();
+        insert_rich(&pool, tx0, &verifier, &mut ws, &cs).unwrap();
+        insert_rich(&pool, tx1, &verifier, &mut ws, &cs).unwrap();
+        let err = insert_rich(&pool, tx2, &verifier, &mut ws, &cs).unwrap_err();
         assert!(matches!(err, MempoolError::SenderQueueFull { .. }));
     }
 
@@ -794,20 +772,18 @@ mod tests {
         };
         let pool = TxPool::new(config);
         let verifier = DilithiumVerifier;
+        let (mut ws, cs) = setup_validation_ctx();
 
         let (tx_low, _) = make_signed_tx(0, 10);
         let (tx_mid, _) = make_signed_tx(0, 50);
         let low_hash = tx_low.hash();
 
-        pool.insert(tx_low, &verifier, &no_known_pubkeys, &rich_balance)
-            .unwrap();
-        pool.insert(tx_mid, &verifier, &no_known_pubkeys, &rich_balance)
-            .unwrap();
+        insert_rich(&pool, tx_low, &verifier, &mut ws, &cs).unwrap();
+        insert_rich(&pool, tx_mid, &verifier, &mut ws, &cs).unwrap();
 
         // Pool is full. Insert a higher priority tx — should evict tx_low.
         let (tx_high, _) = make_signed_tx(0, 100);
-        pool.insert(tx_high, &verifier, &no_known_pubkeys, &rich_balance)
-            .unwrap();
+        insert_rich(&pool, tx_high, &verifier, &mut ws, &cs).unwrap();
 
         assert_eq!(pool.len(), 2);
         assert!(!pool.contains(&low_hash)); // evicted
@@ -821,19 +797,16 @@ mod tests {
         };
         let pool = TxPool::new(config);
         let verifier = DilithiumVerifier;
+        let (mut ws, cs) = setup_validation_ctx();
 
         let (tx1, _) = make_signed_tx(0, 50);
         let (tx2, _) = make_signed_tx(0, 100);
-        pool.insert(tx1, &verifier, &no_known_pubkeys, &rich_balance)
-            .unwrap();
-        pool.insert(tx2, &verifier, &no_known_pubkeys, &rich_balance)
-            .unwrap();
+        insert_rich(&pool, tx1, &verifier, &mut ws, &cs).unwrap();
+        insert_rich(&pool, tx2, &verifier, &mut ws, &cs).unwrap();
 
         // Try to insert a tx with lower priority than worst in pool
         let (tx_too_low, _) = make_signed_tx(0, 5);
-        let err = pool
-            .insert(tx_too_low, &verifier, &no_known_pubkeys, &rich_balance)
-            .unwrap_err();
+        let err = insert_rich(&pool, tx_too_low, &verifier, &mut ws, &cs).unwrap_err();
         assert!(matches!(err, MempoolError::PoolFull { .. }));
     }
 
@@ -841,6 +814,7 @@ mod tests {
     fn known_pubkey_lookup() {
         let pool = TxPool::new(make_config());
         let verifier = DilithiumVerifier;
+        let (mut ws, cs) = setup_validation_ctx();
 
         let signer = DilithiumSigner::generate();
         let pubkey = signer.public_key().to_vec();
@@ -863,16 +837,8 @@ mod tests {
         // NO pubkey in transaction — rely on lookup
         let signed = SignedTransaction::new(from, tx, sig);
 
-        let pk_clone = pubkey.clone();
-        let lookup = move |addr: &Address| -> Option<Vec<u8>> {
-            if *addr == test_address(&pk_clone) {
-                Some(pk_clone.clone())
-            } else {
-                None
-            }
-        };
-
-        let result = pool.insert(signed, &verifier, &lookup, &rich_balance);
+        cs.put_pubkey(&from, &pubkey).unwrap();
+        let result = insert_rich(&pool, signed, &verifier, &mut ws, &cs);
         assert!(result.is_ok());
     }
 
@@ -890,11 +856,10 @@ mod tests {
     fn reject_insufficient_balance() {
         let pool = TxPool::new(make_config());
         let verifier = DilithiumVerifier;
+        let (mut ws, cs) = setup_validation_ctx();
         let (tx, _pk) = make_signed_tx(0, 100);
 
-        let err = pool
-            .insert(tx, &verifier, &no_known_pubkeys, &zero_balance)
-            .unwrap_err();
+        let err = insert_broke(&pool, tx, &verifier, &mut ws, &cs).unwrap_err();
         assert!(matches!(err, MempoolError::InsufficientBalance { .. }));
     }
 
@@ -902,11 +867,18 @@ mod tests {
     fn accept_exact_balance() {
         let pool = TxPool::new(make_config());
         let verifier = DilithiumVerifier;
+        let (mut ws, cs) = setup_validation_ctx();
         let (tx, _pk) = make_signed_tx(0, 100);
 
         // gas_limit=21000, max_fee=110, value=0 → need 21000*110 = 2_310_000
-        let exact = |_: &Address| -> U256 { U256::from(21_000u64 * 110) };
-        let result = pool.insert(tx, &verifier, &no_known_pubkeys, &exact);
+        let result = insert_with_balance(
+            &pool,
+            tx,
+            &verifier,
+            &mut ws,
+            &cs,
+            U256::from(21_000u64 * 110),
+        );
         assert!(result.is_ok());
     }
 
@@ -916,6 +888,7 @@ mod tests {
     fn rbf_replaces_with_sufficient_fee_bump() {
         let pool = TxPool::new(make_config());
         let verifier = DilithiumVerifier;
+        let (mut ws, cs) = setup_validation_ctx();
 
         let signer = DilithiumSigner::generate();
         let pubkey = signer.public_key().to_vec();
@@ -923,14 +896,12 @@ mod tests {
         // Insert tx at nonce 0 with priority_fee=100
         let tx_old = make_signed_tx_with_signer(&signer, &pubkey, 0, 100);
         let old_hash = tx_old.hash();
-        pool.insert(tx_old, &verifier, &no_known_pubkeys, &rich_balance)
-            .unwrap();
+        insert_rich(&pool, tx_old, &verifier, &mut ws, &cs).unwrap();
 
         // Replace with priority_fee=111 (>= 110% of 100)
         let tx_new = make_signed_tx_with_signer(&signer, &pubkey, 0, 111);
         let new_hash = tx_new.hash();
-        pool.insert(tx_new, &verifier, &no_known_pubkeys, &rich_balance)
-            .unwrap();
+        insert_rich(&pool, tx_new, &verifier, &mut ws, &cs).unwrap();
 
         assert_eq!(pool.len(), 1);
         assert!(!pool.contains(&old_hash));
@@ -941,20 +912,18 @@ mod tests {
     fn rbf_rejects_insufficient_fee_bump() {
         let pool = TxPool::new(make_config());
         let verifier = DilithiumVerifier;
+        let (mut ws, cs) = setup_validation_ctx();
 
         let signer = DilithiumSigner::generate();
         let pubkey = signer.public_key().to_vec();
 
         // Insert tx at nonce 0 with priority_fee=100
         let tx_old = make_signed_tx_with_signer(&signer, &pubkey, 0, 100);
-        pool.insert(tx_old, &verifier, &no_known_pubkeys, &rich_balance)
-            .unwrap();
+        insert_rich(&pool, tx_old, &verifier, &mut ws, &cs).unwrap();
 
         // Try to replace with priority_fee=105 (< 110% of 100)
         let tx_new = make_signed_tx_with_signer(&signer, &pubkey, 0, 105);
-        let err = pool
-            .insert(tx_new, &verifier, &no_known_pubkeys, &rich_balance)
-            .unwrap_err();
+        let err = insert_rich(&pool, tx_new, &verifier, &mut ws, &cs).unwrap_err();
         assert!(matches!(err, MempoolError::ReplacementFeeTooLow { .. }));
         assert_eq!(pool.len(), 1); // old tx still there
     }
@@ -967,25 +936,22 @@ mod tests {
         };
         let pool = TxPool::new(config);
         let verifier = DilithiumVerifier;
+        let (mut ws, cs) = setup_validation_ctx();
 
         let signer = DilithiumSigner::generate();
         let pubkey = signer.public_key().to_vec();
 
         let tx_old = make_signed_tx_with_signer(&signer, &pubkey, 0, 100);
-        pool.insert(tx_old, &verifier, &no_known_pubkeys, &rich_balance)
-            .unwrap();
+        insert_rich(&pool, tx_old, &verifier, &mut ws, &cs).unwrap();
 
         // 115 < 120% of 100 → reject
         let tx_low = make_signed_tx_with_signer(&signer, &pubkey, 0, 115);
-        let err = pool
-            .insert(tx_low, &verifier, &no_known_pubkeys, &rich_balance)
-            .unwrap_err();
+        let err = insert_rich(&pool, tx_low, &verifier, &mut ws, &cs).unwrap_err();
         assert!(matches!(err, MempoolError::ReplacementFeeTooLow { .. }));
 
         // 120 >= 120% of 100 → accept
         let tx_ok = make_signed_tx_with_signer(&signer, &pubkey, 0, 120);
-        pool.insert(tx_ok, &verifier, &no_known_pubkeys, &rich_balance)
-            .unwrap();
+        insert_rich(&pool, tx_ok, &verifier, &mut ws, &cs).unwrap();
         assert_eq!(pool.len(), 1);
     }
 }

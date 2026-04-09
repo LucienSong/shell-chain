@@ -8,6 +8,7 @@
 //! - [`ShellPrecompiles`]: PQ precompile provider (ecrecover disabled, PQ_DILITHIUM_VERIFY at 0x0100)
 //! - [`validate_tx`]: PQ signature verification + hybrid pubkey registration
 
+mod aa_validation;
 pub mod bloom;
 mod executor;
 mod precompiles;
@@ -16,13 +17,19 @@ pub mod system_contracts;
 pub mod tracer;
 mod tx_validation;
 
+pub use aa_validation::{
+    validate_aa_tx, AaValidationError, AaValidationOutcome, VALIDATION_GAS_CAP,
+};
 pub use executor::{commit_evm_state, ExecutorError, ShellEvm, TxExecutionResult};
 pub use precompiles::{ShellPrecompiles, PQ_DILITHIUM_VERIFY_GAS};
 pub use state_db::{ShellStateDb, StateDbError};
 pub use system_contracts::{
-    encode_add_validator_calldata, encode_remove_validator_calldata, execute_system_contract,
-    registry_address, system_contract_code_hash, SystemContractError, SYSTEM_CALL_BASE_GAS,
-    SYSTEM_CALL_OP_GAS, VALIDATOR_REGISTRY_ADDR,
+    account_manager_address, account_manager_code_hash, encode_add_validator_calldata,
+    encode_clear_validation_code_calldata, encode_remove_validator_calldata,
+    encode_rotate_key_calldata, encode_set_validation_code_calldata, execute_system_contract,
+    execute_system_contract_call, is_system_contract, registry_address, system_contract_code_hash,
+    SystemContractEffects, SystemContractError, SystemContractOutcome, ACCOUNT_MANAGER_ADDR,
+    SYSTEM_CALL_BASE_GAS, SYSTEM_CALL_OP_GAS, VALIDATOR_REGISTRY_ADDR,
 };
 pub use tracer::{decode_revert_reason, CallFrame, TraceResult};
 pub use tx_validation::{

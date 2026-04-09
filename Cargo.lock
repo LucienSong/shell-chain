@@ -5641,7 +5641,9 @@ dependencies = [
  "serde_json",
  "shell-core",
  "shell-crypto",
+ "shell-evm",
  "shell-primitives",
+ "shell-storage",
  "thiserror 2.0.18",
 ]
 

@@ -197,11 +197,7 @@ impl<S: KvStore + 'static> RpcHandler<S> {
         }
 
         let chain_store = &self.chain_store;
-        let ws = self.world_state.read();
-
-        let known_pubkeys =
-            |addr: &Address| -> Option<Vec<u8>> { chain_store.get_pubkey(addr).ok().flatten() };
-        let balance_of = |addr: &Address| -> U256 { ws.get_balance(addr).unwrap_or(U256::ZERO) };
+        let mut ws = self.world_state.write();
 
         // Clone before insert (which consumes the value) so we can broadcast on success.
         let tx_for_broadcast = self.tx_broadcast.as_ref().map(|_| signed_tx.clone());
@@ -209,7 +205,7 @@ impl<S: KvStore + 'static> RpcHandler<S> {
         let verifier = MultiVerifier;
         let hash = self
             .tx_pool
-            .insert(signed_tx, &verifier, &known_pubkeys, &balance_of)
+            .insert(signed_tx, &mut ws, chain_store, &verifier)
             .map_err(|e| ErrorObjectOwned::owned(-32000, e.to_string(), None::<()>))?;
 
         // Broadcast to peers via the network channel.

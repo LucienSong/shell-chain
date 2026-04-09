@@ -2,7 +2,7 @@
 
 Deploy and interact with smart contracts on Shell-Chain.
 
-> **See also:** [Quickstart Guide](QUICKSTART.md) · [JSON-RPC API Reference](JSON_RPC_API.md) · [Testnet Operator Guide](TESTNET_OPERATOR_GUIDE.md) · [PQ Crypto Guide](PQ_CRYPTO_GUIDE.md)
+> **See also:** [Quickstart Guide](QUICKSTART.md) · [JSON-RPC API Reference](JSON_RPC_API.md) · [Testnet Operator Guide](TESTNET_OPERATOR_GUIDE.md) · [PQ Crypto Guide](PQ_CRYPTO_GUIDE.md) · [Native Account Abstraction Guide](ACCOUNT_ABSTRACTION_GUIDE.md)
 
 ---
 
@@ -243,10 +243,10 @@ curl -s http://localhost:8545 \
     "jsonrpc":"2.0",
     "method":"shell_sendTransaction",
     "params":[{
-      "from": "0xYOUR_ADDRESS",
+      "from": "pq1YOUR_ADDRESS",
       "data": "0x608060405234801561001057600080fd5b50...",
       "gas": "0x100000",
-      "maxFeePerGas": "0x3b9aca00",
+      "maxFeePerGas": "0x5f7609",
       "maxPriorityFeePerGas": "0x0",
       "nonce": "0x0",
       "pqSignature": "0x...dilithium3_signature...",
@@ -256,6 +256,9 @@ curl -s http://localhost:8545 \
   }'
 ```
 
+> **Fee note:** `maxFeePerGas` is only an example. In real deployments, query
+> `eth_gasPrice` and use a value greater than or equal to the current base fee.
+>
 > **Note:** Standard Ethereum wallets (MetaMask, etc.) use ECDSA signatures. For full PQ security, use the `shell-node` CLI or PQ-aware SDKs. See [PQ Crypto Guide](PQ_CRYPTO_GUIDE.md) for details.
 
 ---

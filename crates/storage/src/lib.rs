@@ -19,7 +19,7 @@ pub use merkle_trie::MerkleTrie;
 pub use snapshot::{SnapshotEntry, SnapshotMetadata, SnapshotReader, SnapshotWriter};
 pub use state_pruner::{PruneResult, StatePruner};
 pub use trie_adapter::KvStoreTrieDb;
-pub use world_state::{validator_registry_addr, WorldState};
+pub use world_state::{account_manager_addr, validator_registry_addr, WorldState};
 
 #[cfg(feature = "rocksdb")]
 pub use rocks_db::{

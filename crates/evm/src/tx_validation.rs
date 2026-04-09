@@ -7,9 +7,10 @@
 //! 4. **Nonce check** — tx.nonce must equal account.nonce
 //! 5. **Balance check** — sender must afford gas_limit × max_fee_per_gas + value
 
+use crate::aa_validation::{validate_aa_tx, AaValidationError};
 use shell_core::SignedTransaction;
 use shell_crypto::Verifier;
-use shell_primitives::{blake3_hash, Address, U256};
+use shell_primitives::{Address, U256};
 use shell_storage::{ChainStore, KvStore, StorageError, WorldState};
 
 /// Errors returned during transaction validation.
@@ -53,6 +54,9 @@ pub enum TxValidationError {
 
     #[error("invalid blob transaction: {0}")]
     InvalidBlobTx(String),
+
+    #[error("aa validation failed: {0}")]
+    AaValidation(String),
 }
 
 /// Minimum gas for a plain transfer (no data).
@@ -86,7 +90,7 @@ const ACCESS_LIST_STORAGE_KEY_COST: u64 = 1900;
 /// to know whether registration occurred).
 pub fn validate_tx<S: KvStore + 'static, V: Verifier>(
     signed_tx: &SignedTransaction,
-    world_state: &WorldState<S>,
+    world_state: &mut WorldState<S>,
     chain_store: &ChainStore<S>,
     verifier: &V,
     expected_chain_id: u64,
@@ -120,57 +124,23 @@ pub fn validate_tx<S: KvStore + 'static, V: Verifier>(
         return Err(TxValidationError::GasTooLow(tx.gas_limit));
     }
 
-    let registered_pubkey = chain_store.get_pubkey(&signed_tx.from)?;
-    let pubkey = resolve_pubkey(signed_tx.sender_pubkey.as_ref(), registered_pubkey.as_ref())?;
-
-    // 3b. Algorithm allowlist check (F-170)
-    if !shell_crypto::ALLOWED_ALGORITHMS.contains(&signed_tx.signature.sig_type) {
-        return Err(TxValidationError::DisallowedAlgorithm(
-            signed_tx.signature.sig_type,
-        ));
-    }
-
-    // 3c. Pubkey binding check (F-154): reject if a DIFFERENT pubkey is
-    //     already registered for this address. Same pubkey re-registration
-    //     is allowed (idempotent).
-    if signed_tx.sender_pubkey.is_some() {
-        if let Some(registered) = registered_pubkey.as_ref() {
-            if registered != &pubkey {
-                return Err(TxValidationError::PubkeyConflict);
-            }
-        }
-    }
-
-    // 4. Sender binding:
-    //    - first use (no registered pubkey): address must match the derivation
-    //    - later use: a registered pubkey anchors the account, so address
-    //      derivation is intentionally skipped to allow future key rotation
-    validate_sender_binding(
-        signed_tx,
-        world_state,
-        registered_pubkey.as_deref(),
-        &pubkey,
-    )?;
-
-    // 5. Signature verification
-    let tx_hash = signed_tx.hash();
-    let valid = verifier.verify(&pubkey, tx_hash.as_bytes(), &signed_tx.signature)?;
-    if !valid {
-        return Err(TxValidationError::SignatureInvalid);
-    }
+    let validation = validate_aa_tx(signed_tx, world_state, chain_store, verifier)?;
+    let pubkey = validation.pubkey;
 
     // 6. Register pubkey if this is the first transaction (sender_pubkey present)
-    if signed_tx.sender_pubkey.is_some() && registered_pubkey.is_none() {
+    if validation.should_register_pubkey {
         chain_store.put_pubkey(&signed_tx.from, &pubkey)?;
     }
 
     // 7. Nonce check
-    let account_nonce = world_state.get_nonce(&signed_tx.from)?;
-    if tx.nonce != account_nonce {
-        return Err(TxValidationError::NonceMismatch {
-            expected: account_nonce,
-            got: tx.nonce,
-        });
+    if validation.protocol_checks_nonce {
+        let account_nonce = world_state.get_nonce(&signed_tx.from)?;
+        if tx.nonce != account_nonce {
+            return Err(TxValidationError::NonceMismatch {
+                expected: account_nonce,
+                got: tx.nonce,
+            });
+        }
     }
 
     // 8. Balance check: sender must afford gas_limit * max_fee_per_gas + value
@@ -213,7 +183,7 @@ pub fn validate_tx<S: KvStore + 'static, V: Verifier>(
 /// 7. Signature verification
 pub fn validate_tx_for_import<S: KvStore + 'static, V: Verifier>(
     signed_tx: &SignedTransaction,
-    world_state: &WorldState<S>,
+    world_state: &mut WorldState<S>,
     chain_store: &ChainStore<S>,
     verifier: &V,
     expected_chain_id: u64,
@@ -247,86 +217,7 @@ pub fn validate_tx_for_import<S: KvStore + 'static, V: Verifier>(
         return Err(TxValidationError::GasTooLow(tx.gas_limit));
     }
 
-    let registered_pubkey = chain_store.get_pubkey(&signed_tx.from)?;
-    let pubkey = resolve_pubkey(signed_tx.sender_pubkey.as_ref(), registered_pubkey.as_ref())?;
-    if !shell_crypto::ALLOWED_ALGORITHMS.contains(&signed_tx.signature.sig_type) {
-        return Err(TxValidationError::DisallowedAlgorithm(
-            signed_tx.signature.sig_type,
-        ));
-    }
-
-    // 5. Pubkey binding conflict
-    if signed_tx.sender_pubkey.is_some() {
-        if let Some(registered) = registered_pubkey.as_ref() {
-            if registered != &pubkey {
-                return Err(TxValidationError::PubkeyConflict);
-            }
-        }
-    }
-
-    // 6. Sender binding
-    validate_sender_binding(
-        signed_tx,
-        world_state,
-        registered_pubkey.as_deref(),
-        &pubkey,
-    )?;
-
-    // 7. Signature verification
-    let tx_hash = signed_tx.hash();
-    let valid = verifier.verify(&pubkey, tx_hash.as_bytes(), &signed_tx.signature)?;
-    if !valid {
-        return Err(TxValidationError::SignatureInvalid);
-    }
-
-    Ok(())
-}
-
-/// Resolve the public key for signature verification.
-///
-/// Hybrid model:
-/// - If `sender_pubkey` is in the tx, use it (first-time registration)
-/// - Otherwise, look up the on-chain registry
-fn resolve_pubkey(
-    sender_pubkey: Option<&Vec<u8>>,
-    registered_pubkey: Option<&Vec<u8>>,
-) -> Result<Vec<u8>, TxValidationError> {
-    if let Some(pk) = sender_pubkey {
-        return Ok(pk.clone());
-    }
-    match registered_pubkey {
-        Some(pk) => Ok(pk.clone()),
-        None => Err(TxValidationError::PubkeyNotFound),
-    }
-}
-
-fn validate_sender_binding<S: KvStore + 'static>(
-    signed_tx: &SignedTransaction,
-    world_state: &WorldState<S>,
-    registered_pubkey: Option<&[u8]>,
-    pubkey: &[u8],
-) -> Result<(), TxValidationError> {
-    if registered_pubkey.is_none() {
-        let derived = Address::from_public_key(pubkey, signed_tx.signature.sig_type.as_u8());
-        if signed_tx.from != derived {
-            return Err(TxValidationError::AddressMismatch {
-                from: signed_tx.from,
-                derived,
-            });
-        }
-        return Ok(());
-    }
-
-    if let Some(account) = world_state.get_account(&signed_tx.from)? {
-        if account.validation_code_hash.is_none()
-            && account.pq_pubkey_hash != shell_primitives::ShellHash::ZERO
-        {
-            let pubkey_hash = blake3_hash(pubkey);
-            if account.pq_pubkey_hash != pubkey_hash {
-                return Err(TxValidationError::PubkeyConflict);
-            }
-        }
-    }
+    let _ = validate_aa_tx(signed_tx, world_state, chain_store, verifier)?;
 
     Ok(())
 }
@@ -433,6 +324,10 @@ mod tests {
         }
     }
 
+    fn validator_returns_true() -> Vec<u8> {
+        vec![0x60, 0x01, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xf3]
+    }
+
     // ── Intrinsic gas ─────────────────────────────────────────
 
     #[test]
@@ -465,7 +360,7 @@ mod tests {
         let signed = sign_tx(&signer, tx, true);
 
         let verifier = DilithiumVerifier;
-        let result = validate_tx(&signed, &ws, &cs, &verifier, test_chain_id());
+        let result = validate_tx(&signed, &mut ws, &cs, &verifier, test_chain_id());
         assert!(result.is_ok());
 
         // Pubkey should now be registered
@@ -489,7 +384,7 @@ mod tests {
         let signed = sign_tx(&signer, tx, false);
 
         let verifier = DilithiumVerifier;
-        let result = validate_tx(&signed, &ws, &cs, &verifier, test_chain_id());
+        let result = validate_tx(&signed, &mut ws, &cs, &verifier, test_chain_id());
         assert!(result.is_ok());
     }
 
@@ -506,7 +401,7 @@ mod tests {
         let signed = sign_tx(&signer, tx, true);
 
         let verifier = DilithiumVerifier;
-        let result = validate_tx(&signed, &ws, &cs, &verifier, test_chain_id());
+        let result = validate_tx(&signed, &mut ws, &cs, &verifier, test_chain_id());
         assert!(matches!(
             result,
             Err(TxValidationError::ChainIdMismatch { .. })
@@ -525,7 +420,7 @@ mod tests {
         let signed = sign_tx(&signer, tx, true);
 
         let verifier = DilithiumVerifier;
-        let result = validate_tx(&signed, &ws, &cs, &verifier, test_chain_id());
+        let result = validate_tx(&signed, &mut ws, &cs, &verifier, test_chain_id());
         assert!(matches!(result, Err(TxValidationError::GasTooLow(_))));
     }
 
@@ -541,7 +436,7 @@ mod tests {
         let signed = sign_tx(&signer, tx, false);
 
         let verifier = DilithiumVerifier;
-        let result = validate_tx(&signed, &ws, &cs, &verifier, test_chain_id());
+        let result = validate_tx(&signed, &mut ws, &cs, &verifier, test_chain_id());
         assert!(matches!(result, Err(TxValidationError::PubkeyNotFound)));
     }
 
@@ -561,7 +456,7 @@ mod tests {
             SignedTransaction::with_pubkey(wrong_from, tx, sig, signer.public_key().to_vec());
 
         let verifier = DilithiumVerifier;
-        let result = validate_tx(&signed, &ws, &cs, &verifier, test_chain_id());
+        let result = validate_tx(&signed, &mut ws, &cs, &verifier, test_chain_id());
         assert!(matches!(
             result,
             Err(TxValidationError::AddressMismatch { .. })
@@ -581,7 +476,7 @@ mod tests {
             SignedTransaction::with_pubkey(from, tx, bad_sig, signer.public_key().to_vec());
 
         let verifier = DilithiumVerifier;
-        let result = validate_tx(&signed, &ws, &cs, &verifier, test_chain_id());
+        let result = validate_tx(&signed, &mut ws, &cs, &verifier, test_chain_id());
         assert!(matches!(result, Err(TxValidationError::SignatureInvalid)));
     }
 
@@ -596,7 +491,49 @@ mod tests {
         let signed = sign_tx(&signer, tx, true);
 
         let verifier = DilithiumVerifier;
-        let result = validate_tx(&signed, &ws, &cs, &verifier, test_chain_id());
+        let result = validate_tx(&signed, &mut ws, &cs, &verifier, test_chain_id());
+        assert!(matches!(
+            result,
+            Err(TxValidationError::NonceMismatch {
+                expected: 0,
+                got: 5
+            })
+        ));
+    }
+
+    #[test]
+    fn validate_custom_validation_keeps_protocol_nonce_baseline() {
+        let signer = make_signer();
+        let (mut ws, cs) = setup_stores();
+        let from = signer_address(&signer);
+
+        let code = validator_returns_true();
+        let code_hash = shell_primitives::keccak256(&code);
+        cs.put_code(&code_hash, &code).unwrap();
+
+        use shell_core::Account;
+        ws.set_account(
+            &from,
+            &Account {
+                pq_pubkey_hash: ShellHash::ZERO,
+                nonce: 0,
+                balance: U256::from(1_000_000),
+                validation_code_hash: Some(code_hash),
+                code_hash: None,
+                storage_root: ShellHash::ZERO,
+            },
+        )
+        .unwrap();
+
+        let tx = simple_transfer(test_chain_id(), 5);
+        let signed = SignedTransaction::new(
+            from,
+            tx,
+            PQSignature::new(SignatureType::MlDsa65, vec![0xAA; 64]),
+        );
+
+        let verifier = DilithiumVerifier;
+        let result = validate_tx(&signed, &mut ws, &cs, &verifier, test_chain_id());
         assert!(matches!(
             result,
             Err(TxValidationError::NonceMismatch {
@@ -617,7 +554,7 @@ mod tests {
         let signed = sign_tx(&signer, tx, true);
 
         let verifier = DilithiumVerifier;
-        let result = validate_tx(&signed, &ws, &cs, &verifier, test_chain_id());
+        let result = validate_tx(&signed, &mut ws, &cs, &verifier, test_chain_id());
         assert!(matches!(
             result,
             Err(TxValidationError::InsufficientBalance { .. })
@@ -650,7 +587,7 @@ mod tests {
 
         let verifier = DilithiumVerifier;
         // Must not panic — should return InsufficientBalance with needed = U256::MAX
-        let result = validate_tx(&signed, &ws, &cs, &verifier, test_chain_id());
+        let result = validate_tx(&signed, &mut ws, &cs, &verifier, test_chain_id());
         assert!(
             matches!(result, Err(TxValidationError::InsufficientBalance { .. })),
             "overflow should be caught, got: {:?}",
@@ -678,7 +615,7 @@ mod tests {
         let signed = SignedTransaction::with_pubkey(from, tx, sig, signer2.public_key().to_vec());
 
         let verifier = DilithiumVerifier;
-        let result = validate_tx(&signed, &ws, &cs, &verifier, test_chain_id());
+        let result = validate_tx(&signed, &mut ws, &cs, &verifier, test_chain_id());
         // Should fail with either PubkeyConflict or AddressMismatch
         assert!(result.is_err());
     }
@@ -698,7 +635,7 @@ mod tests {
         let signed = sign_tx(&signer, tx, true);
 
         let verifier = DilithiumVerifier;
-        let result = validate_tx(&signed, &ws, &cs, &verifier, test_chain_id());
+        let result = validate_tx(&signed, &mut ws, &cs, &verifier, test_chain_id());
         assert!(result.is_ok());
     }
 
@@ -720,11 +657,33 @@ mod tests {
             SignedTransaction::with_pubkey(from, tx, bad_algo_sig, signer.public_key().to_vec());
 
         let verifier = DilithiumVerifier;
-        let result = validate_tx(&signed, &ws, &cs, &verifier, test_chain_id());
+        let result = validate_tx(&signed, &mut ws, &cs, &verifier, test_chain_id());
         assert!(
             matches!(result, Err(TxValidationError::DisallowedAlgorithm(_))),
             "MlDsa65 should be rejected, got: {:?}",
             result
         );
+    }
+}
+
+impl From<AaValidationError> for TxValidationError {
+    fn from(value: AaValidationError) -> Self {
+        match value {
+            AaValidationError::PubkeyNotFound => Self::PubkeyNotFound,
+            AaValidationError::AddressMismatch { from, derived } => {
+                Self::AddressMismatch { from, derived }
+            }
+            AaValidationError::SignatureInvalid => Self::SignatureInvalid,
+            AaValidationError::PubkeyConflict => Self::PubkeyConflict,
+            AaValidationError::DisallowedAlgorithm(sig_type) => Self::DisallowedAlgorithm(sig_type),
+            AaValidationError::Crypto(err) => Self::Crypto(err),
+            AaValidationError::Storage(err) => Self::Storage(err),
+            AaValidationError::StateDb(err) => Self::AaValidation(err.to_string()),
+            AaValidationError::ValidationCodeMissing(hash) => {
+                Self::AaValidation(format!("validation code missing for hash {hash}"))
+            }
+            AaValidationError::ValidationContractRejected(msg)
+            | AaValidationError::ValidationContractExecution(msg) => Self::AaValidation(msg),
+        }
     }
 }

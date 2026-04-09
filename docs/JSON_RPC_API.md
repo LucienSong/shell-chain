@@ -2,7 +2,7 @@
 
 Complete reference for the shell-chain JSON-RPC API. All methods follow the [JSON-RPC 2.0](https://www.jsonrpc.org/specification) specification.
 
-> **See also:** [Quickstart Guide](QUICKSTART.md) · [Testnet Operator Guide](TESTNET_OPERATOR_GUIDE.md)
+> **See also:** [Quickstart Guide](QUICKSTART.md) · [Testnet Operator Guide](TESTNET_OPERATOR_GUIDE.md) · [Post-Quantum Cryptography Guide](PQ_CRYPTO_GUIDE.md) · [Native Account Abstraction Guide](ACCOUNT_ABSTRACTION_GUIDE.md)
 
 ---
 
@@ -35,6 +35,10 @@ ws://127.0.0.1:8546
 ```
 
 All requests use POST with `Content-Type: application/json`.
+
+**Address note:** the canonical external account format is `pq1...`. Some
+input paths still accept legacy `0x...` addresses as a migration shim, but the
+examples below use `pq1...` placeholders for account addresses.
 
 ## CORS Configuration
 
@@ -267,7 +271,8 @@ Returns the current base fee.
 
 **Parameters:** None
 
-**Returns:** `String` — Hex-encoded gas price in wei.
+**Returns:** `String` — Hex-encoded base fee in wei for the latest chain state.
+The exact value changes over time as blocks are produced.
 
 ```bash
 curl -s http://localhost:8545 \
@@ -276,7 +281,7 @@ curl -s http://localhost:8545 \
 ```
 
 ```json
-{"jsonrpc":"2.0","id":1,"result":"0x3b9aca00"}
+{"jsonrpc":"2.0","id":1,"result":"0x5f7609"}
 ```
 
 ---
@@ -316,7 +321,7 @@ curl -s http://localhost:8545 \
   "id": 1,
   "result": {
     "oldestBlock": "0x15",
-    "baseFeePerGas": ["0x3b9aca00","0x3b9aca00","0x3b9aca00","0x3b9aca00","0x3b9aca00","0x3b9aca00"],
+    "baseFeePerGas": ["0x8e4f6f","0x7c4681","0x6c1761","0x5f7609","0x53a8d3","0x48c470"],
     "gasUsedRatio": [0.0, 0.0, 0.0, 0.0, 0.0],
     "reward": []
   }
@@ -332,7 +337,7 @@ Returns the balance of an address.
 **Parameters:**
 | # | Type | Required | Description |
 |---|------|----------|-------------|
-| 1 | `String` | Yes | Address (0x-prefixed) |
+| 1 | `String` | Yes | Address (`pq1...` canonical; legacy `0x...` accepted on some input paths) |
 | 2 | `String` | No | Block tag (`"latest"`, `"earliest"`, `"pending"`, `"safe"`, `"finalized"`, or hex number) |
 
 **Returns:** `String` — Hex-encoded balance in wei.
@@ -340,7 +345,7 @@ Returns the balance of an address.
 ```bash
 curl -s http://localhost:8545 \
   -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","method":"eth_getBalance","params":["0x742d35Cc6634C0532925a3b844Bc9e7595f2bD18","latest"],"id":1}'
+  -d '{"jsonrpc":"2.0","method":"eth_getBalance","params":["pq1YOUR_ADDRESS_HERE","latest"],"id":1}'
 ```
 
 ```json
@@ -356,7 +361,7 @@ Returns the nonce (transaction count) for an address.
 **Parameters:**
 | # | Type | Required | Description |
 |---|------|----------|-------------|
-| 1 | `String` | Yes | Address (0x-prefixed) |
+| 1 | `String` | Yes | Address (`pq1...` canonical; legacy `0x...` accepted on some input paths) |
 | 2 | `String` | No | Block tag |
 
 **Returns:** `String` — Hex-encoded nonce.
@@ -364,7 +369,7 @@ Returns the nonce (transaction count) for an address.
 ```bash
 curl -s http://localhost:8545 \
   -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","method":"eth_getTransactionCount","params":["0x742d35Cc6634C0532925a3b844Bc9e7595f2bD18","latest"],"id":1}'
+  -d '{"jsonrpc":"2.0","method":"eth_getTransactionCount","params":["pq1YOUR_ADDRESS_HERE","latest"],"id":1}'
 ```
 
 ```json
@@ -551,7 +556,8 @@ Returns the bytecode at an address.
 | 1 | `String` | Yes | Address |
 | 2 | `String` | No | Block tag |
 
-**Returns:** `String` — Hex-encoded bytecode, or `"0x"` for EOAs.
+**Returns:** `String` — Hex-encoded bytecode, or `"0x"` for accounts without
+runtime code.
 
 ---
 
@@ -733,7 +739,7 @@ Returns the client identifier string.
 
 **Parameters:** None
 
-**Returns:** `String` — `"shell-chain/0.5.0"`.
+**Returns:** `String` — `"shell-chain/0.6.0"`.
 
 ```bash
 curl -s http://localhost:8545 \
@@ -742,7 +748,7 @@ curl -s http://localhost:8545 \
 ```
 
 ```json
-{"jsonrpc":"2.0","id":1,"result":"shell-chain/0.5.0"}
+{"jsonrpc":"2.0","id":1,"result":"shell-chain/0.6.0"}
 ```
 
 ---
@@ -781,14 +787,14 @@ Returns the post-quantum public key associated with an address.
 **Parameters:**
 | # | Type | Required | Description |
 |---|------|----------|-------------|
-| 1 | `String` | Yes | Address (0x-prefixed) |
+| 1 | `String` | Yes | Address (`pq1...` canonical; legacy `0x...` accepted on some input paths) |
 
 **Returns:** `String|null` — Hex-encoded PQ public key, or `null` if not found.
 
 ```bash
 curl -s http://localhost:8545 \
   -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","method":"shell_getPqPubkey","params":["0x742d35Cc6634C0532925a3b844Bc9e7595f2bD18"],"id":1}'
+  -d '{"jsonrpc":"2.0","method":"shell_getPqPubkey","params":["pq1YOUR_ADDRESS_HERE"],"id":1}'
 ```
 
 ---
@@ -964,14 +970,14 @@ Returns node status information.
 **Returns:**
 ```json
 {
-  "version": "ShellChain/v0.1.0/rust",
+  "version": "ShellChain/v0.6.0/rust",
   "chainId": 1337,
   "blockHeight": 42,
   "peerCount": 0,
   "txPoolSize": 5,
   "isMining": true,
   "uptime": 3600,
-  "baseFee": "0x3b9aca00"
+  "baseFee": "0x5f7609"
 }
 ```
 
@@ -1014,7 +1020,7 @@ Returns aggregate chain statistics (scans the last 1,000 blocks).
   "totalTransactions": 3200,
   "avgBlockTime": 2.01,
   "gasUsedTotal": "0x...",
-  "latestBaseFee": "0x3b9aca00"
+  "latestBaseFee": "0x5f7609"
 }
 ```
 

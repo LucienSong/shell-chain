@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- Native Account Abstraction guide covering `pq1...` addresses, validation layers, custom validator flow, and rollout boundaries
+
+### Changed
+- README, quickstart, RPC API, PQ crypto, smart contract, and operator docs aligned to the native AA / `pq1...` address model
+- JSON-RPC documentation updated to describe `eth_gasPrice` as a dynamic base-fee value instead of a fixed 1 gwei example
+
 ## [0.6.0] — 2026-04-06 — Public Testnet Launch Readiness
 
 ### Added

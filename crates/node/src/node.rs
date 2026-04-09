@@ -9,12 +9,12 @@ use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
 use shell_consensus::{Attestation, ConsensusEngine, FinalityState, ForkChoice, PoaEngine};
-use shell_core::{calculate_base_fee, Block, BlockHeader, SignedTransaction};
+use shell_core::{calculate_base_fee, Account, Block, BlockHeader, SignedTransaction};
 use shell_crypto::{BatchVerifier, MultiVerifier, PreVerified, Signer, Verifier, VerifyItem};
 use shell_evm::{commit_evm_state, validate_tx_for_import, ShellEvm, ShellStateDb};
 use shell_mempool::TxPool;
 use shell_network::{NetworkMessage, NetworkService};
-use shell_primitives::{Address, Bytes, ShellHash, U256};
+use shell_primitives::{Address, Bytes, ShellHash};
 use shell_rpc::DevRpcControl;
 use shell_storage::{ChainStore, KvStore, StatePruner, WorldState};
 
@@ -134,6 +134,54 @@ impl<S: KvStore + 'static> Node<S> {
             }),
             shutdown_tx,
         }
+    }
+
+    fn sync_system_contract_state(
+        &self,
+        local_ws: &mut WorldState<S>,
+        effects: &shell_evm::SystemContractEffects,
+    ) -> Result<(), NodeError> {
+        let validators = if effects.validator_set_changed {
+            let validators = local_ws.get_validators()?;
+            if validators.is_empty() {
+                return Err(NodeError::Startup(
+                    "system tx produced empty validator set".into(),
+                ));
+            }
+            if validators.len() > WorldState::<S>::MAX_VALIDATORS {
+                return Err(NodeError::Startup(format!(
+                    "system tx produced validator set of size {} exceeding max {}",
+                    validators.len(),
+                    WorldState::<S>::MAX_VALIDATORS,
+                )));
+            }
+            Some(validators)
+        } else {
+            None
+        };
+
+        let mut updated_accounts: Vec<(Address, Account)> =
+            Vec::with_capacity(effects.updated_accounts.len());
+        for address in &effects.updated_accounts {
+            let account = local_ws.get_account(address)?.ok_or_else(|| {
+                NodeError::Startup(format!("system tx updated missing account {address}"))
+            })?;
+            updated_accounts.push((*address, account));
+        }
+
+        if validators.is_none() && updated_accounts.is_empty() {
+            return Ok(());
+        }
+
+        let mut ws = self.world_state.write();
+        if let Some(validators) = validators {
+            ws.set_validators(&validators)?;
+        }
+        for (address, account) in updated_accounts {
+            ws.set_account(&address, &account)?;
+        }
+
+        Ok(())
     }
 
     /// Register an authority's public key for seal verification.
@@ -270,20 +318,12 @@ impl<S: KvStore + 'static> Node<S> {
         };
 
         self.tx_pool.clear();
-        let known_pubkeys = |addr: &Address| -> Option<Vec<u8>> {
-            self.chain_store.get_pubkey(addr).ok().flatten()
-        };
-        let balance_of = |addr: &Address| -> U256 {
-            self.world_state
-                .read()
-                .get_balance(addr)
-                .unwrap_or(U256::ZERO)
-        };
+        let mut world_state = self.world_state.write();
         let verifier = MultiVerifier;
         for tx in snapshot.pending_txs {
             let _ = self
                 .tx_pool
-                .insert(tx, &verifier, &known_pubkeys, &balance_of);
+                .insert(tx, &mut world_state, self.chain_store.as_ref(), &verifier);
         }
 
         self.dev_state.write().next_block_timestamp = snapshot.next_block_timestamp;
@@ -911,7 +951,7 @@ impl<S: KvStore + 'static> Node<S> {
             let pre_verifier = PreVerified;
             if let Err(e) = validate_tx_for_import(
                 tx,
-                evm.state_db().world_state(),
+                evm.state_db_mut().world_state_mut(),
                 &import_cs,
                 &pre_verifier,
                 self.config.chain_id,
@@ -931,27 +971,10 @@ impl<S: KvStore + 'static> Node<S> {
                     included_txs.push(tx.clone());
 
                     if result.is_system_tx {
-                        // System contract tx: state was applied directly to
-                        // the EVM's WorldState. Sync validator set to the
-                        // persistent WorldState so state_root is consistent.
-                        // Propagate errors to abort block production (F-068).
-                        let local_ws = evm.state_db_mut().world_state_mut();
-                        let validators = local_ws.get_validators()?;
-                        // F-202: Validate resulting validator set (same as import path).
-                        if validators.is_empty() {
-                            return Err(NodeError::Startup(
-                                "system tx produced empty validator set".into(),
-                            ));
-                        }
-                        if validators.len() > WorldState::<S>::MAX_VALIDATORS {
-                            return Err(NodeError::Startup(format!(
-                                "system tx produced validator set of size {} exceeding max {}",
-                                validators.len(),
-                                WorldState::<S>::MAX_VALIDATORS,
-                            )));
-                        }
-                        let mut ws = self.world_state.write();
-                        ws.set_validators(&validators)?;
+                        self.sync_system_contract_state(
+                            evm.state_db_mut().world_state_mut(),
+                            &result.system_contract_effects,
+                        )?;
                     } else {
                         // Normal EVM tx: commit EvmState changeset.
                         commit_evm_state(
@@ -1215,7 +1238,7 @@ impl<S: KvStore + 'static> Node<S> {
             for tx in &block.transactions {
                 validate_tx_for_import(
                     tx,
-                    evm.state_db().world_state(),
+                    evm.state_db_mut().world_state_mut(),
                     &import_cs,
                     &pre_verified,
                     self.config.chain_id,
@@ -1236,24 +1259,10 @@ impl<S: KvStore + 'static> Node<S> {
                         receipts.push(result.receipt);
 
                         if result.is_system_tx {
-                            // Propagate errors to abort block import (F-068).
-                            let local_ws = evm.state_db_mut().world_state_mut();
-                            let validators = local_ws.get_validators()?;
-                            // F-068: Validate resulting validator set is sane.
-                            if validators.is_empty() {
-                                return Err(NodeError::Startup(
-                                    "system tx produced empty validator set".into(),
-                                ));
-                            }
-                            if validators.len() > WorldState::<S>::MAX_VALIDATORS {
-                                return Err(NodeError::Startup(format!(
-                                    "system tx produced validator set of size {} exceeding max {}",
-                                    validators.len(),
-                                    WorldState::<S>::MAX_VALIDATORS,
-                                )));
-                            }
-                            let mut ws = self.world_state.write();
-                            ws.set_validators(&validators)?;
+                            self.sync_system_contract_state(
+                                evm.state_db_mut().world_state_mut(),
+                                &result.system_contract_effects,
+                            )?;
                         } else {
                             commit_evm_state(
                                 &result.state_changes,
@@ -1308,17 +1317,12 @@ impl<S: KvStore + 'static> Node<S> {
         _verifier: &dyn Verifier,
     ) -> Result<ShellHash, NodeError> {
         let chain_store = &self.chain_store;
-        let world_state_guard = self.world_state.read();
-
-        let known_pubkeys =
-            |addr: &Address| -> Option<Vec<u8>> { chain_store.get_pubkey(addr).ok().flatten() };
-        let balance_of =
-            |addr: &Address| -> U256 { world_state_guard.get_balance(addr).unwrap_or(U256::ZERO) };
+        let mut world_state_guard = self.world_state.write();
 
         let dv = MultiVerifier;
         let hash = self
             .tx_pool
-            .insert(tx, &dv, &known_pubkeys, &balance_of)
+            .insert(tx, &mut world_state_guard, chain_store.as_ref(), &dv)
             .map_err(|e| NodeError::Startup(e.to_string()))?;
 
         Ok(hash)
@@ -1504,6 +1508,7 @@ mod tests {
     use shell_core::Transaction;
     use shell_crypto::{DilithiumSigner, Signer};
     use shell_mempool::MempoolConfig;
+    use shell_primitives::U256;
     use shell_rpc::DevRpcControl;
     use shell_storage::MemoryDb;
 
@@ -1702,16 +1707,16 @@ mod tests {
 
         // Insert into mempool with real verification
         let verifier = MultiVerifier;
-        let known_pubkeys = |_: &Address| -> Option<Vec<u8>> { None };
-        let balance_of = |addr: &Address| -> U256 {
-            node.world_state
-                .read()
-                .get_balance(addr)
-                .unwrap_or(U256::ZERO)
-        };
+        let mut world_state = node.world_state.write();
         node.tx_pool
-            .insert(signed, &verifier, &known_pubkeys, &balance_of)
+            .insert(
+                signed,
+                &mut world_state,
+                node.chain_store.as_ref(),
+                &verifier,
+            )
             .unwrap();
+        drop(world_state);
 
         // Produce block with the transfer
         let block = node.produce_block(&signer, 100).unwrap();
@@ -1740,6 +1745,81 @@ mod tests {
             block.header.state_root,
             ShellHash::default(),
             "state root should reflect committed state"
+        );
+    }
+
+    #[test]
+    fn produce_block_commits_account_manager_updates() {
+        let (node, signer) = setup_node();
+        store_genesis(&node);
+
+        let tx_signer = DilithiumSigner::generate();
+        let sender = Address::from_public_key(tx_signer.public_key(), tx_signer.sig_type().as_u8());
+        let initial_balance = U256::from(1_000_000_000_000_000u64);
+        fund_account(&node, &sender, initial_balance);
+
+        let new_pubkey = vec![0xAB; 1312];
+        let tx = Transaction {
+            chain_id: 1337,
+            nonce: 0,
+            to: Some(shell_evm::account_manager_address()),
+            value: U256::ZERO,
+            data: shell_primitives::Bytes::from(shell_evm::encode_rotate_key_calldata(
+                &new_pubkey,
+                tx_signer.sig_type().as_u8(),
+            )),
+            gas_limit: 100_000,
+            max_fee_per_gas: shell_core::INITIAL_BASE_FEE,
+            max_priority_fee_per_gas: 0,
+            access_list: None,
+            tx_type: 2,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
+        };
+
+        let tx_hash = {
+            let encoded = alloy_rlp::encode(&tx);
+            shell_primitives::keccak256(&encoded)
+        };
+        let sig = tx_signer.sign(tx_hash.as_bytes()).expect("sign failed");
+        let signed =
+            SignedTransaction::with_pubkey(sender, tx, sig, tx_signer.public_key().to_vec());
+
+        let verifier = MultiVerifier;
+        let mut world_state = node.world_state.write();
+        node.tx_pool
+            .insert(
+                signed,
+                &mut world_state,
+                node.chain_store.as_ref(),
+                &verifier,
+            )
+            .unwrap();
+        drop(world_state);
+
+        let block = node.produce_block(&signer, 100).unwrap();
+        assert_eq!(block.transactions.len(), 1);
+
+        let account = node
+            .world_state
+            .read()
+            .get_account(&sender)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            account.pq_pubkey_hash,
+            shell_primitives::blake3_hash(&new_pubkey)
+        );
+        assert_eq!(account.nonce, 1);
+        assert_eq!(
+            account.balance,
+            initial_balance
+                - U256::from(shell_evm::SYSTEM_CALL_BASE_GAS + shell_evm::SYSTEM_CALL_OP_GAS)
+                    * U256::from(shell_core::INITIAL_BASE_FEE)
+        );
+        assert_eq!(
+            node.chain_store.get_pubkey(&sender).unwrap().unwrap(),
+            new_pubkey
         );
     }
 
@@ -2512,16 +2592,16 @@ mod tests {
             SignedTransaction::with_pubkey(sender, tx, sig, tx_signer.public_key().to_vec());
 
         let verifier = MultiVerifier;
-        let known_pubkeys = |_: &Address| -> Option<Vec<u8>> { None };
-        let balance_of = |addr: &Address| -> U256 {
-            node.world_state
-                .read()
-                .get_balance(addr)
-                .unwrap_or(U256::ZERO)
-        };
+        let mut world_state = node.world_state.write();
         node.tx_pool
-            .insert(signed, &verifier, &known_pubkeys, &balance_of)
+            .insert(
+                signed,
+                &mut world_state,
+                node.chain_store.as_ref(),
+                &verifier,
+            )
             .unwrap();
+        drop(world_state);
 
         let block = node.produce_block(&signer, 100).unwrap();
         assert_eq!(block.transactions.len(), 1);

@@ -255,16 +255,21 @@ else
     fail "eth_chainId expected 0x539, got $R"
 fi
 
+# Cache the latest block so fee-dependent checks use the same view of chain state.
+LATEST_BLOCK=$(rpc_raw 8545 eth_getBlockByNumber '["latest", false]')
+LATEST_HASH=$(echo "$LATEST_BLOCK" | jq -r '.result.hash // empty')
+LATEST_BASE_FEE=$(echo "$LATEST_BLOCK" | jq -r '.result.baseFeePerGas // empty')
+
 # eth_gasPrice
 R=$(rpc 8545 eth_gasPrice)
-if [ "$R" = "0x3b9aca00" ]; then
-    pass "eth_gasPrice returns 1 gwei (0x3b9aca00)"
+if [ -n "$R" ] && [ "$R" != "null" ] && [ "$R" = "$LATEST_BASE_FEE" ] && [ "$R" != "0x0" ]; then
+    pass "eth_gasPrice matches latest baseFeePerGas ($R)"
 else
-    fail "eth_gasPrice expected 0x3b9aca00, got $R"
+    fail "eth_gasPrice mismatch: rpc=$R latest.baseFeePerGas=$LATEST_BASE_FEE"
 fi
 
 # eth_getBlockByNumber (latest)
-R=$(rpc_raw 8545 eth_getBlockByNumber '["latest", false]' | jq -r '.result.hash // empty')
+R=$LATEST_HASH
 if [ -n "$R" ]; then
     pass "eth_getBlockByNumber('latest') returns hash $R"
 else

@@ -2,7 +2,7 @@
 
 Get a local shell-chain node running in 5 minutes.
 
-> **See also:** [Testnet Operator Guide](TESTNET_OPERATOR_GUIDE.md) · [JSON-RPC API Reference](JSON_RPC_API.md) · [Post-Quantum Cryptography Guide](PQ_CRYPTO_GUIDE.md) · [Smart Contract Guide](SMART_CONTRACT_GUIDE.md)
+> **See also:** [Testnet Operator Guide](TESTNET_OPERATOR_GUIDE.md) · [JSON-RPC API Reference](JSON_RPC_API.md) · [Post-Quantum Cryptography Guide](PQ_CRYPTO_GUIDE.md) · [Smart Contract Guide](SMART_CONTRACT_GUIDE.md) · [Native Account Abstraction Guide](ACCOUNT_ABSTRACTION_GUIDE.md)
 
 ---
 
@@ -47,7 +47,7 @@ View the derived address:
 shell-node key inspect my-key.json
 ```
 
-Note the displayed address (e.g., `0x742d35Cc...`). You'll use it in the genesis file.
+Note the displayed address (e.g., `pq1...`). You'll use it in the genesis file.
 
 ---
 
@@ -65,13 +65,13 @@ Create a `genesis.json` with your address as the sole validator and pre-fund it:
   "consensus": {
     "engine": "poa",
     "authorities": [
-      "0xYOUR_ADDRESS_HERE"
+      "pq1YOUR_ADDRESS_HERE"
     ],
     "block_time_secs": 2,
     "epoch_length": 0
   },
   "alloc": {
-    "0xYOUR_ADDRESS_HERE": {
+    "pq1YOUR_ADDRESS_HERE": {
       "balance": "0x3635c9adc5dea00000"
     }
   },
@@ -79,7 +79,7 @@ Create a `genesis.json` with your address as the sole validator and pre-fund it:
 }
 ```
 
-Replace `0xYOUR_ADDRESS_HERE` with the address from Step 2. The balance `0x3635c9adc5dea00000` is 1,000 ETH in wei.
+Replace `pq1YOUR_ADDRESS_HERE` with the address from Step 2. The balance `0x3635c9adc5dea00000` is 1,000 ETH in wei.
 
 Initialize the data directory:
 
@@ -131,7 +131,7 @@ The block number should increase every 2 seconds.
 Using the CLI:
 
 ```bash
-shell-node account balance 0xYOUR_ADDRESS_HERE --rpc-url http://127.0.0.1:8545
+shell-node account balance pq1YOUR_ADDRESS_HERE --rpc-url http://127.0.0.1:8545
 ```
 
 Or via curl:
@@ -139,7 +139,7 @@ Or via curl:
 ```bash
 curl -s http://localhost:8545 \
   -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","method":"eth_getBalance","params":["0xYOUR_ADDRESS_HERE","latest"],"id":1}'
+  -d '{"jsonrpc":"2.0","method":"eth_getBalance","params":["pq1YOUR_ADDRESS_HERE","latest"],"id":1}'
 ```
 
 Expected result: `"0x3635c9adc5dea00000"` (1,000 ETH).

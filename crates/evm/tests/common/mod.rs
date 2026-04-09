@@ -1,0 +1,204 @@
+use alloy_primitives::U256;
+use shell_core::{Account, BlockHeader, SignedTransaction, Transaction};
+use shell_crypto::{Signer, Verifier};
+use shell_evm::{commit_evm_state, validate_tx, ShellEvm, ShellStateDb, TxExecutionResult};
+use shell_primitives::{Address as ShellAddress, Bytes as ShellBytes, ShellHash};
+use shell_storage::{ChainStore, MemoryDb, WorldState};
+use std::sync::Arc;
+
+pub const CHAIN_ID: u64 = 1337;
+
+pub fn setup() -> (ShellEvm<MemoryDb>, ChainStore<MemoryDb>) {
+    let world_state = WorldState::new(Arc::new(MemoryDb::new()));
+    let chain_store_db = Arc::new(MemoryDb::new());
+    let chain_store_for_evm = ChainStore::new(chain_store_db.clone());
+    let chain_store_for_tests = ChainStore::new(chain_store_db);
+    let state_db = ShellStateDb::new(world_state, chain_store_for_evm);
+    let evm = ShellEvm::new(state_db, CHAIN_ID);
+    (evm, chain_store_for_tests)
+}
+
+pub fn sample_header(number: u64) -> BlockHeader {
+    BlockHeader {
+        parent_hash: ShellHash::ZERO,
+        state_root: ShellHash::ZERO,
+        transactions_root: ShellHash::ZERO,
+        receipts_root: ShellHash::ZERO,
+        logs_bloom: ShellBytes::new(),
+        number,
+        timestamp: 1_700_000_000 + number * 12,
+        gas_limit: 30_000_000,
+        gas_used: 0,
+        extra_data: ShellBytes::new(),
+        proposer: ShellAddress::ZERO,
+        sig_aggregate_proof: None,
+        base_fee_per_gas: 0,
+        withdrawals_root: ShellHash::ZERO,
+        parent_beacon_block_root: ShellHash::ZERO,
+        blob_gas_used: 0,
+        excess_blob_gas: 0,
+    }
+}
+
+pub fn fund_account(evm: &mut ShellEvm<MemoryDb>, addr: &ShellAddress, balance: U256) {
+    let account = Account {
+        pq_pubkey_hash: ShellHash::ZERO,
+        nonce: 0,
+        balance,
+        validation_code_hash: None,
+        code_hash: None,
+        storage_root: ShellHash::ZERO,
+    };
+    evm.state_db_mut()
+        .world_state_mut()
+        .set_account(addr, &account)
+        .unwrap();
+}
+
+pub fn tx_signing_hash(tx: &Transaction) -> ShellHash {
+    let encoded = alloy_rlp::encode(tx);
+    shell_primitives::keccak256(&encoded)
+}
+
+pub fn sign_tx<S: Signer>(
+    from: ShellAddress,
+    signer: &S,
+    tx: Transaction,
+    include_pubkey: bool,
+) -> SignedTransaction {
+    let hash = tx_signing_hash(&tx);
+    let sig = signer.sign(hash.as_bytes()).expect("sign failed");
+    if include_pubkey {
+        SignedTransaction::with_pubkey(from, tx, sig, signer.public_key().to_vec())
+    } else {
+        SignedTransaction::new(from, tx, sig)
+    }
+}
+
+pub fn apply_tx<V: Verifier>(
+    evm: &mut ShellEvm<MemoryDb>,
+    chain_store: &ChainStore<MemoryDb>,
+    verifier: &V,
+    signed_tx: &SignedTransaction,
+    block_number: u64,
+    tx_index: u32,
+    cumulative_gas_used: u64,
+) -> TxExecutionResult {
+    validate_tx(
+        signed_tx,
+        evm.state_db_mut().world_state_mut(),
+        chain_store,
+        verifier,
+        CHAIN_ID,
+    )
+    .expect("validate_tx failed");
+
+    let result = evm
+        .execute_tx(
+            signed_tx,
+            &sample_header(block_number),
+            tx_index,
+            cumulative_gas_used,
+        )
+        .expect("execute_tx failed");
+
+    if !result.is_system_tx {
+        commit_evm_state(
+            &result.state_changes,
+            evm.state_db_mut().world_state_mut(),
+            chain_store,
+        )
+        .expect("commit_evm_state failed");
+    }
+
+    result
+}
+
+#[allow(dead_code)]
+pub fn deploy_runtime_contract<S: Signer, V: Verifier>(
+    evm: &mut ShellEvm<MemoryDb>,
+    chain_store: &ChainStore<MemoryDb>,
+    verifier: &V,
+    signer: &S,
+    from: ShellAddress,
+    nonce: u64,
+    block_number: u64,
+    runtime: &[u8],
+) -> (ShellAddress, ShellHash) {
+    let tx = Transaction {
+        chain_id: CHAIN_ID,
+        nonce,
+        to: None,
+        value: U256::ZERO,
+        data: ShellBytes::from(make_init_code(runtime)),
+        gas_limit: 5_000_000,
+        max_fee_per_gas: 10,
+        max_priority_fee_per_gas: 1,
+        access_list: None,
+        tx_type: 2,
+        max_fee_per_blob_gas: None,
+        blob_versioned_hashes: None,
+    };
+    let signed = sign_tx(from, signer, tx, true);
+    let result = apply_tx(evm, chain_store, verifier, &signed, block_number, 0, 0);
+    let contract_addr = result
+        .receipt
+        .contract_address
+        .expect("contract deployment should return an address");
+    let account = evm
+        .state_db()
+        .world_state()
+        .get_account(&contract_addr)
+        .unwrap()
+        .unwrap();
+    let code_hash = account
+        .code_hash
+        .expect("deployed contract should have code hash");
+    (contract_addr, code_hash)
+}
+
+#[allow(dead_code)]
+fn make_init_code(runtime: &[u8]) -> Vec<u8> {
+    let runtime_len = runtime.len();
+    assert!(runtime_len <= 0xFFFF, "runtime too large for PUSH2");
+
+    let mut init = Vec::new();
+    if runtime_len <= 0xFF {
+        let prefix_len: u8 = 12;
+        init.extend_from_slice(&[
+            0x60,
+            runtime_len as u8,
+            0x60,
+            prefix_len,
+            0x60,
+            0x00,
+            0x39,
+            0x60,
+            runtime_len as u8,
+            0x60,
+            0x00,
+            0xF3,
+        ]);
+    } else {
+        let prefix_len: u16 = 15;
+        init.extend_from_slice(&[
+            0x61,
+            (runtime_len >> 8) as u8,
+            (runtime_len & 0xFF) as u8,
+            0x61,
+            (prefix_len >> 8) as u8,
+            (prefix_len & 0xFF) as u8,
+            0x60,
+            0x00,
+            0x39,
+            0x61,
+            (runtime_len >> 8) as u8,
+            (runtime_len & 0xFF) as u8,
+            0x60,
+            0x00,
+            0xF3,
+        ]);
+    }
+    init.extend_from_slice(runtime);
+    init
+}

@@ -14,7 +14,7 @@ Shell-Chain follows [Vitalik Buterin's vision](https://ethresear.ch/t/how-to-har
 
 - 🔐 **Post-Quantum Signatures** — CRYSTALS-Dilithium (NIST standard) as default, SPHINCS+ as conservative fallback
 - ⚙️ **EVM Compatible** — Cancun-spec EVM; run Solidity contracts with familiar tooling (Hardhat, ethers.js, MetaMask)
-- 🏗️ **Native Account Abstraction** — every account can upgrade its signature scheme without a hard fork
+- 🏗️ **Native Account Abstraction** — protocol-level smart accounts with built-in PQ validation, key rotation, and custom validator hooks
 - 🧩 **PQ Precompiles** — on-chain Dilithium/SPHINCS+ verification, Kyber decapsulation, STARK proof verification
 - 🔗 **PoA Consensus** — epoch-based Proof-of-Authority with dynamic validator management and finality tracking
 - 🌐 **P2P Networking** — libp2p with GossipSub, Kademlia DHT, NAT traversal, and peer scoring
@@ -38,6 +38,24 @@ cargo build --release
 ```
 
 For production deployments with Docker, see the [Operator Guide](docs/TESTNET_OPERATOR_GUIDE.md).
+
+## Native Account Abstraction
+
+Shell-Chain's long-term account model is **native AA**, not Ethereum-style EOAs.
+Externally, accounts are shown as `pq1...` Bech32m addresses; internally, they
+remain 20-byte EVM addresses for compatibility.
+
+Transaction validation follows three protocol-level paths:
+
+1. **First use** — derive `tx.from` from `(version, algo_id, pubkey)` and verify the PQ signature
+2. **Default existing account** — verify `pq_pubkey_hash` and the PQ signature
+3. **Custom AA account** — call account-specific validator code through `validation_code_hash`
+
+This design lets Shell-Chain support key rotation and custom validation logic
+without introducing an ERC-4337 bundler or changing the account's address.
+
+For the full design and current implementation status, see
+[docs/ACCOUNT_ABSTRACTION_GUIDE.md](docs/ACCOUNT_ABSTRACTION_GUIDE.md).
 
 ## Architecture
 
@@ -112,7 +130,8 @@ shell-chain/
 | **CRYSTALS-Kyber** (ML-KEM) | Lattice-based | P2P transport encryption | NIST Level 3 |
 | **STARKs** | Hash-based proofs | Signature aggregation, light clients | Quantum-safe |
 
-Addresses are derived as `keccak256(pq_public_key)[12..]` — same 20-byte format as Ethereum, but from PQ public keys.
+Addresses are derived as `blake3(version || algo_id || pq_public_key)[0..20]`
+and encoded externally as Bech32m `pq1...`.
 
 For details, see [docs/PQ_CRYPTO_GUIDE.md](docs/PQ_CRYPTO_GUIDE.md).
 
@@ -122,6 +141,7 @@ For details, see [docs/PQ_CRYPTO_GUIDE.md](docs/PQ_CRYPTO_GUIDE.md).
 - [Operator Guide](docs/TESTNET_OPERATOR_GUIDE.md) — production deployment with Docker and monitoring
 - [API Reference](docs/JSON_RPC_API.md) — complete JSON-RPC API documentation
 - [PQ Crypto Guide](docs/PQ_CRYPTO_GUIDE.md) — post-quantum cryptography details
+- [Native Account Abstraction Guide](docs/ACCOUNT_ABSTRACTION_GUIDE.md) — `pq1...` addresses, validation layers, and AA rollout
 - [Changelog](CHANGELOG.md) — full release history
 
 ## Contributing
@@ -131,4 +151,3 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 ## License
 
 [MIT](LICENSE) © ShellDAO
-
