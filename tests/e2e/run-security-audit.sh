@@ -361,7 +361,7 @@ echo ""
 ###############################################################################
 
 info "Testing eth_sign (should not sign with local keys)..."
-SIGN_RESP=$(rpc_raw "$RPC_PORT" eth_sign '["0x0000000000000000000000000000000000000001", "0xdeadbeef"]')
+SIGN_RESP=$(rpc_raw "$RPC_PORT" eth_sign '["pq1qyqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqy0vusna", "0xdeadbeef"]')
 
 if [ -n "$SIGN_RESP" ]; then
     ERR_CODE=$(echo "$SIGN_RESP" | jq -r '.error.code // empty' 2>/dev/null)

@@ -183,7 +183,7 @@ curl -s http://localhost:8545 \
     "jsonrpc":"2.0",
     "method":"eth_call",
     "params":[{
-      "to":"0xYOUR_CONTRACT_ADDRESS",
+      "to":"pq1YOUR_CONTRACT_ADDRESS",
       "data":"0x6d4ce63c"
     },"latest"],
     "id":1
@@ -192,8 +192,13 @@ curl -s http://localhost:8545 \
 
 Or with Hardhat:
 
+> **Compatibility note:** raw Shell RPC examples prefer canonical `pq1...`
+> addresses. Some Ethereum toolchains such as ethers.js still expect a 20-byte
+> hex/debug address string today, so the Hardhat snippets below keep using the
+> legacy compatibility form for the contract address only.
+
 ```js
-const counter = await hre.ethers.getContractAt("Counter", "0xYOUR_CONTRACT_ADDRESS");
+const counter = await hre.ethers.getContractAt("Counter", "0xYOUR_CONTRACT_HEX_ADDRESS");
 const count = await counter.get();
 console.log("Current count:", count.toString());
 ```
@@ -217,7 +222,7 @@ curl -s http://localhost:8545 \
 Or with Hardhat:
 
 ```js
-const counter = await hre.ethers.getContractAt("Counter", "0xYOUR_CONTRACT_ADDRESS");
+const counter = await hre.ethers.getContractAt("Counter", "0xYOUR_CONTRACT_HEX_ADDRESS");
 const tx = await counter.increment();
 await tx.wait();
 console.log("Incremented! New count:", (await counter.get()).toString());
@@ -336,13 +341,13 @@ Shell-Chain uses the **EIP-1559** gas model:
    curl -s http://localhost:8545 \
      -H "Content-Type: application/json" \
      -d '{
-       "jsonrpc":"2.0",
-       "method":"eth_createAccessList",
-       "params":[{
-         "to":"0xYOUR_CONTRACT",
+        "jsonrpc":"2.0",
+        "method":"eth_createAccessList",
+        "params":[{
+         "to":"pq1YOUR_CONTRACT_ADDRESS",
          "data":"0x..."
-       },"latest"],
-       "id":1
+        },"latest"],
+        "id":1
      }'
    ```
 

@@ -137,7 +137,7 @@ fn apply_alloc<S: KvStore + 'static>(
     entry: &AllocEntry,
 ) -> Result<(), StorageError> {
     // Create account with the allocated balance
-    let mut account = Account::new_eoa(ShellHash::ZERO, entry.balance);
+    let mut account = Account::new_user_account(ShellHash::ZERO, entry.balance);
     account.nonce = entry.nonce;
 
     // Set code hash if code is provided

@@ -259,11 +259,11 @@ Shell-chain is **not compatible** with MetaMask, Ledger, or other wallets that u
 |-----------|------|
 | Generate a key | `shell-node key generate --output keystore.json` |
 | View address | `shell-node key inspect keystore.json` |
-| Send a transaction | `shell-node tx send --to 0x... --value ... --keystore keystore.json` |
+| Send a transaction | `shell-node tx send --to pq1... --value ... --keystore keystore.json` |
 | Deploy a contract | `shell-node tx deploy --code 0x... --keystore keystore.json` |
-| Call a contract | `shell-node tx call --to 0x... --data 0x...` |
-| Check balance | `shell-node account balance 0xADDRESS` |
-| Check nonce | `shell-node account nonce 0xADDRESS` |
+| Call a contract | `shell-node tx call --to pq1... --data 0x...` |
+| Check balance | `shell-node account balance pq1ADDRESS` |
+| Check nonce | `shell-node account nonce pq1ADDRESS` |
 | List keystores | `shell-node account list --datadir shell-data` |
 
 ### JSON-RPC compatibility

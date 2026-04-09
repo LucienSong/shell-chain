@@ -41,7 +41,7 @@ For production deployments with Docker, see the [Operator Guide](docs/TESTNET_OP
 
 ## Native Account Abstraction
 
-Shell-Chain's long-term account model is **native AA**, not Ethereum-style EOAs.
+Shell-Chain's long-term account model is **native AA**.
 Externally, accounts are shown as `pq1...` Bech32m addresses; internally, they
 remain 20-byte EVM addresses for compatibility.
 

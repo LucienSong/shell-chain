@@ -18,15 +18,15 @@ pub struct Account {
     /// Custom validation logic code hash (None = default Dilithium).
     /// Enables Account Abstraction: users can upgrade their signature scheme.
     pub validation_code_hash: Option<ShellHash>,
-    /// Contract code hash (None = externally owned account).
+    /// Contract code hash (None = account without EVM bytecode).
     pub code_hash: Option<ShellHash>,
     /// Root of the account's storage trie.
     pub storage_root: ShellHash,
 }
 
 impl Account {
-    /// Create a new externally-owned account with default Dilithium validation.
-    pub fn new_eoa(pq_pubkey_hash: ShellHash, balance: U256) -> Self {
+    /// Create a new user account with built-in Dilithium validation.
+    pub fn new_user_account(pq_pubkey_hash: ShellHash, balance: U256) -> Self {
         Self {
             pq_pubkey_hash,
             nonce: 0,
@@ -153,9 +153,9 @@ mod tests {
     use shell_primitives::keccak256;
 
     #[test]
-    fn new_eoa() {
+    fn new_user_account() {
         let pubkey_hash = keccak256(b"dilithium-pubkey");
-        let acct = Account::new_eoa(pubkey_hash, U256::from(1000));
+        let acct = Account::new_user_account(pubkey_hash, U256::from(1000));
         assert!(!acct.is_contract());
         assert!(!acct.has_custom_validation());
         assert_eq!(acct.nonce, 0);
@@ -163,7 +163,7 @@ mod tests {
 
     #[test]
     fn serde_roundtrip() {
-        let acct = Account::new_eoa(keccak256(b"test"), U256::from(42));
+        let acct = Account::new_user_account(keccak256(b"test"), U256::from(42));
         let json = serde_json::to_string(&acct).unwrap();
         let acct2: Account = serde_json::from_str(&json).unwrap();
         assert_eq!(acct, acct2);
@@ -171,7 +171,7 @@ mod tests {
 
     #[test]
     fn account_rlp_roundtrip() {
-        let acct = Account::new_eoa(keccak256(b"rlp-test"), U256::from(999));
+        let acct = Account::new_user_account(keccak256(b"rlp-test"), U256::from(999));
         let mut buf = Vec::new();
         acct.encode(&mut buf);
         assert!(!buf.is_empty());
@@ -182,7 +182,7 @@ mod tests {
 
     #[test]
     fn account_with_custom_validation_rlp() {
-        let mut acct = Account::new_eoa(keccak256(b"aa-test"), U256::from(0));
+        let mut acct = Account::new_user_account(keccak256(b"aa-test"), U256::from(0));
         acct.validation_code_hash = Some(keccak256(b"custom-validator"));
         acct.code_hash = Some(keccak256(b"contract-code"));
 

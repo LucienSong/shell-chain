@@ -4257,7 +4257,8 @@ mod tests {
 
         {
             let mut ws = handler.world_state.write();
-            let account = shell_core::Account::new_eoa(ShellHash::ZERO, U256::from(1_000_000));
+            let account =
+                shell_core::Account::new_user_account(ShellHash::ZERO, U256::from(1_000_000));
             ws.set_account(&addr, &account).unwrap();
         }
 
@@ -4275,7 +4276,7 @@ mod tests {
 
         {
             let mut ws = handler.world_state.write();
-            let mut account = shell_core::Account::new_eoa(ShellHash::ZERO, U256::ZERO);
+            let mut account = shell_core::Account::new_user_account(ShellHash::ZERO, U256::ZERO);
             account.nonce = 42;
             ws.set_account(&addr, &account).unwrap();
         }

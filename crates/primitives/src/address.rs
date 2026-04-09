@@ -7,9 +7,9 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::{PrimitivesError, ShellHash};
 
-/// 20-byte address, identical layout to Ethereum addresses.
+/// 20-byte address, identical raw layout to EVM addresses.
 ///
-/// Shell EOAs are derived from PQ public keys via
+/// Shell user accounts are derived from PQ public keys via
 /// `blake3(version || algo_id || pubkey)[0..20]`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Address(pub alloy_primitives::Address);

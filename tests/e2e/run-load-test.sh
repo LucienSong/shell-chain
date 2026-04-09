@@ -25,6 +25,10 @@ metric() { echo -e "${CYAN}  📊 $1${NC}"; }
 FAILURES=0
 PASSES=0
 
+AA_ADDR_1="pq1qyqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqy0vusna"
+AA_ADDR_2="pq1qyqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqg7j66z6"
+AA_ADDR_3="pq1qyqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqv3ccudq"
+
 TX_COUNT=500
 DURATION=30
 LATENCY_FILE="$PROJECT_DIR/tests/e2e/.load-test-latencies.txt"
@@ -122,10 +126,14 @@ echo ""
 # Use microseconds for better precision.
 DELAY_US=$(( (DURATION * 1000000) / TX_COUNT ))
 
-# Generate random hex addresses for variety.
-rand_addr() {
-    printf "0x%08x%08x%08x%08x%08x" \
-        "$RANDOM" "$RANDOM" "$RANDOM" "$RANDOM" "$RANDOM"
+# Use canonical Shell addresses even in negative-path RPC load tests so the
+# payload shape matches the native AA model.
+pick_addr() {
+    case $(( $1 % 3 )) in
+        0) echo "$AA_ADDR_1" ;;
+        1) echo "$AA_ADDR_2" ;;
+        *) echo "$AA_ADDR_3" ;;
+    esac
 }
 
 > "$LATENCY_FILE"
@@ -140,7 +148,7 @@ LOAD_START=$(date +%s%N)
 
 for i in $(seq 1 "$TX_COUNT"); do
     PORT=${PORTS[$((i % 3))]}
-    TO=$(rand_addr)
+    TO=$(pick_addr "$i")
     NONCE=$(printf "0x%x" "$i")
 
     # Measure per-request latency.
@@ -153,7 +161,7 @@ for i in $(seq 1 "$TX_COUNT"); do
             \"jsonrpc\":\"2.0\",\"id\":${i},
             \"method\":\"shell_sendTransaction\",
             \"params\":[{
-                \"from\":\"0x0000000000000000000000000000000000000001\",
+                \"from\":\"${AA_ADDR_1}\",
                 \"to\":\"${TO}\",
                 \"value\":\"0x1\",
                 \"nonce\":\"${NONCE}\",

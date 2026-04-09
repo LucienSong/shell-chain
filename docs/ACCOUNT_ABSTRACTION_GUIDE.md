@@ -42,7 +42,7 @@ address  = blake3(preimage)[0..20]
 - `algo_id = SignatureType::as_u8()`
 - the final address is still **20 bytes**
 
-This keeps the EVM and storage layout compatible with Ethereum-style addresses
+This keeps the EVM and storage layout compatible with 20-byte EVM address slots
 while avoiding Ethereum's `keccak256(pubkey)[12..]` address space.
 
 ### 2.2 External address encoding

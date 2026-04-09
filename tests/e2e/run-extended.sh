@@ -301,24 +301,24 @@ else
     fail "eth_getTransactionCount failed"
 fi
 
-# eth_getCode (on a non-contract address — should be 0x)
-R=$(rpc 8545 eth_getCode "[\"0x0000000000000000000000000000000000000001\"]")
+# eth_getCode (on a default AA account — should be 0x)
+R=$(rpc 8545 eth_getCode "[\"${PROPOSER}\"]")
 if [ -n "$R" ]; then
-    pass "eth_getCode returns '$R' (empty for EOA)"
+    pass "eth_getCode returns '$R' (empty for a code-less AA account)"
 else
     fail "eth_getCode failed"
 fi
 
 # eth_getStorageAt
-R=$(rpc 8545 eth_getStorageAt "[\"0x0000000000000000000000000000000000000001\", \"0x0\"]")
+R=$(rpc 8545 eth_getStorageAt "[\"${PROPOSER}\", \"0x0\"]")
 if [ -n "$R" ]; then
     pass "eth_getStorageAt returns '$R'"
 else
     fail "eth_getStorageAt failed"
 fi
 
-# eth_call (simple call to zero address — should return empty or error)
-CALL_RESULT=$(rpc_raw 8545 eth_call '[{"to": "0x0000000000000000000000000000000000000001", "data": "0x"}, "latest"]')
+# eth_call against a code-less AA account — should return empty or error
+CALL_RESULT=$(rpc_raw 8545 eth_call "[{\"to\": \"${PROPOSER}\", \"data\": \"0x\"}, \"latest\"]")
 CALL_ERR=$(echo "$CALL_RESULT" | jq -r '.error // empty')
 CALL_RES=$(echo "$CALL_RESULT" | jq -r '.result // empty')
 if [ -n "$CALL_RES" ] || [ -n "$CALL_ERR" ]; then
@@ -328,7 +328,7 @@ else
 fi
 
 # eth_estimateGas
-EST_RESULT=$(rpc_raw 8545 eth_estimateGas '[{"to": "0x0000000000000000000000000000000000000001", "value": "0x0"}]')
+EST_RESULT=$(rpc_raw 8545 eth_estimateGas "[{\"to\": \"${PROPOSER}\", \"value\": \"0x0\"}]")
 EST_RES=$(echo "$EST_RESULT" | jq -r '.result // empty')
 if [ -n "$EST_RES" ]; then
     pass "eth_estimateGas returns $EST_RES"

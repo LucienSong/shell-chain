@@ -457,13 +457,13 @@ This displays the address associated with the keystore without requiring the pas
   "consensus": {
     "engine": "poa",
     "authorities": [
-      "0xYOUR_VALIDATOR_ADDRESS_HERE"
+      "pq1YOUR_VALIDATOR_ADDRESS_HERE"
     ],
     "block_time_secs": 2,
     "epoch_length": 0
   },
   "alloc": {
-    "0xYOUR_VALIDATOR_ADDRESS_HERE": {
+    "pq1YOUR_VALIDATOR_ADDRESS_HERE": {
       "balance": "0x3635c9adc5dea00000"
     }
   },

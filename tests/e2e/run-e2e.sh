@@ -18,6 +18,9 @@ info() { echo -e "${YELLOW}→ $1${NC}"; }
 
 FAILURES=0
 
+AA_ADDR_1="pq1qyqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqy0vusna"
+AA_ADDR_2="pq1qyqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqg7j66z6"
+
 rpc() {
     local port=$1
     local method=$2
@@ -194,7 +197,9 @@ info "Testing shell_sendTransaction..."
 # Build a minimal JSON transaction payload. shell_sendTransaction expects a
 # SignedTransaction object.  We send a deliberately invalid/dummy one to verify
 # that the RPC method is reachable and responds with a structured JSON-RPC error
-# (rather than a connection failure or HTTP error).
+# (rather than a connection failure or HTTP error). Even for this negative-path
+# probe, keep the address shape aligned with Shell-Chain's canonical `pq1...`
+# user-account format.
 TX_RESULT=$(curl -sf "http://127.0.0.1:8545" \
     -X POST \
     -H "Content-Type: application/json" \
@@ -202,8 +207,8 @@ TX_RESULT=$(curl -sf "http://127.0.0.1:8545" \
         "jsonrpc":"2.0","id":1,
         "method":"shell_sendTransaction",
         "params":[{
-            "from":"0x0000000000000000000000000000000000000001",
-            "to":"0x0000000000000000000000000000000000000002",
+            "from":"'"${AA_ADDR_1}"'",
+            "to":"'"${AA_ADDR_2}"'",
             "value":"0x0",
             "nonce":"0x0",
             "gas":"0x5208",

@@ -160,7 +160,7 @@ Send 1 ETH (1000000000000000000 wei) from your funded account:
 
 ```bash
 shell-node tx send \
-  --to 0xRECIPIENT_ADDRESS \
+  --to pq1RECIPIENT_ADDRESS \
   --value 1000000000000000000 \
   --keystore my-key.json \
   --rpc-url http://127.0.0.1:8545
@@ -171,7 +171,7 @@ Enter your keystore password when prompted. The command outputs the transaction 
 Verify the recipient received the funds:
 
 ```bash
-shell-node account balance 0xRECIPIENT_ADDRESS --rpc-url http://127.0.0.1:8545
+shell-node account balance pq1RECIPIENT_ADDRESS --rpc-url http://127.0.0.1:8545
 ```
 
 ---
@@ -236,7 +236,7 @@ For more details on alpha testnet operations, see the [Testnet Operator Guide](T
 - **Full API reference:** See [JSON-RPC API Reference](JSON_RPC_API.md) for all 61 RPC methods.
 - **Understand the cryptography:** See [PQ Crypto Guide](PQ_CRYPTO_GUIDE.md) for details on Dilithium3, key formats, and quantum resistance.
 - **Deploy a contract:** Use `shell-node tx deploy --code 0x... --keystore my-key.json`.
-- **Make a read-only call:** Use `shell-node tx call --to 0xContractAddr --data 0x...`.
+- **Make a read-only call:** Use `shell-node tx call --to pq1CONTRACT_ADDRESS --data 0x...`.
 - **Monitor with Grafana:** Start the full stack with `docker compose -f docker-compose.prod.yml up -d` and open `http://localhost:3000`.
 
 ---

@@ -126,7 +126,7 @@ wscat -c ws://127.0.0.1:8546
 **Example — logs with filter:**
 
 ```bash
-> {"jsonrpc":"2.0","id":2,"method":"eth_subscribe","params":["logs",{"address":"0x1234...","topics":["0xddf2..."]}]}
+> {"jsonrpc":"2.0","id":2,"method":"eth_subscribe","params":["logs",{"address":"pq1...","topics":["0xddf2..."]}]}
 < {"jsonrpc":"2.0","id":2,"result":"0x2"}
 ```
 
@@ -504,7 +504,7 @@ Executes a read-only call against the EVM (no state changes).
 ```bash
 curl -s http://localhost:8545 \
   -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","method":"eth_call","params":[{"to":"0xContractAddr","data":"0x..."},"latest"],"id":1}'
+  -d '{"jsonrpc":"2.0","method":"eth_call","params":[{"to":"pq1CONTRACT_ADDRESS","data":"0x..."},"latest"],"id":1}'
 ```
 
 ---
@@ -523,7 +523,7 @@ Estimates gas for a transaction. Returns `gas_used × 1.2` with a minimum of 21,
 ```bash
 curl -s http://localhost:8545 \
   -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","method":"eth_estimateGas","params":[{"to":"0x...","value":"0xde0b6b3a7640000"}],"id":1}'
+  -d '{"jsonrpc":"2.0","method":"eth_estimateGas","params":[{"to":"pq1RECIPIENT_ADDRESS","value":"0xde0b6b3a7640000"}],"id":1}'
 ```
 
 ```json
@@ -851,8 +851,8 @@ curl -s http://localhost:8545 \
   "jsonrpc": "2.0",
   "id": 1,
   "result": [
-    "0x0000000000000000000000000000000000000001",
-    "0x0000000000000000000000000000000000000002"
+    "pq1qyqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqy0vusna",
+    "pq1qyqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqg7j66z6"
   ]
 }
 ```
@@ -871,7 +871,7 @@ Returns whether an address is a validator.
 **Returns:** Object:
 ```json
 {
-  "address": "0x...",
+  "address": "pq1...",
   "isValidator": true
 }
 ```
@@ -953,8 +953,8 @@ Returns governance configuration.
 ```json
 {
   "validatorCount": 3,
-  "validators": ["0x...", "0x...", "0x..."],
-  "systemContractAddress": "0x...",
+  "validators": ["pq1...", "pq1...", "pq1..."],
+  "systemContractAddress": "pq1qyqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqy0vusna",
   "proposalGasLimit": 100000
 }
 ```
@@ -1058,7 +1058,7 @@ Returns the post-quantum signature details for validators who signed a specific 
   "blockNumber": "0x1a",
   "signers": [
     {
-      "address": "0x...",
+      "address": "pq1...",
       "pqPubkey": "0x...",
       "signatureValid": true
     }
@@ -1119,7 +1119,7 @@ Returns voting activity statistics for validators in recent blocks.
 {
   "validators": [
     {
-      "address": "0x...",
+      "address": "pq1...",
       "blocksProduced": 500,
       "lastBlockProduced": "0x1a",
       "uptime": 99.8
@@ -1142,8 +1142,8 @@ Returns pending governance proposals that have not yet been finalized.
   "proposals": [
     {
       "type": "addValidator",
-      "target": "0x...",
-      "proposer": "0x...",
+      "target": "pq1...",
+      "proposer": "pq1...",
       "proposedAt": "0x18",
       "status": "pending"
     }
@@ -1178,8 +1178,8 @@ Replays a transaction and returns an execution trace.
 {
   "frame": {
     "type": "CALL",
-    "from": "0x...",
-    "to": "0x...",
+    "from": "pq1...",
+    "to": "pq1...",
     "gas": 21000,
     "gasUsed": 21000,
     "input": "0x",

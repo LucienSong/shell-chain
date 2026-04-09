@@ -85,7 +85,7 @@ impl<S: KvStore + 'static> WorldState<S> {
     fn get_or_default(&self, address: &Address) -> Result<Account, StorageError> {
         Ok(self
             .get_account(address)?
-            .unwrap_or_else(|| Account::new_eoa(ShellHash::ZERO, U256::ZERO)))
+            .unwrap_or_else(|| Account::new_user_account(ShellHash::ZERO, U256::ZERO)))
     }
 
     // ── Balance helpers ────────────────────────────────────────
@@ -368,7 +368,7 @@ mod tests {
         let store = test_store();
         let mut ws = WorldState::new(store);
         let addr = test_address(b"alice");
-        let acct = Account::new_eoa(keccak256(b"alice-pk"), U256::from(1000));
+        let acct = Account::new_user_account(keccak256(b"alice-pk"), U256::from(1000));
 
         ws.set_account(&addr, &acct).unwrap();
         let loaded = ws.get_account(&addr).unwrap().unwrap();
