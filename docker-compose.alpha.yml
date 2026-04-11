@@ -65,7 +65,6 @@ services:
       --rpc-addr 0.0.0.0:8545
       --ws --ws-port 8546
       --p2p --p2p-addr 0.0.0.0:30303
-      --bootnode /dns4/node1/tcp/30303
       --enable-mdns
       --rpc-cors "${RPC_CORS:-*}"
       --rpc-api ${RPC_API:-eth,net,web3,shell}
@@ -111,7 +110,6 @@ services:
       --rpc-addr 0.0.0.0:8545
       --ws --ws-port 8546
       --p2p --p2p-addr 0.0.0.0:30303
-      --bootnode /dns4/node1/tcp/30303
       --enable-mdns
       --rpc-cors "${RPC_CORS:-*}"
       --rpc-api ${RPC_API:-eth,net,web3,shell}
@@ -157,7 +155,6 @@ services:
       --rpc-addr 0.0.0.0:8545
       --ws --ws-port 8546
       --p2p --p2p-addr 0.0.0.0:30303
-      --bootnode /dns4/node1/tcp/30303
       --enable-mdns
       --rpc-cors "${RPC_CORS:-*}"
       --rpc-api ${RPC_API:-eth,net,web3,shell}

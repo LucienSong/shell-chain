@@ -14,7 +14,7 @@ use shell_evm::bloom::BLOOM_SIZE;
 use shell_evm::{ShellEvm, ShellStateDb};
 use shell_mempool::TxPool;
 use shell_primitives::{Address, Bytes, ShellHash, U256};
-use shell_storage::{ChainStore, KvStore, WorldState};
+use shell_storage::{ChainStore, KvStore, WorldState, MAX_ADDRESS_TX_HISTORY_OFFSET};
 
 use crate::api::{
     DebugApiServer, EthApiServer, EvmApiServer, NetApiServer, ShellApiServer, TraceApiServer,
@@ -561,6 +561,11 @@ impl<S: KvStore + 'static> EvmApiServer for RpcHandler<S> {
 /// Convert a storage error into a JSON-RPC internal error.
 fn internal_err(msg: impl std::fmt::Display) -> ErrorObjectOwned {
     ErrorObjectOwned::owned(-32603, msg.to_string(), None::<()>)
+}
+
+/// Convert a user input problem into a JSON-RPC invalid params error.
+fn invalid_params_err(msg: impl std::fmt::Display) -> ErrorObjectOwned {
+    ErrorObjectOwned::owned(-32602, msg.to_string(), None::<()>)
 }
 
 /// Parse a user-facing address string (`pq1...` or legacy hex).
@@ -1832,11 +1837,19 @@ impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
         });
         let page = page.unwrap_or(0);
         let limit = limit.unwrap_or(20).min(100);
-        let offset = (page * limit) as usize;
+        let offset = page
+            .checked_mul(limit)
+            .ok_or_else(|| invalid_params_err("page * limit overflow"))?;
+        if offset > MAX_ADDRESS_TX_HISTORY_OFFSET as u64 {
+            return Err(invalid_params_err(format!(
+                "page/limit offset {} exceeds max {} entries",
+                offset, MAX_ADDRESS_TX_HISTORY_OFFSET
+            )));
+        }
 
         let tx_hashes = self
             .chain_store
-            .get_txs_by_address(&address, from, to, offset, limit as usize)
+            .get_txs_by_address(&address, from, to, offset as usize, limit as usize)
             .map_err(internal_err)?;
 
         // Resolve each tx hash to a full RPC transaction
@@ -2068,6 +2081,7 @@ impl<S: KvStore + 'static> TraceApiServer for RpcHandler<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::ShellApiServer;
     use crate::dev_control::DevRpcControl;
     use shell_core::{Block, BlockHeader, Transaction, TransactionReceipt};
     use shell_crypto::{DilithiumSigner, Signer};
@@ -2196,6 +2210,24 @@ mod tests {
         let handler = setup();
         let result = EthApiServer::chain_id(&handler).await.unwrap();
         assert_eq!(result, "0x2a"); // 42
+    }
+
+    #[tokio::test]
+    async fn get_transactions_by_address_rejects_deep_pagination() {
+        let handler = setup();
+        let err = ShellApiServer::get_transactions_by_address(
+            &handler,
+            Address::from([0x33; 20]),
+            None,
+            None,
+            Some((MAX_ADDRESS_TX_HISTORY_OFFSET as u64) + 1),
+            Some(1),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.code(), -32602);
+        assert!(err.message().contains("exceeds max"));
     }
 
     #[tokio::test]

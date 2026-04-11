@@ -5,6 +5,9 @@ pub enum StorageError {
     #[error("key not found")]
     NotFound,
 
+    #[error("invalid input: {0}")]
+    InvalidInput(String),
+
     #[error("database error: {0}")]
     Database(String),
 

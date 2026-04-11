@@ -6,7 +6,7 @@ use parking_lot::RwLock;
 
 use shell_core::SignedTransaction;
 use shell_crypto::Verifier;
-use shell_evm::{validate_aa_tx, AaValidationError};
+use shell_evm::{compute_intrinsic_gas, validate_aa_tx, AaValidationError, AaValidationOutcome};
 use shell_primitives::{Address, ShellHash, U256};
 use shell_storage::{ChainStore, KvStore, WorldState};
 
@@ -92,7 +92,12 @@ impl TxPool {
         verifier: &V,
     ) -> Result<ShellHash, MempoolError> {
         // --- Stateless checks (before acquiring lock) ---
-        self.validate_stateless(&tx, world_state, chain_store, verifier)?;
+        let validation = self.validate_stateless(&tx, world_state, chain_store, verifier)?;
+        if validation.should_register_pubkey {
+            chain_store
+                .put_pubkey(&tx.from, &validation.pubkey)
+                .map_err(MempoolError::Storage)?;
+        }
 
         // --- Balance floor check (F-020) ---
         let sender = tx.sender();
@@ -111,6 +116,9 @@ impl TxPool {
         let hash = tx.hash();
         let nonce = tx.tx.nonce;
         let priority_fee = tx.tx.max_priority_fee_per_gas;
+        let chain_nonce = world_state
+            .get_nonce(&sender)
+            .map_err(MempoolError::Storage)?;
 
         // --- Stateful checks (under write lock) ---
         let mut inner = self.inner.write();
@@ -120,30 +128,49 @@ impl TxPool {
             return Err(MempoolError::Duplicate { hash });
         }
 
+        let sender_q = inner.by_sender.get(&sender);
+        let existing_hash = sender_q.and_then(|q| q.get(&nonce).copied());
+        let expected_next_nonce = next_expected_nonce(sender_q, chain_nonce);
+
+        if nonce < chain_nonce {
+            return Err(MempoolError::NonceTooLow {
+                got: nonce,
+                pending: chain_nonce,
+            });
+        }
+
         // Same-nonce handling: RBF replacement (F-021)
-        if let Some(sender_q) = inner.by_sender.get(&sender) {
-            if let Some(&existing_hash) = sender_q.get(&nonce) {
-                // Check fee bump threshold
-                let old_fee = inner
-                    .by_hash
-                    .get(&existing_hash)
-                    .map(|e| e.tx.tx.max_priority_fee_per_gas)
-                    .unwrap_or(0);
-                let bump = self.config.replacement_fee_bump_pct;
-                // required = old_fee * (100 + bump) / 100, rounded up
-                let required = old_fee
-                    .checked_mul(100 + bump)
-                    .map(|v| v / 100)
-                    .unwrap_or(u64::MAX);
-                if priority_fee < required {
-                    return Err(MempoolError::ReplacementFeeTooLow {
-                        got: priority_fee,
-                        required,
-                    });
-                }
-                // Evict old tx at this nonce
-                Self::remove_entry(&mut inner, &existing_hash);
+        if let Some(existing_hash) = existing_hash {
+            // Check fee bump threshold
+            let old_fee = inner
+                .by_hash
+                .get(&existing_hash)
+                .map(|e| e.tx.tx.max_priority_fee_per_gas)
+                .unwrap_or(0);
+            let bump = self.config.replacement_fee_bump_pct;
+            // required = old_fee * (100 + bump) / 100, rounded up
+            let required = old_fee
+                .checked_mul(100 + bump)
+                .map(|v| v / 100)
+                .unwrap_or(u64::MAX);
+            if priority_fee < required {
+                return Err(MempoolError::ReplacementFeeTooLow {
+                    got: priority_fee,
+                    required,
+                });
             }
+            // Evict old tx at this nonce
+            Self::remove_entry(&mut inner, &existing_hash);
+        } else if nonce > expected_next_nonce {
+            return Err(MempoolError::NonceGap {
+                expected: expected_next_nonce,
+                got: nonce,
+            });
+        } else if nonce < expected_next_nonce {
+            return Err(MempoolError::NonceTooLow {
+                got: nonce,
+                pending: expected_next_nonce,
+            });
         }
 
         // Per-sender limit (checked after possible RBF eviction)
@@ -284,7 +311,7 @@ impl TxPool {
         world_state: &mut WorldState<S>,
         chain_store: &ChainStore<S>,
         verifier: &V,
-    ) -> Result<(), MempoolError> {
+    ) -> Result<AaValidationOutcome, MempoolError> {
         // Chain ID
         if tx.tx.chain_id != self.config.chain_id {
             return Err(MempoolError::ChainIdMismatch {
@@ -313,6 +340,18 @@ impl TxPool {
             }
         }
 
+        let intrinsic = compute_intrinsic_gas(
+            tx.tx.data.as_ref(),
+            tx.tx.is_contract_creation(),
+            &tx.tx.access_list,
+        );
+        if tx.tx.gas_limit < intrinsic {
+            return Err(MempoolError::GasTooLow {
+                got: tx.tx.gas_limit,
+                minimum: intrinsic,
+            });
+        }
+
         // Per-tx serialized size limit — protects against oversized PQ
         // signatures and access lists.
         let tx_size = serde_json::to_vec(tx).map(|v| v.len()).map_err(|e| {
@@ -326,9 +365,7 @@ impl TxPool {
         }
 
         validate_aa_tx(tx, world_state, chain_store, verifier)
-            .map_err(|err| map_aa_validation_error(tx, err))?;
-
-        Ok(())
+            .map_err(|err| map_aa_validation_error(tx, err))
     }
 
     /// Remove a single entry from all indexes. Caller holds write lock.
@@ -371,6 +408,23 @@ fn map_aa_validation_error(tx: &SignedTransaction, err: AaValidationError) -> Me
         ),
         other => MempoolError::InvalidTransaction(other.to_string()),
     }
+}
+
+fn next_expected_nonce(sender_q: Option<&BTreeMap<u64, ShellHash>>, chain_nonce: u64) -> u64 {
+    let mut expected = chain_nonce;
+    if let Some(sender_q) = sender_q {
+        for queued_nonce in sender_q.keys() {
+            if *queued_nonce < expected {
+                continue;
+            }
+            if *queued_nonce == expected {
+                expected = expected.saturating_add(1);
+                continue;
+            }
+            break;
+        }
+    }
+    expected
 }
 
 #[cfg(test)]
@@ -523,10 +577,11 @@ mod tests {
         let signer = DilithiumSigner::generate();
         let pubkey = signer.public_key().to_vec();
         let from = test_address(&pubkey);
+        let recipient = test_address(b"recipient-placeholder-key-data-for-address");
         let tx = Transaction {
             chain_id: 999, // wrong
             nonce: 0,
-            to: None,
+            to: Some(recipient),
             value: Default::default(),
             data: Bytes::default(),
             gas_limit: 21_000,
@@ -553,10 +608,11 @@ mod tests {
         let signer = DilithiumSigner::generate();
         let pubkey = signer.public_key().to_vec();
         let from = test_address(&pubkey);
+        let recipient = test_address(b"recipient-placeholder-key-data-for-address");
         let tx = Transaction {
             chain_id: 42,
             nonce: 0,
-            to: None,
+            to: Some(recipient),
             value: Default::default(),
             data: Bytes::default(),
             gas_limit: 21_000,
@@ -575,7 +631,7 @@ mod tests {
     }
 
     #[test]
-    fn reject_invalid_signature() {
+    fn reject_under_intrinsic_gas() {
         let pool = TxPool::new(make_config());
         let verifier = DilithiumVerifier;
         let (mut ws, cs) = setup_validation_ctx();
@@ -586,7 +642,38 @@ mod tests {
         let tx = Transaction {
             chain_id: 42,
             nonce: 0,
-            to: None,
+            to: Some(test_address(b"recipient-placeholder-key-data-for-address")),
+            value: Default::default(),
+            data: Bytes::copy_from_slice(&[0xde, 0xad]),
+            gas_limit: 21_000,
+            max_fee_per_gas: 100,
+            max_priority_fee_per_gas: 50,
+            access_list: None,
+            tx_type: 2,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
+        };
+        let sig = signer.sign(tx.hash().as_bytes()).unwrap();
+        let signed = SignedTransaction::with_pubkey(from, tx, sig, pubkey);
+
+        let err = insert_rich(&pool, signed, &verifier, &mut ws, &cs).unwrap_err();
+        assert!(matches!(err, MempoolError::GasTooLow { .. }));
+    }
+
+    #[test]
+    fn reject_invalid_signature() {
+        let pool = TxPool::new(make_config());
+        let verifier = DilithiumVerifier;
+        let (mut ws, cs) = setup_validation_ctx();
+
+        let signer = DilithiumSigner::generate();
+        let pubkey = signer.public_key().to_vec();
+        let from = test_address(&pubkey);
+        let recipient = test_address(b"recipient-placeholder-key-data-for-address");
+        let tx = Transaction {
+            chain_id: 42,
+            nonce: 0,
+            to: Some(recipient),
             value: Default::default(),
             data: Bytes::default(),
             gas_limit: 21_000,
@@ -614,10 +701,11 @@ mod tests {
         let signer = DilithiumSigner::generate();
         let pubkey = signer.public_key().to_vec();
         let wrong_from = test_address(b"different-key-bytes");
+        let recipient = test_address(b"recipient-placeholder-key-data-for-address");
         let tx = Transaction {
             chain_id: 42,
             nonce: 0,
-            to: None,
+            to: Some(recipient),
             value: Default::default(),
             data: Bytes::default(),
             gas_limit: 21_000,
@@ -644,10 +732,11 @@ mod tests {
         let signer = DilithiumSigner::generate();
         let pubkey = signer.public_key().to_vec();
         let from = test_address(&pubkey);
+        let recipient = test_address(b"recipient-placeholder-key-data-for-address");
         let tx = Transaction {
             chain_id: 42,
             nonce: 0,
-            to: None,
+            to: Some(recipient),
             value: Default::default(),
             data: Bytes::default(),
             gas_limit: 21_000,
@@ -664,6 +753,55 @@ mod tests {
 
         let err = insert_rich(&pool, signed, &verifier, &mut ws, &cs).unwrap_err();
         assert!(matches!(err, MempoolError::PubkeyRequired { .. }));
+    }
+
+    #[test]
+    fn first_transaction_registers_pubkey_for_follow_up_sends() {
+        let pool = TxPool::new(make_config());
+        let verifier = DilithiumVerifier;
+        let (mut ws, cs) = setup_validation_ctx();
+        let signer = DilithiumSigner::generate();
+        let pubkey = signer.public_key().to_vec();
+        let from = test_address(&pubkey);
+        let recipient = test_address(b"recipient-placeholder-key-data-for-address");
+
+        let tx0 = Transaction {
+            chain_id: 42,
+            nonce: 0,
+            to: Some(recipient),
+            value: Default::default(),
+            data: Bytes::default(),
+            gas_limit: 21_000,
+            max_fee_per_gas: 100,
+            max_priority_fee_per_gas: 50,
+            access_list: None,
+            tx_type: 2,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
+        };
+        let sig0 = signer.sign(tx0.hash().as_bytes()).unwrap();
+        let first = SignedTransaction::with_pubkey(from, tx0, sig0, pubkey.clone());
+        insert_rich(&pool, first, &verifier, &mut ws, &cs).unwrap();
+
+        assert_eq!(cs.get_pubkey(&from).unwrap(), Some(pubkey));
+
+        let tx1 = Transaction {
+            chain_id: 42,
+            nonce: 1,
+            to: Some(recipient),
+            value: Default::default(),
+            data: Bytes::default(),
+            gas_limit: 21_000,
+            max_fee_per_gas: 100,
+            max_priority_fee_per_gas: 50,
+            access_list: None,
+            tx_type: 2,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
+        };
+        let sig1 = signer.sign(tx1.hash().as_bytes()).unwrap();
+        let follow_up = SignedTransaction::new(from, tx1, sig1);
+        insert_rich(&pool, follow_up, &verifier, &mut ws, &cs).unwrap();
     }
 
     #[test]
@@ -725,19 +863,30 @@ mod tests {
 
         let signer = DilithiumSigner::generate();
         let pubkey = signer.public_key().to_vec();
+        let sender = test_address(&pubkey);
 
-        // Insert nonces out of order
-        let tx2 = make_signed_tx_with_signer(&signer, &pubkey, 2, 50);
         let tx0 = make_signed_tx_with_signer(&signer, &pubkey, 0, 50);
         let tx1 = make_signed_tx_with_signer(&signer, &pubkey, 1, 50);
+        let tx2 = make_signed_tx_with_signer(&signer, &pubkey, 2, 50);
+        let hash0 = tx0.hash();
+        let hash1 = tx1.hash();
+        let hash2 = tx2.hash();
 
-        insert_rich(&pool, tx2, &verifier, &mut ws, &cs).unwrap();
         insert_rich(&pool, tx0, &verifier, &mut ws, &cs).unwrap();
+        let err = insert_rich(&pool, tx2.clone(), &verifier, &mut ws, &cs).unwrap_err();
+        assert!(matches!(
+            err,
+            MempoolError::NonceGap {
+                expected: 1,
+                got: 2
+            }
+        ));
         insert_rich(&pool, tx1, &verifier, &mut ws, &cs).unwrap();
+        insert_rich(&pool, tx2, &verifier, &mut ws, &cs).unwrap();
 
-        let sender = test_address(&pubkey);
         let sender_hashes = pool.sender_txs(&sender);
         assert_eq!(sender_hashes.len(), 3);
+        assert_eq!(sender_hashes, vec![hash0, hash1, hash2]);
         assert_eq!(pool.sender_count(&sender), 3);
     }
 
@@ -819,10 +968,11 @@ mod tests {
         let signer = DilithiumSigner::generate();
         let pubkey = signer.public_key().to_vec();
         let from = test_address(&pubkey);
+        let recipient = test_address(b"recipient-placeholder-key-data-for-address");
         let tx = Transaction {
             chain_id: 42,
             nonce: 0,
-            to: None,
+            to: Some(recipient),
             value: Default::default(),
             data: Bytes::default(),
             gas_limit: 21_000,

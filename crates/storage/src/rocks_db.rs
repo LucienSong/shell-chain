@@ -297,6 +297,17 @@ impl KvStore for RocksDbStore {
         }
         Ok(results)
     }
+
+    fn scan_all(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
+        let cf = self.cf();
+        let iter = self.db.iterator_cf(&cf, rocksdb::IteratorMode::Start);
+        let mut results = Vec::new();
+        for item in iter {
+            let (k, v) = item.map_err(|e| StorageError::Database(e.to_string()))?;
+            results.push((k.to_vec(), v.to_vec()));
+        }
+        Ok(results)
+    }
 }
 
 impl std::fmt::Debug for RocksDbStore {
@@ -364,6 +375,26 @@ mod tests {
         assert_eq!(s.get(b"a").unwrap(), Some(b"1".to_vec()));
         assert_eq!(s.get(b"b").unwrap(), Some(b"2".to_vec()));
         assert_eq!(s.get(b"to_delete").unwrap(), None);
+    }
+
+    #[test]
+    fn scan_all_returns_all_entries_in_key_order() {
+        let (_dir, stores) = open_temp();
+        let s = &stores.state;
+
+        s.put(b"b", b"2").unwrap();
+        s.put(b"a", b"1").unwrap();
+        s.put(b"c", b"3").unwrap();
+
+        let entries = s.scan_all().unwrap();
+        assert_eq!(
+            entries,
+            vec![
+                (b"a".to_vec(), b"1".to_vec()),
+                (b"b".to_vec(), b"2".to_vec()),
+                (b"c".to_vec(), b"3".to_vec()),
+            ]
+        );
     }
 
     #[test]

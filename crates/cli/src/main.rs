@@ -121,6 +121,10 @@ enum Commands {
         #[arg(long)]
         rpc_api: Option<String>,
 
+        /// Allow exposing dev-only `evm` RPC methods on non-loopback listeners.
+        #[arg(long)]
+        unsafe_dev_exposed: bool,
+
         /// Metrics HTTP server listen address (ip:port).
         #[arg(long)]
         metrics_addr: Option<String>,
@@ -253,6 +257,7 @@ async fn main() {
             rpc_cors,
             rpc_rate_limit,
             rpc_api,
+            unsafe_dev_exposed,
             metrics_addr,
             max_idle_interval,
         } => {
@@ -338,6 +343,9 @@ async fn main() {
             let effective_rpc_api =
                 rpc_api.or_else(|| file_config.rpc.api_modules.map(|v| v.join(",")));
 
+            let effective_unsafe_dev_exposed =
+                unsafe_dev_exposed || file_config.rpc.unsafe_dev_exposed.unwrap_or(false);
+
             // Merge --bootnode (repeatable) and --bootnodes (comma-separated).
             let mut all_bootnodes = bootnode;
             all_bootnodes.extend(bootnodes);
@@ -369,6 +377,7 @@ async fn main() {
                 rpc_cors: effective_rpc_cors,
                 rpc_rate_limit: effective_rpc_rate_limit,
                 rpc_api: effective_rpc_api,
+                unsafe_dev_exposed: effective_unsafe_dev_exposed,
                 metrics_addr: effective_metrics_addr,
                 max_idle_interval,
             })

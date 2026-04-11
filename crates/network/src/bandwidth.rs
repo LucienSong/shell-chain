@@ -6,7 +6,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Snapshot of current bandwidth usage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,11 +21,62 @@ pub struct BandwidthStats {
     pub total_outbound: u64,
 }
 
-/// Thread-safe bandwidth tracker with per-second rate limiting.
+#[derive(Debug)]
+struct TokenBucket {
+    tokens: u64,
+    refill_per_sec: u64,
+    capacity: u64,
+    last_refill: Instant,
+}
+
+impl TokenBucket {
+    fn new(refill_per_sec: u64) -> Self {
+        let capacity = refill_per_sec.saturating_add(refill_per_sec / 2);
+        Self {
+            tokens: refill_per_sec,
+            refill_per_sec,
+            capacity,
+            last_refill: Instant::now(),
+        }
+    }
+
+    fn refill(&mut self, now: Instant) {
+        let elapsed_nanos = now.saturating_duration_since(self.last_refill).as_nanos();
+        if elapsed_nanos == 0 || self.refill_per_sec == 0 {
+            return;
+        }
+
+        let refill = elapsed_nanos.saturating_mul(self.refill_per_sec as u128)
+            / Duration::from_secs(1).as_nanos();
+        if refill == 0 {
+            return;
+        }
+
+        let refill = refill.min(u64::MAX as u128) as u64;
+        self.tokens = self.tokens.saturating_add(refill).min(self.capacity);
+
+        let consumed_nanos =
+            refill as u128 * Duration::from_secs(1).as_nanos() / self.refill_per_sec as u128;
+        let consumed_nanos = consumed_nanos.min(u64::MAX as u128) as u64;
+        self.last_refill += Duration::from_nanos(consumed_nanos);
+    }
+
+    fn allow(&mut self, bytes: u64, now: Instant) -> bool {
+        self.refill(now);
+        if bytes > self.tokens {
+            return false;
+        }
+        self.tokens -= bytes;
+        true
+    }
+}
+
+/// Thread-safe bandwidth tracker with smoothed token-bucket rate limiting.
 ///
-/// Counters (`inbound_bytes` / `outbound_bytes`) accumulate within a
-/// one-second window and are reset by [`reset_if_needed`]. A limit of
-/// `0` means **unlimited** — `record_*` always returns `true`.
+/// Window counters (`inbound_bytes` / `outbound_bytes`) still report the current
+/// one-second usage and are reset by [`reset_if_needed`], while enforcement uses
+/// token buckets so short bursts can be absorbed without the hard edges of a
+/// fixed-window limiter. A limit of `0` means **unlimited**.
 pub struct BandwidthTracker {
     inbound_bytes: Arc<AtomicU64>,
     outbound_bytes: Arc<AtomicU64>,
@@ -33,6 +84,8 @@ pub struct BandwidthTracker {
     total_outbound: Arc<AtomicU64>,
     max_inbound: u64,
     max_outbound: u64,
+    inbound_limiter: Option<std::sync::Mutex<TokenBucket>>,
+    outbound_limiter: Option<std::sync::Mutex<TokenBucket>>,
     last_reset: std::sync::Mutex<Instant>,
 }
 
@@ -48,6 +101,9 @@ impl BandwidthTracker {
             total_outbound: Arc::new(AtomicU64::new(0)),
             max_inbound: max_in,
             max_outbound: max_out,
+            inbound_limiter: (max_in != 0).then(|| std::sync::Mutex::new(TokenBucket::new(max_in))),
+            outbound_limiter: (max_out != 0)
+                .then(|| std::sync::Mutex::new(TokenBucket::new(max_out))),
             last_reset: std::sync::Mutex::new(Instant::now()),
         }
     }
@@ -65,17 +121,18 @@ impl BandwidthTracker {
             self.inbound_bytes.fetch_add(bytes, Ordering::Relaxed);
             return true;
         }
-        // CAS loop: atomically check-and-increment to prevent race (F-056).
-        self.inbound_bytes
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
-                let new = current.saturating_add(bytes);
-                if new <= self.max_inbound {
-                    Some(new)
-                } else {
-                    None // over limit — reject
-                }
-            })
-            .is_ok()
+
+        let allowed = self
+            .inbound_limiter
+            .as_ref()
+            .expect("inbound limiter missing")
+            .lock()
+            .expect("lock poisoned")
+            .allow(bytes, Instant::now());
+        if allowed {
+            self.inbound_bytes.fetch_add(bytes, Ordering::Relaxed);
+        }
+        allowed
     }
 
     /// Record `bytes` of outbound traffic. Returns `false` if the configured
@@ -90,27 +147,35 @@ impl BandwidthTracker {
             self.outbound_bytes.fetch_add(bytes, Ordering::Relaxed);
             return true;
         }
-        // CAS loop: atomically check-and-increment to prevent race (F-056).
-        self.outbound_bytes
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
-                let new = current.saturating_add(bytes);
-                if new <= self.max_outbound {
-                    Some(new)
-                } else {
-                    None
-                }
-            })
-            .is_ok()
+
+        let allowed = self
+            .outbound_limiter
+            .as_ref()
+            .expect("outbound limiter missing")
+            .lock()
+            .expect("lock poisoned")
+            .allow(bytes, Instant::now());
+        if allowed {
+            self.outbound_bytes.fetch_add(bytes, Ordering::Relaxed);
+        }
+        allowed
     }
 
     /// Reset per-second counters if at least one second has elapsed.
     pub fn reset_if_needed(&self) {
         let mut last = self.last_reset.lock().expect("lock poisoned");
-        if last.elapsed() >= std::time::Duration::from_secs(1) {
-            // Use SeqCst to synchronize with concurrent record operations (F-057).
+        if last.elapsed() >= Duration::from_secs(1) {
+            let now = Instant::now();
+            if let Some(limiter) = &self.inbound_limiter {
+                limiter.lock().expect("lock poisoned").refill(now);
+            }
+            if let Some(limiter) = &self.outbound_limiter {
+                limiter.lock().expect("lock poisoned").refill(now);
+            }
+
             self.inbound_bytes.store(0, Ordering::SeqCst);
             self.outbound_bytes.store(0, Ordering::SeqCst);
-            *last = Instant::now();
+            *last = now;
         }
     }
 
@@ -166,10 +231,14 @@ mod tests {
         assert!(tracker.record_inbound(100));
         assert!(!tracker.record_inbound(1));
 
-        // Force a reset by backdating last_reset.
+        // Force a reset by backdating both the stats window and limiter clock.
         {
             let mut last = tracker.last_reset.lock().unwrap();
-            *last = Instant::now() - std::time::Duration::from_secs(2);
+            *last = Instant::now() - Duration::from_secs(2);
+        }
+        {
+            let mut limiter = tracker.inbound_limiter.as_ref().unwrap().lock().unwrap();
+            limiter.last_refill = Instant::now() - Duration::from_secs(2);
         }
         tracker.reset_if_needed();
 
@@ -231,6 +300,35 @@ mod tests {
         tracker.reset_if_needed(); // less than 1s elapsed — should be a no-op
         let s = tracker.stats();
         assert_eq!(s.inbound_bytes_per_sec, 80);
+    }
+
+    #[test]
+    fn token_bucket_allows_smoothed_burst_after_idle_refill() {
+        let tracker = BandwidthTracker::new(100, 0);
+        assert!(tracker.record_inbound(100));
+        assert!(!tracker.record_inbound(1));
+
+        {
+            let mut limiter = tracker.inbound_limiter.as_ref().unwrap().lock().unwrap();
+            limiter.last_refill = Instant::now() - Duration::from_millis(1500);
+        }
+
+        assert!(tracker.record_inbound(150));
+        assert!(!tracker.record_inbound(1));
+    }
+
+    #[test]
+    fn token_bucket_caps_idle_credit_at_burst_capacity() {
+        let tracker = BandwidthTracker::new(100, 0);
+        assert!(tracker.record_inbound(100));
+
+        {
+            let mut limiter = tracker.inbound_limiter.as_ref().unwrap().lock().unwrap();
+            limiter.last_refill = Instant::now() - Duration::from_secs(10);
+        }
+
+        assert!(tracker.record_inbound(150));
+        assert!(!tracker.record_inbound(1));
     }
 
     #[test]

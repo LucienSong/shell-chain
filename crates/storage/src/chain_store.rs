@@ -22,6 +22,12 @@ mod format_version {
     pub const RLP: u8 = 0x02;
 }
 
+/// Maximum supported offset for address transaction history pagination.
+///
+/// Deep pagination currently relies on a prefix scan, so offsets beyond this
+/// threshold are rejected explicitly instead of degrading into unbounded work.
+pub const MAX_ADDRESS_TX_HISTORY_OFFSET: usize = 10_000;
+
 /// Encode a value to RLP with a version prefix byte.
 fn encode_rlp<T: Encodable>(value: &T) -> Vec<u8> {
     let mut buf = Vec::with_capacity(1 + value.length());
@@ -371,10 +377,22 @@ impl<S: KvStore> ChainStore<S> {
         offset: usize,
         limit: usize,
     ) -> Result<Vec<ShellHash>, StorageError> {
+        if offset > MAX_ADDRESS_TX_HISTORY_OFFSET {
+            return Err(StorageError::InvalidInput(format!(
+                "transaction history offset {offset} exceeds max {}",
+                MAX_ADDRESS_TX_HISTORY_OFFSET
+            )));
+        }
+
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
         let prefix = Self::addr_tx_prefix(address);
         let entries = self.store.scan_prefix(&prefix)?;
 
-        let mut tx_hashes = Vec::new();
+        let mut tx_hashes = Vec::with_capacity(limit);
+        let mut matched = 0usize;
         for (key, value) in &entries {
             // key layout: "a/" (2) + addr (20) + block_number (8) + tx_index (4) = 34
             if key.len() < prefix.len() + 12 {
@@ -388,14 +406,22 @@ impl<S: KvStore> ChainStore<S> {
                 continue;
             }
             if value.len() == 32 {
+                if matched < offset {
+                    matched += 1;
+                    continue;
+                }
+
                 let hash = ShellHash::try_from_slice(value)
                     .map_err(|e| StorageError::Codec(e.to_string()))?;
                 tx_hashes.push(hash);
+                matched += 1;
+                if tx_hashes.len() == limit {
+                    break;
+                }
             }
         }
 
-        // Apply pagination (offset/limit)
-        Ok(tx_hashes.into_iter().skip(offset).take(limit).collect())
+        Ok(tx_hashes)
     }
 
     // ── Chain config ───────────────────────────────────────────
@@ -464,13 +490,10 @@ impl<S: KvStore> ChainStore<S> {
         metadata: crate::SnapshotMetadata,
         writer: W,
     ) -> Result<crate::SnapshotMetadata, StorageError> {
-        // For logical export, we need to iterate all keys.
-        // KvStore doesn't have an iterator, so we use a different approach:
-        // The caller should use the RocksDB-specific checkpoint for production.
-        // This method provides a reference implementation for testing.
-        let snap_writer = crate::SnapshotWriter::new(writer, metadata)?;
-        // Note: without KvStore iterator support, this is a no-op placeholder.
-        // Real export should use RocksDB checkpoint or iterate known keys.
+        let mut snap_writer = crate::SnapshotWriter::new(writer, metadata)?;
+        for (key, value) in self.store.scan_all()? {
+            snap_writer.write_entry(&key, &value)?;
+        }
         snap_writer.finalize()
     }
 
@@ -1025,6 +1048,37 @@ mod tests {
         assert_eq!(store.get(b"test-key-2").unwrap(), Some(b"value-2".to_vec()));
     }
 
+    #[test]
+    fn test_get_txs_by_address_applies_offset_after_block_filter() {
+        let store = Arc::new(MemoryDb::new());
+        let cs = ChainStore::new(Arc::clone(&store));
+        let address = Address::from([0x11; 20]);
+
+        for (idx, block_number) in [1u64, 2, 3].into_iter().enumerate() {
+            let hash = ShellHash::from([(idx as u8) + 1; 32]);
+            store
+                .put(
+                    &ChainStore::<MemoryDb>::addr_tx_key(&address, block_number, idx as u32),
+                    hash.as_bytes(),
+                )
+                .unwrap();
+        }
+
+        let page = cs.get_txs_by_address(&address, 2, 3, 1, 1).unwrap();
+        assert_eq!(page, vec![ShellHash::from([3u8; 32])]);
+    }
+
+    #[test]
+    fn test_get_txs_by_address_rejects_deep_offset() {
+        let store = Arc::new(MemoryDb::new());
+        let cs = ChainStore::new(store);
+        let address = Address::from([0x22; 20]);
+
+        let result =
+            cs.get_txs_by_address(&address, 0, u64::MAX, MAX_ADDRESS_TX_HISTORY_OFFSET + 1, 1);
+        assert!(matches!(result, Err(StorageError::InvalidInput(_))));
+    }
+
     // ── Snapshot round-trip tests ──────────────────────────────────────
 
     #[test]
@@ -1054,37 +1108,26 @@ mod tests {
             .unwrap();
         assert_eq!(exported.chain_id, 1337);
         assert_eq!(exported.block_number, 1);
+        assert!(exported.entry_count > 0);
 
         // Import into a fresh store.
         let store2 = Arc::new(MemoryDb::new());
         let cs2 = ChainStore::new(store2.clone());
 
-        // Build a snapshot with actual data entries for the fresh store.
-        let mut buf2 = Vec::new();
-        {
-            let meta2 =
-                crate::SnapshotMetadata::new(1337, 1, b1.hash(), ShellHash::default(), b0.hash());
-            let mut writer =
-                crate::SnapshotWriter::new(std::io::Cursor::new(&mut buf2), meta2).unwrap();
-            // Manually write the chain config entry.
-            let cfg = ChainConfig {
-                chain_id: 1337,
-                genesis_hash: b0.hash(),
-            };
-            let cfg_bytes = serde_json::to_vec(&cfg).unwrap();
-            writer.write_entry(b"CFG", &cfg_bytes).unwrap();
-            writer.finalize().unwrap();
-        }
-
         let imported = cs2
-            .import_snapshot(std::io::Cursor::new(&buf2), 1337, &b0.hash())
+            .import_snapshot(std::io::Cursor::new(&buf), 1337, &b0.hash())
             .unwrap();
-        assert_eq!(imported.entry_count, 1);
+        assert_eq!(imported.entry_count, exported.entry_count);
 
-        // Verify the config was restored.
+        // Verify chain metadata and canonical data were restored.
         let loaded_cfg = cs2.get_chain_config().unwrap().unwrap();
         assert_eq!(loaded_cfg.chain_id, 1337);
         assert_eq!(loaded_cfg.genesis_hash, b0.hash());
+        assert_eq!(
+            cs2.get_block_by_number(1).unwrap().unwrap().hash(),
+            b1.hash()
+        );
+        assert_eq!(cs2.get_head_block().unwrap().unwrap().hash(), b1.hash());
     }
 
     #[test]
@@ -1105,6 +1148,7 @@ mod tests {
 
         assert_eq!(exported.block_number, 0);
         assert_eq!(exported.block_hash, b0.hash());
+        assert!(exported.entry_count > 0);
     }
 
     #[test]

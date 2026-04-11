@@ -201,6 +201,7 @@ mod tests {
                 authorities: vec![addr1],
                 authority_pubkeys: vec!["0x1234".to_string()],
                 block_time_secs: 1,
+                max_future_secs: 60,
                 epoch_length: 0,
             },
             alloc,

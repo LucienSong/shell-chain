@@ -170,18 +170,19 @@ async fn all_receipts_across_blocks() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-#[ignore] // MemoryDb export is a no-op; real round-trip requires disk-backed store
 async fn snapshot_export_import_roundtrip() {
     let env = setup();
+    let state_root = env.world_state.write().state_root().unwrap_or_default();
 
     // Build a short chain
-    let genesis = make_genesis_block();
+    let mut genesis = make_genesis_block();
+    genesis.header.state_root = state_root;
     store_block(&env, &genesis);
-    let block1 = make_block(1, genesis.hash());
+    let mut block1 = make_block(1, genesis.hash());
+    block1.header.state_root = state_root;
     store_block(&env, &block1);
 
     let genesis_hash = genesis.hash();
-    let state_root = env.world_state.write().state_root().unwrap_or_default();
 
     // Export snapshot
     let metadata = SnapshotMetadata::new(TEST_CHAIN_ID, 1, block1.hash(), state_root, genesis_hash);
@@ -189,25 +190,19 @@ async fn snapshot_export_import_roundtrip() {
     let exported_meta = env.chain_store.export_snapshot(metadata, &mut buf).unwrap();
     assert_eq!(exported_meta.chain_id, TEST_CHAIN_ID);
     assert_eq!(exported_meta.block_number, 1);
+    assert!(exported_meta.entry_count > 0);
 
     // Import into a fresh store
     let db2 = Arc::new(MemoryDb::new());
     let chain_store2 = ChainStore::new(db2.clone());
-    let import_result = chain_store2.import_snapshot(&buf[..], TEST_CHAIN_ID, &genesis_hash);
+    let imported_meta = chain_store2
+        .import_snapshot(&buf[..], TEST_CHAIN_ID, &genesis_hash)
+        .unwrap();
+    assert_eq!(imported_meta.chain_id, TEST_CHAIN_ID);
+    assert_eq!(imported_meta.block_number, 1);
 
-    // The reference export_snapshot is a no-op placeholder for MemoryDb
-    // (it can't iterate keys), so import may succeed trivially or fail
-    // depending on whether the snapshot contains data. Either outcome is
-    // valid for this in-memory test — what matters is no panics.
-    match import_result {
-        Ok(meta) => {
-            assert_eq!(meta.chain_id, TEST_CHAIN_ID);
-        }
-        Err(e) => {
-            // Expected: MemoryDb export is a no-op so import may fail
-            eprintln!("[sync] snapshot import skipped (in-memory): {e}");
-        }
-    }
+    let imported_head = chain_store2.get_head_block().unwrap().unwrap();
+    assert_eq!(imported_head.hash(), block1.hash());
 }
 
 // ---------------------------------------------------------------------------

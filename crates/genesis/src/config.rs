@@ -43,6 +43,10 @@ fn default_gas_limit() -> u64 {
     30_000_000
 }
 
+fn default_poa_max_future_secs() -> u64 {
+    60
+}
+
 /// Consensus engine configuration within genesis.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "engine")]
@@ -60,6 +64,9 @@ pub enum ConsensusConfig {
         authority_pubkeys: Vec<String>,
         /// Minimum seconds between blocks.
         block_time_secs: u64,
+        /// Maximum seconds a block timestamp may be ahead of wall-clock time.
+        #[serde(default = "default_poa_max_future_secs")]
+        max_future_secs: u64,
         /// Number of blocks per epoch. Defaults to 0 (no epochs).
         #[serde(default)]
         epoch_length: u64,
@@ -134,7 +141,8 @@ mod tests {
                 "engine": "poa",
                 "authorities": [authority],
                 "authority_pubkeys": ["0x1234"],
-                "block_time_secs": 2u64
+                "block_time_secs": 2u64,
+                "max_future_secs": 45u64
             },
             "alloc": {
                 authority.to_string(): {
@@ -166,11 +174,13 @@ mod tests {
                 authorities,
                 authority_pubkeys,
                 block_time_secs,
+                max_future_secs,
                 ..
             } => {
                 assert_eq!(authorities.len(), 1);
                 assert_eq!(authority_pubkeys, &vec!["0x1234".to_string()]);
                 assert_eq!(*block_time_secs, 2);
+                assert_eq!(*max_future_secs, 45);
             }
         }
     }
@@ -220,6 +230,11 @@ mod tests {
         assert_eq!(config.gas_limit, 30_000_000);
         assert!(config.alloc.is_empty());
         assert!(config.boot_nodes.is_empty());
+        match config.consensus {
+            ConsensusConfig::PoA {
+                max_future_secs, ..
+            } => assert_eq!(max_future_secs, 60),
+        }
     }
 
     #[test]

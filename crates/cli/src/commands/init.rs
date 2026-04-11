@@ -14,6 +14,7 @@ use tracing::info;
 
 /// Maximum genesis file size: 10 MB (F-082).
 const MAX_GENESIS_FILE_SIZE: u64 = 10 * 1024 * 1024;
+const DEV_AUTHORITY_INITIAL_BALANCE: u128 = 1_000_000_000_000_000_000_000_000_000u128;
 
 /// Initialize a data directory with genesis block.
 ///
@@ -65,7 +66,7 @@ pub fn init(
             alloc.insert(
                 authority,
                 AllocEntry {
-                    balance: U256::from(1_000_000_000_000_000_000u128), // 1e18
+                    balance: U256::from(DEV_AUTHORITY_INITIAL_BALANCE),
                     nonce: 0,
                     code: None,
                     storage: None,
@@ -82,6 +83,7 @@ pub fn init(
                     authorities: vec![authority],
                     authority_pubkeys: vec![format!("0x{}", hex::encode(signer.public_key()))],
                     block_time_secs: 2,
+                    max_future_secs: 60,
                     epoch_length: 0,
                 },
                 alloc,

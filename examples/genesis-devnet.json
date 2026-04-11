@@ -10,6 +10,7 @@
       "pq1qyqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqy0vusna"
     ],
     "block_time_secs": 2,
+    "max_future_secs": 60,
     "epoch_length": 0
   },
   "alloc": {

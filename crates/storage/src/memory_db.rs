@@ -177,6 +177,24 @@ mod tests {
     }
 
     #[test]
+    fn scan_all_returns_all_entries_in_key_order() {
+        let db = MemoryDb::new();
+        db.put(b"b", b"2").unwrap();
+        db.put(b"a", b"1").unwrap();
+        db.put(b"c", b"3").unwrap();
+
+        let entries = db.scan_all().unwrap();
+        assert_eq!(
+            entries,
+            vec![
+                (b"a".to_vec(), b"1".to_vec()),
+                (b"b".to_vec(), b"2".to_vec()),
+                (b"c".to_vec(), b"3".to_vec()),
+            ]
+        );
+    }
+
+    #[test]
     fn len_and_is_empty() {
         let db = MemoryDb::new();
         assert!(db.is_empty().unwrap());

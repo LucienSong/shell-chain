@@ -18,8 +18,8 @@ pub struct PoaConfig {
     pub epoch_length: u64,
 }
 
-/// Default maximum future timestamp tolerance (15 seconds).
-const DEFAULT_MAX_FUTURE_SECS: u64 = 15;
+/// Default maximum future timestamp tolerance (60 seconds).
+const DEFAULT_MAX_FUTURE_SECS: u64 = 60;
 
 impl PoaConfig {
     pub fn new(authorities: Vec<Address>, block_time_secs: u64) -> Self {
@@ -344,7 +344,7 @@ mod tests {
         let (config, addr, _) = test_config();
         let engine = PoaEngine::new(config);
 
-        // Block timestamp 100 seconds in the future (max_future_secs = 15)
+        // Block timestamp 100 seconds in the future (max_future_secs = 60)
         let header = sample_header(0, addr, 2100);
         let result = engine.verify_timestamp(&header, None, 2000);
         assert!(result.is_err());
@@ -357,15 +357,27 @@ mod tests {
         let (config, addr, _) = test_config();
         let engine = PoaEngine::new(config);
 
-        // Block timestamp exactly at max_future_secs boundary (15s)
-        let header = sample_header(0, addr, 2015);
+        // Block timestamp exactly at max_future_secs boundary (60s)
+        let header = sample_header(0, addr, 2060);
         let result = engine.verify_timestamp(&header, None, 2000);
         assert!(result.is_ok());
 
         // 1 second over → rejected
-        let header_over = sample_header(0, addr, 2016);
+        let header_over = sample_header(0, addr, 2061);
         let result_over = engine.verify_timestamp(&header_over, None, 2000);
         assert!(result_over.is_err());
+    }
+
+    #[test]
+    fn with_max_future_secs_overrides_default() {
+        let (config, addr, _) = test_config();
+        let engine = PoaEngine::new(config.with_max_future_secs(5));
+
+        let header = sample_header(0, addr, 2005);
+        assert!(engine.verify_timestamp(&header, None, 2000).is_ok());
+
+        let header_over = sample_header(0, addr, 2006);
+        assert!(engine.verify_timestamp(&header_over, None, 2000).is_err());
     }
 
     #[test]

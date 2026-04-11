@@ -11,7 +11,7 @@ mod world_state;
 #[cfg(feature = "rocksdb")]
 mod rocks_db;
 
-pub use chain_store::{ChainConfig, ChainStore};
+pub use chain_store::{ChainConfig, ChainStore, MAX_ADDRESS_TX_HISTORY_OFFSET};
 pub use error::StorageError;
 pub use kv_store::{KvStore, WriteBatch, WriteBatchOp};
 pub use memory_db::MemoryDb;

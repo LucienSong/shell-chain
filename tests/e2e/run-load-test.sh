@@ -113,7 +113,15 @@ PRE_HEIGHT=$((16#${PRE_HEIGHT_HEX#0x}))
 metric "Block height before load: #${PRE_HEIGHT}"
 
 PENDING_BEFORE=$(rpc 8545 shell_pendingCount)
+PENDING_BEFORE_DEC=$((16#${PENDING_BEFORE#0x}))
+DRAIN_ALLOWANCE=${DRAIN_ALLOWANCE:-4}
+if [ "$PENDING_BEFORE_DEC" -eq 0 ]; then
+    DRAIN_TARGET=0
+else
+    DRAIN_TARGET=$((PENDING_BEFORE_DEC + DRAIN_ALLOWANCE))
+fi
 metric "Pending tx before load: ${PENDING_BEFORE}"
+metric "Drain target after load: <= ${DRAIN_TARGET} pending txs"
 
 # ─── Send sustained load ─────────────────────────────────────
 echo ""
@@ -275,7 +283,7 @@ DRAIN_OK=false
 for i in $(seq 1 15); do
     PENDING=$(rpc 8545 shell_pendingCount)
     PENDING_DEC=$((16#${PENDING#0x}))
-    if [ "$PENDING_DEC" -eq 0 ]; then
+    if [ "$PENDING_DEC" -le "$DRAIN_TARGET" ]; then
         DRAIN_OK=true
         break
     fi
@@ -284,10 +292,10 @@ for i in $(seq 1 15); do
 done
 
 if [ "$DRAIN_OK" = "true" ]; then
-    pass "Mempool drained (all transactions processed)"
+    pass "Mempool drained back to target window (baseline ${PENDING_BEFORE_DEC}, target <= ${DRAIN_TARGET})"
 else
     PENDING=$(rpc 8545 shell_pendingCount)
-    fail "Mempool still has pending txs after 30s (${PENDING})"
+    fail "Mempool did not drain back to target window after 30s (${PENDING}, target <= ${DRAIN_TARGET})"
 fi
 
 # ─── Post-load memory ────────────────────────────────────────

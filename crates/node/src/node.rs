@@ -447,6 +447,11 @@ impl<S: KvStore + 'static> Node<S> {
         // Get the peer count handle from the network for RPC.
         let peer_count_handle = network.peer_count_handle();
 
+        self.config
+            .rpc
+            .validate_dev_rpc_exposure()
+            .map_err(NodeError::Startup)?;
+
         let rpc_handle = start_rpc_server(
             self.config.rpc.clone(),
             self.chain_store.clone(),
@@ -460,7 +465,7 @@ impl<S: KvStore + 'static> Node<S> {
             finalized_number.clone(),
             self.finality.clone(),
             peer_count_handle,
-            if self.config.rpc.api_namespaces.iter().any(|ns| ns == "evm") {
+            if self.config.rpc.has_api_namespace("evm") {
                 Some(self.clone() as Arc<dyn DevRpcControl>)
             } else {
                 None
@@ -1063,8 +1068,9 @@ impl<S: KvStore + 'static> Node<S> {
 
     /// Import and validate a block received from the network.
     ///
-    /// Re-executes all transactions through the EVM and commits state
-    /// changes to WorldState, then stores the block.
+    /// Re-executes all transactions through the EVM on an isolated state
+    /// snapshot, verifies the imported state root, then atomically swaps the
+    /// live WorldState and stores the block.
     ///
     /// Fork detection: if the incoming block is at the same height as
     /// the current head but with a different hash, it is treated as a
@@ -1169,14 +1175,22 @@ impl<S: KvStore + 'static> Node<S> {
             }
         }
 
-        // Re-execute transactions and commit state changes.
+        let current_root = {
+            let mut ws = self.world_state.write();
+            ws.state_root()?
+        };
+
+        // Re-execute transactions against an isolated state snapshot.
+        // The live WorldState is only swapped to the imported root after the
+        // computed state_root matches the block header.
         let mut receipts = Vec::new();
-        if !block.transactions.is_empty() {
+        let mut new_pubkeys: HashMap<Address, Vec<u8>> = HashMap::new();
+        let imported_state_root = if !block.transactions.is_empty() {
             // Validate all transactions before execution (F-181):
             // security-critical checks (sig, algorithm, access list, pubkey)
             // are enforced during block import, not just mempool.
             let import_cs = ChainStore::new(self.store.clone());
-
+            let mut block_pubkeys: HashMap<Address, Vec<u8>> = HashMap::new();
             // M5-C2: Batch verify all transaction signatures in parallel.
             // Resolve pubkeys and compute tx hashes, then dispatch to rayon.
             let batch_verifier = MultiVerifier;
@@ -1184,22 +1198,43 @@ impl<S: KvStore + 'static> Node<S> {
             let mut resolved_pks: Vec<Vec<u8>> = Vec::with_capacity(block.transactions.len());
             for tx in &block.transactions {
                 let pk = match &tx.sender_pubkey {
-                    Some(pk) => pk.clone(),
-                    None => import_cs
-                        .get_pubkey(&tx.from)
-                        .map_err(|e| {
-                            NodeError::Startup(format!(
-                                "block {} pubkey lookup failed: {e}",
-                                block.number()
-                            ))
-                        })?
-                        .ok_or_else(|| {
-                            NodeError::Startup(format!(
-                                "block {} missing pubkey for {}",
-                                block.number(),
-                                tx.from
-                            ))
-                        })?,
+                    Some(pk) => {
+                        block_pubkeys.entry(tx.from).or_insert_with(|| pk.clone());
+                        if import_cs
+                            .get_pubkey(&tx.from)
+                            .map_err(|e| {
+                                NodeError::Startup(format!(
+                                    "block {} pubkey lookup failed: {e}",
+                                    block.number()
+                                ))
+                            })?
+                            .is_none()
+                        {
+                            new_pubkeys.entry(tx.from).or_insert_with(|| pk.clone());
+                        }
+                        pk.clone()
+                    }
+                    None => {
+                        if let Some(pk) = block_pubkeys.get(&tx.from) {
+                            pk.clone()
+                        } else {
+                            import_cs
+                                .get_pubkey(&tx.from)
+                                .map_err(|e| {
+                                    NodeError::Startup(format!(
+                                        "block {} pubkey lookup failed: {e}",
+                                        block.number()
+                                    ))
+                                })?
+                                .ok_or_else(|| {
+                                    NodeError::Startup(format!(
+                                        "block {} missing pubkey for {}",
+                                        block.number(),
+                                        tx.from
+                                    ))
+                                })?
+                        }
+                    }
                 };
                 resolved_pks.push(pk);
             }
@@ -1222,10 +1257,6 @@ impl<S: KvStore + 'static> Node<S> {
                     ))
                 })?;
 
-            let current_root = {
-                let mut ws = self.world_state.write();
-                ws.state_root()?
-            };
             let ws = WorldState::at_root(self.store.clone(), &current_root)?;
             let cs = ChainStore::new(self.store.clone());
             let state_db = ShellStateDb::new(ws, cs);
@@ -1235,9 +1266,17 @@ impl<S: KvStore + 'static> Node<S> {
             // Uses PreVerified to skip redundant individual
             // sig checks — signatures were already batch-verified above.
             let pre_verified = PreVerified;
+            let mut validation_pubkeys: HashMap<Address, Vec<u8>> = HashMap::new();
             for tx in &block.transactions {
+                let mut tx_for_validation = tx.clone();
+                if tx_for_validation.sender_pubkey.is_none() {
+                    if let Some(pk) = validation_pubkeys.get(&tx.from) {
+                        tx_for_validation.sender_pubkey = Some(pk.clone());
+                    }
+                }
+
                 validate_tx_for_import(
-                    tx,
+                    &tx_for_validation,
                     evm.state_db_mut().world_state_mut(),
                     &import_cs,
                     &pre_verified,
@@ -1249,6 +1288,12 @@ impl<S: KvStore + 'static> Node<S> {
                         block.number()
                     ))
                 })?;
+
+                if let Some(pk) = &tx.sender_pubkey {
+                    validation_pubkeys
+                        .entry(tx.from)
+                        .or_insert_with(|| pk.clone());
+                }
             }
             let mut cumulative_gas: u64 = 0;
 
@@ -1269,9 +1314,6 @@ impl<S: KvStore + 'static> Node<S> {
                                 evm.state_db_mut().world_state_mut(),
                                 &self.chain_store,
                             )?;
-
-                            let mut ws = self.world_state.write();
-                            commit_evm_state(&result.state_changes, &mut ws, &self.chain_store)?;
                         }
                     }
                     Err(e) => {
@@ -1282,6 +1324,23 @@ impl<S: KvStore + 'static> Node<S> {
                     }
                 }
             }
+            evm.state_db_mut().world_state_mut().state_root()?
+        } else {
+            current_root
+        };
+        if imported_state_root != block.header.state_root {
+            return Err(NodeError::Startup(format!(
+                "block {} state root mismatch: expected {:?}, got {:?}",
+                block.number(),
+                block.header.state_root,
+                imported_state_root
+            )));
+        }
+
+        let committed_world_state = WorldState::at_root(self.store.clone(), &imported_state_root)?;
+        {
+            let mut live_ws = self.world_state.write();
+            *live_ws = committed_world_state;
         }
 
         // Commit to storage.
@@ -1293,6 +1352,9 @@ impl<S: KvStore + 'static> Node<S> {
         self.chain_store
             .set_canonical(block.number(), &block_hash)?;
         self.chain_store.set_head(&block_hash)?;
+        for (address, pubkey) in new_pubkeys {
+            self.chain_store.put_pubkey(&address, &pubkey)?;
+        }
 
         // Remove any included transactions from our mempool.
         let tx_hashes: Vec<ShellHash> = block.transactions.iter().map(|tx| tx.hash()).collect();
@@ -1577,6 +1639,11 @@ mod tests {
         ws.set_account(addr, &account).unwrap();
     }
 
+    fn current_state_root(node: &Node<MemoryDb>) -> ShellHash {
+        let mut ws = node.world_state.write();
+        ws.state_root().unwrap()
+    }
+
     #[test]
     fn node_creation() {
         let (node, _signer) = setup_node();
@@ -1827,11 +1894,12 @@ mod tests {
     fn import_block() {
         let (node, _signer) = setup_node();
         store_genesis(&node);
+        let state_root = current_state_root(&node);
 
         let block = Block {
             header: BlockHeader {
                 parent_hash: node.chain_store.get_head_hash().unwrap().unwrap(),
-                state_root: ShellHash::default(),
+                state_root,
                 transactions_root: ShellHash::default(),
                 receipts_root: ShellHash::default(),
                 logs_bloom: Bytes::default(),
@@ -1899,6 +1967,310 @@ mod tests {
     }
 
     #[test]
+    fn import_block_persists_aa_pubkey_for_follow_up_transactions() {
+        let (leader, proposer_signer) = setup_node();
+        store_genesis(&leader);
+        let proposer = leader.config.proposer_address.unwrap();
+
+        let tx_signer = DilithiumSigner::generate();
+        let sender = Address::from_public_key(tx_signer.public_key(), tx_signer.sig_type().as_u8());
+        let receiver = Address::from([0xCC; 20]);
+        let initial_balance = U256::from(100_000_000_000_000u64);
+        fund_account(&leader, &sender, initial_balance);
+
+        let verifier = MultiVerifier;
+        let tx0 = Transaction {
+            chain_id: 1337,
+            nonce: 0,
+            to: Some(receiver),
+            value: U256::from(1u64),
+            data: shell_primitives::Bytes::new(),
+            gas_limit: 21_000,
+            max_fee_per_gas: shell_core::INITIAL_BASE_FEE,
+            max_priority_fee_per_gas: 0,
+            access_list: None,
+            tx_type: 2,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
+        };
+        let tx0_hash = {
+            let encoded = alloy_rlp::encode(&tx0);
+            shell_primitives::keccak256(&encoded)
+        };
+        let sig0 = tx_signer.sign(tx0_hash.as_bytes()).expect("sign failed");
+        let signed0 =
+            SignedTransaction::with_pubkey(sender, tx0, sig0, tx_signer.public_key().to_vec());
+
+        let mut leader_world_state = leader.world_state.write();
+        leader
+            .tx_pool
+            .insert(
+                signed0,
+                &mut leader_world_state,
+                leader.chain_store.as_ref(),
+                &verifier,
+            )
+            .unwrap();
+        drop(leader_world_state);
+
+        let block1 = leader.produce_block(&proposer_signer, 100).unwrap();
+
+        let follower_db = Arc::new(MemoryDb::new());
+        let follower_cs = Arc::new(ChainStore::new(follower_db.clone()));
+        let follower_ws = Arc::new(RwLock::new(WorldState::new(follower_db.clone())));
+        let consensus = Arc::new(RwLock::new(PoaEngine::new(PoaConfig::new(
+            vec![proposer],
+            1,
+        ))));
+        let tx_pool = Arc::new(TxPool::new(MempoolConfig {
+            chain_id: 1337,
+            ..MempoolConfig::default()
+        }));
+        let config = NodeConfig::dev(proposer);
+        let follower = Node::new(
+            config,
+            follower_db,
+            follower_cs,
+            follower_ws,
+            tx_pool,
+            consensus,
+        );
+        store_genesis(&follower);
+        fund_account(&follower, &sender, initial_balance);
+        follower.register_authority_pubkey(proposer, proposer_signer.public_key().to_vec());
+
+        follower.import_block(block1, &verifier).unwrap();
+        assert_eq!(
+            follower.chain_store.get_pubkey(&sender).unwrap().unwrap(),
+            tx_signer.public_key().to_vec()
+        );
+
+        let tx1 = Transaction {
+            chain_id: 1337,
+            nonce: 1,
+            to: Some(receiver),
+            value: U256::from(2u64),
+            data: shell_primitives::Bytes::new(),
+            gas_limit: 21_000,
+            max_fee_per_gas: shell_core::INITIAL_BASE_FEE,
+            max_priority_fee_per_gas: 0,
+            access_list: None,
+            tx_type: 2,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
+        };
+        let tx1_hash = {
+            let encoded = alloy_rlp::encode(&tx1);
+            shell_primitives::keccak256(&encoded)
+        };
+        let sig1 = tx_signer.sign(tx1_hash.as_bytes()).expect("sign failed");
+        let signed1 = SignedTransaction::new(sender, tx1, sig1);
+
+        let mut leader_world_state = leader.world_state.write();
+        leader
+            .tx_pool
+            .insert(
+                signed1,
+                &mut leader_world_state,
+                leader.chain_store.as_ref(),
+                &verifier,
+            )
+            .unwrap();
+        drop(leader_world_state);
+
+        let block2 = leader.produce_block(&proposer_signer, 100).unwrap();
+        follower.import_block(block2, &verifier).unwrap();
+
+        let follower_account = follower
+            .world_state
+            .read()
+            .get_account(&sender)
+            .unwrap()
+            .unwrap();
+        assert_eq!(follower_account.nonce, 2);
+    }
+
+    #[test]
+    fn import_block_materializes_state_root_for_restart() {
+        let (leader, proposer_signer) = setup_node();
+        store_genesis(&leader);
+        let proposer = leader.config.proposer_address.unwrap();
+
+        let tx_signer = DilithiumSigner::generate();
+        let sender = Address::from_public_key(tx_signer.public_key(), tx_signer.sig_type().as_u8());
+        let receiver = Address::from([0xDD; 20]);
+        let initial_balance = U256::from(100_000_000_000_000u64);
+        fund_account(&leader, &sender, initial_balance);
+
+        let verifier = MultiVerifier;
+        let tx = Transaction {
+            chain_id: 1337,
+            nonce: 0,
+            to: Some(receiver),
+            value: U256::from(1u64),
+            data: shell_primitives::Bytes::new(),
+            gas_limit: 21_000,
+            max_fee_per_gas: shell_core::INITIAL_BASE_FEE,
+            max_priority_fee_per_gas: 0,
+            access_list: None,
+            tx_type: 2,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
+        };
+        let tx_hash = {
+            let encoded = alloy_rlp::encode(&tx);
+            shell_primitives::keccak256(&encoded)
+        };
+        let sig = tx_signer.sign(tx_hash.as_bytes()).expect("sign failed");
+        let signed =
+            SignedTransaction::with_pubkey(sender, tx, sig, tx_signer.public_key().to_vec());
+
+        let mut leader_world_state = leader.world_state.write();
+        leader
+            .tx_pool
+            .insert(
+                signed,
+                &mut leader_world_state,
+                leader.chain_store.as_ref(),
+                &verifier,
+            )
+            .unwrap();
+        drop(leader_world_state);
+
+        let block = leader.produce_block(&proposer_signer, 100).unwrap();
+        assert_eq!(block.transactions.len(), 1);
+
+        let follower_db = Arc::new(MemoryDb::new());
+        let follower_cs = Arc::new(ChainStore::new(follower_db.clone()));
+        let follower_ws = Arc::new(RwLock::new(WorldState::new(follower_db.clone())));
+        let consensus = Arc::new(RwLock::new(PoaEngine::new(PoaConfig::new(
+            vec![proposer],
+            1,
+        ))));
+        let tx_pool = Arc::new(TxPool::new(MempoolConfig {
+            chain_id: 1337,
+            ..MempoolConfig::default()
+        }));
+        let config = NodeConfig::dev(proposer);
+        let follower = Node::new(
+            config,
+            follower_db,
+            follower_cs,
+            follower_ws,
+            tx_pool,
+            consensus,
+        );
+        store_genesis(&follower);
+        fund_account(&follower, &sender, initial_balance);
+        follower.register_authority_pubkey(proposer, proposer_signer.public_key().to_vec());
+
+        follower.import_block(block.clone(), &verifier).unwrap();
+
+        assert!(
+            follower
+                .store
+                .contains(block.header.state_root.as_bytes())
+                .unwrap(),
+            "imported tx block should materialize its state root for restart safety"
+        );
+    }
+
+    #[test]
+    fn import_block_state_root_mismatch_leaves_live_state_unchanged() {
+        let (leader, proposer_signer) = setup_node();
+        store_genesis(&leader);
+        let proposer = leader.config.proposer_address.unwrap();
+
+        let tx_signer = DilithiumSigner::generate();
+        let sender = Address::from_public_key(tx_signer.public_key(), tx_signer.sig_type().as_u8());
+        let receiver = Address::from([0xEE; 20]);
+        let initial_balance = U256::from(100_000_000_000_000u64);
+        fund_account(&leader, &sender, initial_balance);
+
+        let verifier = MultiVerifier;
+        let tx = Transaction {
+            chain_id: 1337,
+            nonce: 0,
+            to: Some(receiver),
+            value: U256::from(1u64),
+            data: shell_primitives::Bytes::new(),
+            gas_limit: 21_000,
+            max_fee_per_gas: shell_core::INITIAL_BASE_FEE,
+            max_priority_fee_per_gas: 0,
+            access_list: None,
+            tx_type: 2,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
+        };
+        let tx_hash = {
+            let encoded = alloy_rlp::encode(&tx);
+            shell_primitives::keccak256(&encoded)
+        };
+        let sig = tx_signer.sign(tx_hash.as_bytes()).expect("sign failed");
+        let signed =
+            SignedTransaction::with_pubkey(sender, tx, sig, tx_signer.public_key().to_vec());
+
+        let mut leader_world_state = leader.world_state.write();
+        leader
+            .tx_pool
+            .insert(
+                signed,
+                &mut leader_world_state,
+                leader.chain_store.as_ref(),
+                &verifier,
+            )
+            .unwrap();
+        drop(leader_world_state);
+
+        let block = leader.produce_block(&proposer_signer, 100).unwrap();
+
+        let follower_db = Arc::new(MemoryDb::new());
+        let follower_cs = Arc::new(ChainStore::new(follower_db.clone()));
+        let follower_ws = Arc::new(RwLock::new(WorldState::new(follower_db.clone())));
+        let consensus = Arc::new(RwLock::new(PoaEngine::new(PoaConfig::new(
+            vec![proposer],
+            1,
+        ))));
+        let tx_pool = Arc::new(TxPool::new(MempoolConfig {
+            chain_id: 1337,
+            ..MempoolConfig::default()
+        }));
+        let config = NodeConfig::dev(proposer);
+        let follower = Node::new(
+            config,
+            follower_db,
+            follower_cs,
+            follower_ws,
+            tx_pool,
+            consensus,
+        );
+        store_genesis(&follower);
+        fund_account(&follower, &sender, initial_balance);
+        fund_account(&follower, &Address::from([0xAB; 20]), U256::from(42u64));
+        follower.register_authority_pubkey(proposer, proposer_signer.public_key().to_vec());
+
+        let before_root = current_state_root(&follower);
+        let before_head = follower
+            .chain_store
+            .get_head_block()
+            .unwrap()
+            .unwrap()
+            .hash();
+
+        let err = follower.import_block(block, &verifier).unwrap_err();
+        assert!(err.to_string().contains("state root mismatch"));
+        assert_eq!(
+            current_state_root(&follower),
+            before_root,
+            "failed imports must not mutate the follower live state"
+        );
+
+        let after_head = follower.chain_store.get_head_block().unwrap().unwrap();
+        assert_eq!(after_head.number(), 0);
+        assert_eq!(after_head.hash(), before_head);
+    }
+
+    #[test]
     fn import_block_with_invalid_seal_rejected() {
         let (node, signer) = setup_node();
         store_genesis(&node);
@@ -1944,11 +2316,12 @@ mod tests {
         // In M1b, blocks without a seal are allowed with a warning.
         let (node, _signer) = setup_node();
         store_genesis(&node);
+        let state_root = current_state_root(&node);
 
         let block = Block {
             header: BlockHeader {
                 parent_hash: node.chain_store.get_head_hash().unwrap().unwrap(),
-                state_root: ShellHash::default(),
+                state_root,
                 transactions_root: ShellHash::default(),
                 receipts_root: ShellHash::default(),
                 logs_bloom: Bytes::default(),
@@ -2247,6 +2620,7 @@ mod tests {
         store_genesis(&node);
         let verifier = MultiVerifier;
         let proposer = node.config.proposer_address.unwrap();
+        let state_root = current_state_root(&node);
 
         let mut parent_hash = node.chain_store.get_head_hash().unwrap().unwrap();
         let mut parent_gas_used = 0u64;
@@ -2259,7 +2633,7 @@ mod tests {
             let block = Block {
                 header: BlockHeader {
                     parent_hash,
-                    state_root: ShellHash::default(),
+                    state_root,
                     transactions_root: ShellHash::default(),
                     receipts_root: ShellHash::default(),
                     logs_bloom: Bytes::default(),
@@ -2345,13 +2719,14 @@ mod tests {
         store_genesis(&node);
         let verifier = MultiVerifier;
         let proposer = node.config.proposer_address.unwrap();
+        let state_root = current_state_root(&node);
 
         // Import block 1 normally.
         let parent_hash = node.chain_store.get_head_hash().unwrap().unwrap();
         let block1 = Block {
             header: BlockHeader {
                 parent_hash,
-                state_root: ShellHash::default(),
+                state_root,
                 transactions_root: ShellHash::default(),
                 receipts_root: ShellHash::default(),
                 logs_bloom: Bytes::default(),
@@ -2382,7 +2757,7 @@ mod tests {
         let fork_block = Block {
             header: BlockHeader {
                 parent_hash,
-                state_root: ShellHash::default(),
+                state_root,
                 transactions_root: ShellHash::default(),
                 receipts_root: ShellHash::default(),
                 logs_bloom: Bytes::default(),
@@ -2462,12 +2837,13 @@ mod tests {
         store_genesis(&node);
         let verifier = MultiVerifier;
         let proposer = node.config.proposer_address.unwrap();
+        let state_root = current_state_root(&node);
 
         let parent_hash = node.chain_store.get_head_hash().unwrap().unwrap();
         let block = Block {
             header: BlockHeader {
                 parent_hash,
-                state_root: ShellHash::default(),
+                state_root,
                 transactions_root: ShellHash::default(),
                 receipts_root: ShellHash::default(),
                 logs_bloom: Bytes::default(),
@@ -2647,11 +3023,12 @@ mod tests {
     fn import_block_tracks_state_root() {
         let (node, _signer) = setup_node_with_pruning(10);
         store_genesis(&node);
+        let current_root = current_state_root(&node);
 
         let block = Block {
             header: BlockHeader {
                 parent_hash: node.chain_store.get_head_hash().unwrap().unwrap(),
-                state_root: ShellHash::from([0xAB; 32]),
+                state_root: current_root,
                 transactions_root: ShellHash::default(),
                 receipts_root: ShellHash::default(),
                 logs_bloom: Bytes::default(),
@@ -2678,10 +3055,7 @@ mod tests {
         let tracker = node.state_root_tracker.read();
         assert_eq!(tracker.len(), 1);
         assert_eq!(tracker.latest().unwrap().block_number, 1);
-        assert_eq!(
-            tracker.latest().unwrap().state_root,
-            ShellHash::from([0xAB; 32])
-        );
+        assert_eq!(tracker.latest().unwrap().state_root, current_root);
     }
 
     #[test]

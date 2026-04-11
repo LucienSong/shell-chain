@@ -37,6 +37,7 @@ pub struct RpcSection {
     pub cors_origins: Option<Vec<String>>,
     pub rate_limit: Option<u32>,
     pub api_modules: Option<Vec<String>>,
+    pub unsafe_dev_exposed: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -99,6 +100,7 @@ ws_port = 8546
 cors_origins = ["*"]
 rate_limit = 100
 api_modules = ["eth", "net", "web3"]
+unsafe_dev_exposed = true
 
 [p2p]
 enabled = true
@@ -138,6 +140,7 @@ format = "json"
             config.rpc.api_modules.as_deref(),
             Some(vec!["eth".to_string(), "net".to_string(), "web3".to_string()].as_slice())
         );
+        assert_eq!(config.rpc.unsafe_dev_exposed, Some(true));
 
         assert_eq!(config.p2p.enabled, Some(true));
         assert_eq!(config.p2p.listen_addr.as_deref(), Some("0.0.0.0:30303"));
@@ -172,6 +175,7 @@ format = "json"
         assert!(config.rpc.cors_origins.is_none());
         assert!(config.rpc.rate_limit.is_none());
         assert!(config.rpc.api_modules.is_none());
+        assert!(config.rpc.unsafe_dev_exposed.is_none());
         assert!(config.p2p.enabled.is_none());
         assert!(config.p2p.listen_addr.is_none());
         assert!(config.p2p.bootnodes.is_none());
@@ -199,6 +203,7 @@ ws_enabled = true
         assert!(config.node.block_time.is_none());
         assert_eq!(config.rpc.ws_enabled, Some(true));
         assert!(config.rpc.listen_addr.is_none());
+        assert!(config.rpc.unsafe_dev_exposed.is_none());
         assert!(config.p2p.enabled.is_none());
     }
 

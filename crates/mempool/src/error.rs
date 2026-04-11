@@ -1,4 +1,5 @@
 use shell_primitives::{Address, ShellHash, U256};
+use shell_storage::StorageError;
 use thiserror::Error;
 
 /// Errors that can occur during mempool operations.
@@ -19,8 +20,14 @@ pub enum MempoolError {
     #[error("gas price {got} below minimum {min}")]
     GasPriceTooLow { got: u64, min: u64 },
 
+    #[error("gas limit {got} below intrinsic minimum {minimum}")]
+    GasTooLow { got: u64, minimum: u64 },
+
     #[error("nonce {got} too low, sender has pending nonce >= {pending}")]
     NonceTooLow { got: u64, pending: u64 },
+
+    #[error("nonce gap: expected next nonce {expected}, got {got}")]
+    NonceGap { expected: u64, got: u64 },
 
     #[error("insufficient balance: need {needed}, have {have}")]
     InsufficientBalance { needed: U256, have: U256 },
@@ -42,6 +49,9 @@ pub enum MempoolError {
 
     #[error("invalid transaction: {0}")]
     InvalidTransaction(String),
+
+    #[error("storage error: {0}")]
+    Storage(#[from] StorageError),
 }
 
 #[cfg(test)]
@@ -86,6 +96,18 @@ mod tests {
     }
 
     #[test]
+    fn gas_too_low_display() {
+        let err = MempoolError::GasTooLow {
+            got: 21_000,
+            minimum: 21_032,
+        };
+        assert_eq!(
+            err.to_string(),
+            "gas limit 21000 below intrinsic minimum 21032"
+        );
+    }
+
+    #[test]
     fn nonce_too_low_display() {
         let err = MempoolError::NonceTooLow {
             got: 3,
@@ -93,6 +115,15 @@ mod tests {
         };
         assert!(err.to_string().contains("nonce 3 too low"));
         assert!(err.to_string().contains("10"));
+    }
+
+    #[test]
+    fn nonce_gap_display() {
+        let err = MempoolError::NonceGap {
+            expected: 1,
+            got: 3,
+        };
+        assert_eq!(err.to_string(), "nonce gap: expected next nonce 1, got 3");
     }
 
     #[test]
