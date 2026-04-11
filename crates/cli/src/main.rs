@@ -34,7 +34,7 @@ struct Cli {
     #[arg(long, default_value = "shell-data", global = true)]
     datadir: PathBuf,
 
-    /// Log output format: "text" (human-readable) or "json" (structured).
+    /// Log output format: "text" (human-readable), "json" (structured), or "compact".
     #[arg(long, default_value = "text", global = true)]
     log_format: String,
 
@@ -209,6 +209,27 @@ enum Commands {
         #[command(subcommand)]
         command: commands::wallet::WalletCommand,
     },
+
+    /// Hot backup and restore for the RocksDB data directory.
+    Backup {
+        #[command(subcommand)]
+        command: BackupCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum BackupCommands {
+    /// Create a RocksDB checkpoint (hot backup).
+    Create {
+        /// Output directory for the backup (default: <datadir>/backups/<timestamp>/).
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+    /// Restore the data directory from a RocksDB checkpoint.
+    Restore {
+        /// Path to the backup directory created by `backup create`.
+        backup_path: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -245,12 +266,23 @@ async fn main() {
                 .with_target(true)
                 .with_file(true)
                 .with_line_number(true)
+                .with_current_span(true)
+                .with_span_list(true)
+                .with_env_filter(filter)
+                .init();
+        }
+        "compact" => {
+            tracing_subscriber::fmt()
+                .compact()
+                .with_target(false)
                 .with_env_filter(filter)
                 .init();
         }
         _ => {
+            // Default "text" format with full target and thread IDs for debugging.
             tracing_subscriber::fmt()
                 .with_target(true)
+                .with_thread_ids(false)
                 .with_env_filter(filter)
                 .init();
         }
@@ -422,6 +454,12 @@ async fn main() {
         Commands::Tx { command } => commands::tx::execute(command),
         Commands::Account { command } => commands::account::execute(command),
         Commands::Wallet { command } => commands::wallet::execute(command),
+        Commands::Backup { command } => match command {
+            BackupCommands::Create { output } => commands::create_backup(cli.datadir, output),
+            BackupCommands::Restore { backup_path } => {
+                commands::restore_backup(cli.datadir, backup_path)
+            }
+        },
     };
 
     if let Err(e) = result {

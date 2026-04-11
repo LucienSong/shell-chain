@@ -17,6 +17,7 @@ use shell_mempool::TxPool;
 use shell_primitives::Address;
 use shell_storage::{ChainStore, KvStore, WorldState};
 
+use crate::admin::AdminApiServer;
 use crate::api::{
     DebugApiServer, EthApiServer, EvmApiServer, NetApiServer, ShellApiServer, TraceApiServer,
     Web3ApiServer,
@@ -271,7 +272,10 @@ pub async fn start_rpc_server<S: KvStore + 'static>(
         module.merge(DebugApiServer::into_rpc(handler.clone()))?;
     }
     if ns.iter().any(|n| n == "trace") {
-        module.merge(TraceApiServer::into_rpc(handler))?;
+        module.merge(TraceApiServer::into_rpc(handler.clone()))?;
+    }
+    if ns.iter().any(|n| n == "admin") {
+        module.merge(AdminApiServer::into_rpc(handler))?;
     }
 
     if let Some(ws_listen) = internal_ws {

@@ -10,7 +10,8 @@ use std::time::Instant;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use prometheus::{
-    Encoder, Histogram, HistogramOpts, IntCounter, IntGauge, Opts, Registry, TextEncoder,
+    CounterVec, Encoder, GaugeVec, Histogram, HistogramOpts, IntCounter, IntGauge, Opts, Registry,
+    TextEncoder,
 };
 
 /// Prometheus metrics for a shell-chain node.
@@ -27,6 +28,14 @@ pub struct Metrics {
     pub blocks_imported: IntCounter,
     /// Total number of transactions received.
     pub txs_received: IntCounter,
+    /// Current epoch number (wPoA).
+    pub epoch_number: IntGauge,
+    /// Number of currently active validators.
+    pub validator_active_count: IntGauge,
+    /// Per-validator weight gauge: `shell_validator_weight{validator="0x..."}`.
+    pub validator_weight: GaugeVec,
+    /// Per-validator missed-slot counter: `shell_consensus_slot_miss_total{validator="0x..."}`.
+    pub validator_slot_miss: CounterVec,
     /// Timestamp when the node started, used for uptime calculation.
     pub uptime_start: Instant,
     registry: Registry,
@@ -63,6 +72,23 @@ impl Metrics {
             "shell_txs_received_total",
             "Total transactions received",
         ))?;
+        let epoch_number =
+            IntGauge::with_opts(Opts::new("shell_epoch_number", "Current wPoA epoch"))?;
+        let validator_active_count = IntGauge::with_opts(Opts::new(
+            "shell_validator_active_count",
+            "Number of currently active validators",
+        ))?;
+        let validator_weight = GaugeVec::new(
+            Opts::new("shell_validator_weight", "Per-validator proposer weight"),
+            &["validator"],
+        )?;
+        let validator_slot_miss = CounterVec::new(
+            Opts::new(
+                "shell_consensus_slot_miss_total",
+                "Per-validator missed proposer slots",
+            ),
+            &["validator"],
+        )?;
 
         registry.register(Box::new(block_height.clone()))?;
         registry.register(Box::new(peer_count.clone()))?;
@@ -70,6 +96,10 @@ impl Metrics {
         registry.register(Box::new(block_production_ms.clone()))?;
         registry.register(Box::new(blocks_imported.clone()))?;
         registry.register(Box::new(txs_received.clone()))?;
+        registry.register(Box::new(epoch_number.clone()))?;
+        registry.register(Box::new(validator_active_count.clone()))?;
+        registry.register(Box::new(validator_weight.clone()))?;
+        registry.register(Box::new(validator_slot_miss.clone()))?;
 
         Ok(Self {
             block_height,
@@ -78,6 +108,10 @@ impl Metrics {
             block_production_ms,
             blocks_imported,
             txs_received,
+            epoch_number,
+            validator_active_count,
+            validator_weight,
+            validator_slot_miss,
             uptime_start: Instant::now(),
             registry,
         })
@@ -93,6 +127,22 @@ impl Metrics {
             return String::new();
         }
         String::from_utf8(buffer).unwrap_or_default()
+    }
+
+    /// Update validator weight metric for a single validator.
+    ///
+    /// `validator` should be a hex-encoded address string (e.g. `"0xabc..."`).
+    pub fn set_validator_weight(&self, validator: &str, weight: f64) {
+        self.validator_weight
+            .with_label_values(&[validator])
+            .set(weight);
+    }
+
+    /// Record a missed proposer slot for a validator.
+    pub fn record_slot_miss(&self, validator: &str) {
+        self.validator_slot_miss
+            .with_label_values(&[validator])
+            .inc();
     }
 }
 
@@ -346,5 +396,55 @@ mod tests {
             output.contains("shell_block_production_duration_seconds_count 3"),
             "histogram should record 3 observations"
         );
+    }
+
+    #[test]
+    fn wpoa_metrics_default_to_zero() {
+        let m = Metrics::new().expect("metrics init");
+        assert_eq!(m.epoch_number.get(), 0);
+        assert_eq!(m.validator_active_count.get(), 0);
+    }
+
+    #[test]
+    fn validator_weight_gauge_updates() {
+        let m = Metrics::new().expect("metrics init");
+        m.set_validator_weight("0xabcd", 3.0);
+        m.set_validator_weight("0xabcd", 5.0);
+
+        let output = m.gather();
+        assert!(
+            output.contains("shell_validator_weight"),
+            "should contain validator_weight metric"
+        );
+        assert!(
+            output.contains(r#"validator="0xabcd""#),
+            "should have validator label"
+        );
+    }
+
+    #[test]
+    fn validator_slot_miss_counter_increments() {
+        let m = Metrics::new().expect("metrics init");
+        m.record_slot_miss("0xdead");
+        m.record_slot_miss("0xdead");
+
+        let output = m.gather();
+        assert!(
+            output.contains("shell_consensus_slot_miss_total"),
+            "should contain slot_miss metric"
+        );
+    }
+
+    #[test]
+    fn epoch_and_active_count_setters() {
+        let m = Metrics::new().expect("metrics init");
+        m.epoch_number.set(7);
+        m.validator_active_count.set(4);
+        assert_eq!(m.epoch_number.get(), 7);
+        assert_eq!(m.validator_active_count.get(), 4);
+
+        let output = m.gather();
+        assert!(output.contains("shell_epoch_number 7"));
+        assert!(output.contains("shell_validator_active_count 4"));
     }
 }

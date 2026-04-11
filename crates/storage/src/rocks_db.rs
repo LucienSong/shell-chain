@@ -137,6 +137,23 @@ impl RocksDbStores {
         }
         Ok(())
     }
+
+    /// Create a consistent RocksDB checkpoint at `output_path`.
+    ///
+    /// Uses [`rocksdb::checkpoint::Checkpoint`] — the node does **not** need to
+    /// be stopped. The checkpoint directory is a valid RocksDB database that can
+    /// be opened directly or copied to another host.
+    ///
+    /// Hard-links are used for SST files when source and destination are on the
+    /// same filesystem, making this operation near-instant regardless of DB size.
+    pub fn create_checkpoint<P: AsRef<Path>>(&self, output_path: P) -> Result<(), StorageError> {
+        let checkpoint = rocksdb::checkpoint::Checkpoint::new(&self.state.db)
+            .map_err(|e| StorageError::Database(format!("checkpoint init: {e}")))?;
+        checkpoint
+            .create_checkpoint(output_path.as_ref())
+            .map_err(|e| StorageError::Database(format!("checkpoint create: {e}")))?;
+        Ok(())
+    }
 }
 
 impl RocksDbStore {
