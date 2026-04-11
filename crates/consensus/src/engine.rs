@@ -9,6 +9,8 @@ use crate::ConsensusError;
 pub enum EngineType {
     /// Proof of Authority — Phase 1 consensus.
     PoA,
+    /// Weighted Proof of Authority — Phase 1.5 consensus.
+    WPoA,
     /// Byzantine Fault Tolerant — reserved for Phase 2 upgrade.
     BFT,
 }
