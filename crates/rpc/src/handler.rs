@@ -2431,6 +2431,7 @@ mod tests {
         let signer = DilithiumSigner::generate();
         let pubkey = signer.public_key().to_vec();
         let addr = signer_address(&signer);
+        let gas_limit = shell_evm::compute_intrinsic_gas(&[], true, &None);
 
         // Fund the sender so balance check passes.
         {
@@ -2446,7 +2447,7 @@ mod tests {
             nonce: 0,
             max_fee_per_gas: 1_000_000_000,
             max_priority_fee_per_gas: 100_000_000,
-            gas_limit: 21_000,
+            gas_limit,
             to: None,
             value: U256::ZERO,
             data: Bytes::default(),
@@ -2478,6 +2479,7 @@ mod tests {
         let signer = DilithiumSigner::generate();
         let pubkey = signer.public_key().to_vec();
         let addr = signer_address(&signer);
+        let gas_limit = shell_evm::compute_intrinsic_gas(&[], true, &None);
 
         {
             let mut ws = handler.world_state.write();
@@ -2491,7 +2493,7 @@ mod tests {
             nonce: 0,
             max_fee_per_gas: 1_000_000_000,
             max_priority_fee_per_gas: 100_000_000,
-            gas_limit: 21_000,
+            gas_limit,
             to: None,
             value: U256::ZERO,
             data: Bytes::default(),
@@ -4325,6 +4327,7 @@ mod tests {
         let signer = DilithiumSigner::generate();
         let pubkey = signer.public_key().to_vec();
         let addr = signer_address(&signer);
+        let gas_limit = shell_evm::compute_intrinsic_gas(&[], true, &None);
 
         // Fund the sender and register pubkey so mempool can verify.
         {
@@ -4339,7 +4342,7 @@ mod tests {
             nonce: 0,
             max_priority_fee_per_gas: 100_000_000,
             max_fee_per_gas: 1_000_000_000,
-            gas_limit: 21_000,
+            gas_limit,
             to: None,
             value: U256::ZERO,
             data: Bytes::default(),
@@ -4372,6 +4375,7 @@ mod tests {
         let signer = DilithiumSigner::generate();
         let pubkey = signer.public_key().to_vec();
         let addr = signer_address(&signer);
+        let gas_limit = shell_evm::compute_intrinsic_gas(&[], true, &None);
 
         {
             let mut ws = handler.world_state.write();
@@ -4385,7 +4389,7 @@ mod tests {
             nonce: 0,
             max_priority_fee_per_gas: 100_000_000,
             max_fee_per_gas: 1_000_000_000,
-            gas_limit: 21_000,
+            gas_limit,
             to: None,
             value: U256::ZERO,
             data: Bytes::default(),
