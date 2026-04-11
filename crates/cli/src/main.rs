@@ -7,6 +7,7 @@
 //! - `key generate`  — create a new encrypted keystore file
 //! - `tx send|deploy|call` — transaction operations
 //! - `account list|balance|nonce` — account management
+//! - `wallet create|balance|send|export` — lightweight wallet UX
 //! - `export-state`  — export chain state to a snapshot file
 //! - `import-state`  — import chain state from a snapshot file
 //! - `removedb`      — remove the chain database
@@ -189,6 +190,12 @@ enum Commands {
     Account {
         #[command(subcommand)]
         command: commands::account::AccountCommand,
+    },
+
+    /// Lightweight wallet UX built on top of key/account/tx primitives.
+    Wallet {
+        #[command(subcommand)]
+        command: commands::wallet::WalletCommand,
     },
 }
 
@@ -396,6 +403,7 @@ async fn main() {
         Commands::Version => commands::version(),
         Commands::Tx { command } => commands::tx::execute(command),
         Commands::Account { command } => commands::account::execute(command),
+        Commands::Wallet { command } => commands::wallet::execute(command),
     };
 
     if let Err(e) = result {

@@ -9,6 +9,7 @@ mod removedb;
 pub mod run;
 pub mod tx;
 mod version;
+pub mod wallet;
 
 pub use export_state::export_state;
 pub use import_state::import_state;
