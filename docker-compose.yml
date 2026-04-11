@@ -13,15 +13,14 @@ services:
     command: >
       --datadir /data
       --rpc-addr 0.0.0.0:8545
-      --rpc-api eth,net,web3,shell,evm
-      --unsafe-dev-exposed
+      --rpc-api eth,net,web3,shell
       --p2p
       --p2p-addr 0.0.0.0:30303
       --enable-mdns
       --db rocksdb
       --block-time 2000
     ports:
-      - "8545:8545"
+      - "127.0.0.1:8545:8545"
       - "30303:30303"
     volumes:
       - genesis:/shared
@@ -45,15 +44,14 @@ services:
     command: >
       --datadir /data
       --rpc-addr 0.0.0.0:8545
-      --rpc-api eth,net,web3,shell,evm
-      --unsafe-dev-exposed
+      --rpc-api eth,net,web3,shell
       --p2p
       --p2p-addr 0.0.0.0:30303
       --enable-mdns
       --db rocksdb
       --block-time 2000
     ports:
-      - "8546:8545"
+      - "127.0.0.1:8546:8545"
     volumes:
       - genesis:/shared
       - node2-data:/data
@@ -70,15 +68,14 @@ services:
     command: >
       --datadir /data
       --rpc-addr 0.0.0.0:8545
-      --rpc-api eth,net,web3,shell,evm
-      --unsafe-dev-exposed
+      --rpc-api eth,net,web3,shell
       --p2p
       --p2p-addr 0.0.0.0:30303
       --enable-mdns
       --db rocksdb
       --block-time 2000
     ports:
-      - "8547:8545"
+      - "127.0.0.1:8547:8545"
     volumes:
       - genesis:/shared
       - node3-data:/data
