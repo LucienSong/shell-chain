@@ -1,10 +1,19 @@
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use alloy_rlp::{Decodable, Encodable};
+use lru::LruCache;
+use parking_lot::Mutex;
 use shell_core::Account;
 use shell_primitives::{keccak256, Address, ShellHash, U256};
 
 use crate::{KvStore, MerkleTrie, StorageError};
+
+/// Approximate byte-size of one RLP-encoded [`Account`].
+const ACCOUNT_SIZE_BYTES: usize = 100;
+
+/// Default account cache capacity (64 MiB / ACCOUNT_SIZE_BYTES).
+const DEFAULT_CACHE_CAPACITY_ACCOUNTS: usize = 64 * 1024 * 1024 / ACCOUNT_SIZE_BYTES;
 
 /// Returns the system address used for the validator registry (0x0000…0001).
 pub fn validator_registry_addr() -> Address {
@@ -21,26 +30,52 @@ pub fn account_manager_addr() -> Address {
 /// Accounts are stored in a Merkle Patricia Trie keyed by `keccak256(address)`.
 /// Each account may have its own storage sub-trie whose nodes share the same
 /// underlying [`KvStore`].
+///
+/// An LRU account cache sits in front of the trie to avoid re-decoding
+/// on repeated reads.  The default capacity is 64 MiB worth of entries;
+/// use [`WorldState::new_with_cache_mb`] to override.
 pub struct WorldState<S: KvStore + 'static> {
     account_trie: MerkleTrie<S>,
     store: Arc<S>,
+    /// `None` = account not in trie; `Some(account)` = cached account.
+    account_cache: Mutex<LruCache<Address, Option<Account>>>,
 }
 
 impl<S: KvStore + 'static> WorldState<S> {
-    /// Create a new empty world state.
+    /// Create a new empty world state with the default 64 MiB account cache.
     pub fn new(store: Arc<S>) -> Self {
+        Self::new_with_cache_mb(store, 64)
+    }
+
+    /// Create a new empty world state with the given account cache size in MiB.
+    pub fn new_with_cache_mb(store: Arc<S>, cache_mb: usize) -> Self {
+        let cap = NonZeroUsize::new(cache_mb * 1024 * 1024 / ACCOUNT_SIZE_BYTES)
+            .unwrap_or(NonZeroUsize::new(DEFAULT_CACHE_CAPACITY_ACCOUNTS).unwrap());
         Self {
             account_trie: MerkleTrie::new(Arc::clone(&store)),
             store,
+            account_cache: Mutex::new(LruCache::new(cap)),
         }
     }
 
-    /// Open world state at an existing state root.
+    /// Open world state at an existing state root with the default account cache.
     pub fn at_root(store: Arc<S>, state_root: &ShellHash) -> Result<Self, StorageError> {
+        Self::at_root_with_cache_mb(store, state_root, 64)
+    }
+
+    /// Open world state at an existing state root with the given cache size in MiB.
+    pub fn at_root_with_cache_mb(
+        store: Arc<S>,
+        state_root: &ShellHash,
+        cache_mb: usize,
+    ) -> Result<Self, StorageError> {
         let trie = MerkleTrie::at_root(Arc::clone(&store), state_root.as_bytes())?;
+        let cap = NonZeroUsize::new(cache_mb * 1024 * 1024 / ACCOUNT_SIZE_BYTES)
+            .unwrap_or(NonZeroUsize::new(DEFAULT_CACHE_CAPACITY_ACCOUNTS).unwrap());
         Ok(Self {
             account_trie: trie,
             store,
+            account_cache: Mutex::new(LruCache::new(cap)),
         })
     }
 
@@ -50,7 +85,9 @@ impl<S: KvStore + 'static> WorldState<S> {
     /// contract execution) that must not mutate the live state handle.
     pub fn snapshot(&mut self) -> Result<Self, StorageError> {
         let root = self.state_root()?;
-        Self::at_root(Arc::clone(&self.store), &root)
+        let cap = self.account_cache.lock().cap();
+        let cap_mb = (cap.get() * ACCOUNT_SIZE_BYTES + 1024 * 1024 - 1) / (1024 * 1024);
+        Self::at_root_with_cache_mb(Arc::clone(&self.store), &root, cap_mb.max(1))
     }
 
     fn account_key(address: &Address) -> Vec<u8> {
@@ -58,19 +95,28 @@ impl<S: KvStore + 'static> WorldState<S> {
     }
 
     /// Retrieve an account by address. Returns `None` if the account does not exist.
+    ///
+    /// Results are memoised in the LRU account cache.
     pub fn get_account(&self, address: &Address) -> Result<Option<Account>, StorageError> {
+        // Fast path: cache hit.
+        if let Some(cached) = self.account_cache.lock().get(address) {
+            return Ok(cached.clone());
+        }
+        // Slow path: trie lookup.
         let key = Self::account_key(address);
-        match self.account_trie.get(&key)? {
+        let result = match self.account_trie.get(&key)? {
             Some(data) => {
                 let account = Account::decode(&mut &data[..])
                     .map_err(|e| StorageError::Codec(e.to_string()))?;
-                Ok(Some(account))
+                Some(account)
             }
-            None => Ok(None),
-        }
+            None => None,
+        };
+        self.account_cache.lock().put(*address, result.clone());
+        Ok(result)
     }
 
-    /// Write an account to the state trie.
+    /// Write an account to the state trie and update the LRU cache.
     pub fn set_account(
         &mut self,
         address: &Address,
@@ -79,7 +125,11 @@ impl<S: KvStore + 'static> WorldState<S> {
         let key = Self::account_key(address);
         let mut buf = Vec::new();
         account.encode(&mut buf);
-        self.account_trie.insert(&key, &buf)
+        self.account_trie.insert(&key, &buf)?;
+        self.account_cache
+            .lock()
+            .put(*address, Some(account.clone()));
+        Ok(())
     }
 
     fn get_or_default(&self, address: &Address) -> Result<Account, StorageError> {

@@ -52,6 +52,12 @@ pub struct RunArgs {
     pub metrics_addr: String,
     /// Maximum seconds between blocks when mempool is empty (0 = disabled).
     pub max_idle_interval: u64,
+    /// Maximum number of pending transactions in the mempool (default: 4096).
+    pub mempool_max_size: Option<usize>,
+    /// Minimum gas-price bump required to replace a pending transaction, in percent (default: 10).
+    pub mempool_price_bump: Option<u64>,
+    /// Account LRU cache size for the world-state trie, in MiB (default: 64).
+    pub state_cache_size_mb: Option<usize>,
 }
 
 /// Maximum genesis file size: 10 MB (F-082).
@@ -439,6 +445,8 @@ async fn run_with_store<S: KvStore + 'static>(
             .with_epoch_length(epoch_length),
         mempool: MempoolConfig {
             chain_id: genesis_config.chain_id,
+            max_pool_size: args.mempool_max_size.unwrap_or(4096),
+            replacement_fee_bump_pct: args.mempool_price_bump.unwrap_or(10),
             ..MempoolConfig::default()
         },
         rpc: RpcConfig {
@@ -471,6 +479,7 @@ async fn run_with_store<S: KvStore + 'static>(
             listen_addr: args.metrics_addr.parse()?,
         },
         max_idle_interval_ms: args.max_idle_interval * 1000,
+        state_cache_size_mb: args.state_cache_size_mb.unwrap_or(64),
     };
 
     // Build the node (auto-detects existing state via NodeBuilder).

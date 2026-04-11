@@ -15,6 +15,7 @@ members = [
     "crates/keystore",
     "crates/cli",
     "tests/e2e",
+    "crates/bench",
 ]
 
 [workspace.package]
@@ -96,6 +97,9 @@ http-body-util = "0.1"
 
 # --- parallel ---
 rayon = "1.10"
+
+# --- caching ---
+lru = "0.12"
 
 # --- benchmarks ---
 criterion = { version = "0.5", features = ["html_reports"] }

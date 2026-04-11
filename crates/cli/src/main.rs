@@ -145,6 +145,18 @@ enum Commands {
         /// Max idle seconds before producing a heartbeat block (0 = always produce).
         #[arg(long, default_value = "0")]
         max_idle_interval: u64,
+
+        /// Maximum number of pending transactions in the mempool.
+        #[arg(long)]
+        mempool_max_size: Option<usize>,
+
+        /// Minimum gas-price bump (%) required to replace a pending transaction.
+        #[arg(long)]
+        mempool_price_bump: Option<u64>,
+
+        /// Account LRU cache size for the world-state trie in MiB.
+        #[arg(long)]
+        state_cache_size_mb: Option<usize>,
     },
 
     /// Initialize genesis block and data directory.
@@ -314,6 +326,9 @@ async fn main() {
             unsafe_dev_exposed,
             metrics_addr,
             max_idle_interval,
+            mempool_max_size,
+            mempool_price_bump,
+            state_cache_size_mb,
         } => {
             // Load config file if specified (CLI args override file values).
             let file_config = match &config_path {
@@ -437,6 +452,9 @@ async fn main() {
                 unsafe_dev_exposed: effective_unsafe_dev_exposed,
                 metrics_addr: effective_metrics_addr,
                 max_idle_interval,
+                mempool_max_size,
+                mempool_price_bump,
+                state_cache_size_mb,
             })
             .await
         }

@@ -54,10 +54,16 @@ impl<S: KvStore + 'static> NodeBuilder<S> {
 
         let chain_store = Arc::new(ChainStore::new(store.clone()));
 
+        let cache_mb = self.config.state_cache_size_mb;
+
         // Resume from existing chain state if available.
         let world_state = match chain_store.get_head_block() {
             Ok(Some(head)) => {
-                match WorldState::at_root(store.clone(), &head.header.state_root) {
+                match WorldState::at_root_with_cache_mb(
+                    store.clone(),
+                    &head.header.state_root,
+                    cache_mb,
+                ) {
                     Ok(mut ws) => {
                         // F-306: Validate DB integrity on startup.
                         if let Err(e) = ws.validate() {
@@ -65,15 +71,24 @@ impl<S: KvStore + 'static> NodeBuilder<S> {
                                 error = %e,
                                 "world state validation failed on startup — starting fresh"
                             );
-                            Arc::new(RwLock::new(WorldState::new(store.clone())))
+                            Arc::new(RwLock::new(WorldState::new_with_cache_mb(
+                                store.clone(),
+                                cache_mb,
+                            )))
                         } else {
                             Arc::new(RwLock::new(ws))
                         }
                     }
-                    Err(_) => Arc::new(RwLock::new(WorldState::new(store.clone()))),
+                    Err(_) => Arc::new(RwLock::new(WorldState::new_with_cache_mb(
+                        store.clone(),
+                        cache_mb,
+                    ))),
                 }
             }
-            _ => Arc::new(RwLock::new(WorldState::new(store.clone()))),
+            _ => Arc::new(RwLock::new(WorldState::new_with_cache_mb(
+                store.clone(),
+                cache_mb,
+            ))),
         };
 
         let consensus = Arc::new(RwLock::new(PoaEngine::new(self.config.consensus.clone())));
