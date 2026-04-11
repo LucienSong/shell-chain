@@ -1,11 +1,13 @@
 //! `shell-node run` — start the node.
 
 use std::net::SocketAddr;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use shell_consensus::PoaConfig;
+use shell_core::Block;
 use shell_crypto::{DilithiumSigner, Signer};
 use shell_genesis::{
     initialize_authority_pubkeys, initialize_genesis, AllocEntry, ConsensusConfig, GenesisConfig,
@@ -15,11 +17,11 @@ use shell_mempool::MempoolConfig;
 use shell_network::{NetworkBus, NetworkConfig};
 use shell_node::config::NodeConfig;
 use shell_node::pruning::PruningConfig;
-use shell_primitives::Address;
+use shell_primitives::{Address, ShellHash};
 use shell_rpc::RpcConfig;
-use shell_storage::{ChainStore, KvStore, MemoryDb};
+use shell_storage::{ChainStore, KvStore, MemoryDb, WorldState};
 
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 /// Aggregated CLI arguments for the `run` subcommand.
 #[allow(dead_code)]
@@ -41,6 +43,7 @@ pub struct RunArgs {
     pub rpc_cors: Option<String>,
     pub rpc_rate_limit: Option<u32>,
     pub rpc_api: Option<String>,
+    pub unsafe_dev_exposed: bool,
     pub metrics_addr: String,
     /// Maximum seconds between blocks when mempool is empty (0 = disabled).
     pub max_idle_interval: u64,
@@ -49,6 +52,7 @@ pub struct RunArgs {
 /// Maximum genesis file size: 10 MB (F-082).
 const MAX_GENESIS_FILE_SIZE: u64 = 10 * 1024 * 1024;
 const DEV_AUTHORITY_KEY_FILE: &str = "dev-authority.json";
+const DEV_AUTHORITY_INITIAL_BALANCE: u128 = 1_000_000_000_000_000_000_000_000_000u128;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct DevAuthorityKeyFile {
@@ -86,6 +90,119 @@ fn load_or_create_dev_signer(path: &Path) -> Result<DilithiumSigner, Box<dyn std
     }
     info!("Persisted dev authority key to {}", path.display());
     Ok(signer)
+}
+
+fn validate_state_root<S: KvStore + 'static>(
+    store: Arc<S>,
+    state_root: ShellHash,
+) -> Result<(), String> {
+    if !store
+        .contains(state_root.as_bytes())
+        .map_err(|e| format!("state root presence check failed: {e}"))?
+    {
+        return Err(format!("missing trie root node {state_root}"));
+    }
+
+    let ws = WorldState::at_root(store, &state_root)
+        .map_err(|e| format!("failed to open world state at {state_root}: {e}"))?;
+
+    match catch_unwind(AssertUnwindSafe(|| {
+        let mut ws = ws;
+        ws.validate()
+    })) {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(format!(
+            "world state validation failed at {state_root}: {e}"
+        )),
+        Err(_) => Err(format!("world state validation panicked at {state_root}")),
+    }
+}
+
+fn recompute_total_tx_count<S: KvStore + 'static>(
+    chain_store: &ChainStore<S>,
+    head_number: u64,
+) -> Result<u64, Box<dyn std::error::Error>> {
+    let mut total = 0u64;
+    for number in 0..=head_number {
+        let block = chain_store
+            .get_block_by_number(number)?
+            .ok_or_else(|| format!("missing canonical block #{number} during tx-count repair"))?;
+        total = total
+            .checked_add(block.transactions.len() as u64)
+            .ok_or("total tx count overflow during repair")?;
+    }
+    Ok(total)
+}
+
+fn repair_head_state_if_needed<S: KvStore + 'static>(
+    chain_store: &ChainStore<S>,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let Some(head) = chain_store.get_head_block()? else {
+        return Ok(false);
+    };
+
+    let store = Arc::clone(chain_store.store());
+    if validate_state_root(Arc::clone(&store), head.header.state_root).is_ok() {
+        return Ok(false);
+    }
+
+    warn!(
+        block = head.number(),
+        state_root = %head.header.state_root,
+        "head state root is not restart-safe; scanning canonical history for a recoverable root"
+    );
+
+    let mut recovered: Option<Block> = None;
+    for number in (0..=head.number()).rev() {
+        let Some(candidate) = chain_store.get_block_by_number(number)? else {
+            continue;
+        };
+        match validate_state_root(Arc::clone(&store), candidate.header.state_root) {
+            Ok(()) => {
+                recovered = Some(candidate);
+                break;
+            }
+            Err(reason) => {
+                warn!(
+                    block = number,
+                    state_root = %candidate.header.state_root,
+                    reason,
+                    "canonical block state root is not recoverable"
+                );
+            }
+        }
+    }
+
+    let recovered = recovered.ok_or_else(|| {
+        format!(
+            "failed to find a recoverable canonical state root up to head #{}",
+            head.number()
+        )
+    })?;
+
+    if recovered.number() == head.number() {
+        return Ok(false);
+    }
+
+    let recovered_hash = recovered.hash();
+    chain_store.set_head(&recovered_hash)?;
+    for number in (recovered.number() + 1)..=head.number() {
+        chain_store.delete_canonical(number)?;
+    }
+
+    let persisted_finalized = chain_store.get_finalized_number()?.unwrap_or(0);
+    if persisted_finalized > recovered.number() {
+        chain_store.set_finalized_number(recovered.number())?;
+    }
+    chain_store.set_total_tx_count(recompute_total_tx_count(chain_store, recovered.number())?)?;
+
+    warn!(
+        old_head = head.number(),
+        repaired_head = recovered.number(),
+        repaired_hash = %recovered_hash,
+        "rolled head back to latest recoverable block; node will re-sync missing canonical blocks"
+    );
+    Ok(true)
 }
 
 /// Start the node: load genesis, initialize state, and run the event loop.
@@ -151,12 +268,14 @@ async fn run_with_store<S: KvStore + 'static>(
             info!("Loading keystore from {}", path.display());
             let json = std::fs::read_to_string(&path)?;
             let encrypted: EncryptedKey = serde_json::from_str(&json)?;
+            let unlocked_address = Address::parse(&encrypted.address)
+                .map_err(|e| format!("invalid keystore address '{}': {e}", encrypted.address))?;
 
             eprint!("Enter keystore password: ");
             let password = rpassword::read_password()?;
 
             let signer = decrypt(&encrypted, password.as_bytes())?;
-            info!("Keystore unlocked: 0x{}", encrypted.address);
+            info!("Keystore unlocked: {unlocked_address}");
             Arc::new(signer)
         }
         None => {
@@ -169,8 +288,8 @@ async fn run_with_store<S: KvStore + 'static>(
         }
     };
 
-    let authority = Address::from_public_key(signer.public_key());
-    info!("Node authority: 0x{}", hex::encode(authority.as_bytes()));
+    let authority = Address::from_public_key(signer.public_key(), signer.sig_type().as_u8());
+    info!("Node authority: {authority}");
 
     // Check if chain is already initialized (persistent storage resume).
     let chain_store = ChainStore::new(store.clone());
@@ -184,6 +303,16 @@ async fn run_with_store<S: KvStore + 'static>(
     } else {
         false
     };
+
+    if resumed && repair_head_state_if_needed(&chain_store)? {
+        if let Some(repaired_head) = chain_store.get_head_block()? {
+            info!(
+                "Startup state repair selected block #{} (state_root: {:?})",
+                repaired_head.number(),
+                repaired_head.header.state_root
+            );
+        }
+    }
 
     // Load genesis config.
     let genesis_file = args.datadir.join("genesis.json");
@@ -207,7 +336,7 @@ async fn run_with_store<S: KvStore + 'static>(
         alloc.insert(
             authority,
             AllocEntry {
-                balance: U256::from(1_000_000_000_000_000_000u128),
+                balance: U256::from(DEV_AUTHORITY_INITIAL_BALANCE),
                 nonce: 0,
                 code: None,
                 storage: None,
@@ -224,6 +353,7 @@ async fn run_with_store<S: KvStore + 'static>(
                 authorities: vec![authority],
                 authority_pubkeys: vec![format!("0x{}", hex::encode(signer.public_key()))],
                 block_time_secs: args.block_time / 1000,
+                max_future_secs: 60,
                 epoch_length: 0,
             },
             alloc,
@@ -273,17 +403,19 @@ async fn run_with_store<S: KvStore + 'static>(
     }
 
     // Extract authorities and epoch_length from genesis.
-    let (authorities, authority_pubkeys, _block_time_secs, epoch_length) =
+    let (authorities, authority_pubkeys, block_time_secs, max_future_secs, epoch_length) =
         match &genesis_config.consensus {
             ConsensusConfig::PoA {
                 authorities,
                 authority_pubkeys,
                 block_time_secs,
+                max_future_secs,
                 epoch_length,
             } => (
                 authorities.clone(),
                 authority_pubkeys.clone(),
                 *block_time_secs,
+                *max_future_secs,
                 *epoch_length,
             ),
         };
@@ -297,7 +429,8 @@ async fn run_with_store<S: KvStore + 'static>(
     };
     let node_config = NodeConfig {
         chain_id: genesis_config.chain_id,
-        consensus: PoaConfig::new(authorities.clone(), args.block_time / 1000)
+        consensus: PoaConfig::new(authorities.clone(), block_time_secs)
+            .with_max_future_secs(max_future_secs)
             .with_epoch_length(epoch_length),
         mempool: MempoolConfig {
             chain_id: genesis_config.chain_id,
@@ -316,6 +449,7 @@ async fn run_with_store<S: KvStore + 'static>(
                 .as_ref()
                 .map(|s| s.split(',').map(|n| n.trim().to_string()).collect())
                 .unwrap_or_else(|| vec!["eth".into(), "net".into(), "web3".into(), "shell".into()]),
+            allow_unsafe_dev_exposed: args.unsafe_dev_exposed,
             max_request_body_size: 5 * 1024 * 1024,
             ..RpcConfig::default()
         },
@@ -371,7 +505,7 @@ async fn run_with_store<S: KvStore + 'static>(
                 eprintln!("   WS:          ws://{ws}");
             }
             eprintln!("   P2P:         {p2p_listen} (libp2p)");
-            eprintln!("   Authority:   0x{}", hex::encode(authority.as_bytes()));
+            eprintln!("   Authority:   {authority}");
             eprintln!("   Metrics:     http://{}", args.metrics_addr);
             eprintln!("   Block time:  {}ms", args.block_time);
             if args.pruning > 0 {
@@ -427,7 +561,7 @@ async fn run_with_store<S: KvStore + 'static>(
         if let Some(ws) = ws_addr {
             eprintln!("   WS:          ws://{ws}");
         }
-        eprintln!("   Authority:   0x{}", hex::encode(authority.as_bytes()));
+        eprintln!("   Authority:   {authority}");
         eprintln!("   Metrics:     http://{}", args.metrics_addr);
         eprintln!("   Block time:  {}ms", args.block_time);
         if args.pruning > 0 {
@@ -476,6 +610,11 @@ async fn run_with_store<S: KvStore + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shell_core::BlockHeader;
+    use shell_genesis::initialize_genesis;
+    use shell_primitives::{Bytes, U256};
+    use shell_storage::MemoryDb;
+    use std::collections::HashMap;
 
     #[test]
     fn dev_authority_signer_is_persisted() {
@@ -498,5 +637,84 @@ mod tests {
         assert_eq!(signer1.secret_key_bytes(), signer2.secret_key_bytes());
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn test_genesis(authority: Address) -> GenesisConfig {
+        GenesisConfig {
+            chain_id: 1337,
+            chain_name: "shell-chain-test".into(),
+            timestamp: 1_700_000_000,
+            gas_limit: 30_000_000,
+            extra_data: String::new(),
+            consensus: ConsensusConfig::PoA {
+                authorities: vec![authority],
+                authority_pubkeys: vec![],
+                block_time_secs: 2,
+                max_future_secs: 60,
+                epoch_length: 0,
+            },
+            alloc: HashMap::from([(
+                authority,
+                AllocEntry {
+                    balance: U256::from(1_000_000u64),
+                    nonce: 0,
+                    code: None,
+                    storage: None,
+                },
+            )]),
+            boot_nodes: vec![],
+        }
+    }
+
+    fn test_block(number: u64, parent_hash: ShellHash, state_root: ShellHash) -> Block {
+        Block {
+            header: BlockHeader {
+                parent_hash,
+                state_root,
+                transactions_root: ShellHash::ZERO,
+                receipts_root: ShellHash::ZERO,
+                logs_bloom: Bytes::new(),
+                number,
+                gas_limit: 30_000_000,
+                gas_used: 0,
+                timestamp: 1_700_000_000 + number,
+                extra_data: Bytes::new(),
+                proposer: Address::ZERO,
+                sig_aggregate_proof: None,
+                base_fee_per_gas: 0,
+                withdrawals_root: ShellHash::ZERO,
+                parent_beacon_block_root: ShellHash::ZERO,
+                blob_gas_used: 0,
+                excess_blob_gas: 0,
+            },
+            transactions: vec![],
+            proposer_seal: None,
+        }
+    }
+
+    #[test]
+    fn repair_head_state_rolls_back_to_latest_recoverable_block() {
+        let store = Arc::new(MemoryDb::new());
+        let chain_store = ChainStore::new(Arc::clone(&store));
+        let authority = Address::from([7u8; 20]);
+        let genesis = initialize_genesis(&test_genesis(authority), Arc::clone(&store)).unwrap();
+
+        let bad_block = test_block(1, genesis.hash(), ShellHash::from([0x11; 32]));
+        let bad_hash = bad_block.hash();
+        chain_store.put_block(&bad_block).unwrap();
+        chain_store.set_canonical(1, &bad_hash).unwrap();
+        chain_store.set_head(&bad_hash).unwrap();
+        chain_store.set_finalized_number(1).unwrap();
+        chain_store.set_total_tx_count(42).unwrap();
+
+        let repaired = repair_head_state_if_needed(&chain_store).unwrap();
+        assert!(repaired, "expected startup repair to trigger");
+
+        let repaired_head = chain_store.get_head_block().unwrap().unwrap();
+        assert_eq!(repaired_head.number(), 0);
+        assert_eq!(repaired_head.hash(), genesis.hash());
+        assert!(chain_store.get_block_by_number(1).unwrap().is_none());
+        assert_eq!(chain_store.get_finalized_number().unwrap(), Some(0));
+        assert_eq!(chain_store.get_total_tx_count().unwrap(), 0);
     }
 }

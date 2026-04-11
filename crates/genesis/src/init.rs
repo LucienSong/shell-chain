@@ -30,9 +30,8 @@ pub fn initialize_genesis<S: KvStore + 'static>(
             .map_err(|e| GenesisError::StateInit(e.to_string()))?;
     }
 
-    // Mark the ValidatorRegistry system contract address with a placeholder
-    // code hash so eth_getCode returns non-empty and the address is recognized
-    // as a contract account.
+    // Mark native system-contract addresses with deterministic placeholder
+    // code hashes so they are recognized as contract accounts from genesis.
     mark_system_contract(&mut world_state).map_err(|e| GenesisError::StateInit(e.to_string()))?;
 
     // Compute state root
@@ -138,7 +137,7 @@ fn apply_alloc<S: KvStore + 'static>(
     entry: &AllocEntry,
 ) -> Result<(), StorageError> {
     // Create account with the allocated balance
-    let mut account = Account::new_eoa(ShellHash::ZERO, entry.balance);
+    let mut account = Account::new_user_account(ShellHash::ZERO, entry.balance);
     account.nonce = entry.nonce;
 
     // Set code hash if code is provided
@@ -160,14 +159,15 @@ fn apply_alloc<S: KvStore + 'static>(
     Ok(())
 }
 
-/// Mark the ValidatorRegistry system contract address (0x0000…0001) as a code
-/// account with a deterministic code hash: `keccak256("ValidatorRegistry")`.
+/// Mark native system-contract addresses as code accounts with deterministic
+/// placeholder code hashes.
 fn mark_system_contract<S: KvStore + 'static>(
     world_state: &mut WorldState<S>,
 ) -> Result<(), StorageError> {
-    let addr = shell_storage::validator_registry_addr();
-    let code_hash = keccak256(b"ValidatorRegistry");
-    world_state.set_code_hash(&addr, code_hash)
+    let registry_addr = shell_storage::validator_registry_addr();
+    let account_manager_addr = shell_storage::account_manager_addr();
+    world_state.set_code_hash(&registry_addr, keccak256(b"ValidatorRegistry"))?;
+    world_state.set_code_hash(&account_manager_addr, keccak256(b"AccountManager"))
 }
 
 #[cfg(test)]
@@ -201,6 +201,7 @@ mod tests {
                 authorities: vec![addr1],
                 authority_pubkeys: vec!["0x1234".to_string()],
                 block_time_secs: 1,
+                max_future_secs: 60,
                 epoch_length: 0,
             },
             alloc,
@@ -270,7 +271,7 @@ mod tests {
     #[test]
     fn genesis_with_contract_code() {
         let mut config = test_genesis();
-        let contract_addr = Address::from_public_key(keccak256(b"contract").as_bytes());
+        let contract_addr = Address::from_public_key(keccak256(b"contract").as_bytes(), 0);
         config.alloc.insert(
             contract_addr,
             AllocEntry {
@@ -293,7 +294,7 @@ mod tests {
     #[test]
     fn genesis_with_storage() {
         let mut config = test_genesis();
-        let addr = Address::from_public_key(keccak256(b"storage-test").as_bytes());
+        let addr = Address::from_public_key(keccak256(b"storage-test").as_bytes(), 0);
 
         let slot = keccak256(b"slot-0");
         let value = keccak256(b"value-0");

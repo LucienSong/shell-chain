@@ -14,7 +14,7 @@ use shell_evm::bloom::BLOOM_SIZE;
 use shell_evm::{ShellEvm, ShellStateDb};
 use shell_mempool::TxPool;
 use shell_primitives::{Address, Bytes, ShellHash, U256};
-use shell_storage::{ChainStore, KvStore, WorldState};
+use shell_storage::{ChainStore, KvStore, WorldState, MAX_ADDRESS_TX_HISTORY_OFFSET};
 
 use crate::api::{
     DebugApiServer, EthApiServer, EvmApiServer, NetApiServer, ShellApiServer, TraceApiServer,
@@ -197,11 +197,7 @@ impl<S: KvStore + 'static> RpcHandler<S> {
         }
 
         let chain_store = &self.chain_store;
-        let ws = self.world_state.read();
-
-        let known_pubkeys =
-            |addr: &Address| -> Option<Vec<u8>> { chain_store.get_pubkey(addr).ok().flatten() };
-        let balance_of = |addr: &Address| -> U256 { ws.get_balance(addr).unwrap_or(U256::ZERO) };
+        let mut ws = self.world_state.write();
 
         // Clone before insert (which consumes the value) so we can broadcast on success.
         let tx_for_broadcast = self.tx_broadcast.as_ref().map(|_| signed_tx.clone());
@@ -209,7 +205,7 @@ impl<S: KvStore + 'static> RpcHandler<S> {
         let verifier = MultiVerifier;
         let hash = self
             .tx_pool
-            .insert(signed_tx, &verifier, &known_pubkeys, &balance_of)
+            .insert(signed_tx, &mut ws, chain_store, &verifier)
             .map_err(|e| ErrorObjectOwned::owned(-32000, e.to_string(), None::<()>))?;
 
         // Broadcast to peers via the network channel.
@@ -306,36 +302,25 @@ impl<S: KvStore + 'static> RpcHandler<S> {
             .map_err(|e| internal_err(format!("invalid call data hex: {e}")))?
             .unwrap_or_default();
 
-        let access_list = req.access_list.as_ref().map(|list| {
-            list.iter()
-                .map(|item| {
-                    let addr_str = item.address.strip_prefix("0x").unwrap_or(&item.address);
-                    let addr_bytes = hex::decode(addr_str).unwrap_or_default();
-                    let address = if addr_bytes.len() == 20 {
-                        Address::from_slice(&addr_bytes)
-                    } else {
-                        Address::ZERO
-                    };
-                    let storage_keys = item
-                        .storage_keys
-                        .iter()
-                        .map(|k| {
-                            let k_str = k.strip_prefix("0x").unwrap_or(k);
-                            let k_bytes = hex::decode(k_str).unwrap_or_default();
-                            let mut hash = ShellHash::ZERO;
-                            if k_bytes.len() == 32 {
-                                hash = ShellHash::from_slice(&k_bytes);
-                            }
-                            hash
+        let access_list = req
+            .access_list
+            .as_ref()
+            .map(|list| {
+                list.iter()
+                    .map(|item| {
+                        let storage_keys = item
+                            .storage_keys
+                            .iter()
+                            .map(|k| parse_hex_hash(k))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        Ok(shell_core::AccessListItem {
+                            address: item.address,
+                            storage_keys,
                         })
-                        .collect();
-                    shell_core::AccessListItem {
-                        address,
-                        storage_keys,
-                    }
-                })
-                .collect()
-        });
+                    })
+                    .collect::<Result<Vec<_>, ErrorObjectOwned>>()
+            })
+            .transpose()?;
 
         let tx = Transaction {
             chain_id: self.chain_id,
@@ -578,13 +563,21 @@ fn internal_err(msg: impl std::fmt::Display) -> ErrorObjectOwned {
     ErrorObjectOwned::owned(-32603, msg.to_string(), None::<()>)
 }
 
-/// Parse a hex-encoded address string ("0x..." with 20 bytes).
+/// Convert a user input problem into a JSON-RPC invalid params error.
+fn invalid_params_err(msg: impl std::fmt::Display) -> ErrorObjectOwned {
+    ErrorObjectOwned::owned(-32602, msg.to_string(), None::<()>)
+}
+
+/// Parse a user-facing address string (`pq1...` or legacy hex).
 fn parse_address(s: &str) -> Result<Address, ErrorObjectOwned> {
+    Address::parse(s).map_err(|e| internal_err(format!("invalid address: {e}")))
+}
+
+/// Parse a 32-byte hex string into `ShellHash`.
+fn parse_hex_hash(s: &str) -> Result<ShellHash, ErrorObjectOwned> {
     let hex_str = s.strip_prefix("0x").unwrap_or(s);
-    let bytes =
-        hex::decode(hex_str).map_err(|e| internal_err(format!("invalid address hex: {e}")))?;
-    Address::try_from_slice(&bytes)
-        .map_err(|e| internal_err(format!("invalid address length: {e}")))
+    let bytes = hex::decode(hex_str).map_err(|e| internal_err(format!("invalid hash hex: {e}")))?;
+    ShellHash::try_from_slice(&bytes).map_err(|e| internal_err(format!("invalid hash length: {e}")))
 }
 
 /// Parse a hex string "0x..." into u64.
@@ -780,7 +773,7 @@ fn tx_to_rpc(
         access_list: tx.tx.access_list.as_ref().map(|list| {
             list.iter()
                 .map(|item| RpcAccessListItem {
-                    address: format!("{}", item.address),
+                    address: item.address,
                     storage_keys: item.storage_keys.iter().map(|k| format!("{}", k)).collect(),
                 })
                 .collect()
@@ -1844,11 +1837,19 @@ impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
         });
         let page = page.unwrap_or(0);
         let limit = limit.unwrap_or(20).min(100);
-        let offset = (page * limit) as usize;
+        let offset = page
+            .checked_mul(limit)
+            .ok_or_else(|| invalid_params_err("page * limit overflow"))?;
+        if offset > MAX_ADDRESS_TX_HISTORY_OFFSET as u64 {
+            return Err(invalid_params_err(format!(
+                "page/limit offset {} exceeds max {} entries",
+                offset, MAX_ADDRESS_TX_HISTORY_OFFSET
+            )));
+        }
 
         let tx_hashes = self
             .chain_store
-            .get_txs_by_address(&address, from, to, offset, limit as usize)
+            .get_txs_by_address(&address, from, to, offset as usize, limit as usize)
             .map_err(internal_err)?;
 
         // Resolve each tx hash to a full RPC transaction
@@ -2080,6 +2081,7 @@ impl<S: KvStore + 'static> TraceApiServer for RpcHandler<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::ShellApiServer;
     use crate::dev_control::DevRpcControl;
     use shell_core::{Block, BlockHeader, Transaction, TransactionReceipt};
     use shell_crypto::{DilithiumSigner, Signer};
@@ -2139,6 +2141,14 @@ mod tests {
         )
     }
 
+    fn test_address(seed: &[u8]) -> Address {
+        Address::from_public_key(seed, 0)
+    }
+
+    fn signer_address(signer: &DilithiumSigner) -> Address {
+        Address::from_public_key(signer.public_key(), signer.sig_type().as_u8())
+    }
+
     fn make_genesis_block() -> Block {
         Block {
             header: BlockHeader {
@@ -2152,7 +2162,7 @@ mod tests {
                 gas_used: 0,
                 timestamp: 1_700_000_000,
                 extra_data: Bytes::default(),
-                proposer: Address::from_public_key(b"proposer-key-data"),
+                proposer: test_address(b"proposer-key-data"),
                 sig_aggregate_proof: None,
                 base_fee_per_gas: 0,
                 withdrawals_root: ShellHash::ZERO,
@@ -2203,6 +2213,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_transactions_by_address_rejects_deep_pagination() {
+        let handler = setup();
+        let err = ShellApiServer::get_transactions_by_address(
+            &handler,
+            Address::from([0x33; 20]),
+            None,
+            None,
+            Some((MAX_ADDRESS_TX_HISTORY_OFFSET as u64) + 1),
+            Some(1),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.code(), -32602);
+        assert!(err.message().contains("exceeds max"));
+    }
+
+    #[tokio::test]
     async fn get_block_after_store() {
         let handler = setup();
         let block = make_genesis_block();
@@ -2236,7 +2264,7 @@ mod tests {
     #[tokio::test]
     async fn get_balance_default_zero() {
         let handler = setup();
-        let addr = Address::from_public_key(b"test-address-key");
+        let addr = test_address(b"test-address-key");
         let result = EthApiServer::get_balance(&handler, addr, None)
             .await
             .unwrap();
@@ -2246,7 +2274,7 @@ mod tests {
     #[tokio::test]
     async fn get_nonce_default_zero() {
         let handler = setup();
-        let addr = Address::from_public_key(b"test-address-key");
+        let addr = test_address(b"test-address-key");
         let result = EthApiServer::get_transaction_count(&handler, addr, None)
             .await
             .unwrap();
@@ -2333,7 +2361,7 @@ mod tests {
     #[tokio::test]
     async fn shell_get_pq_pubkey_not_found() {
         let handler = setup();
-        let addr = Address::from_public_key(b"unknown");
+        let addr = test_address(b"unknown");
         let result = ShellApiServer::get_pq_pubkey(&handler, addr).await.unwrap();
         assert!(result.is_none());
     }
@@ -2343,7 +2371,7 @@ mod tests {
         let handler = setup();
         let signer = DilithiumSigner::generate();
         let pubkey = signer.public_key().to_vec();
-        let addr = Address::from_public_key(&pubkey);
+        let addr = signer_address(&signer);
 
         handler.chain_store.put_pubkey(&addr, &pubkey).unwrap();
 
@@ -2369,7 +2397,7 @@ mod tests {
         // Directly construct an RpcTransaction to check compat fields.
         let rpc_tx = tx_to_rpc(
             &shell_core::SignedTransaction::new(
-                Address::from_public_key(b"test"),
+                test_address(b"test"),
                 Transaction {
                     chain_id: 42,
                     nonce: 0,
@@ -2402,7 +2430,8 @@ mod tests {
         let handler = setup();
         let signer = DilithiumSigner::generate();
         let pubkey = signer.public_key().to_vec();
-        let addr = Address::from_public_key(&pubkey);
+        let addr = signer_address(&signer);
+        let gas_limit = shell_evm::compute_intrinsic_gas(&[], true, &None);
 
         // Fund the sender so balance check passes.
         {
@@ -2418,7 +2447,7 @@ mod tests {
             nonce: 0,
             max_fee_per_gas: 1_000_000_000,
             max_priority_fee_per_gas: 100_000_000,
-            gas_limit: 21_000,
+            gas_limit,
             to: None,
             value: U256::ZERO,
             data: Bytes::default(),
@@ -2449,7 +2478,8 @@ mod tests {
         let handler = setup();
         let signer = DilithiumSigner::generate();
         let pubkey = signer.public_key().to_vec();
-        let addr = Address::from_public_key(&pubkey);
+        let addr = signer_address(&signer);
+        let gas_limit = shell_evm::compute_intrinsic_gas(&[], true, &None);
 
         {
             let mut ws = handler.world_state.write();
@@ -2463,7 +2493,7 @@ mod tests {
             nonce: 0,
             max_fee_per_gas: 1_000_000_000,
             max_priority_fee_per_gas: 100_000_000,
-            gas_limit: 21_000,
+            gas_limit,
             to: None,
             value: U256::ZERO,
             data: Bytes::default(),
@@ -2492,7 +2522,7 @@ mod tests {
     #[tokio::test]
     async fn get_code_no_contract_returns_0x() {
         let handler = setup();
-        let addr = Address::from_public_key(b"test-address");
+        let addr = test_address(b"test-address");
         let result = EthApiServer::get_code(&handler, addr, None).await.unwrap();
         assert_eq!(result, "0x");
     }
@@ -2500,7 +2530,7 @@ mod tests {
     #[tokio::test]
     async fn get_code_returns_stored_bytecode() {
         let handler = setup();
-        let addr = Address::from_public_key(b"contract-addr");
+        let addr = test_address(b"contract-addr");
         let code = b"\x60\x00\x60\x00\xf3"; // PUSH1 0 PUSH1 0 RETURN
         let code_hash = shell_primitives::keccak256(code);
 
@@ -2529,7 +2559,7 @@ mod tests {
     #[tokio::test]
     async fn get_storage_at_empty_returns_zero() {
         let handler = setup();
-        let addr = Address::from_public_key(b"test-address");
+        let addr = test_address(b"test-address");
         let result = EthApiServer::get_storage_at(&handler, addr, "0x0".into(), None)
             .await
             .unwrap();
@@ -2543,7 +2573,7 @@ mod tests {
     #[tokio::test]
     async fn get_storage_at_returns_stored_value() {
         let handler = setup();
-        let addr = Address::from_public_key(b"storage-test");
+        let addr = test_address(b"storage-test");
         let slot = ShellHash::from(alloy_primitives::B256::from(U256::from(1)));
         let value = ShellHash::from(alloy_primitives::B256::from(U256::from(42)));
 
@@ -2576,7 +2606,7 @@ mod tests {
     #[tokio::test]
     async fn eth_call_simple_transfer() {
         let handler = setup();
-        let from = Address::from_public_key(b"caller-key");
+        let from = test_address(b"caller-key");
 
         // Fund the caller.
         {
@@ -2602,7 +2632,7 @@ mod tests {
     #[tokio::test]
     async fn eth_estimate_gas_simple_transfer() {
         let handler = setup();
-        let from = Address::from_public_key(b"caller-key");
+        let from = test_address(b"caller-key");
 
         {
             let mut ws = handler.world_state.write();
@@ -2653,7 +2683,7 @@ mod tests {
                 gas_used: 21_000 * logs_per_receipt.len() as u64,
                 timestamp: 1_700_000_000 + number,
                 extra_data: Bytes::default(),
-                proposer: Address::from_public_key(b"proposer-key-data"),
+                proposer: test_address(b"proposer-key-data"),
                 sig_aggregate_proof: None,
                 base_fee_per_gas: 0,
                 withdrawals_root: ShellHash::ZERO,
@@ -2892,7 +2922,7 @@ mod tests {
 
         let signer = DilithiumSigner::generate();
         let pubkey = signer.public_key().to_vec();
-        let addr = Address::from_public_key(&pubkey);
+        let addr = signer_address(&signer);
 
         let handler = RpcHandler::new(
             chain_store.clone(),
@@ -2941,7 +2971,7 @@ mod tests {
     #[tokio::test]
     async fn propose_add_validator_creates_correct_tx() {
         let (handler, _signer, _addr) = setup_with_proposer();
-        let target = format!("0x{}", "ab".repeat(20));
+        let target = Address::from([0xAB; 20]).to_string();
         let result = ShellApiServer::propose_add_validator(&handler, target.clone()).await;
         assert!(
             result.is_ok(),
@@ -2967,7 +2997,7 @@ mod tests {
     #[tokio::test]
     async fn propose_remove_validator_creates_correct_tx() {
         let (handler, _signer, _addr) = setup_with_proposer();
-        let target = format!("0x{}", "cc".repeat(20));
+        let target = Address::from([0xCC; 20]).to_string();
         let result = ShellApiServer::propose_remove_validator(&handler, target.clone()).await;
         assert!(
             result.is_ok(),
@@ -2995,7 +3025,7 @@ mod tests {
             }
         }
 
-        let target = format!("0x{}", "ab".repeat(20));
+        let target = Address::from([0xAB; 20]).to_string();
         let result = ShellApiServer::propose_add_validator(&handler, target).await;
         assert!(
             result.is_ok(),
@@ -3119,7 +3149,7 @@ mod tests {
     #[tokio::test]
     async fn eth_sign_returns_error() {
         let handler = setup();
-        let addr = Address::from_public_key(b"test-key");
+        let addr = test_address(b"test-key");
         let result = EthApiServer::sign(&handler, addr, "0xdeadbeef".into()).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().message().contains("not supported"));
@@ -3152,7 +3182,7 @@ mod tests {
     #[tokio::test]
     async fn get_validator_status_not_validator() {
         let handler = setup();
-        let addr = Address::from_public_key(b"some-random-key");
+        let addr = test_address(b"some-random-key");
         let result = ShellApiServer::get_validator_status(&handler, addr)
             .await
             .unwrap();
@@ -3163,7 +3193,7 @@ mod tests {
     #[tokio::test]
     async fn get_validator_status_is_validator() {
         let handler = setup();
-        let addr = Address::from_public_key(b"validator-key-1");
+        let addr = test_address(b"validator-key-1");
         {
             let mut ws = handler.world_state.write();
             ws.set_validators(&[addr]).unwrap();
@@ -3189,8 +3219,8 @@ mod tests {
     #[tokio::test]
     async fn get_governance_info_with_validators() {
         let handler = setup();
-        let v1 = Address::from_public_key(b"validator-key-1");
-        let v2 = Address::from_public_key(b"validator-key-2");
+        let v1 = test_address(b"validator-key-1");
+        let v2 = test_address(b"validator-key-2");
         {
             let mut ws = handler.world_state.write();
             ws.set_validators(&[v1, v2]).unwrap();
@@ -3249,9 +3279,9 @@ mod tests {
     async fn encode_add_validator_returns_correct_hex() {
         let handler = setup();
         let target = Address::from([0xAB; 20]);
-        let hex_addr = format!("0x{}", hex::encode(target.as_bytes()));
+        let bech32_addr = target.to_string();
 
-        let result = ShellApiServer::encode_add_validator(&handler, hex_addr)
+        let result = ShellApiServer::encode_add_validator(&handler, bech32_addr)
             .await
             .unwrap();
 
@@ -3267,9 +3297,9 @@ mod tests {
     async fn encode_remove_validator_returns_correct_hex() {
         let handler = setup();
         let target = Address::from([0xCD; 20]);
-        let hex_addr = format!("0x{}", hex::encode(target.as_bytes()));
+        let bech32_addr = target.to_string();
 
-        let result = ShellApiServer::encode_remove_validator(&handler, hex_addr)
+        let result = ShellApiServer::encode_remove_validator(&handler, bech32_addr)
             .await
             .unwrap();
 
@@ -3290,7 +3320,7 @@ mod tests {
     #[tokio::test]
     async fn get_validator_status_reflects_changes() {
         let handler = setup();
-        let addr = Address::from_public_key(b"dynamic-val");
+        let addr = test_address(b"dynamic-val");
 
         // Initially not a validator
         let result = ShellApiServer::get_validator_status(&handler, addr)
@@ -3352,7 +3382,7 @@ mod tests {
     async fn get_node_info_mining_true_with_proposer() {
         let handler = setup();
         let signer = DilithiumSigner::generate();
-        let addr = Address::from_public_key(signer.public_key());
+        let addr = signer_address(&signer);
         let handler = handler.with_proposer(Arc::new(signer), addr);
 
         let result = ShellApiServer::get_node_info(&handler).await.unwrap();
@@ -3412,7 +3442,7 @@ mod tests {
                 gas_used: 21_000,
                 timestamp: 1_700_000_003,
                 extra_data: Bytes::default(),
-                proposer: Address::from_public_key(b"proposer-key-data"),
+                proposer: test_address(b"proposer-key-data"),
                 sig_aggregate_proof: None,
                 base_fee_per_gas: 1_000_000_000,
                 withdrawals_root: ShellHash::ZERO,
@@ -3486,7 +3516,7 @@ mod tests {
                 gas_used: 0,
                 timestamp: 1_700_000_000,
                 extra_data: Bytes::default(),
-                proposer: Address::from_public_key(b"proposer-key-data"),
+                proposer: test_address(b"proposer-key-data"),
                 sig_aggregate_proof: None,
                 base_fee_per_gas: 0,
                 withdrawals_root: ShellHash::ZERO,
@@ -3852,7 +3882,7 @@ mod tests {
         succeeded: bool,
     ) -> (ShellHash, ShellHash) {
         let signer = DilithiumSigner::generate();
-        let from = Address::from_public_key(signer.public_key());
+        let from = signer_address(&signer);
         let tx = Transaction {
             chain_id: 42,
             nonce: 0,
@@ -3883,7 +3913,7 @@ mod tests {
                 gas_used: 21_000,
                 timestamp: 1_700_000_000 + number,
                 extra_data: Bytes::default(),
-                proposer: Address::from_public_key(b"proposer-key-data"),
+                proposer: test_address(b"proposer-key-data"),
                 sig_aggregate_proof: None,
                 base_fee_per_gas: 0,
                 withdrawals_root: ShellHash::ZERO,
@@ -4261,7 +4291,8 @@ mod tests {
 
         {
             let mut ws = handler.world_state.write();
-            let account = shell_core::Account::new_eoa(ShellHash::ZERO, U256::from(1_000_000));
+            let account =
+                shell_core::Account::new_user_account(ShellHash::ZERO, U256::from(1_000_000));
             ws.set_account(&addr, &account).unwrap();
         }
 
@@ -4279,7 +4310,7 @@ mod tests {
 
         {
             let mut ws = handler.world_state.write();
-            let mut account = shell_core::Account::new_eoa(ShellHash::ZERO, U256::ZERO);
+            let mut account = shell_core::Account::new_user_account(ShellHash::ZERO, U256::ZERO);
             account.nonce = 42;
             ws.set_account(&addr, &account).unwrap();
         }
@@ -4295,7 +4326,8 @@ mod tests {
         let handler = setup();
         let signer = DilithiumSigner::generate();
         let pubkey = signer.public_key().to_vec();
-        let addr = Address::from_public_key(&pubkey);
+        let addr = signer_address(&signer);
+        let gas_limit = shell_evm::compute_intrinsic_gas(&[], true, &None);
 
         // Fund the sender and register pubkey so mempool can verify.
         {
@@ -4310,7 +4342,7 @@ mod tests {
             nonce: 0,
             max_priority_fee_per_gas: 100_000_000,
             max_fee_per_gas: 1_000_000_000,
-            gas_limit: 21_000,
+            gas_limit,
             to: None,
             value: U256::ZERO,
             data: Bytes::default(),
@@ -4342,7 +4374,8 @@ mod tests {
         let handler = setup();
         let signer = DilithiumSigner::generate();
         let pubkey = signer.public_key().to_vec();
-        let addr = Address::from_public_key(&pubkey);
+        let addr = signer_address(&signer);
+        let gas_limit = shell_evm::compute_intrinsic_gas(&[], true, &None);
 
         {
             let mut ws = handler.world_state.write();
@@ -4356,7 +4389,7 @@ mod tests {
             nonce: 0,
             max_priority_fee_per_gas: 100_000_000,
             max_fee_per_gas: 1_000_000_000,
-            gas_limit: 21_000,
+            gas_limit,
             to: None,
             value: U256::ZERO,
             data: Bytes::default(),

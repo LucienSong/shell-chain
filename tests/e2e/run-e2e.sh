@@ -1,7 +1,7 @@
 #!/bin/bash
 # Shell-chain 3-node E2E test
-# Usage: ./tests/e2e/run-e2e.sh
-set -e
+# Usage: ./tests/e2e/run-e2e.sh [--reuse]
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -17,6 +17,27 @@ fail() { echo -e "${RED}✗ $1${NC}"; FAILURES=$((FAILURES + 1)); }
 info() { echo -e "${YELLOW}→ $1${NC}"; }
 
 FAILURES=0
+REUSE=false
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --reuse)
+            REUSE=true
+            shift
+            ;;
+        --help|-h)
+            echo "Usage: ./tests/e2e/run-e2e.sh [--reuse]"
+            exit 0
+            ;;
+        *)
+            echo "Unknown argument: $1" >&2
+            exit 1
+            ;;
+    esac
+done
+
+AA_ADDR_1="pq1qyqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqy0vusna"
+AA_ADDR_2="pq1qyqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqg7j66z6"
 
 rpc() {
     local port=$1
@@ -29,9 +50,41 @@ rpc() {
         2>/dev/null | jq -r '.result // .error'
 }
 
+wait_for_block() {
+    local port=$1
+    local timeout=${2:-60}
+    for _ in $(seq 1 "$timeout"); do
+        local block
+        block=$(rpc "$port" eth_blockNumber 2>/dev/null || echo "0x0")
+        if [ -n "$block" ] && [ "$block" != "0x0" ] && [ "$block" != "null" ]; then
+            echo "$block"
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
+}
+
+wait_for_ready() {
+    local node=$1
+    local timeout=${2:-30}
+    for _ in $(seq 1 "$timeout"); do
+        local ready_resp ready_val
+        ready_resp=$(docker exec "$node" curl -sf http://localhost:9090/ready 2>/dev/null || echo "")
+        ready_val=$(echo "$ready_resp" | jq -r '.ready // empty' 2>/dev/null)
+        if [ "$ready_val" = "true" ]; then
+            return 0
+        fi
+        sleep 2
+    done
+    return 1
+}
+
 cleanup() {
-    info "Tearing down containers..."
-    docker compose down -v --remove-orphans 2>/dev/null || true
+    if [ "$REUSE" != "true" ]; then
+        info "Tearing down containers..."
+        docker compose down -v --remove-orphans 2>/dev/null || true
+    fi
 }
 trap cleanup EXIT
 
@@ -42,11 +95,15 @@ echo "║   Shell-chain 3-Node E2E Test Suite      ║"
 echo "╚══════════════════════════════════════════╝"
 echo ""
 
-info "Building Docker image..."
-docker compose build --quiet
+if [ "$REUSE" = "true" ]; then
+    info "Reusing existing 3-node testnet..."
+else
+    info "Building Docker image..."
+    docker compose build --quiet
 
-info "Starting 3-node testnet..."
-docker compose up -d
+    info "Starting 3-node testnet..."
+    docker compose up -d
+fi
 
 # Wait for node1 to be healthy (producing blocks).
 info "Waiting for node1 to produce blocks..."
@@ -96,20 +153,16 @@ fi
 info "Polling for block sync..."
 
 N2_DEC=0
-for i in $(seq 1 30); do
-    N2=$(rpc 8546 eth_blockNumber 2>/dev/null || echo "0x0")
+N2=$(wait_for_block 8546 120 || echo "0x0")
+if [ -n "$N2" ] && [ "$N2" != "null" ]; then
     N2_DEC=$((16#${N2#0x}))
-    if [ "$N2_DEC" -gt 0 ]; then break; fi
-    sleep 2
-done
+fi
 
 N3_DEC=0
-for i in $(seq 1 30); do
-    N3=$(rpc 8547 eth_blockNumber 2>/dev/null || echo "0x0")
+N3=$(wait_for_block 8547 120 || echo "0x0")
+if [ -n "$N3" ] && [ "$N3" != "null" ]; then
     N3_DEC=$((16#${N3#0x}))
-    if [ "$N3_DEC" -gt 0 ]; then break; fi
-    sleep 2
-done
+fi
 
 N1=$(rpc 8545 eth_blockNumber)
 N1_DEC=$((16#${N1#0x}))
@@ -180,11 +233,11 @@ done
 # ─── Test 8: Ready endpoint returns ready=true ───────────────
 info "Testing ready endpoints via docker exec..."
 for node in shell-node1 shell-node2 shell-node3; do
-    READY_RESP=$(docker exec "$node" curl -sf http://localhost:9090/ready 2>/dev/null || echo "")
-    READY_VAL=$(echo "$READY_RESP" | jq -r '.ready // empty' 2>/dev/null)
-    if [ "$READY_VAL" = "true" ]; then
+    if wait_for_ready "$node" 30; then
         pass "Ready endpoint on ${node} returns ready=true"
     else
+        READY_RESP=$(docker exec "$node" curl -sf http://localhost:9090/ready 2>/dev/null || echo "")
+        READY_VAL=$(echo "$READY_RESP" | jq -r '.ready // empty' 2>/dev/null)
         fail "Ready endpoint on ${node} did not return ready=true (got: ${READY_VAL})"
     fi
 done
@@ -194,7 +247,9 @@ info "Testing shell_sendTransaction..."
 # Build a minimal JSON transaction payload. shell_sendTransaction expects a
 # SignedTransaction object.  We send a deliberately invalid/dummy one to verify
 # that the RPC method is reachable and responds with a structured JSON-RPC error
-# (rather than a connection failure or HTTP error).
+# (rather than a connection failure or HTTP error). Even for this negative-path
+# probe, keep the address shape aligned with Shell-Chain's canonical `pq1...`
+# user-account format.
 TX_RESULT=$(curl -sf "http://127.0.0.1:8545" \
     -X POST \
     -H "Content-Type: application/json" \
@@ -202,8 +257,8 @@ TX_RESULT=$(curl -sf "http://127.0.0.1:8545" \
         "jsonrpc":"2.0","id":1,
         "method":"shell_sendTransaction",
         "params":[{
-            "from":"0x0000000000000000000000000000000000000001",
-            "to":"0x0000000000000000000000000000000000000002",
+            "from":"'"${AA_ADDR_1}"'",
+            "to":"'"${AA_ADDR_2}"'",
             "value":"0x0",
             "nonce":"0x0",
             "gas":"0x5208",
@@ -238,36 +293,25 @@ fi
 
 # ─── Test 11: WebSocket eth_subscribe (newHeads) ─────────────
 info "Testing WebSocket eth_subscribe..."
-# The RPC server may expose WS on the same port. Try a quick wscat/curl check.
-# We use curl --http1.1 with Upgrade headers to probe for WebSocket support.
-# If websocat is available, use that; otherwise fall back to a probe.
-if command -v websocat &>/dev/null; then
-    WS_RESULT=$(echo '{"jsonrpc":"2.0","id":1,"method":"eth_subscribe","params":["newHeads"]}' \
-        | timeout 5 websocat -n1 ws://127.0.0.1:8545 2>/dev/null || echo "")
-    if echo "$WS_RESULT" | jq -e '.result' &>/dev/null; then
-        pass "WebSocket eth_subscribe(newHeads) returned subscription id"
-    else
-        # WS might be on a separate port; test connectivity at least
-        info "WebSocket subscribe returned: ${WS_RESULT:-empty}"
-        pass "WebSocket probe completed (websocat available)"
-    fi
-else
-    # Probe with curl for HTTP 101 Upgrade
-    WS_PROBE=$(curl -sf -o /dev/null -w "%{http_code}" \
-        -H "Connection: Upgrade" \
-        -H "Upgrade: websocket" \
-        -H "Sec-WebSocket-Version: 13" \
-        -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" \
-        "http://127.0.0.1:8545" 2>/dev/null || echo "000")
-    if [ "$WS_PROBE" = "101" ]; then
-        pass "WebSocket upgrade handshake succeeded (HTTP 101)"
-    elif [ "$WS_PROBE" = "200" ] || [ "$WS_PROBE" = "400" ]; then
-        # Server responded — WS may be on a different port or not enabled on this port
-        pass "WebSocket probe completed (HTTP ${WS_PROBE}, WS may use separate port)"
-    else
-        fail "WebSocket probe failed (HTTP ${WS_PROBE})"
-    fi
-fi
+# Probe with curl for HTTP 101 Upgrade and bound the request time explicitly.
+WS_PROBE=$(curl --http1.1 --max-time 5 -s -o /dev/null -w "%{http_code}" \
+    -H "Connection: Upgrade" \
+    -H "Upgrade: websocket" \
+    -H "Sec-WebSocket-Version: 13" \
+    -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" \
+    "http://127.0.0.1:8545" 2>/dev/null || echo "000")
+case "$WS_PROBE" in
+101*)
+    pass "WebSocket upgrade handshake succeeded (HTTP 101)"
+    ;;
+200*|400*)
+    # Server responded — WS may be on a different port or not enabled on this port
+    pass "WebSocket probe completed (HTTP ${WS_PROBE}, WS may use separate port)"
+    ;;
+*)
+    fail "WebSocket probe failed (HTTP ${WS_PROBE})"
+    ;;
+esac
 
 # ─── Results ─────────────────────────────────────────────────
 echo ""

@@ -11,6 +11,11 @@ pub fn validator_registry_addr() -> Address {
     Address::from([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1])
 }
 
+/// Returns the system address used for the account manager (0x0000…0002).
+pub fn account_manager_addr() -> Address {
+    Address::from([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2])
+}
+
 /// Manages the world state (all accounts and their storage).
 ///
 /// Accounts are stored in a Merkle Patricia Trie keyed by `keccak256(address)`.
@@ -37,6 +42,15 @@ impl<S: KvStore + 'static> WorldState<S> {
             account_trie: trie,
             store,
         })
+    }
+
+    /// Re-open the current world state at its latest root as an isolated snapshot.
+    ///
+    /// Useful for read-only simulations (e.g. RPC `eth_call`, AA validation
+    /// contract execution) that must not mutate the live state handle.
+    pub fn snapshot(&mut self) -> Result<Self, StorageError> {
+        let root = self.state_root()?;
+        Self::at_root(Arc::clone(&self.store), &root)
     }
 
     fn account_key(address: &Address) -> Vec<u8> {
@@ -71,7 +85,7 @@ impl<S: KvStore + 'static> WorldState<S> {
     fn get_or_default(&self, address: &Address) -> Result<Account, StorageError> {
         Ok(self
             .get_account(address)?
-            .unwrap_or_else(|| Account::new_eoa(ShellHash::ZERO, U256::ZERO)))
+            .unwrap_or_else(|| Account::new_user_account(ShellHash::ZERO, U256::ZERO)))
     }
 
     // ── Balance helpers ────────────────────────────────────────
@@ -327,7 +341,7 @@ mod tests {
     }
 
     fn test_address(seed: &[u8]) -> Address {
-        Address::from_public_key(keccak256(seed).as_bytes())
+        Address::from_public_key(keccak256(seed).as_bytes(), 0)
     }
 
     #[test]
@@ -354,7 +368,7 @@ mod tests {
         let store = test_store();
         let mut ws = WorldState::new(store);
         let addr = test_address(b"alice");
-        let acct = Account::new_eoa(keccak256(b"alice-pk"), U256::from(1000));
+        let acct = Account::new_user_account(keccak256(b"alice-pk"), U256::from(1000));
 
         ws.set_account(&addr, &acct).unwrap();
         let loaded = ws.get_account(&addr).unwrap().unwrap();

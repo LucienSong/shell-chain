@@ -42,7 +42,7 @@ pub fn encrypt(signer: &DilithiumSigner, password: &[u8]) -> Result<EncryptedKey
 
     derived_key.zeroize();
 
-    let address = Address::from_public_key(signer.public_key());
+    let address = Address::from_public_key(signer.public_key(), signer.sig_type().as_u8());
 
     Ok(EncryptedKey {
         version: 1,
@@ -151,7 +151,7 @@ pub fn encrypt_sphincs(
 
     derived_key.zeroize();
 
-    let address = Address::from_public_key(signer.public_key());
+    let address = Address::from_public_key(signer.public_key(), signer.sig_type().as_u8());
 
     Ok(EncryptedKey {
         version: 1,
@@ -286,7 +286,7 @@ mod tests {
     #[test]
     fn address_matches() {
         let signer = DilithiumSigner::generate();
-        let expected = Address::from_public_key(signer.public_key());
+        let expected = Address::from_public_key(signer.public_key(), signer.sig_type().as_u8());
         let encrypted = encrypt(&signer, b"addr-test").unwrap();
 
         assert_eq!(encrypted.address, hex::encode(expected.as_bytes()));

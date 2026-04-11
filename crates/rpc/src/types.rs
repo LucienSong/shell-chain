@@ -1,4 +1,4 @@
-//! Hex-formatted JSON-RPC response types for Ethereum API compatibility.
+//! JSON-RPC types with Ethereum-compatible hex numerics and `pq1...` addresses.
 
 use serde::{Deserialize, Serialize};
 use shell_primitives::{Address, ShellHash, U256};
@@ -84,7 +84,7 @@ pub struct RpcTransaction {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RpcAccessListItem {
-    pub address: String,
+    pub address: Address,
     pub storage_keys: Vec<String>,
 }
 
@@ -429,6 +429,11 @@ mod tests {
         ] {
             assert!(json.get(key).is_some(), "missing field: {key}");
         }
+        assert_eq!(json.get("from").unwrap(), &serde_json::json!(Address::ZERO));
+        assert_eq!(
+            json.get("to").unwrap(),
+            &serde_json::json!(Address::from([0x01; 20]))
+        );
     }
 
     #[test]
@@ -582,6 +587,11 @@ mod tests {
         ] {
             assert!(json.get(key).is_some(), "missing field: {key}");
         }
+        assert_eq!(json.get("from").unwrap(), &serde_json::json!(Address::ZERO));
+        assert_eq!(
+            json.get("to").unwrap(),
+            &serde_json::json!(Address::from([0x01; 20]))
+        );
     }
 
     #[test]
@@ -637,6 +647,10 @@ mod tests {
             assert!(json.get(key).is_some(), "missing field: {key}");
         }
         assert_eq!(json.get("removed").unwrap(), false);
+        assert_eq!(
+            json.get("address").unwrap(),
+            &serde_json::json!(Address::from([0xAA; 20]))
+        );
     }
 
     #[test]
@@ -687,23 +701,58 @@ mod tests {
 
     #[test]
     fn call_request_deserializes_all_fields() {
-        let json = r#"{
-            "from": "0x0000000000000000000000000000000000000001",
-            "to": "0x0000000000000000000000000000000000000002",
+        let from = Address::from([0x01; 20]);
+        let to = Address::from([0x02; 20]);
+        let access_addr = Address::from([0x03; 20]);
+        let json = serde_json::json!({
+            "from": from,
+            "to": to,
             "data": "0xabcd",
             "value": "0x3e8",
             "gas": "0x5208",
             "accessList": [
-                {"address": "0x0000000000000000000000000000000000000003", "storageKeys": ["0x0000000000000000000000000000000000000000000000000000000000000001"]}
+                {
+                    "address": access_addr,
+                    "storageKeys": ["0x0000000000000000000000000000000000000000000000000000000000000001"]
+                }
             ]
-        }"#;
-        let req: CallRequest = serde_json::from_str(json).unwrap();
-        assert!(req.from.is_some());
-        assert!(req.to.is_some());
+        });
+        let req: CallRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.from, Some(from));
+        assert_eq!(req.to, Some(to));
         assert_eq!(req.data.as_ref().unwrap(), "0xabcd");
         assert_eq!(req.value.as_ref().unwrap(), "0x3e8");
         assert_eq!(req.gas.as_ref().unwrap(), "0x5208");
         assert_eq!(req.access_list.as_ref().unwrap().len(), 1);
+        assert_eq!(req.access_list.as_ref().unwrap()[0].address, access_addr);
+    }
+
+    #[test]
+    fn call_request_accepts_legacy_hex_addresses() {
+        let req: CallRequest = serde_json::from_value(serde_json::json!({
+            "from": "0x0000000000000000000000000000000000000001",
+            "to": "0x0000000000000000000000000000000000000002",
+            "accessList": [
+                {
+                    "address": "0x0000000000000000000000000000000000000003",
+                    "storageKeys": []
+                }
+            ]
+        }))
+        .unwrap();
+
+        assert_eq!(
+            req.from,
+            Some(Address::from_hex("0x0000000000000000000000000000000000000001").unwrap())
+        );
+        assert_eq!(
+            req.to,
+            Some(Address::from_hex("0x0000000000000000000000000000000000000002").unwrap())
+        );
+        assert_eq!(
+            req.access_list.as_ref().unwrap()[0].address,
+            Address::from_hex("0x0000000000000000000000000000000000000003").unwrap()
+        );
     }
 
     #[test]

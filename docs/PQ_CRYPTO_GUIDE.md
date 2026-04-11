@@ -2,7 +2,7 @@
 
 Shell-chain is built from the ground up with post-quantum cryptographic primitives, making it resistant to attacks from both classical and quantum computers.
 
-> **See also:** [Quickstart Guide](QUICKSTART.md) · [Testnet Operator Guide](TESTNET_OPERATOR_GUIDE.md) · [JSON-RPC API Reference](JSON_RPC_API.md)
+> **See also:** [Quickstart Guide](QUICKSTART.md) · [Testnet Operator Guide](TESTNET_OPERATOR_GUIDE.md) · [JSON-RPC API Reference](JSON_RPC_API.md) · [Native Account Abstraction Guide](ACCOUNT_ABSTRACTION_GUIDE.md)
 
 ---
 
@@ -56,15 +56,18 @@ Shell-chain's default signature algorithm. Based on the hardness of lattice prob
 
 ### Keccak-256 (Hashing)
 
-Used for address derivation and Ethereum-compatible operations (transaction hashing, receipt tries, storage proofs):
-
-```
-address = keccak256(public_key)[12..32]   // last 20 bytes
-```
+Used for Ethereum-compatible hashing surfaces such as `web3_sha3` and other
+EVM-facing data structures. **It is no longer used for Shell account address
+derivation.**
 
 ### BLAKE3 (Internal Hashing)
 
-Used for high-performance internal operations where Ethereum compatibility is not required.
+Used for Shell account address derivation and other high-performance internal
+operations where Ethereum compatibility is not required.
+
+```text
+address = blake3(version || algo_id || public_key)[0..20]
+```
 
 ### Argon2id (Key Derivation)
 
@@ -97,7 +100,7 @@ shell-node key generate --output keystore.json
 
 2. **Address derivation** — The 20-byte address is computed as:
    ```
-   address = keccak256(public_key)[12..32]
+   address = blake3(version || algo_id || public_key)[0..20]
    ```
 
 3. **Password prompt** — You enter an encryption password.
@@ -148,7 +151,7 @@ The keystore file is a JSON document inspired by the Ethereum Web3 Secret Storag
 | Field | Type | Description |
 |-------|------|-------------|
 | `version` | `u32` | Format version (always `1`) |
-| `address` | `String` | 20-byte address (hex, no 0x prefix) |
+| `address` | `String` | Legacy hex address string stored for compatibility; CLI / RPC surfaces display canonical `pq1...` |
 | `key_type` | `String` | `"dilithium3"` or `"sphincs-sha2-256f"` |
 | `kdf` | `String` | Key derivation function (always `"argon2id"`) |
 | `kdf_params.m_cost` | `u32` | Memory cost in KiB (65,536 = 64 MiB) |
@@ -164,32 +167,35 @@ The keystore file is a JSON document inspired by the Ethereum Web3 Secret Storag
 
 ```bash
 shell-node key inspect keystore.json
-# Output: Address: 0x742d35Cc6634C0532925a3b844Bc9e7595f2bD18
+# Output: Address: pq1...
 ```
 
-This does **not** require the password — the address is stored in plaintext.
+This does **not** require the password. The keystore stores the address in
+plaintext for compatibility, while CLI output uses the canonical `pq1...` form.
 
 ---
 
 ## Address Derivation
 
-Shell-chain addresses are 20 bytes, derived identically to Ethereum:
+Shell-chain addresses remain **20 bytes internally**, but their canonical
+external form is `pq1...`.
 
 ```
-public_key  ──→  keccak256()  ──→  32-byte hash  ──→  take bytes [12..32]  ──→  20-byte address
- (1,952 B)                                                                        (0x-prefixed hex)
+version || algo_id || public_key  ──→  blake3()  ──→  32-byte hash  ──→  take bytes [0..20]  ──→  20-byte address
+                                                                         └──── Bech32m encode ───→  pq1...
 ```
 
 ### Step by step
 
-1. Start with the raw Dilithium3 public key (1,952 bytes).
-2. Compute `keccak256(public_key)` → 32-byte hash.
-3. Take the last 20 bytes (bytes 12–31 inclusive).
-4. The result is the address, displayed as a 0x-prefixed hex string (42 characters).
+1. Start with the derivation version, the signature algorithm ID, and the raw public key.
+2. Compute `blake3(version || algo_id || public_key)` → 32-byte hash.
+3. Take the first 20 bytes (bytes 0–19 inclusive).
+4. Encode that 20-byte value as Bech32m with HRP `pq` for user-facing display.
 
 ### Important notes
 
 - The same public key always produces the same address (deterministic).
+- The same public key under different supported algorithms produces different addresses because `algo_id` is part of the preimage.
 - Different public keys produce different addresses (collision-resistant, 160-bit security).
 - Unlike Ethereum, the public key is a Dilithium3 key (1,952 bytes), not an ECDSA key (64 bytes). This means you **cannot** derive the public key from a signature as you can with ECDSA's `ecrecover`.
 - The public key must be registered on-chain with the first transaction. Query it via `shell_getPqPubkey`.
@@ -253,11 +259,11 @@ Shell-chain is **not compatible** with MetaMask, Ledger, or other wallets that u
 |-----------|------|
 | Generate a key | `shell-node key generate --output keystore.json` |
 | View address | `shell-node key inspect keystore.json` |
-| Send a transaction | `shell-node tx send --to 0x... --value ... --keystore keystore.json` |
+| Send a transaction | `shell-node tx send --to pq1... --value ... --keystore keystore.json` |
 | Deploy a contract | `shell-node tx deploy --code 0x... --keystore keystore.json` |
-| Call a contract | `shell-node tx call --to 0x... --data 0x...` |
-| Check balance | `shell-node account balance 0xADDRESS` |
-| Check nonce | `shell-node account nonce 0xADDRESS` |
+| Call a contract | `shell-node tx call --to pq1... --data 0x...` |
+| Check balance | `shell-node account balance pq1ADDRESS` |
+| Check nonce | `shell-node account nonce pq1ADDRESS` |
 | List keystores | `shell-node account list --datadir shell-data` |
 
 ### JSON-RPC compatibility

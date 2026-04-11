@@ -65,6 +65,12 @@ pub trait KvStore: Send + Sync {
     /// Results are sorted by key in ascending byte order.
     #[allow(clippy::type_complexity)]
     fn scan_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError>;
+
+    /// Scan all keys in the store, returning (key, value) pairs in ascending key order.
+    #[allow(clippy::type_complexity)]
+    fn scan_all(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
+        self.scan_prefix(&[])
+    }
 }
 
 #[cfg(test)]

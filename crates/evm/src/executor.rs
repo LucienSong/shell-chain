@@ -19,7 +19,9 @@ use shell_storage::{ChainStore, KvStore, StorageError, WorldState};
 
 use crate::precompiles::ShellPrecompiles;
 use crate::state_db::{ShellStateDb, StateDbError};
-use crate::system_contracts::{self, execute_system_contract, SYSTEM_CALL_BASE_GAS};
+use crate::system_contracts::{
+    self, execute_system_contract_call, SystemContractEffects, SYSTEM_CALL_BASE_GAS,
+};
 
 /// Errors returned during EVM execution.
 #[derive(Debug, thiserror::Error)]
@@ -47,6 +49,8 @@ pub struct TxExecutionResult {
     /// True if this was a system contract transaction whose state changes
     /// were applied directly to the EVM's WorldState (not via EvmState).
     pub is_system_tx: bool,
+    /// Explicit state surfaces mutated by native system-contract execution.
+    pub system_contract_effects: SystemContractEffects,
 }
 
 /// High-level EVM executor for shell-chain.
@@ -73,9 +77,8 @@ impl<S: KvStore + 'static> ShellEvm<S> {
     /// State changes are NOT committed — the caller must apply them to
     /// WorldState after collecting all transactions in a block.
     ///
-    /// **System contract intercept**: if the transaction targets the
-    /// ValidatorRegistry at 0x0000…0001, native Rust logic handles it
-    /// instead of routing through revm.
+    /// **System contract intercept**: transactions targeting native system
+    /// contracts are handled by Rust logic instead of routing through revm.
     pub fn execute_tx(
         &mut self,
         signed_tx: &shell_core::SignedTransaction,
@@ -87,7 +90,7 @@ impl<S: KvStore + 'static> ShellEvm<S> {
 
         // ── System contract intercept ──────────────────────────
         if let Some(to) = &tx.to {
-            if to.as_bytes() == &system_contracts::VALIDATOR_REGISTRY_ADDR {
+            if system_contracts::is_system_contract(to) {
                 return self.execute_system_contract_tx(
                     signed_tx,
                     header,
@@ -221,6 +224,7 @@ impl<S: KvStore + 'static> ShellEvm<S> {
             gas_used,
             output: output_bytes,
             is_system_tx: false,
+            system_contract_effects: SystemContractEffects::default(),
         })
     }
 
@@ -257,7 +261,7 @@ impl<S: KvStore + 'static> ShellEvm<S> {
         }
     }
 
-    /// Execute a transaction targeting the ValidatorRegistry system contract.
+    /// Execute a transaction targeting a native system contract.
     ///
     /// Runs native Rust logic instead of the EVM, produces appropriate logs,
     /// and charges a fixed gas fee.
@@ -269,13 +273,30 @@ impl<S: KvStore + 'static> ShellEvm<S> {
         cumulative_gas_used: u64,
     ) -> Result<TxExecutionResult, ExecutorError> {
         let caller = &signed_tx.from;
+        let tx = &signed_tx.tx;
+        let target = signed_tx.tx.to.unwrap_or_default();
         let input = signed_tx.tx.data.as_ref();
-        let ws = self.state_db.world_state_mut();
-
-        let result = execute_system_contract(caller, input, ws);
+        let (ws, chain_store) = self.state_db.world_state_and_chain_store();
+        let result = if tx.value != U256::ZERO {
+            Err(crate::system_contracts::SystemContractError::AbiDecode(
+                "system contracts do not accept value".into(),
+            ))
+        } else {
+            execute_system_contract_call(&target, caller, input, ws, chain_store)
+        };
 
         match result {
-            Ok((output, gas_used)) => {
+            Ok(mut outcome) => {
+                ws.increment_nonce(caller)?;
+                if !outcome.effects.updated_accounts.contains(caller) {
+                    outcome.effects.updated_accounts.push(*caller);
+                }
+                let output = outcome.output;
+                let gas_used = outcome.gas_used;
+                ws.sub_balance(
+                    caller,
+                    U256::from(gas_used) * U256::from(tx.max_fee_per_gas),
+                )?;
                 let new_cumulative = cumulative_gas_used + gas_used;
 
                 // Build event logs for mutating operations
@@ -332,11 +353,19 @@ impl<S: KvStore + 'static> ShellEvm<S> {
                     gas_used,
                     output,
                     is_system_tx: true,
+                    system_contract_effects: outcome.effects,
                 })
             }
             Err(e) => {
+                ws.increment_nonce(caller)?;
+                let mut effects = SystemContractEffects::default();
+                effects.updated_accounts.push(*caller);
                 // System contract reverted — produce a failed receipt
                 let gas_used = SYSTEM_CALL_BASE_GAS;
+                ws.sub_balance(
+                    caller,
+                    U256::from(gas_used) * U256::from(tx.max_fee_per_gas),
+                )?;
                 let new_cumulative = cumulative_gas_used + gas_used;
                 let revert_msg = e.to_string().into_bytes();
 
@@ -358,6 +387,7 @@ impl<S: KvStore + 'static> ShellEvm<S> {
                     gas_used,
                     output: revert_msg,
                     is_system_tx: true,
+                    system_contract_effects: effects,
                 })
             }
         }
@@ -475,7 +505,7 @@ mod tests {
         let mut evm = setup_evm();
 
         let signer = DilithiumSigner::generate();
-        let from = ShellAddress::from_public_key(signer.public_key());
+        let from = ShellAddress::from_public_key(signer.public_key(), signer.sig_type().as_u8());
         let to = ShellAddress::from([0x01; 20]);
 
         // Fund sender with plenty of balance
@@ -595,11 +625,15 @@ mod tests {
 
     // ── Helper: build a system contract tx ─────────────────────
 
-    fn make_system_tx(from: ShellAddress, calldata: Vec<u8>) -> SignedTransaction {
+    fn make_system_tx_to(
+        from: ShellAddress,
+        to: ShellAddress,
+        calldata: Vec<u8>,
+    ) -> SignedTransaction {
         let tx = Transaction {
             chain_id: 1337,
             nonce: 0,
-            to: Some(system_contracts::registry_address()),
+            to: Some(to),
             value: U256::ZERO,
             data: shell_primitives::Bytes::from(calldata),
             gas_limit: 100_000,
@@ -612,6 +646,10 @@ mod tests {
         };
         let sig = PQSignature::new(SignatureType::Dilithium3, vec![0xDD; 100]);
         SignedTransaction::new(from, tx, sig)
+    }
+
+    fn make_system_tx(from: ShellAddress, calldata: Vec<u8>) -> SignedTransaction {
+        make_system_tx_to(from, system_contracts::registry_address(), calldata)
     }
 
     // ── System contract executor integration tests ─────────────
@@ -891,6 +929,55 @@ mod tests {
 
         let tx_result = evm.execute_tx(&signed, &header, 0, 0).unwrap();
         assert!(tx_result.state_changes.is_empty());
+    }
+
+    #[test]
+    fn execute_rotate_key_via_executor_updates_account() {
+        let mut evm = setup_evm();
+        let caller = ShellAddress::from([0x31; 20]);
+        let initial_balance = U256::from(10_000_000u64);
+        fund_account(&mut evm, &caller, initial_balance);
+
+        let new_pubkey = vec![0xAB; 1312];
+        let calldata = system_contracts::encode_rotate_key_calldata(
+            &new_pubkey,
+            SignatureType::Dilithium3.as_u8(),
+        );
+        let signed = make_system_tx_to(
+            caller,
+            system_contracts::account_manager_address(),
+            calldata,
+        );
+        let header = sample_header();
+
+        let tx_result = evm.execute_tx(&signed, &header, 0, 0).unwrap();
+        assert_eq!(tx_result.receipt.status, 1);
+        assert!(tx_result.is_system_tx);
+        assert_eq!(
+            tx_result.system_contract_effects.updated_accounts,
+            vec![caller]
+        );
+
+        let account = evm
+            .state_db_mut()
+            .world_state_mut()
+            .get_account(&caller)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            account.pq_pubkey_hash,
+            shell_primitives::blake3_hash(&new_pubkey)
+        );
+        assert_eq!(account.nonce, 1);
+        assert_eq!(account.balance, initial_balance);
+        assert_eq!(
+            evm.state_db_mut()
+                .chain_store()
+                .get_pubkey(&caller)
+                .unwrap()
+                .unwrap(),
+            new_pubkey
+        );
     }
 
     // ── Helpers for advanced EVM tests ────────────────────────

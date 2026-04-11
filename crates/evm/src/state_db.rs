@@ -64,7 +64,6 @@ impl<S: KvStore + 'static> ShellStateDb<S> {
 
     /// Returns mutable WorldState and shared ChainStore in one borrow,
     /// avoiding the split-borrow issue with separate accessors.
-    #[cfg(test)]
     pub(crate) fn world_state_and_chain_store(&mut self) -> (&mut WorldState<S>, &ChainStore<S>) {
         (&mut self.world_state, &self.chain_store)
     }
@@ -72,7 +71,7 @@ impl<S: KvStore + 'static> ShellStateDb<S> {
     /// Convert a shell-chain Account to revm AccountInfo.
     ///
     /// Maps `Option<ShellHash>` code_hash to B256, defaulting to
-    /// `KECCAK_EMPTY` for EOA accounts (no contract code).
+    /// `KECCAK_EMPTY` for accounts without contract bytecode.
     fn to_account_info(account: &Account) -> AccountInfo {
         let code_hash = match &account.code_hash {
             Some(h) => shell_hash_to_b256(h),
@@ -193,7 +192,7 @@ mod tests {
         let info = db.basic(alloy_primitives::Address::ZERO).unwrap().unwrap();
         assert_eq!(info.nonce, 42);
         assert_eq!(info.balance, U256::from(1_000_000));
-        // EOA has KECCAK_EMPTY code hash
+        // Accounts without contract bytecode use KECCAK_EMPTY
         assert_eq!(info.code_hash, KECCAK_EMPTY);
     }
 

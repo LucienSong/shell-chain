@@ -2,7 +2,7 @@
 
 This guide covers everything you need to run a shell-chain testnet node — from system requirements to monitoring and maintenance.
 
-> **See also:** [Quickstart Guide](QUICKSTART.md) · [JSON-RPC API Reference](JSON_RPC_API.md) · [Post-Quantum Cryptography Guide](PQ_CRYPTO_GUIDE.md)
+> **See also:** [Quickstart Guide](QUICKSTART.md) · [JSON-RPC API Reference](JSON_RPC_API.md) · [Post-Quantum Cryptography Guide](PQ_CRYPTO_GUIDE.md) · [Native Account Abstraction Guide](ACCOUNT_ABSTRACTION_GUIDE.md)
 
 ---
 
@@ -457,13 +457,13 @@ This displays the address associated with the keystore without requiring the pas
   "consensus": {
     "engine": "poa",
     "authorities": [
-      "0xYOUR_VALIDATOR_ADDRESS_HERE"
+      "pq1YOUR_VALIDATOR_ADDRESS_HERE"
     ],
     "block_time_secs": 2,
     "epoch_length": 0
   },
   "alloc": {
-    "0xYOUR_VALIDATOR_ADDRESS_HERE": {
+    "pq1YOUR_VALIDATOR_ADDRESS_HERE": {
       "balance": "0x3635c9adc5dea00000"
     }
   },

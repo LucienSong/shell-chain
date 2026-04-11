@@ -11,7 +11,7 @@ mod world_state;
 #[cfg(feature = "rocksdb")]
 mod rocks_db;
 
-pub use chain_store::{ChainConfig, ChainStore};
+pub use chain_store::{ChainConfig, ChainStore, MAX_ADDRESS_TX_HISTORY_OFFSET};
 pub use error::StorageError;
 pub use kv_store::{KvStore, WriteBatch, WriteBatchOp};
 pub use memory_db::MemoryDb;
@@ -19,7 +19,7 @@ pub use merkle_trie::MerkleTrie;
 pub use snapshot::{SnapshotEntry, SnapshotMetadata, SnapshotReader, SnapshotWriter};
 pub use state_pruner::{PruneResult, StatePruner};
 pub use trie_adapter::KvStoreTrieDb;
-pub use world_state::{validator_registry_addr, WorldState};
+pub use world_state::{account_manager_addr, validator_registry_addr, WorldState};
 
 #[cfg(feature = "rocksdb")]
 pub use rocks_db::{

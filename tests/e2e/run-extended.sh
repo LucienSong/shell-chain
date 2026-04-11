@@ -255,16 +255,21 @@ else
     fail "eth_chainId expected 0x539, got $R"
 fi
 
+# Cache the latest block so fee-dependent checks use the same view of chain state.
+LATEST_BLOCK=$(rpc_raw 8545 eth_getBlockByNumber '["latest", false]')
+LATEST_HASH=$(echo "$LATEST_BLOCK" | jq -r '.result.hash // empty')
+LATEST_BASE_FEE=$(echo "$LATEST_BLOCK" | jq -r '.result.baseFeePerGas // empty')
+
 # eth_gasPrice
 R=$(rpc 8545 eth_gasPrice)
-if [ "$R" = "0x3b9aca00" ]; then
-    pass "eth_gasPrice returns 1 gwei (0x3b9aca00)"
+if [ -n "$R" ] && [ "$R" != "null" ] && [ "$R" = "$LATEST_BASE_FEE" ] && [ "$R" != "0x0" ]; then
+    pass "eth_gasPrice matches latest baseFeePerGas ($R)"
 else
-    fail "eth_gasPrice expected 0x3b9aca00, got $R"
+    fail "eth_gasPrice mismatch: rpc=$R latest.baseFeePerGas=$LATEST_BASE_FEE"
 fi
 
 # eth_getBlockByNumber (latest)
-R=$(rpc_raw 8545 eth_getBlockByNumber '["latest", false]' | jq -r '.result.hash // empty')
+R=$LATEST_HASH
 if [ -n "$R" ]; then
     pass "eth_getBlockByNumber('latest') returns hash $R"
 else
@@ -296,24 +301,24 @@ else
     fail "eth_getTransactionCount failed"
 fi
 
-# eth_getCode (on a non-contract address — should be 0x)
-R=$(rpc 8545 eth_getCode "[\"0x0000000000000000000000000000000000000001\"]")
+# eth_getCode (on a default AA account — should be 0x)
+R=$(rpc 8545 eth_getCode "[\"${PROPOSER}\"]")
 if [ -n "$R" ]; then
-    pass "eth_getCode returns '$R' (empty for EOA)"
+    pass "eth_getCode returns '$R' (empty for a code-less AA account)"
 else
     fail "eth_getCode failed"
 fi
 
 # eth_getStorageAt
-R=$(rpc 8545 eth_getStorageAt "[\"0x0000000000000000000000000000000000000001\", \"0x0\"]")
+R=$(rpc 8545 eth_getStorageAt "[\"${PROPOSER}\", \"0x0\"]")
 if [ -n "$R" ]; then
     pass "eth_getStorageAt returns '$R'"
 else
     fail "eth_getStorageAt failed"
 fi
 
-# eth_call (simple call to zero address — should return empty or error)
-CALL_RESULT=$(rpc_raw 8545 eth_call '[{"to": "0x0000000000000000000000000000000000000001", "data": "0x"}, "latest"]')
+# eth_call against a code-less AA account — should return empty or error
+CALL_RESULT=$(rpc_raw 8545 eth_call "[{\"to\": \"${PROPOSER}\", \"data\": \"0x\"}, \"latest\"]")
 CALL_ERR=$(echo "$CALL_RESULT" | jq -r '.error // empty')
 CALL_RES=$(echo "$CALL_RESULT" | jq -r '.result // empty')
 if [ -n "$CALL_RES" ] || [ -n "$CALL_ERR" ]; then
@@ -323,7 +328,7 @@ else
 fi
 
 # eth_estimateGas
-EST_RESULT=$(rpc_raw 8545 eth_estimateGas '[{"to": "0x0000000000000000000000000000000000000001", "value": "0x0"}]')
+EST_RESULT=$(rpc_raw 8545 eth_estimateGas "[{\"to\": \"${PROPOSER}\", \"value\": \"0x0\"}]")
 EST_RES=$(echo "$EST_RESULT" | jq -r '.result // empty')
 if [ -n "$EST_RES" ]; then
     pass "eth_estimateGas returns $EST_RES"

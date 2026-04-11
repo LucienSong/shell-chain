@@ -48,6 +48,8 @@ pub struct RpcConfig {
     /// API namespaces to enable. Default: ["eth", "net", "web3", "shell"].
     /// Debug and trace require explicit opt-in.
     pub api_namespaces: Vec<String>,
+    /// Allow exposing dev-only `evm` RPC methods on non-loopback listeners.
+    pub allow_unsafe_dev_exposed: bool,
     /// Maximum request body size in bytes (default: 5 MB).
     pub max_request_body_size: u32,
 }
@@ -63,8 +65,43 @@ impl Default for RpcConfig {
             cors_allowed_origins: Some(vec!["*".to_string()]),
             rate_limit_per_sec: Some(50),
             api_namespaces: vec!["eth".into(), "net".into(), "web3".into(), "shell".into()],
+            allow_unsafe_dev_exposed: false,
             max_request_body_size: 5 * 1024 * 1024,
         }
+    }
+}
+
+impl RpcConfig {
+    /// Returns true when the given namespace is enabled.
+    pub fn has_api_namespace(&self, namespace: &str) -> bool {
+        self.api_namespaces.iter().any(|n| n == namespace)
+    }
+
+    /// Reject non-loopback exposure of the dev-only `evm` RPC namespace unless
+    /// the operator explicitly opts into the unsafe configuration.
+    pub fn validate_dev_rpc_exposure(&self) -> Result<(), String> {
+        if self.allow_unsafe_dev_exposed || !self.has_api_namespace("evm") {
+            return Ok(());
+        }
+
+        let mut exposed = Vec::new();
+        if !self.listen_addr.ip().is_loopback() {
+            exposed.push(format!("http://{}", self.listen_addr));
+        }
+        if let Some(ws_addr) = self.ws_addr {
+            if !ws_addr.ip().is_loopback() {
+                exposed.push(format!("ws://{}", ws_addr));
+            }
+        }
+
+        if exposed.is_empty() {
+            return Ok(());
+        }
+
+        Err(format!(
+            "refusing to expose dev-only 'evm' RPC namespace on non-loopback listener(s): {}. Bind RPC to 127.0.0.1/::1 or pass --unsafe-dev-exposed to override.",
+            exposed.join(", ")
+        ))
     }
 }
 
@@ -256,5 +293,77 @@ pub async fn start_rpc_server<S: KvStore + 'static>(
             ws_addr: None,
             ws_handle: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RpcConfig;
+    use std::net::SocketAddr;
+
+    #[test]
+    fn rpc_config_default_disallows_unsafe_dev_exposure() {
+        assert!(!RpcConfig::default().allow_unsafe_dev_exposed);
+    }
+
+    #[test]
+    fn dev_rpc_exposure_allows_loopback_only_listeners() {
+        let config = RpcConfig {
+            api_namespaces: vec!["eth".into(), "evm".into()],
+            ws_addr: Some(SocketAddr::from(([127, 0, 0, 1], 8546))),
+            ..RpcConfig::default()
+        };
+
+        assert!(config.validate_dev_rpc_exposure().is_ok());
+    }
+
+    #[test]
+    fn dev_rpc_exposure_rejects_public_http_listener() {
+        let config = RpcConfig {
+            listen_addr: SocketAddr::from(([0, 0, 0, 0], 8545)),
+            api_namespaces: vec!["evm".into()],
+            ws_addr: None,
+            ..RpcConfig::default()
+        };
+
+        let err = config.validate_dev_rpc_exposure().unwrap_err();
+        assert!(err.contains("http://0.0.0.0:8545"));
+        assert!(err.contains("--unsafe-dev-exposed"));
+    }
+
+    #[test]
+    fn dev_rpc_exposure_rejects_public_ws_listener() {
+        let config = RpcConfig {
+            api_namespaces: vec!["evm".into()],
+            ws_addr: Some(SocketAddr::from(([0, 0, 0, 0], 8546))),
+            ..RpcConfig::default()
+        };
+
+        let err = config.validate_dev_rpc_exposure().unwrap_err();
+        assert!(err.contains("ws://0.0.0.0:8546"));
+    }
+
+    #[test]
+    fn dev_rpc_exposure_allows_public_listener_when_unsafe_override_set() {
+        let config = RpcConfig {
+            listen_addr: SocketAddr::from(([0, 0, 0, 0], 8545)),
+            api_namespaces: vec!["evm".into()],
+            allow_unsafe_dev_exposed: true,
+            ..RpcConfig::default()
+        };
+
+        assert!(config.validate_dev_rpc_exposure().is_ok());
+    }
+
+    #[test]
+    fn dev_rpc_exposure_ignores_public_listener_without_evm_namespace() {
+        let config = RpcConfig {
+            listen_addr: SocketAddr::from(([0, 0, 0, 0], 8545)),
+            api_namespaces: vec!["eth".into(), "shell".into()],
+            ws_addr: None,
+            ..RpcConfig::default()
+        };
+
+        assert!(config.validate_dev_rpc_exposure().is_ok());
     }
 }

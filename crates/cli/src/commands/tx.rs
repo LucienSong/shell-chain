@@ -15,7 +15,7 @@ use shell_primitives::{Address, Bytes, U256};
 pub enum TxCommand {
     /// Send a value transfer transaction.
     Send {
-        /// Recipient address (0x-prefixed hex).
+        /// Recipient address (`pq1...`; legacy `0x...` also accepted).
         #[arg(long)]
         to: String,
 
@@ -69,7 +69,7 @@ pub enum TxCommand {
 
     /// Make a read-only call (eth_call).
     Call {
-        /// Contract address (0x-prefixed hex).
+        /// Contract address (`pq1...`; legacy `0x...` also accepted).
         #[arg(long)]
         to: String,
 
@@ -120,7 +120,7 @@ fn cmd_send(
     gas_limit: Option<u64>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let signer = load_keystore(&keystore)?;
-    let from = Address::from_public_key(signer.public_key());
+    let from = Address::from_public_key(signer.public_key(), signer.sig_type().as_u8());
     let to_addr = parse_address(&to)?;
 
     let chain_id = match chain_id {
@@ -180,7 +180,7 @@ fn cmd_deploy(
     value: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let signer = load_keystore(&keystore)?;
-    let from = Address::from_public_key(signer.public_key());
+    let from = Address::from_public_key(signer.public_key(), signer.sig_type().as_u8());
 
     let chain_id = match chain_id {
         Some(id) => id,
@@ -281,18 +281,9 @@ fn load_keystore(path: &PathBuf) -> Result<Box<dyn Signer>, Box<dyn std::error::
     Ok(Box::new(signer))
 }
 
-/// Parse a 0x-prefixed hex address string.
+/// Parse a user-facing address string (`pq1...` or legacy hex).
 fn parse_address(s: &str) -> Result<Address, Box<dyn std::error::Error>> {
-    let s = s.strip_prefix("0x").unwrap_or(s);
-    if s.len() != 40 {
-        return Err(format!(
-            "invalid address length: expected 40 hex chars, got {}",
-            s.len()
-        )
-        .into());
-    }
-    let bytes = hex::decode(s)?;
-    Ok(Address::from_slice(&bytes))
+    Address::parse(s).map_err(|e| format!("invalid address '{s}': {e}").into())
 }
 
 /// Parse a decimal or hex string into U256.
@@ -460,6 +451,13 @@ mod tests {
     fn parse_address_no_prefix() {
         let addr = parse_address("0000000000000000000000000000000000000001").unwrap();
         assert_eq!(addr.as_bytes()[19], 1);
+    }
+
+    #[test]
+    fn parse_bech32m_address() {
+        let raw = Address::from([0x11; 20]);
+        let addr = parse_address(&raw.to_string()).unwrap();
+        assert_eq!(addr, raw);
     }
 
     #[test]

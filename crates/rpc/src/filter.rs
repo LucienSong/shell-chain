@@ -372,8 +372,12 @@ mod tests {
 
     #[test]
     fn raw_filter_single_address() {
-        let json = r#"{"fromBlock":"0x1","toBlock":"0x5","address":"0x0000000000000000000000000000000000000001"}"#;
-        let raw: RawLogFilter = serde_json::from_str(json).unwrap();
+        let json = serde_json::json!({
+            "fromBlock": "0x1",
+            "toBlock": "0x5",
+            "address": Address::from([0x01; 20]),
+        });
+        let raw: RawLogFilter = serde_json::from_value(json).unwrap();
         let filter = raw.into_filter(100);
         assert_eq!(filter.from_block, Some(1));
         assert_eq!(filter.to_block, Some(5));
@@ -382,8 +386,13 @@ mod tests {
 
     #[test]
     fn raw_filter_array_address() {
-        let json = r#"{"address":["0x0000000000000000000000000000000000000001","0x0000000000000000000000000000000000000002"]}"#;
-        let raw: RawLogFilter = serde_json::from_str(json).unwrap();
+        let json = serde_json::json!({
+            "address": [
+                Address::from([0x01; 20]).to_string(),
+                "0x0000000000000000000000000000000000000002"
+            ]
+        });
+        let raw: RawLogFilter = serde_json::from_value(json).unwrap();
         let filter = raw.into_filter(100);
         assert_eq!(filter.address.as_ref().unwrap().len(), 2);
     }

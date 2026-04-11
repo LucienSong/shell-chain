@@ -17,7 +17,7 @@ pub enum AccountCommand {
 
     /// Query the balance of an address.
     Balance {
-        /// Address to query (0x-prefixed hex).
+        /// Address to query (`pq1...`; legacy `0x...` also accepted).
         address: String,
 
         /// JSON-RPC endpoint URL.
@@ -27,7 +27,7 @@ pub enum AccountCommand {
 
     /// Query the nonce (transaction count) of an address.
     Nonce {
-        /// Address to query (0x-prefixed hex).
+        /// Address to query (`pq1...`; legacy `0x...` also accepted).
         address: String,
 
         /// JSON-RPC endpoint URL.
@@ -62,7 +62,10 @@ fn cmd_list(datadir: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         if path.extension().is_some_and(|ext| ext == "json") {
             if let Ok(contents) = std::fs::read_to_string(&path) {
                 if let Ok(ek) = serde_json::from_str::<EncryptedKey>(&contents) {
-                    println!("0x{} ({})", ek.address, path.display());
+                    let address = Address::parse(&ek.address).map_err(|e| {
+                        format!("invalid keystore address in {}: {e}", path.display())
+                    })?;
+                    println!("{address} ({})", path.display());
                     found += 1;
                 }
             }
@@ -136,16 +139,7 @@ fn cmd_nonce(address: String, rpc_url: String) -> Result<(), Box<dyn std::error:
 // ---------------------------------------------------------------------------
 
 fn parse_address(s: &str) -> Result<Address, Box<dyn std::error::Error>> {
-    let s = s.strip_prefix("0x").unwrap_or(s);
-    if s.len() != 40 {
-        return Err(format!(
-            "invalid address length: expected 40 hex chars, got {}",
-            s.len()
-        )
-        .into());
-    }
-    let bytes = hex::decode(s)?;
-    Ok(Address::from_slice(&bytes))
+    Address::parse(s).map_err(|e| format!("invalid address '{s}': {e}").into())
 }
 
 fn rpc_post(
@@ -167,6 +161,13 @@ mod tests {
     fn parse_valid_address() {
         let addr = parse_address("0x0000000000000000000000000000000000000042").unwrap();
         assert_eq!(addr.as_bytes()[19], 0x42);
+    }
+
+    #[test]
+    fn parse_bech32m_address() {
+        let raw = Address::from([0x24; 20]);
+        let addr = parse_address(&raw.to_string()).unwrap();
+        assert_eq!(addr, raw);
     }
 
     #[test]

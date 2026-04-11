@@ -21,7 +21,7 @@ pub fn key_generate(output: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Generating Dilithium3 keypair...");
     let signer = DilithiumSigner::generate();
-    let address = Address::from_public_key(signer.public_key());
+    let address = Address::from_public_key(signer.public_key(), signer.sig_type().as_u8());
 
     info!("Encrypting with argon2id + XChaCha20-Poly1305...");
     let encrypted = encrypt(&signer, password.as_bytes())?;
@@ -30,7 +30,7 @@ pub fn key_generate(output: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     std::fs::write(&output, &json)?;
 
     eprintln!("✓ Keystore written to {}", output.display());
-    eprintln!("  Address: 0x{}", hex::encode(address.as_bytes()));
+    eprintln!("  Address: {address}");
     eprintln!(
         "  Public key: 0x{}...{}",
         &hex::encode(signer.public_key())[..16],
@@ -44,10 +44,12 @@ pub fn key_generate(output: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 pub fn key_inspect(path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let json = std::fs::read_to_string(&path)?;
     let encrypted: EncryptedKey = serde_json::from_str(&json)?;
+    let address = Address::parse(&encrypted.address)
+        .map_err(|e| format!("invalid keystore address '{}': {e}", encrypted.address))?;
 
     eprintln!("Keystore: {}", path.display());
     eprintln!("  Version:    {}", encrypted.version);
-    eprintln!("  Address:    0x{}", encrypted.address);
+    eprintln!("  Address:    {address}");
     eprintln!("  KDF:        {}", encrypted.kdf);
     eprintln!("  Cipher:     {}", encrypted.cipher);
     eprintln!(

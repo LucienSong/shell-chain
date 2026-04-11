@@ -2,7 +2,7 @@
 
 Deploy and interact with smart contracts on Shell-Chain.
 
-> **See also:** [Quickstart Guide](QUICKSTART.md) · [JSON-RPC API Reference](JSON_RPC_API.md) · [Testnet Operator Guide](TESTNET_OPERATOR_GUIDE.md) · [PQ Crypto Guide](PQ_CRYPTO_GUIDE.md)
+> **See also:** [Quickstart Guide](QUICKSTART.md) · [JSON-RPC API Reference](JSON_RPC_API.md) · [Testnet Operator Guide](TESTNET_OPERATOR_GUIDE.md) · [PQ Crypto Guide](PQ_CRYPTO_GUIDE.md) · [Native Account Abstraction Guide](ACCOUNT_ABSTRACTION_GUIDE.md)
 
 ---
 
@@ -183,7 +183,7 @@ curl -s http://localhost:8545 \
     "jsonrpc":"2.0",
     "method":"eth_call",
     "params":[{
-      "to":"0xYOUR_CONTRACT_ADDRESS",
+      "to":"pq1YOUR_CONTRACT_ADDRESS",
       "data":"0x6d4ce63c"
     },"latest"],
     "id":1
@@ -192,8 +192,13 @@ curl -s http://localhost:8545 \
 
 Or with Hardhat:
 
+> **Compatibility note:** raw Shell RPC examples prefer canonical `pq1...`
+> addresses. Some Ethereum toolchains such as ethers.js still expect a 20-byte
+> hex/debug address string today, so the Hardhat snippets below keep using the
+> legacy compatibility form for the contract address only.
+
 ```js
-const counter = await hre.ethers.getContractAt("Counter", "0xYOUR_CONTRACT_ADDRESS");
+const counter = await hre.ethers.getContractAt("Counter", "0xYOUR_CONTRACT_HEX_ADDRESS");
 const count = await counter.get();
 console.log("Current count:", count.toString());
 ```
@@ -217,7 +222,7 @@ curl -s http://localhost:8545 \
 Or with Hardhat:
 
 ```js
-const counter = await hre.ethers.getContractAt("Counter", "0xYOUR_CONTRACT_ADDRESS");
+const counter = await hre.ethers.getContractAt("Counter", "0xYOUR_CONTRACT_HEX_ADDRESS");
 const tx = await counter.increment();
 await tx.wait();
 console.log("Incremented! New count:", (await counter.get()).toString());
@@ -243,10 +248,10 @@ curl -s http://localhost:8545 \
     "jsonrpc":"2.0",
     "method":"shell_sendTransaction",
     "params":[{
-      "from": "0xYOUR_ADDRESS",
+      "from": "pq1YOUR_ADDRESS",
       "data": "0x608060405234801561001057600080fd5b50...",
       "gas": "0x100000",
-      "maxFeePerGas": "0x3b9aca00",
+      "maxFeePerGas": "0x5f7609",
       "maxPriorityFeePerGas": "0x0",
       "nonce": "0x0",
       "pqSignature": "0x...dilithium3_signature...",
@@ -256,6 +261,9 @@ curl -s http://localhost:8545 \
   }'
 ```
 
+> **Fee note:** `maxFeePerGas` is only an example. In real deployments, query
+> `eth_gasPrice` and use a value greater than or equal to the current base fee.
+>
 > **Note:** Standard Ethereum wallets (MetaMask, etc.) use ECDSA signatures. For full PQ security, use the `shell-node` CLI or PQ-aware SDKs. See [PQ Crypto Guide](PQ_CRYPTO_GUIDE.md) for details.
 
 ---
@@ -333,13 +341,13 @@ Shell-Chain uses the **EIP-1559** gas model:
    curl -s http://localhost:8545 \
      -H "Content-Type: application/json" \
      -d '{
-       "jsonrpc":"2.0",
-       "method":"eth_createAccessList",
-       "params":[{
-         "to":"0xYOUR_CONTRACT",
+        "jsonrpc":"2.0",
+        "method":"eth_createAccessList",
+        "params":[{
+         "to":"pq1YOUR_CONTRACT_ADDRESS",
          "data":"0x..."
-       },"latest"],
-       "id":1
+        },"latest"],
+        "id":1
      }'
    ```
 

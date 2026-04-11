@@ -4,7 +4,10 @@
 //! JSON-RPC to stress-test the RPC layer, mempool, and signature verification
 //! pipeline.
 
-use std::time::{Duration, Instant};
+use std::{
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 
 use clap::Parser;
 use rand::Rng;
@@ -12,15 +15,27 @@ use serde::{Deserialize, Serialize};
 use shell_core::{SignedTransaction, Transaction};
 use shell_crypto::{DilithiumSigner, Signer};
 use shell_primitives::{Address, Bytes, U256};
+use shell_tx_generator::load_dev_authority;
 
 // ── CLI ──────────────────────────────────────────────────────────────
 
 #[derive(Parser, Debug)]
-#[command(name = "shell-tx-generator", about = "Testnet stress-testing transaction generator")]
+#[command(
+    name = "shell-tx-generator",
+    about = "Testnet stress-testing transaction generator"
+)]
 struct Cli {
     /// JSON-RPC endpoint URL.
     #[arg(long, default_value = "http://localhost:8545")]
     rpc_url: String,
+
+    /// Additional JSON-RPC endpoints that should receive the same dev funding.
+    #[arg(long = "fund-rpc-url")]
+    fund_rpc_urls: Vec<String>,
+
+    /// Path to a dev-authority.json file used for canonical on-chain funding.
+    #[arg(long)]
+    funding_key_file: Option<PathBuf>,
 
     /// Number of test accounts to generate.
     #[arg(long = "accounts", default_value_t = 5)]
@@ -60,7 +75,7 @@ impl TestAccount {
     fn generate() -> Self {
         let signer = DilithiumSigner::generate();
         let pubkey = signer.public_key().to_vec();
-        let address = Address::from_public_key(&pubkey);
+        let address = Address::from_public_key(&pubkey, signer.sig_type().as_u8());
         Self {
             signer,
             address,
@@ -226,7 +241,207 @@ async fn rpc_set_balance(
     }
 }
 
+async fn rpc_get_transaction_count(
+    client: &reqwest::Client,
+    url: &str,
+    address: &Address,
+    req_id: u64,
+) -> Result<u64, String> {
+    let req = RpcRequest {
+        jsonrpc: "2.0",
+        method: "eth_getTransactionCount",
+        params: serde_json::json!([address, "latest"]),
+        id: req_id,
+    };
+    let resp = client
+        .post(url)
+        .json(&req)
+        .send()
+        .await
+        .map_err(|e| format!("http: {e}"))?;
+
+    let body: RpcResponse = resp.json().await.map_err(|e| format!("decode: {e}"))?;
+    if let Some(err) = body.error {
+        Err(format!("[{}] {}", err.code, err.message))
+    } else if let Some(result) = body.result {
+        let hex = result
+            .as_str()
+            .ok_or_else(|| format!("unexpected result: {result:?}"))?;
+        let trimmed = hex.strip_prefix("0x").unwrap_or(hex);
+        u64::from_str_radix(trimmed, 16).map_err(|e| format!("invalid nonce {hex}: {e}"))
+    } else {
+        Err("empty response".into())
+    }
+}
+
+async fn rpc_mine_blocks(
+    client: &reqwest::Client,
+    url: &str,
+    blocks: u64,
+    req_id: u64,
+) -> Result<(), String> {
+    let req = RpcRequest {
+        jsonrpc: "2.0",
+        method: "evm_mine",
+        params: serde_json::json!([blocks]),
+        id: req_id,
+    };
+    let resp = client
+        .post(url)
+        .json(&req)
+        .send()
+        .await
+        .map_err(|e| format!("http: {e}"))?;
+
+    let body: RpcResponse = resp.json().await.map_err(|e| format!("decode: {e}"))?;
+    if let Some(err) = body.error {
+        Err(format!("[{}] {}", err.code, err.message))
+    } else {
+        Ok(())
+    }
+}
+
+async fn rpc_get_balance(
+    client: &reqwest::Client,
+    url: &str,
+    address: &Address,
+    req_id: u64,
+) -> Result<U256, String> {
+    let req = RpcRequest {
+        jsonrpc: "2.0",
+        method: "eth_getBalance",
+        params: serde_json::json!([address, "latest"]),
+        id: req_id,
+    };
+    let resp = client
+        .post(url)
+        .json(&req)
+        .send()
+        .await
+        .map_err(|e| format!("http: {e}"))?;
+
+    let body: RpcResponse = resp.json().await.map_err(|e| format!("decode: {e}"))?;
+    if let Some(err) = body.error {
+        Err(format!("[{}] {}", err.code, err.message))
+    } else if let Some(result) = body.result {
+        let hex = result
+            .as_str()
+            .ok_or_else(|| format!("unexpected result: {result:?}"))?;
+        let trimmed = hex.strip_prefix("0x").unwrap_or(hex);
+        U256::from_str_radix(trimmed, 16).map_err(|e| format!("invalid balance {hex}: {e}"))
+    } else {
+        Err("empty response".into())
+    }
+}
+
+async fn rpc_block_number(client: &reqwest::Client, url: &str, req_id: u64) -> Result<u64, String> {
+    let req = RpcRequest {
+        jsonrpc: "2.0",
+        method: "eth_blockNumber",
+        params: serde_json::json!([]),
+        id: req_id,
+    };
+    let resp = client
+        .post(url)
+        .json(&req)
+        .send()
+        .await
+        .map_err(|e| format!("http: {e}"))?;
+
+    let body: RpcResponse = resp.json().await.map_err(|e| format!("decode: {e}"))?;
+    if let Some(err) = body.error {
+        Err(format!("[{}] {}", err.code, err.message))
+    } else if let Some(result) = body.result {
+        let hex = result
+            .as_str()
+            .ok_or_else(|| format!("unexpected result: {result:?}"))?;
+        let trimmed = hex.strip_prefix("0x").unwrap_or(hex);
+        u64::from_str_radix(trimmed, 16).map_err(|e| format!("invalid block number {hex}: {e}"))
+    } else {
+        Err("empty response".into())
+    }
+}
+
+async fn wait_for_cluster_height(
+    client: &reqwest::Client,
+    urls: &[String],
+    target: u64,
+    timeout: Duration,
+    req_id: &mut u64,
+) -> Result<(), Vec<(String, String)>> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let mut pending = Vec::new();
+        for url in urls {
+            let id = *req_id;
+            *req_id += 1;
+            match rpc_block_number(client, url, id).await {
+                Ok(height) if height >= target => {}
+                Ok(height) => pending.push((
+                    url.clone(),
+                    format!("height {height} < target barrier {target}"),
+                )),
+                Err(err) => pending.push((url.clone(), err)),
+            }
+        }
+
+        if pending.is_empty() {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(pending);
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+async fn wait_for_cluster_balances(
+    client: &reqwest::Client,
+    urls: &[String],
+    accounts: &[Address],
+    expected_min_balance: U256,
+    timeout: Duration,
+    req_id: &mut u64,
+) -> Result<(), Vec<(String, String)>> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let mut pending = Vec::new();
+        for url in urls {
+            for address in accounts {
+                let id = *req_id;
+                *req_id += 1;
+                match rpc_get_balance(client, url, address, id).await {
+                    Ok(balance) if balance >= expected_min_balance => {}
+                    Ok(balance) => pending.push((
+                        url.clone(),
+                        format!(
+                            "balance for {address} is {balance}, below required {expected_min_balance}"
+                        ),
+                    )),
+                    Err(err) => pending.push((url.clone(), format!("{address}: {err}"))),
+                }
+            }
+        }
+
+        if pending.is_empty() {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(pending);
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
 // ── Transaction builder ──────────────────────────────────────────────
+
+fn sample_fees(base_max_fee: u64, base_priority_fee: u64, rng: &mut impl Rng) -> (u64, u64) {
+    let jitter = rng.gen_range(0..1_000_000u64);
+    (
+        base_max_fee.saturating_add(jitter),
+        base_priority_fee.saturating_add(jitter),
+    )
+}
 
 fn build_tx(
     kind: TxKind,
@@ -236,23 +451,30 @@ fn build_tx(
     rng: &mut impl Rng,
 ) -> Transaction {
     match kind {
-        TxKind::SimpleTransfer => Transaction {
-            chain_id,
-            nonce,
-            to: Some(recipient),
-            value: U256::from(rng.gen_range(1_000u64..1_000_000)),
-            data: Bytes::new(),
-            gas_limit: 21_000,
-            max_fee_per_gas: 1_000_000_000,
-            max_priority_fee_per_gas: 100_000_000,
-            access_list: None,
-            tx_type: 2,
-            max_fee_per_blob_gas: None,
-            blob_versioned_hashes: None,
-        },
+        TxKind::SimpleTransfer => {
+            let (max_fee_per_gas, max_priority_fee_per_gas) =
+                sample_fees(1_000_000_000, 100_000_000, rng);
+            Transaction {
+                chain_id,
+                nonce,
+                to: Some(recipient),
+                value: U256::from(rng.gen_range(1_000u64..1_000_000)),
+                data: Bytes::new(),
+                gas_limit: 21_000,
+                max_fee_per_gas,
+                max_priority_fee_per_gas,
+                access_list: None,
+                tx_type: 2,
+                max_fee_per_blob_gas: None,
+                blob_versioned_hashes: None,
+            }
+        }
         TxKind::ContractCreation => {
             // Minimal bytecode: PUSH1 1, PUSH1 0, MSTORE, PUSH1 32, PUSH1 0, RETURN
-            let bytecode = hex::decode("600160005260206000f3").unwrap();
+            let mut bytecode = hex::decode("600160005260206000f3").unwrap();
+            bytecode.extend_from_slice(&rng.gen::<u64>().to_be_bytes());
+            let (max_fee_per_gas, max_priority_fee_per_gas) =
+                sample_fees(1_000_000_000, 100_000_000, rng);
             Transaction {
                 chain_id,
                 nonce,
@@ -260,8 +482,8 @@ fn build_tx(
                 value: U256::ZERO,
                 data: Bytes::copy_from_slice(&bytecode),
                 gas_limit: 100_000,
-                max_fee_per_gas: 1_000_000_000,
-                max_priority_fee_per_gas: 100_000_000,
+                max_fee_per_gas,
+                max_priority_fee_per_gas,
                 access_list: None,
                 tx_type: 2,
                 max_fee_per_blob_gas: None,
@@ -272,6 +494,8 @@ fn build_tx(
             // Random 4-byte function selector + 32 bytes of random data
             let mut data = vec![0u8; 36];
             rng.fill(&mut data[..]);
+            let (max_fee_per_gas, max_priority_fee_per_gas) =
+                sample_fees(1_000_000_000, 100_000_000, rng);
             Transaction {
                 chain_id,
                 nonce,
@@ -279,42 +503,50 @@ fn build_tx(
                 value: U256::ZERO,
                 data: Bytes::copy_from_slice(&data),
                 gas_limit: 50_000,
-                max_fee_per_gas: 1_000_000_000,
-                max_priority_fee_per_gas: 100_000_000,
+                max_fee_per_gas,
+                max_priority_fee_per_gas,
                 access_list: None,
                 tx_type: 2,
                 max_fee_per_blob_gas: None,
                 blob_versioned_hashes: None,
             }
         }
-        TxKind::ZeroValue => Transaction {
-            chain_id,
-            nonce,
-            to: Some(recipient),
-            value: U256::ZERO,
-            data: Bytes::copy_from_slice(&[0xde, 0xad]),
-            gas_limit: 21_000,
-            max_fee_per_gas: 1_000_000_000,
-            max_priority_fee_per_gas: 100_000_000,
-            access_list: None,
-            tx_type: 2,
-            max_fee_per_blob_gas: None,
-            blob_versioned_hashes: None,
-        },
-        TxKind::HighGas => Transaction {
-            chain_id,
-            nonce,
-            to: Some(recipient),
-            value: U256::from(rng.gen_range(1u64..1_000)),
-            data: Bytes::new(),
-            gas_limit: 10_000_000,
-            max_fee_per_gas: 5_000_000_000,
-            max_priority_fee_per_gas: 500_000_000,
-            access_list: None,
-            tx_type: 2,
-            max_fee_per_blob_gas: None,
-            blob_versioned_hashes: None,
-        },
+        TxKind::ZeroValue => {
+            let (max_fee_per_gas, max_priority_fee_per_gas) =
+                sample_fees(1_000_000_000, 100_000_000, rng);
+            Transaction {
+                chain_id,
+                nonce,
+                to: Some(recipient),
+                value: U256::ZERO,
+                data: Bytes::new(),
+                gas_limit: 21_000,
+                max_fee_per_gas,
+                max_priority_fee_per_gas,
+                access_list: None,
+                tx_type: 2,
+                max_fee_per_blob_gas: None,
+                blob_versioned_hashes: None,
+            }
+        }
+        TxKind::HighGas => {
+            let (max_fee_per_gas, max_priority_fee_per_gas) =
+                sample_fees(5_000_000_000, 500_000_000, rng);
+            Transaction {
+                chain_id,
+                nonce,
+                to: Some(recipient),
+                value: U256::from(rng.gen_range(1u64..1_000)),
+                data: Bytes::new(),
+                gas_limit: 10_000_000,
+                max_fee_per_gas,
+                max_priority_fee_per_gas,
+                access_list: None,
+                tx_type: 2,
+                max_fee_per_blob_gas: None,
+                blob_versioned_hashes: None,
+            }
+        }
     }
 }
 
@@ -331,11 +563,27 @@ fn sign_tx(
     }
 }
 
+fn build_funding_tx(chain_id: u64, nonce: u64, recipient: Address, value: U256) -> Transaction {
+    Transaction {
+        chain_id,
+        nonce,
+        to: Some(recipient),
+        value,
+        data: Bytes::new(),
+        gas_limit: 21_000,
+        max_fee_per_gas: 2_000_000_000,
+        max_priority_fee_per_gas: 100_000_000,
+        access_list: None,
+        tx_type: 2,
+        max_fee_per_blob_gas: None,
+        blob_versioned_hashes: None,
+    }
+}
+
 // ── ANSI colours ─────────────────────────────────────────────────────
 
 const GREEN: &str = "\x1b[32m";
 const RED: &str = "\x1b[31m";
-const _YELLOW: &str = "\x1b[33m";
 const CYAN: &str = "\x1b[36m";
 const BOLD: &str = "\x1b[1m";
 const RESET: &str = "\x1b[0m";
@@ -346,19 +594,25 @@ const RESET: &str = "\x1b[0m";
 async fn main() {
     let cli = Cli::parse();
 
-    println!(
-        "\n{BOLD}{CYAN}═══ Shell-Chain Transaction Generator ═══{RESET}\n"
-    );
+    println!("\n{BOLD}{CYAN}═══ Shell-Chain Transaction Generator ═══{RESET}\n");
     println!("  RPC endpoint : {}", cli.rpc_url);
     println!("  Accounts     : {}", cli.num_accounts);
     println!("  Duration     : {}s", cli.duration);
-    println!("  Interval     : {}–{}ms", cli.min_interval, cli.max_interval);
+    println!(
+        "  Interval     : {}–{}ms",
+        cli.min_interval, cli.max_interval
+    );
     println!("  Chain ID     : {}", cli.chain_id);
     println!();
 
     // ── 1. Generate accounts ────────────────────────────────────────
-    println!("{BOLD}▸ Generating {} Dilithium3 keypairs …{RESET}", cli.num_accounts);
-    let mut accounts: Vec<TestAccount> = (0..cli.num_accounts).map(|_| TestAccount::generate()).collect();
+    println!(
+        "{BOLD}▸ Generating {} Dilithium3 keypairs …{RESET}",
+        cli.num_accounts
+    );
+    let mut accounts: Vec<TestAccount> = (0..cli.num_accounts)
+        .map(|_| TestAccount::generate())
+        .collect();
     for (i, acct) in accounts.iter().enumerate() {
         println!(
             "  {CYAN}[{}]{RESET} {}  (pubkey {}…)",
@@ -380,23 +634,194 @@ async fn main() {
         .build()
         .expect("http client");
 
-    println!("{BOLD}▸ Funding accounts via shell_setBalance …{RESET}");
     let fund_amount = "0x3635c9adc5dea00000"; // 1000 ETH each
-    let mut fund_ok = 0usize;
-    for (i, acct) in accounts.iter().enumerate() {
-        match rpc_set_balance(&client, &cli.rpc_url, &acct.address, fund_amount, i as u64 + 1000).await {
-            Ok(_) => {
-                println!("  {GREEN}✓{RESET} [{i}] {} funded with 1000 ETH", acct.address);
-                fund_ok += 1;
-            }
-            Err(e) => {
-                println!("  {RED}✗{RESET} [{i}] {} fund failed: {e}", acct.address);
-            }
+    let fund_amount_u256 =
+        U256::from_str_radix(fund_amount.trim_start_matches("0x"), 16).expect("valid fund amount");
+    let mut cluster_rpc_urls = vec![cli.rpc_url.clone()];
+    for url in &cli.fund_rpc_urls {
+        if !cluster_rpc_urls.contains(url) {
+            cluster_rpc_urls.push(url.clone());
         }
     }
-    if fund_ok == 0 {
-        eprintln!("\n{RED}WARNING: No accounts funded — txs will likely fail with insufficient balance.{RESET}");
-        eprintln!("  Make sure shell_setBalance is available (requires updated node).\n");
+    let mut fund_req_id: u64 = 1000;
+    if let Some(path) = &cli.funding_key_file {
+        let funder = match load_dev_authority(path) {
+            Ok(funder) => funder,
+            Err(err) => {
+                eprintln!("\n{RED}ERROR: {err}{RESET}");
+                std::process::exit(1);
+            }
+        };
+        let funded_addresses = accounts.iter().map(|acct| acct.address).collect::<Vec<_>>();
+
+        println!(
+            "{BOLD}▸ Funding accounts via canonical on-chain transfers from {} …{RESET}",
+            funder.address
+        );
+        let mut funding_nonce =
+            match rpc_get_transaction_count(&client, &cli.rpc_url, &funder.address, fund_req_id)
+                .await
+            {
+                Ok(nonce) => nonce,
+                Err(err) => {
+                    eprintln!(
+                        "\n{RED}ERROR: failed to read funding nonce for {}: {err}{RESET}",
+                        funder.address
+                    );
+                    std::process::exit(1);
+                }
+            };
+        fund_req_id += 1;
+
+        let mut fund_ok = 0usize;
+        for (i, acct) in accounts.iter().enumerate() {
+            let tx = build_funding_tx(cli.chain_id, funding_nonce, acct.address, fund_amount_u256);
+            let signed = sign_tx(
+                &funder.signer,
+                funder.address,
+                tx,
+                Some(funder.pubkey.clone()),
+            );
+            let id = fund_req_id;
+            fund_req_id += 1;
+            match rpc_send_tx(&client, &cli.rpc_url, &signed, id).await {
+                Ok(hash) => {
+                    println!(
+                        "  {GREEN}✓{RESET} [{i}] {} funding tx accepted (hash={hash})",
+                        acct.address
+                    );
+                    funding_nonce += 1;
+                    fund_ok += 1;
+                }
+                Err(err) => {
+                    println!(
+                        "  {RED}✗{RESET} [{i}] {} funding tx rejected: {err}",
+                        acct.address
+                    );
+                }
+            }
+        }
+        if fund_ok != accounts.len() {
+            eprintln!(
+                "\n{RED}ERROR: on-chain funding failed for {} account(s).{RESET}",
+                accounts.len() - fund_ok
+            );
+            std::process::exit(1);
+        }
+
+        println!(
+            "  {GREEN}✓{RESET} Submitted {} funding transfer(s); sealing funding blocks",
+            fund_ok
+        );
+        for label in ["funding block", "post-funding barrier block"] {
+            match rpc_mine_blocks(&client, &cli.rpc_url, 1, fund_req_id).await {
+                Ok(()) => println!("  {GREEN}✓{RESET} {label} mined on primary endpoint"),
+                Err(err) => {
+                    eprintln!("\n{RED}ERROR: failed to mine {label}: {err}{RESET}");
+                    std::process::exit(1);
+                }
+            }
+            fund_req_id += 1;
+        }
+
+        let barrier_height = match rpc_block_number(&client, &cli.rpc_url, fund_req_id).await {
+            Ok(barrier_height) => barrier_height,
+            Err(err) => {
+                eprintln!(
+                    "\n{RED}ERROR: failed to read funded barrier height from primary: {err}{RESET}"
+                );
+                std::process::exit(1);
+            }
+        };
+        fund_req_id += 1;
+
+        match wait_for_cluster_height(
+            &client,
+            &cluster_rpc_urls,
+            barrier_height,
+            Duration::from_secs(90),
+            &mut fund_req_id,
+        )
+        .await
+        {
+            Ok(()) => println!(
+                "  {GREEN}✓{RESET} cluster synced to funded barrier block #{barrier_height}"
+            ),
+            Err(pending) => {
+                eprintln!(
+                    "\n{RED}ERROR: cluster did not catch up to funded barrier block #{barrier_height}.{RESET}"
+                );
+                for (url, status) in pending {
+                    eprintln!("  - {url}: {status}");
+                }
+                std::process::exit(1);
+            }
+        }
+
+        match wait_for_cluster_balances(
+            &client,
+            &cluster_rpc_urls,
+            &funded_addresses,
+            fund_amount_u256,
+            Duration::from_secs(90),
+            &mut fund_req_id,
+        )
+        .await
+        {
+            Ok(()) => println!(
+                "  {GREEN}✓{RESET} funded balances are visible on all {} endpoint(s)",
+                cluster_rpc_urls.len()
+            ),
+            Err(pending) => {
+                eprintln!(
+                    "\n{RED}ERROR: cluster did not observe canonical funded balances after barrier sync.{RESET}"
+                );
+                for (url, status) in pending {
+                    eprintln!("  - {url}: {status}");
+                }
+                std::process::exit(1);
+            }
+        }
+    } else if cluster_rpc_urls.len() > 1 {
+        eprintln!(
+            "\n{RED}ERROR: multi-node funding now requires --funding-key-file so funding can be executed as canonical on-chain transfers.{RESET}"
+        );
+        eprintln!(
+            "  shell_setBalance mutates local node state and cannot safely fund a synced cluster.\n"
+        );
+        std::process::exit(1);
+    } else {
+        println!("{BOLD}▸ Funding accounts via shell_setBalance on the primary endpoint …{RESET}");
+        let mut fund_ok = 0usize;
+        for (i, acct) in accounts.iter().enumerate() {
+            let id = fund_req_id;
+            fund_req_id += 1;
+            if rpc_set_balance(&client, &cli.rpc_url, &acct.address, fund_amount, id)
+                .await
+                .is_ok()
+            {
+                println!(
+                    "  {GREEN}✓{RESET} [{i}] {} funded with 1000 ETH on primary endpoint",
+                    acct.address
+                );
+                fund_ok += 1;
+            } else {
+                println!(
+                    "  {RED}✗{RESET} [{i}] {} funding failed on the primary endpoint",
+                    acct.address
+                );
+            }
+        }
+        if fund_ok != accounts.len() {
+            eprintln!(
+                "\n{RED}ERROR: primary funding failed for {} account(s).{RESET}",
+                accounts.len() - fund_ok
+            );
+            eprintln!(
+                "  Make sure shell_setBalance is available and reachable on the primary endpoint.\n"
+            );
+            std::process::exit(1);
+        }
     }
     println!();
 
@@ -478,18 +903,10 @@ async fn main() {
     }
 
     // ── 3. Report ───────────────────────────────────────────────────
-    println!(
-        "\n{BOLD}{CYAN}═══ Summary ═══{RESET}\n"
-    );
+    println!("\n{BOLD}{CYAN}═══ Summary ═══{RESET}\n");
     println!("  Total sent   : {}", stats.total);
-    println!(
-        "  Succeeded    : {GREEN}{}{RESET}",
-        stats.ok
-    );
-    println!(
-        "  Failed       : {RED}{}{RESET}",
-        stats.fail
-    );
+    println!("  Succeeded    : {GREEN}{}{RESET}", stats.ok);
+    println!("  Failed       : {RED}{}{RESET}", stats.fail);
     if stats.total > 0 {
         println!(
             "  Success rate : {:.1}%",

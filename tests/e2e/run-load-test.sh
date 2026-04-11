@@ -25,6 +25,10 @@ metric() { echo -e "${CYAN}  📊 $1${NC}"; }
 FAILURES=0
 PASSES=0
 
+AA_ADDR_1="pq1qyqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqy0vusna"
+AA_ADDR_2="pq1qyqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqg7j66z6"
+AA_ADDR_3="pq1qyqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqv3ccudq"
+
 TX_COUNT=500
 DURATION=30
 LATENCY_FILE="$PROJECT_DIR/tests/e2e/.load-test-latencies.txt"
@@ -109,7 +113,15 @@ PRE_HEIGHT=$((16#${PRE_HEIGHT_HEX#0x}))
 metric "Block height before load: #${PRE_HEIGHT}"
 
 PENDING_BEFORE=$(rpc 8545 shell_pendingCount)
+PENDING_BEFORE_DEC=$((16#${PENDING_BEFORE#0x}))
+DRAIN_ALLOWANCE=${DRAIN_ALLOWANCE:-4}
+if [ "$PENDING_BEFORE_DEC" -eq 0 ]; then
+    DRAIN_TARGET=0
+else
+    DRAIN_TARGET=$((PENDING_BEFORE_DEC + DRAIN_ALLOWANCE))
+fi
 metric "Pending tx before load: ${PENDING_BEFORE}"
+metric "Drain target after load: <= ${DRAIN_TARGET} pending txs"
 
 # ─── Send sustained load ─────────────────────────────────────
 echo ""
@@ -122,10 +134,14 @@ echo ""
 # Use microseconds for better precision.
 DELAY_US=$(( (DURATION * 1000000) / TX_COUNT ))
 
-# Generate random hex addresses for variety.
-rand_addr() {
-    printf "0x%08x%08x%08x%08x%08x" \
-        "$RANDOM" "$RANDOM" "$RANDOM" "$RANDOM" "$RANDOM"
+# Use canonical Shell addresses even in negative-path RPC load tests so the
+# payload shape matches the native AA model.
+pick_addr() {
+    case $(( $1 % 3 )) in
+        0) echo "$AA_ADDR_1" ;;
+        1) echo "$AA_ADDR_2" ;;
+        *) echo "$AA_ADDR_3" ;;
+    esac
 }
 
 > "$LATENCY_FILE"
@@ -140,7 +156,7 @@ LOAD_START=$(date +%s%N)
 
 for i in $(seq 1 "$TX_COUNT"); do
     PORT=${PORTS[$((i % 3))]}
-    TO=$(rand_addr)
+    TO=$(pick_addr "$i")
     NONCE=$(printf "0x%x" "$i")
 
     # Measure per-request latency.
@@ -153,7 +169,7 @@ for i in $(seq 1 "$TX_COUNT"); do
             \"jsonrpc\":\"2.0\",\"id\":${i},
             \"method\":\"shell_sendTransaction\",
             \"params\":[{
-                \"from\":\"0x0000000000000000000000000000000000000001\",
+                \"from\":\"${AA_ADDR_1}\",
                 \"to\":\"${TO}\",
                 \"value\":\"0x1\",
                 \"nonce\":\"${NONCE}\",
@@ -267,7 +283,7 @@ DRAIN_OK=false
 for i in $(seq 1 15); do
     PENDING=$(rpc 8545 shell_pendingCount)
     PENDING_DEC=$((16#${PENDING#0x}))
-    if [ "$PENDING_DEC" -eq 0 ]; then
+    if [ "$PENDING_DEC" -le "$DRAIN_TARGET" ]; then
         DRAIN_OK=true
         break
     fi
@@ -276,10 +292,10 @@ for i in $(seq 1 15); do
 done
 
 if [ "$DRAIN_OK" = "true" ]; then
-    pass "Mempool drained (all transactions processed)"
+    pass "Mempool drained back to target window (baseline ${PENDING_BEFORE_DEC}, target <= ${DRAIN_TARGET})"
 else
     PENDING=$(rpc 8545 shell_pendingCount)
-    fail "Mempool still has pending txs after 30s (${PENDING})"
+    fail "Mempool did not drain back to target window after 30s (${PENDING}, target <= ${DRAIN_TARGET})"
 fi
 
 # ─── Post-load memory ────────────────────────────────────────

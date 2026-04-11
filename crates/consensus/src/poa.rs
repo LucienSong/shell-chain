@@ -18,8 +18,8 @@ pub struct PoaConfig {
     pub epoch_length: u64,
 }
 
-/// Default maximum future timestamp tolerance (15 seconds).
-const DEFAULT_MAX_FUTURE_SECS: u64 = 15;
+/// Default maximum future timestamp tolerance (60 seconds).
+const DEFAULT_MAX_FUTURE_SECS: u64 = 60;
 
 impl PoaConfig {
     pub fn new(authorities: Vec<Address>, block_time_secs: u64) -> Self {
@@ -248,12 +248,12 @@ impl PoaEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shell_crypto::{DilithiumSigner, DilithiumVerifier};
+    use shell_crypto::{DilithiumSigner, DilithiumVerifier, Signer};
     use shell_primitives::{Bytes, ShellHash};
 
     fn test_config() -> (PoaConfig, Address, DilithiumSigner) {
         let signer = DilithiumSigner::generate();
-        let addr = Address::from_public_key(signer.public_key());
+        let addr = Address::from_public_key(signer.public_key(), signer.sig_type().as_u8());
         let config = PoaConfig::new(vec![addr], 1);
         (config, addr, signer)
     }
@@ -282,9 +282,9 @@ mod tests {
 
     #[test]
     fn proposer_round_robin() {
-        let a1 = Address::from_public_key(shell_primitives::keccak256(b"a1").as_bytes());
-        let a2 = Address::from_public_key(shell_primitives::keccak256(b"a2").as_bytes());
-        let a3 = Address::from_public_key(shell_primitives::keccak256(b"a3").as_bytes());
+        let a1 = Address::from_public_key(shell_primitives::keccak256(b"a1").as_bytes(), 0);
+        let a2 = Address::from_public_key(shell_primitives::keccak256(b"a2").as_bytes(), 0);
+        let a3 = Address::from_public_key(shell_primitives::keccak256(b"a3").as_bytes(), 0);
         let config = PoaConfig::new(vec![a1, a2, a3], 1);
 
         assert_eq!(config.proposer_for_block(0), a1);
@@ -306,7 +306,8 @@ mod tests {
     fn verify_header_wrong_proposer() {
         let (config, _, _) = test_config();
         let engine = PoaEngine::new(config);
-        let wrong = Address::from_public_key(shell_primitives::keccak256(b"intruder").as_bytes());
+        let wrong =
+            Address::from_public_key(shell_primitives::keccak256(b"intruder").as_bytes(), 0);
         let header = sample_header(0, wrong, 1000);
 
         let err = engine.verify_header(&header).unwrap_err();
@@ -343,7 +344,7 @@ mod tests {
         let (config, addr, _) = test_config();
         let engine = PoaEngine::new(config);
 
-        // Block timestamp 100 seconds in the future (max_future_secs = 15)
+        // Block timestamp 100 seconds in the future (max_future_secs = 60)
         let header = sample_header(0, addr, 2100);
         let result = engine.verify_timestamp(&header, None, 2000);
         assert!(result.is_err());
@@ -356,15 +357,27 @@ mod tests {
         let (config, addr, _) = test_config();
         let engine = PoaEngine::new(config);
 
-        // Block timestamp exactly at max_future_secs boundary (15s)
-        let header = sample_header(0, addr, 2015);
+        // Block timestamp exactly at max_future_secs boundary (60s)
+        let header = sample_header(0, addr, 2060);
         let result = engine.verify_timestamp(&header, None, 2000);
         assert!(result.is_ok());
 
         // 1 second over → rejected
-        let header_over = sample_header(0, addr, 2016);
+        let header_over = sample_header(0, addr, 2061);
         let result_over = engine.verify_timestamp(&header_over, None, 2000);
         assert!(result_over.is_err());
+    }
+
+    #[test]
+    fn with_max_future_secs_overrides_default() {
+        let (config, addr, _) = test_config();
+        let engine = PoaEngine::new(config.with_max_future_secs(5));
+
+        let header = sample_header(0, addr, 2005);
+        assert!(engine.verify_timestamp(&header, None, 2000).is_ok());
+
+        let header_over = sample_header(0, addr, 2006);
+        assert!(engine.verify_timestamp(&header_over, None, 2000).is_err());
     }
 
     #[test]
@@ -413,6 +426,7 @@ mod tests {
             .map(|i| {
                 Address::from_public_key(
                     shell_primitives::keccak256(format!("auth{i}").as_bytes()).as_bytes(),
+                    0,
                 )
             })
             .collect()
@@ -703,6 +717,7 @@ mod tests {
             .map(|i| {
                 Address::from_public_key(
                     shell_primitives::keccak256(format!("new_auth{i}").as_bytes()).as_bytes(),
+                    0,
                 )
             })
             .collect();
@@ -717,7 +732,7 @@ mod tests {
     #[test]
     fn single_validator_all_slots() {
         let signer = DilithiumSigner::generate();
-        let addr = Address::from_public_key(signer.public_key());
+        let addr = Address::from_public_key(signer.public_key(), signer.sig_type().as_u8());
         let config = PoaConfig::new(vec![addr], 1);
         let engine = PoaEngine::new(config);
 
