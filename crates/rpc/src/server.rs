@@ -7,6 +7,9 @@ use jsonrpsee::server::{Server, ServerHandle};
 use tower_http::cors::{Any, CorsLayer};
 use tracing::{info, warn};
 
+use crate::middleware::{ApiKeyLayer, RateLimitLayer};
+use crate::tls_proxy::{start_tls_proxy, TlsProxyHandle};
+
 use shell_consensus::FinalityState;
 use shell_core::SignedTransaction;
 use shell_crypto::Signer;
@@ -52,6 +55,10 @@ pub struct RpcConfig {
     pub allow_unsafe_dev_exposed: bool,
     /// Maximum request body size in bytes (default: 5 MB).
     pub max_request_body_size: u32,
+    /// Optional API key for Bearer token authentication.
+    /// When set, every HTTP request must include `Authorization: Bearer <key>`.
+    /// `None` disables authentication (open access).
+    pub api_key: Option<String>,
 }
 
 impl Default for RpcConfig {
@@ -67,6 +74,7 @@ impl Default for RpcConfig {
             api_namespaces: vec!["eth".into(), "net".into(), "web3".into(), "shell".into()],
             allow_unsafe_dev_exposed: false,
             max_request_body_size: 5 * 1024 * 1024,
+            api_key: None,
         }
     }
 }
@@ -115,6 +123,8 @@ pub struct RpcServerHandle {
     pub ws_addr: Option<SocketAddr>,
     /// Handle to stop the WS server (present when `ws_addr` is `Some`).
     pub ws_handle: Option<ServerHandle>,
+    /// TLS termination proxy handle, present when TLS cert+key are configured.
+    pub tls_proxy: Option<TlsProxyHandle>,
 }
 
 /// Build and start the JSON-RPC server(s).
@@ -143,35 +153,31 @@ pub async fn start_rpc_server<S: KvStore + 'static>(
     peer_count: Arc<std::sync::atomic::AtomicUsize>,
     dev_control: Option<DynDevRpcControl>,
 ) -> Result<RpcServerHandle, Box<dyn std::error::Error + Send + Sync>> {
-    // Validate TLS configuration if provided.
-    match tls::load_tls_config(
+    // Load and validate TLS configuration.
+    // When cert+key are provided, we start jsonrpsee on an internal loopback
+    // port and front it with a tokio-rustls TLS proxy on the configured address.
+    let tls_cfg = match tls::load_tls_config(
         config.tls_cert_path.as_deref(),
         config.tls_key_path.as_deref(),
     ) {
-        Ok(Some(_tls_cfg)) => {
-            // TLS cert/key validated successfully. jsonrpsee's ServerBuilder does
-            // not natively accept a rustls config, so full WSS transport requires
-            // a TLS-terminating reverse proxy (e.g. nginx, caddy) or a custom
-            // hyper-rustls acceptor in front of the RPC server.
-            //
-            // TODO: integrate tokio-rustls TlsAcceptor with a custom hyper
-            // service to serve WSS directly.
+        Ok(Some(cfg)) => {
             info!(
-                "TLS certificate and key validated successfully \
-                 (cert={}, key={}). \
-                 NOTE: WSS transport is not yet wired — use a TLS-terminating \
-                 proxy for production WSS until native support is added.",
+                "TLS enabled (cert={}, key={}). Binding jsonrpsee internally; \
+                 TLS proxy will accept on configured listen_addr.",
                 config.tls_cert_path.as_deref().unwrap_or(""),
                 config.tls_key_path.as_deref().unwrap_or(""),
             );
+            Some(cfg)
         }
         Ok(None) => {
             info!("RPC server starting without TLS (plain HTTP/WS)");
+            None
         }
         Err(e) => {
             warn!("TLS configuration error: {e}. Starting without TLS.");
+            None
         }
-    }
+    };
 
     let mut handler = RpcHandler::new(
         chain_store,
@@ -217,10 +223,30 @@ pub async fn start_rpc_server<S: KvStore + 'static>(
         CorsLayer::new() // restrictive default
     };
 
-    // TODO: integrate per-connection rate limiting once tower's RateLimitLayer
-    // produces Clone services (required by jsonrpsee). Config field is retained
-    // for future use. Current value: {:?} config.rate_limit_per_sec.
-    let middleware = tower::ServiceBuilder::new().layer(cors);
+    // Determine the actual bind address for jsonrpsee:
+    // - With TLS: bind on loopback ephemeral port; TLS proxy fronts the public addr.
+    // - Without TLS: bind directly on config.listen_addr.
+    let internal_http = if tls_cfg.is_some() {
+        SocketAddr::from(([127, 0, 0, 1], 0))
+    } else {
+        config.listen_addr
+    };
+    let internal_ws = config.ws_addr.map(|ws| {
+        if tls_cfg.is_some() {
+            SocketAddr::from(([127, 0, 0, 1], 0))
+        } else {
+            ws
+        }
+    });
+
+    // Build middleware stack:
+    //   1. CORS
+    //   2. Optional global request rate limit (req/sec)
+    //   3. Optional Bearer API key authentication
+    let middleware = tower::ServiceBuilder::new()
+        .layer(cors)
+        .layer(RateLimitLayer::from_config(config.rate_limit_per_sec))
+        .layer(ApiKeyLayer::new(config.api_key.clone()));
 
     // Conditionally merge RPC modules based on enabled namespaces.
     let ns = &config.api_namespaces;
@@ -248,14 +274,14 @@ pub async fn start_rpc_server<S: KvStore + 'static>(
         module.merge(TraceApiServer::into_rpc(handler))?;
     }
 
-    if let Some(ws_listen) = config.ws_addr {
+    if let Some(ws_listen) = internal_ws {
         // Separate ports: HTTP-only + WS-only.
         let http_server = Server::builder()
             .set_http_middleware(middleware.clone())
             .max_connections(config.max_connections)
             .max_request_body_size(config.max_request_body_size)
             .http_only()
-            .build(config.listen_addr)
+            .build(internal_http)
             .await?;
         let http_addr = http_server.local_addr()?;
         let http_handle = http_server.start(module.clone());
@@ -270,11 +296,21 @@ pub async fn start_rpc_server<S: KvStore + 'static>(
         let ws_addr = ws_server.local_addr()?;
         let ws_handle = ws_server.start(module);
 
+        // Start TLS proxy if TLS is configured, forwarding public_addr → http_addr.
+        let tls_proxy = if let Some(cfg) = tls_cfg {
+            let proxy = start_tls_proxy(config.listen_addr, http_addr, cfg.server_config).await?;
+            info!("TLS proxy up: {} -> {}", proxy.public_addr, http_addr);
+            Some(proxy)
+        } else {
+            None
+        };
+
         Ok(RpcServerHandle {
             http_addr,
             http_handle,
             ws_addr: Some(ws_addr),
             ws_handle: Some(ws_handle),
+            tls_proxy,
         })
     } else {
         // Single port: both HTTP and WS on listen_addr (jsonrpsee default).
@@ -282,16 +318,26 @@ pub async fn start_rpc_server<S: KvStore + 'static>(
             .set_http_middleware(middleware)
             .max_connections(config.max_connections)
             .max_request_body_size(config.max_request_body_size)
-            .build(config.listen_addr)
+            .build(internal_http)
             .await?;
         let http_addr = server.local_addr()?;
         let http_handle = server.start(module);
+
+        // Start TLS proxy if TLS is configured, forwarding public_addr → http_addr.
+        let tls_proxy = if let Some(cfg) = tls_cfg {
+            let proxy = start_tls_proxy(config.listen_addr, http_addr, cfg.server_config).await?;
+            info!("TLS proxy up: {} -> {}", proxy.public_addr, http_addr);
+            Some(proxy)
+        } else {
+            None
+        };
 
         Ok(RpcServerHandle {
             http_addr,
             http_handle,
             ws_addr: None,
             ws_handle: None,
+            tls_proxy,
         })
     }
 }

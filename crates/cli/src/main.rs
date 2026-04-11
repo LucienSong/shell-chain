@@ -122,6 +122,18 @@ enum Commands {
         #[arg(long)]
         rpc_api: Option<String>,
 
+        /// Bearer token API key required on every RPC request (disabled if not set).
+        #[arg(long)]
+        rpc_api_key: Option<String>,
+
+        /// Path to a PEM TLS certificate file for HTTPS/WSS (requires --rpc-tls-key).
+        #[arg(long)]
+        rpc_tls_cert: Option<String>,
+
+        /// Path to a PEM TLS private key file for HTTPS/WSS (requires --rpc-tls-cert).
+        #[arg(long)]
+        rpc_tls_key: Option<String>,
+
         /// Allow exposing dev-only `evm` RPC methods on non-loopback listeners.
         #[arg(long)]
         unsafe_dev_exposed: bool,
@@ -264,6 +276,9 @@ async fn main() {
             rpc_cors,
             rpc_rate_limit,
             rpc_api,
+            rpc_api_key,
+            rpc_tls_cert,
+            rpc_tls_key,
             unsafe_dev_exposed,
             metrics_addr,
             max_idle_interval,
@@ -384,6 +399,9 @@ async fn main() {
                 rpc_cors: effective_rpc_cors,
                 rpc_rate_limit: effective_rpc_rate_limit,
                 rpc_api: effective_rpc_api,
+                rpc_api_key,
+                rpc_tls_cert,
+                rpc_tls_key,
                 unsafe_dev_exposed: effective_unsafe_dev_exposed,
                 metrics_addr: effective_metrics_addr,
                 max_idle_interval,

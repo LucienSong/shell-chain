@@ -43,6 +43,11 @@ pub struct RunArgs {
     pub rpc_cors: Option<String>,
     pub rpc_rate_limit: Option<u32>,
     pub rpc_api: Option<String>,
+    pub rpc_api_key: Option<String>,
+    /// Path to a PEM-encoded TLS certificate file.
+    pub rpc_tls_cert: Option<String>,
+    /// Path to a PEM-encoded TLS private key file.
+    pub rpc_tls_key: Option<String>,
     pub unsafe_dev_exposed: bool,
     pub metrics_addr: String,
     /// Maximum seconds between blocks when mempool is empty (0 = disabled).
@@ -451,6 +456,9 @@ async fn run_with_store<S: KvStore + 'static>(
                 .unwrap_or_else(|| vec!["eth".into(), "net".into(), "web3".into(), "shell".into()]),
             allow_unsafe_dev_exposed: args.unsafe_dev_exposed,
             max_request_body_size: 5 * 1024 * 1024,
+            api_key: args.rpc_api_key.clone(),
+            tls_cert_path: args.rpc_tls_cert.clone(),
+            tls_key_path: args.rpc_tls_key.clone(),
             ..RpcConfig::default()
         },
         network: NetworkConfig::default(),
