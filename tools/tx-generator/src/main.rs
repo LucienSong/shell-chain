@@ -334,11 +334,7 @@ async fn rpc_get_balance(
     }
 }
 
-async fn rpc_block_number(
-    client: &reqwest::Client,
-    url: &str,
-    req_id: u64,
-) -> Result<u64, String> {
+async fn rpc_block_number(client: &reqwest::Client, url: &str, req_id: u64) -> Result<u64, String> {
     let req = RpcRequest {
         jsonrpc: "2.0",
         method: "eth_blockNumber",

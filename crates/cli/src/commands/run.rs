@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use shell_consensus::PoaConfig;
-use shell_core::{Block, BlockHeader};
+use shell_core::Block;
 use shell_crypto::{DilithiumSigner, Signer};
 use shell_genesis::{
     initialize_authority_pubkeys, initialize_genesis, AllocEntry, ConsensusConfig, GenesisConfig,
@@ -17,7 +17,7 @@ use shell_mempool::MempoolConfig;
 use shell_network::{NetworkBus, NetworkConfig};
 use shell_node::config::NodeConfig;
 use shell_node::pruning::PruningConfig;
-use shell_primitives::{Address, Bytes, ShellHash};
+use shell_primitives::{Address, ShellHash};
 use shell_rpc::RpcConfig;
 use shell_storage::{ChainStore, KvStore, MemoryDb, WorldState};
 
@@ -610,8 +610,9 @@ async fn run_with_store<S: KvStore + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shell_core::BlockHeader;
     use shell_genesis::initialize_genesis;
-    use shell_primitives::U256;
+    use shell_primitives::{Bytes, U256};
     use shell_storage::MemoryDb;
     use std::collections::HashMap;
 

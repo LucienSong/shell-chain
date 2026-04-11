@@ -627,7 +627,7 @@ async fn run_mixed_mode(
     let mut cycle = 0u64;
 
     while Instant::now() < deadline {
-        if cycle > 0 && cycle % 5 == 0 {
+        if cycle > 0 && cycle.is_multiple_of(5) {
             match rotate_key(client, cli, primary, req_id).await {
                 Ok(_) => stats.rotations_ok += 1,
                 Err(err) => {
@@ -866,12 +866,8 @@ async fn main() {
                 .signer
                 .sign(tx.hash().0.as_slice())
                 .expect("signing failed");
-            let signed = SignedTransaction::with_pubkey(
-                funder.address,
-                tx,
-                sig,
-                funder.pubkey.clone(),
-            );
+            let signed =
+                SignedTransaction::with_pubkey(funder.address, tx, sig, funder.pubkey.clone());
             let id = req_id;
             req_id += 1;
             match rpc_send_tx(&client, &cli.rpc_url, &signed, id).await {
@@ -952,15 +948,15 @@ async fn main() {
         for addr in scenario_addresses {
             let id = req_id;
             req_id += 1;
-            if let Err(err) = rpc_set_balance(&client, &cli.rpc_url, &addr, &cli.fund_amount, id).await
+            if let Err(err) =
+                rpc_set_balance(&client, &cli.rpc_url, &addr, &cli.fund_amount, id).await
             {
                 eprintln!("failed to fund {addr} on primary endpoint: {err}");
                 std::process::exit(1);
             }
             println!(
                 "funded {} with {} on primary endpoint",
-                addr,
-                cli.fund_amount
+                addr, cli.fund_amount
             );
         }
 
@@ -985,9 +981,7 @@ async fn main() {
                 )
                 .await
                 {
-                    eprintln!(
-                        "cluster did not catch up to funded barrier block #{barrier_height}"
-                    );
+                    eprintln!("cluster did not catch up to funded barrier block #{barrier_height}");
                     for (url, status) in pending {
                         eprintln!("  - {url}: {status}");
                     }
