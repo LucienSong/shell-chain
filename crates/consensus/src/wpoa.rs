@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use shell_core::{Block, BlockHeader};
-use shell_crypto::{Signer, Verifier};
+use shell_crypto::{PQSignature, SignatureType, Signer, Verifier};
 use shell_primitives::Address;
 
 use crate::poa::PoaEngine;
@@ -67,6 +67,7 @@ impl WPoaConfig {
 pub struct WPoaEngine {
     inner: PoaEngine,
     validator_set: ValidatorSet,
+    #[allow(dead_code)]
     verifier: Arc<dyn Verifier>,
     signer: Option<Arc<dyn Signer>>,
 }
@@ -198,9 +199,13 @@ mod tests {
             &self,
             _pk: &[u8],
             _msg: &[u8],
-            _sig: &[u8],
-        ) -> Result<(), shell_crypto::CryptoError> {
-            Ok(())
+            _sig: &PQSignature,
+        ) -> Result<bool, shell_crypto::CryptoError> {
+            Ok(true)
+        }
+
+        fn sig_type(&self) -> SignatureType {
+            SignatureType::Dilithium3
         }
     }
 

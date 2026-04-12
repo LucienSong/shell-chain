@@ -165,7 +165,7 @@ pub fn detect_offline(
 mod tests {
     use super::*;
     use shell_core::BlockHeader;
-    use shell_primitives::{Address, ShellHash, U256};
+    use shell_primitives::{Address, Bytes, ShellHash};
 
     fn addr(n: u8) -> Address {
         Address::from([n; 20])
@@ -182,10 +182,14 @@ mod tests {
             receipts_root: ShellHash::ZERO,
             gas_limit: 30_000_000,
             gas_used: 0,
-            base_fee_per_gas: U256::ZERO,
-            extra_data: Vec::new(),
-            logs_bloom: Vec::new(),
-            proposer_seal: Vec::new(),
+            base_fee_per_gas: 0u64,
+            extra_data: Bytes::new(),
+            logs_bloom: Bytes::new(),
+            sig_aggregate_proof: None,
+            withdrawals_root: ShellHash::ZERO,
+            parent_beacon_block_root: ShellHash::ZERO,
+            blob_gas_used: 0,
+            excess_blob_gas: 0,
         }
     }
 
