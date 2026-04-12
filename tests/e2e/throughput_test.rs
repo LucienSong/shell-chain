@@ -11,7 +11,7 @@
 use std::time::Instant;
 
 use shell_primitives::{Address, U256};
-use shell_rpc::ShellApiServer;
+use shell_rpc::api::ShellApiServer;
 
 use shell_e2e::{make_funded_account, make_transfer, setup, sign_tx, TEST_CHAIN_ID};
 
@@ -37,10 +37,7 @@ async fn submit_n_transactions(count: usize) -> (usize, u128) {
     for sender in &senders {
         let tx = make_transfer(TEST_CHAIN_ID, 0, recipient, U256::from(1u64));
         let signed = sign_tx(&sender.signer, sender.address, tx);
-        if ShellApiServer::send_transaction(&env.handler, signed)
-            .await
-            .is_ok()
-        {
+        if env.handler.send_transaction(signed).await.is_ok() {
             accepted += 1;
         }
     }
@@ -106,10 +103,7 @@ async fn throughput_pool_size_respected_under_load() {
         let sender = make_funded_account(&env);
         let tx = make_transfer(TEST_CHAIN_ID, 0, recipient, U256::from(1u64));
         let signed = sign_tx(&sender.signer, sender.address, tx);
-        if ShellApiServer::send_transaction(&env.handler, signed)
-            .await
-            .is_ok()
-        {
+        if env.handler.send_transaction(signed).await.is_ok() {
             accepted += 1;
         }
     }
@@ -147,7 +141,8 @@ async fn throughput_mixed_workload_ordering() {
         tx.max_priority_fee_per_gas = priority_fee;
         tx.max_fee_per_gas = 2_000_000_000;
         let signed = sign_tx(&sender.signer, sender.address, tx);
-        ShellApiServer::send_transaction(&env.handler, signed)
+        env.handler
+            .send_transaction(signed)
             .await
             .expect("tx accepted");
     }
