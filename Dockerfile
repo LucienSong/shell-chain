@@ -1,5 +1,13 @@
 # Multi-stage build for shell-node with RocksDB + libp2p
-FROM rust:1.93-bookworm AS builder
+#
+# Multi-arch build (M10):
+#   docker buildx build --platform linux/amd64,linux/arm64 \
+#       -t ghcr.io/luciensong/shell-chain:v0.13.0 --push .
+#
+# Single-arch local build:
+#   docker build -t shell-node:latest .
+ARG TARGETPLATFORM
+FROM --platform=${TARGETPLATFORM:-linux/amd64} rust:1.93-bookworm AS builder
 
 # Install RocksDB build dependencies
 RUN apt-get update && apt-get install -y \

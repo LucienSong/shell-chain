@@ -1,0 +1,33 @@
+[package]
+name = "shell-fuzz"
+version = "0.13.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "shell_fuzz"
+path = "src/lib.rs"
+
+[[bin]]
+name = "fuzz_rlp"
+path = "fuzz_targets/fuzz_rlp.rs"
+
+[[bin]]
+name = "fuzz_rpc"
+path = "fuzz_targets/fuzz_rpc.rs"
+
+[[bin]]
+name = "fuzz_p2p_msg"
+path = "fuzz_targets/fuzz_p2p_msg.rs"
+
+[dependencies]
+libfuzzer-sys = "0.4"
+shell-core = { path = "../crates/core" }
+shell-primitives = { path = "../crates/primitives" }
+shell-rpc = { path = "../crates/rpc" }
+alloy-rlp = { version = "0.3", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+debug = false

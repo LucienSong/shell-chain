@@ -7,6 +7,7 @@
 //! - `key generate`  — create a new encrypted keystore file
 //! - `tx send|deploy|call` — transaction operations
 //! - `account list|balance|nonce` — account management
+//! - `wallet create|balance|send|export` — lightweight wallet UX
 //! - `export-state`  — export chain state to a snapshot file
 //! - `import-state`  — import chain state from a snapshot file
 //! - `removedb`      — remove the chain database
@@ -33,7 +34,7 @@ struct Cli {
     #[arg(long, default_value = "shell-data", global = true)]
     datadir: PathBuf,
 
-    /// Log output format: "text" (human-readable) or "json" (structured).
+    /// Log output format: "text" (human-readable), "json" (structured), or "compact".
     #[arg(long, default_value = "text", global = true)]
     log_format: String,
 
@@ -46,6 +47,7 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum Commands {
     /// Start the node.
     Run {
@@ -121,6 +123,18 @@ enum Commands {
         #[arg(long)]
         rpc_api: Option<String>,
 
+        /// Bearer token API key required on every RPC request (disabled if not set).
+        #[arg(long)]
+        rpc_api_key: Option<String>,
+
+        /// Path to a PEM TLS certificate file for HTTPS/WSS (requires --rpc-tls-key).
+        #[arg(long)]
+        rpc_tls_cert: Option<String>,
+
+        /// Path to a PEM TLS private key file for HTTPS/WSS (requires --rpc-tls-cert).
+        #[arg(long)]
+        rpc_tls_key: Option<String>,
+
         /// Allow exposing dev-only `evm` RPC methods on non-loopback listeners.
         #[arg(long)]
         unsafe_dev_exposed: bool,
@@ -132,6 +146,18 @@ enum Commands {
         /// Max idle seconds before producing a heartbeat block (0 = always produce).
         #[arg(long, default_value = "0")]
         max_idle_interval: u64,
+
+        /// Maximum number of pending transactions in the mempool.
+        #[arg(long)]
+        mempool_max_size: Option<usize>,
+
+        /// Minimum gas-price bump (%) required to replace a pending transaction.
+        #[arg(long)]
+        mempool_price_bump: Option<u64>,
+
+        /// Account LRU cache size for the world-state trie in MiB.
+        #[arg(long)]
+        state_cache_size_mb: Option<usize>,
     },
 
     /// Initialize genesis block and data directory.
@@ -190,6 +216,33 @@ enum Commands {
         #[command(subcommand)]
         command: commands::account::AccountCommand,
     },
+
+    /// Lightweight wallet UX built on top of key/account/tx primitives.
+    Wallet {
+        #[command(subcommand)]
+        command: commands::wallet::WalletCommand,
+    },
+
+    /// Hot backup and restore for the RocksDB data directory.
+    Backup {
+        #[command(subcommand)]
+        command: BackupCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum BackupCommands {
+    /// Create a RocksDB checkpoint (hot backup).
+    Create {
+        /// Output directory for the backup (default: <datadir>/backups/<timestamp>/).
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+    /// Restore the data directory from a RocksDB checkpoint.
+    Restore {
+        /// Path to the backup directory created by `backup create`.
+        backup_path: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -226,12 +279,23 @@ async fn main() {
                 .with_target(true)
                 .with_file(true)
                 .with_line_number(true)
+                .with_current_span(true)
+                .with_span_list(true)
+                .with_env_filter(filter)
+                .init();
+        }
+        "compact" => {
+            tracing_subscriber::fmt()
+                .compact()
+                .with_target(false)
                 .with_env_filter(filter)
                 .init();
         }
         _ => {
+            // Default "text" format with full target and thread IDs for debugging.
             tracing_subscriber::fmt()
                 .with_target(true)
+                .with_thread_ids(false)
                 .with_env_filter(filter)
                 .init();
         }
@@ -257,9 +321,15 @@ async fn main() {
             rpc_cors,
             rpc_rate_limit,
             rpc_api,
+            rpc_api_key,
+            rpc_tls_cert,
+            rpc_tls_key,
             unsafe_dev_exposed,
             metrics_addr,
             max_idle_interval,
+            mempool_max_size,
+            mempool_price_bump,
+            state_cache_size_mb,
         } => {
             // Load config file if specified (CLI args override file values).
             let file_config = match &config_path {
@@ -377,9 +447,15 @@ async fn main() {
                 rpc_cors: effective_rpc_cors,
                 rpc_rate_limit: effective_rpc_rate_limit,
                 rpc_api: effective_rpc_api,
+                rpc_api_key,
+                rpc_tls_cert,
+                rpc_tls_key,
                 unsafe_dev_exposed: effective_unsafe_dev_exposed,
                 metrics_addr: effective_metrics_addr,
                 max_idle_interval,
+                mempool_max_size,
+                mempool_price_bump,
+                state_cache_size_mb,
             })
             .await
         }
@@ -396,6 +472,13 @@ async fn main() {
         Commands::Version => commands::version(),
         Commands::Tx { command } => commands::tx::execute(command),
         Commands::Account { command } => commands::account::execute(command),
+        Commands::Wallet { command } => commands::wallet::execute(command),
+        Commands::Backup { command } => match command {
+            BackupCommands::Create { output } => commands::create_backup(cli.datadir, output),
+            BackupCommands::Restore { backup_path } => {
+                commands::restore_backup(cli.datadir, backup_path)
+            }
+        },
     };
 
     if let Err(e) = result {

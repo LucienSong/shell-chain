@@ -1,0 +1,27 @@
+[package]
+name = "shell-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dev-dependencies]
+criterion = { workspace = true }
+shell-primitives = { workspace = true }
+shell-crypto = { workspace = true }
+shell-storage = { workspace = true }
+shell-core = { workspace = true }
+shell-consensus = { workspace = true }
+
+[[bench]]
+name = "bench_crypto"
+harness = false
+
+[[bench]]
+name = "bench_state"
+harness = false
+
+[[bench]]
+name = "bench_consensus"
+harness = false

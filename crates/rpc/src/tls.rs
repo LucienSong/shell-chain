@@ -96,10 +96,16 @@ pub fn load_tls_config(
                 .ok_or_else(|| TlsConfigError::NoKeyFound(key.to_string()))?;
 
             // Build and validate the ServerConfig.
-            let server_config = rustls::ServerConfig::builder()
-                .with_no_client_auth()
-                .with_single_cert(certs, private_key)
-                .map_err(|e| TlsConfigError::ServerConfigError(e.to_string()))?;
+            // Use an explicit ring provider (default-features = false means no
+            // auto-detection; we must specify the provider explicitly).
+            let server_config = rustls::ServerConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_safe_default_protocol_versions()
+            .map_err(|e| TlsConfigError::ServerConfigError(e.to_string()))?
+            .with_no_client_auth()
+            .with_single_cert(certs, private_key)
+            .map_err(|e| TlsConfigError::ServerConfigError(e.to_string()))?;
 
             Ok(Some(TlsConfig {
                 server_config: Arc::new(server_config),

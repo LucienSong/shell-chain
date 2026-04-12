@@ -54,6 +54,9 @@ pub struct NodeConfig {
     /// Maximum idle interval in ms before producing a heartbeat block.
     /// When 0, every block_time tick produces a block (legacy behavior).
     pub max_idle_interval_ms: u64,
+    /// Account cache size in MiB for the world state LRU trie cache.
+    /// Default: 64 MiB.  Higher values reduce state trie decode overhead.
+    pub state_cache_size_mb: usize,
 }
 
 impl NodeConfig {
@@ -78,6 +81,7 @@ impl NodeConfig {
             pruning: PruningConfig::default(),
             metrics: MetricsConfig::default(),
             max_idle_interval_ms: 0,
+            state_cache_size_mb: 64,
         }
     }
 }

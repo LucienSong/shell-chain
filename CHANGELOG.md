@@ -2,6 +2,61 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.13.0] — 2026-04-15 — M10: Mainnet Readiness
+
+### Added
+
+**Batch 1 — Production Security**
+- RPC TLS termination via `tokio-rustls` (`--rpc-tls-cert` / `--rpc-tls-key`)
+- Server-wide request rate limiting middleware (`--rpc-rate-limit`)
+- API key authentication for all methods (`--rpc-api-key`)
+- P2P message signature verification for GossipSub block/tx broadcasts
+
+**Batch 2 — Developer Ecosystem**
+- `shell-sdk` TypeScript/JavaScript SDK (viem-based): PQ address encode/decode, AA transaction builders, `ShellProvider`, HTTP/WS transports
+- `sdk-signer`: `ShellSigner` class, Dilithium3 WASM binding, keystore JSON support
+- `ShellERC20` and `ShellERC721` reference contracts with PQ-signature `permit`/`mint`
+- `shell-node wallet` CLI commands: `create`, `balance`, `send`, `export`
+
+**Batch 3 — wPoA Consensus**
+- Weighted Proof-of-Authority (`WPoaEngine`) with stake-weighted round-robin proposer selection
+- `ValidatorSet`: genesis population, weighted proposer, lifecycle state machine (Pending → Active → Exiting → Exited)
+- `SlashingEngine`: double-sign detection, offline detection, configurable slash fractions
+- Validator lifecycle CLI: `shell-node validator register / status / exit`
+- RPC methods: `shell_getValidatorSet`, `shell_getValidatorInfo`
+
+**Batch 4 — Operations & Observability**
+- Structured JSON logging with `--log-format json|text` and sensitive-field filtering
+- Extended Prometheus metrics: `shell_aa_tx_total`, `shell_key_rotation_total`, `shell_validator_weight`, `shell_consensus_slot_miss`, `shell_evm_gas_used_total`, `shell_snapshot_size_bytes`
+- Admin RPC namespace (`admin_nodeInfo`, `admin_peers`, `admin_addPeer`, `admin_removePeer`, `admin_datadir`); requires `--admin-api` flag (loopback-only by default)
+- Hot backup / restore CLI: `shell-node backup create|restore|schedule`
+
+**Batch 5 — Performance**
+- Criterion benchmark suite (`crates/bench/`): `bench_crypto`, `bench_state`, `bench_consensus`
+- LRU account cache on `WorldState` (default 64 MiB, `--state-cache-size-mb`): write-through, None-caching, configurable capacity
+- Mempool tuning CLI flags: `--mempool-max-size` (default 4096), `--mempool-price-bump` (default 10%)
+
+**Batch 6 — QA & Release**
+- `tests/e2e/wpoa_regression.rs`: 14 regression tests covering wPoA, slashing, WorldState LRU cache, mempool priority
+- `tests/e2e/throughput_test.rs`: in-process 500 TPS baseline tests
+- `fuzz/` directory with three `cargo-fuzz` targets: `fuzz_rlp`, `fuzz_rpc`, `fuzz_p2p_msg`
+- `deny.toml` for `cargo deny` security policy (advisory, license, and ban checks)
+- `run-load-test.sh`: extended with `TX_COUNT` / `DURATION` env vars for 500 TPS / 1h production soak (`TX_COUNT=1800000 DURATION=3600`)
+- `run-security-audit.sh`: M10 checks — admin RPC exposure, slash evidence replay guard, TLS downgrade prevention
+- `UPGRADE.md`: migration guide from v0.9 → v0.13.0
+- `scripts/release.sh`: automated git tagging and release procedure
+
+### Changed
+- Workspace version bumped from `0.6.0` to `0.13.0`
+- Dockerfile updated with `--platform` multi-arch comment and `arm64` build note
+- `NodeConfig`: added `state_cache_size_mb` (default 64), `mempool_max_size`, `mempool_price_bump` fields
+
+### Fixed
+- F-379: `WorldState::snapshot()` LRU capacity rounding drift documented
+- F-380: WorldState LRU cache now covered by regression tests
+- F-381: `PoaEngine::proposer_for_block` private field — bench uses inline modulo
+- F-382: Prometheus cache metrics deferred to M11
+
 ## [Unreleased]
 
 ### Added

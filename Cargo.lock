@@ -726,6 +726,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
+name = "aws-lc-rs"
+version = "1.16.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a054912289d18629dc78375ba2c3726a3afe3ff71b4edba9dedfca0e3446d1fc"
+dependencies = [
+ "aws-lc-sys",
+ "zeroize",
+]
+
+[[package]]
+name = "aws-lc-sys"
+version = "0.39.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "83a25cf98105baa966497416dbd42565ce3a8cf8dbfd59803ec9ad46f3126399"
+dependencies = [
+ "cc",
+ "cmake",
+ "dunce",
+ "fs_extra",
+]
+
+[[package]]
 name = "base-x"
 version = "0.2.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1132,6 +1154,15 @@ name = "clap_lex"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
+
+[[package]]
+name = "cmake"
+version = "0.1.58"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c0f78a02292a74a88ac736019ab962ece0bc380e3f977bf72e376c5d78ff0678"
+dependencies = [
+ "cc",
+]
 
 [[package]]
 name = "colorchoice"
@@ -1909,6 +1940,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs_extra"
+version = "1.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "42703706b716c37f96a77aea830392ad231f44c9e9a67872fa5548707e11b11c"
+
+[[package]]
 name = "funty"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2220,6 +2257,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
 dependencies = [
  "allocator-api2",
+ "equivalent",
  "foldhash 0.1.5",
 ]
 
@@ -3611,6 +3649,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
 
 [[package]]
+name = "lru"
+version = "0.12.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "234cf4f4a04dc1f57e24b96cc0cd600cf2af460d4161ac5ecdd0af8e1f3b2a38"
+dependencies = [
+ "hashbrown 0.15.5",
+]
+
+[[package]]
 name = "lru-slab"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3641,6 +3688,12 @@ name = "memchr"
 version = "2.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
+
+[[package]]
+name = "mime"
+version = "0.3.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
 
 [[package]]
 name = "minimal-lexical"
@@ -5117,6 +5170,7 @@ version = "0.23.37"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "758025cb5fccfd3bc2fd74708fd4682be41d99e5dff73c377c0646c6012c73a4"
 dependencies = [
+ "aws-lc-rs",
  "log",
  "once_cell",
  "ring",
@@ -5190,6 +5244,7 @@ version = "0.103.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df33b2b81ac578cabaf06b89b0631153a3f416b0a886e8a7a1707fb51abbd1ef"
 dependencies = [
+ "aws-lc-rs",
  "ring",
  "rustls-pki-types",
  "untrusted",
@@ -5495,8 +5550,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "shell-bench"
+version = "0.13.0"
+dependencies = [
+ "criterion",
+ "shell-consensus",
+ "shell-core",
+ "shell-crypto",
+ "shell-primitives",
+ "shell-storage",
+]
+
+[[package]]
 name = "shell-cli"
-version = "0.6.0"
+version = "0.13.0"
 dependencies = [
  "alloy-rlp",
  "clap",
@@ -5525,7 +5592,7 @@ dependencies = [
 
 [[package]]
 name = "shell-consensus"
-version = "0.6.0"
+version = "0.13.0"
 dependencies = [
  "async-trait",
  "serde",
@@ -5537,7 +5604,7 @@ dependencies = [
 
 [[package]]
 name = "shell-core"
-version = "0.6.0"
+version = "0.13.0"
 dependencies = [
  "alloy-rlp",
  "criterion",
@@ -5550,7 +5617,7 @@ dependencies = [
 
 [[package]]
 name = "shell-crypto"
-version = "0.6.0"
+version = "0.13.0"
 dependencies = [
  "alloy-rlp",
  "criterion",
@@ -5569,7 +5636,7 @@ dependencies = [
 
 [[package]]
 name = "shell-e2e-tests"
-version = "0.6.0"
+version = "0.13.0"
 dependencies = [
  "hex",
  "parking_lot",
@@ -5586,7 +5653,7 @@ dependencies = [
 
 [[package]]
 name = "shell-evm"
-version = "0.6.0"
+version = "0.13.0"
 dependencies = [
  "alloy-primitives",
  "alloy-rlp",
@@ -5605,7 +5672,7 @@ dependencies = [
 
 [[package]]
 name = "shell-genesis"
-version = "0.6.0"
+version = "0.13.0"
 dependencies = [
  "hex",
  "serde",
@@ -5619,7 +5686,7 @@ dependencies = [
 
 [[package]]
 name = "shell-keystore"
-version = "0.6.0"
+version = "0.13.0"
 dependencies = [
  "argon2",
  "chacha20poly1305",
@@ -5635,7 +5702,7 @@ dependencies = [
 
 [[package]]
 name = "shell-mempool"
-version = "0.6.0"
+version = "0.13.0"
 dependencies = [
  "parking_lot",
  "serde_json",
@@ -5649,7 +5716,7 @@ dependencies = [
 
 [[package]]
 name = "shell-network"
-version = "0.6.0"
+version = "0.13.0"
 dependencies = [
  "async-trait",
  "blake3",
@@ -5667,7 +5734,7 @@ dependencies = [
 
 [[package]]
 name = "shell-node"
-version = "0.6.0"
+version = "0.13.0"
 dependencies = [
  "alloy-rlp",
  "http-body-util",
@@ -5693,7 +5760,7 @@ dependencies = [
 
 [[package]]
 name = "shell-primitives"
-version = "0.6.0"
+version = "0.13.0"
 dependencies = [
  "alloy-primitives",
  "alloy-rlp",
@@ -5708,11 +5775,13 @@ dependencies = [
 
 [[package]]
 name = "shell-rpc"
-version = "0.6.0"
+version = "0.13.0"
 dependencies = [
  "alloy-primitives",
  "alloy-rlp",
+ "futures-util",
  "hex",
+ "http",
  "jsonrpsee",
  "parking_lot",
  "rand 0.8.5",
@@ -5731,6 +5800,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-rustls",
  "tower",
  "tower-http",
  "tracing",
@@ -5738,7 +5808,7 @@ dependencies = [
 
 [[package]]
 name = "shell-storage"
-version = "0.6.0"
+version = "0.13.0"
 dependencies = [
  "alloy-rlp",
  "base64",
@@ -5746,6 +5816,8 @@ dependencies = [
  "eth_trie",
  "ethereum-types",
  "hex",
+ "lru",
+ "parking_lot",
  "rocksdb",
  "serde",
  "serde_json",
@@ -6269,6 +6341,7 @@ dependencies = [
  "http",
  "http-body",
  "http-body-util",
+ "mime",
  "pin-project-lite",
  "tower-layer",
  "tower-service",

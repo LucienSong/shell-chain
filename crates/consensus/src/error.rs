@@ -36,4 +36,20 @@ pub enum ConsensusError {
 
     #[error("cannot reorg past finalized block {0}")]
     ReorgPastFinalized(u64),
+
+    // wPoA / validator lifecycle errors
+    #[error("signing error: {0}")]
+    SigningError(String),
+
+    #[error("no signer configured for this node")]
+    NoSigner,
+
+    #[error("validator already exists: {0}")]
+    AlreadyValidator(Address),
+
+    #[error("cannot remove last active validator")]
+    LastValidator,
+
+    #[error("invalid lifecycle transition: {0}")]
+    InvalidLifecycleTransition(String),
 }

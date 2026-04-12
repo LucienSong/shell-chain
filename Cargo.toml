@@ -15,10 +15,11 @@ members = [
     "crates/keystore",
     "crates/cli",
     "tests/e2e",
+    "crates/bench",
 ]
 
 [workspace.package]
-version = "0.6.0"
+version = "0.13.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/LucienSong/shell-chain"
@@ -64,8 +65,10 @@ revm = { version = "36", default-features = false, features = ["std", "optional_
 jsonrpsee = { version = "0.24", features = ["server", "macros"] }
 tokio = { version = "1", features = ["full"] }
 parking_lot = "0.12"
-tower = { version = "0.4", features = ["limit"] }
-tower-http = { version = "0.5", features = ["cors"] }
+tower = { version = "0.4", features = ["limit", "timeout", "buffer"] }
+tower-http = { version = "0.5", features = ["cors", "validate-request"] }
+http = "1"
+futures-util = "0.3"
 
 # --- network (libp2p) ---
 libp2p = { version = "0.56", features = ["tcp", "dns", "noise", "yamux", "gossipsub", "mdns", "tokio", "identify", "kad", "macros", "relay", "dcutr", "autonat"] }
@@ -76,6 +79,7 @@ rocksdb = { version = "0.22", default-features = false, features = ["snappy"] }
 # --- tls ---
 rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
 rustls-pemfile = "2"
+tokio-rustls = { version = "0.26", features = ["ring"] }
 
 # --- cli ---
 clap = { version = "4", features = ["derive"] }
@@ -93,6 +97,9 @@ http-body-util = "0.1"
 
 # --- parallel ---
 rayon = "1.10"
+
+# --- caching ---
+lru = "0.12"
 
 # --- benchmarks ---
 criterion = { version = "0.5", features = ["html_reports"] }

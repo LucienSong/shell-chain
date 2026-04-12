@@ -19,6 +19,8 @@ serde_json.workspace = true
 base64 = "0.22"
 sha2 = "0.10"
 hex.workspace = true
+lru.workspace = true
+parking_lot.workspace = true
 shell-primitives = { path = "../primitives" }
 shell-core = { path = "../core" }
 rocksdb = { workspace = true, optional = true }
