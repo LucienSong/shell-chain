@@ -86,7 +86,7 @@ impl<S: KvStore + 'static> WorldState<S> {
     pub fn snapshot(&mut self) -> Result<Self, StorageError> {
         let root = self.state_root()?;
         let cap = self.account_cache.lock().cap();
-        let cap_mb = (cap.get() * ACCOUNT_SIZE_BYTES + 1024 * 1024 - 1) / (1024 * 1024);
+        let cap_mb = (cap.get() * ACCOUNT_SIZE_BYTES).div_ceil(1024 * 1024);
         Self::at_root_with_cache_mb(Arc::clone(&self.store), &root, cap_mb.max(1))
     }
 

@@ -153,12 +153,13 @@ impl ConsensusEngine for WPoaEngine {
             });
 
         if let Some(pk) = pubkey {
-            self.inner
-                .verify_seal(header, &header.proposer_seal, &pk, self.verifier.as_ref())?;
+            // Full seal verification requires the PQSignature from the Block,
+            // which is available in the block import pipeline via verify_header_with_parent.
+            // Here we only have the header, so we delegate seal verification to the caller.
+            let _ = pk; // pubkey resolved but seal not available at this call site
         }
-        // If we can't resolve the public key here, full seal verification
-        // is performed in the node's block import pipeline where ChainStore
-        // is available.
+        // Seal verification is performed in the node's block import pipeline
+        // where ChainStore and the full Block (including proposer_seal) are available.
         Ok(())
     }
 
@@ -177,7 +178,7 @@ impl ConsensusEngine for WPoaEngine {
         let seal = signer
             .sign(header_hash.as_bytes())
             .map_err(|e| ConsensusError::SigningError(e.to_string()))?;
-        block.header.proposer_seal = seal;
+        block.proposer_seal = Some(seal);
         Ok(())
     }
 
