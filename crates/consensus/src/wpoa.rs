@@ -136,30 +136,18 @@ impl ConsensusEngine for WPoaEngine {
             });
         }
 
-        // Delegate timestamp and seal verification to the inner PoaEngine.
-        // The inner engine will re-check the proposer (it uses the uniform
-        // authority list), so we call verify_seal directly.
-        let pubkey = self
-            .inner
-            .config()
-            .authorities
-            .iter()
-            .position(|a| *a == header.proposer)
-            .and_then(|_idx| {
-                // In practice, pubkeys are looked up from ChainStore.
-                // The inner engine's verify_header handles this path when
-                // full verification is needed; here we delegate.
-                None::<Vec<u8>>
-            });
-
-        if let Some(pk) = pubkey {
-            // Full seal verification requires the PQSignature from the Block,
-            // which is available in the block import pipeline via verify_header_with_parent.
-            // Here we only have the header, so we delegate seal verification to the caller.
-            let _ = pk; // pubkey resolved but seal not available at this call site
-        }
-        // Seal verification is performed in the node's block import pipeline
-        // where ChainStore and the full Block (including proposer_seal) are available.
+        // NOTE: `verify_header` only receives a `BlockHeader`, which does not
+        // carry the proposer seal (`Block::proposer_seal`). Full PQ-signature
+        // seal verification requires both the header hash and the seal bytes
+        // from the enclosing `Block`, as well as a public-key lookup against
+        // `ChainStore`. That verification is the responsibility of the block
+        // import pipeline (e.g. `verify_header_with_parent` / `import_block`),
+        // not this method.
+        //
+        // This method intentionally limits itself to the structural checks that
+        // can be performed without ChainStore access:
+        //   1. Proposer is in the active validator set (checked above).
+        //   2. Proposer matches the weighted round-robin slot (checked above).
         Ok(())
     }
 

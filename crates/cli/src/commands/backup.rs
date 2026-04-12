@@ -3,8 +3,13 @@
 //! # Subcommands
 //!
 //! - `backup create [--output <dir>]`  — create a consistent RocksDB checkpoint.
-//!   Uses RocksDB's built-in `Checkpoint` API: no node shutdown required.
-//!   The output directory receives hard-linked SST files (instant, near-zero copy cost).
+//!   Uses RocksDB's built-in `Checkpoint` API to create a hard-linked SST
+//!   snapshot.  **The node process must be stopped before running this command**
+//!   because `RocksDbStore::open_all` opens the database with an exclusive
+//!   lock; attempting to open an already-open database will fail.
+//!   For live (in-process) backups without stopping the node, use the
+//!   `admin_createSnapshot` RPC method (planned) which calls `Checkpoint`
+//!   on the live DB handle.
 //!
 //! - `backup restore <backup-dir>`     — restore the data directory from a checkpoint.
 //!   The live `db/` directory is renamed to `db.bak.<timestamp>` before restore to
@@ -16,10 +21,12 @@
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Create a RocksDB checkpoint (hot backup) of the data directory.
+/// Create a RocksDB checkpoint (offline backup) of the data directory.
 ///
 /// Uses `rocksdb::checkpoint::Checkpoint` to create a consistent snapshot
-/// while the database may be open (live node not required to be stopped).
+/// of the database.  **Requires the node to be stopped** — RocksDB takes an
+/// exclusive lock on the data directory, so this call will fail if the node
+/// process already has the database open.
 ///
 /// The checkpoint is placed in `output_dir` (defaults to
 /// `<datadir>/backups/<unix_timestamp>/`).

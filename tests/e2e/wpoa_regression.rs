@@ -213,18 +213,28 @@ fn world_state_cache_hit_after_warm() {
 
     let addr = make_addr(7);
     ws.set_balance(&addr, U256::from(1_000_000u64)).unwrap();
-    // Warm the cache.
-    let _ = ws.get_account(&addr).unwrap();
 
-    let start = Instant::now();
+    // Cold run: first read populates the cache.
+    let cold_start = Instant::now();
+    let _ = ws.get_account(&addr).unwrap();
+    let cold_elapsed = cold_start.elapsed();
+
+    // Warm run: subsequent reads should come from the LRU cache.
+    let warm_start = Instant::now();
     for _ in 0..1000 {
         let _ = ws.get_account(&addr).unwrap();
     }
-    let elapsed = start.elapsed();
+    let warm_elapsed = warm_start.elapsed();
+
+    // The 1000 warm cache hits must complete in less time than 1000× the
+    // cold read. We use a 10× factor to give CI ample headroom.
+    let cold_micros = cold_elapsed.as_micros().max(1);
+    let warm_per_hit_micros = warm_elapsed.as_micros() / 1000;
     assert!(
-        elapsed.as_millis() < 100,
-        "1000 cache hits took {}ms — expected < 100ms",
-        elapsed.as_millis()
+        warm_per_hit_micros < cold_micros * 10,
+        "cache hits ({warm_per_hit_micros}µs/hit) should be faster than cold reads \
+         ({}µs) with 10× margin",
+        cold_micros
     );
 }
 

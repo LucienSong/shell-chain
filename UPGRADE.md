@@ -42,12 +42,8 @@ v0.13.0 is a significant mainnet-readiness release. The highlights are:
 |------|---------|-------------|
 | `--rpc-tls-cert <path>` | — | TLS certificate file (PEM) |
 | `--rpc-tls-key <path>` | — | TLS private key file (PEM) |
-| `--rpc-tls-self-signed` | false | Auto-generate self-signed cert (dev only) |
-| `--rpc-rate-limit <n>` | 100 | Max requests/second per IP |
-| `--rpc-rate-limit-whitelist <cidr>` | — | CIDR ranges exempt from rate limiting |
-| `--rpc-api-key <key>` | — | Bearer token required for write methods |
-| `--rpc-auth-reads` | false | Also require auth on read methods |
-| `--admin-api` | false | Enable admin RPC namespace (loopback only) |
+| `--rpc-rate-limit <n>` | 100 | Max requests/second (server-wide) |
+| `--rpc-api-key <key>` | — | Bearer token required for all methods |
 | `--log-format <json\|text>` | text | Structured logging format |
 | `--state-cache-size-mb <n>` | 64 | LRU account cache size |
 | `--mempool-max-size <n>` | 4096 | Max transactions in mempool |

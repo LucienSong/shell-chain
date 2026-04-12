@@ -137,6 +137,11 @@ pub struct RpcServerHandle {
 /// When `config.ws_addr` is `None`, a single server on `config.listen_addr`
 /// handles both HTTP and WebSocket (the jsonrpsee default).
 ///
+/// `admin_p2p_context` is an optional tuple of `(peer_id, p2p_listen_addr)`:
+///   - `peer_id` is the base58-encoded libp2p PeerId.
+///   - `p2p_listen_addr` is the multiaddr the P2P layer listens on.
+/// Both are surfaced by `admin_nodeInfo`. Pass `None` if unavailable.
+///
 /// Returns an [`RpcServerHandle`] for graceful shutdown.
 #[allow(clippy::too_many_arguments)]
 pub async fn start_rpc_server<S: KvStore + 'static>(
@@ -153,6 +158,7 @@ pub async fn start_rpc_server<S: KvStore + 'static>(
     finality: Arc<parking_lot::RwLock<FinalityState>>,
     peer_count: Arc<std::sync::atomic::AtomicUsize>,
     dev_control: Option<DynDevRpcControl>,
+    admin_p2p_context: Option<(String, String)>,
 ) -> Result<RpcServerHandle, Box<dyn std::error::Error + Send + Sync>> {
     // Load and validate TLS configuration.
     // When cert+key are provided, we start jsonrpsee on an internal loopback
@@ -175,8 +181,11 @@ pub async fn start_rpc_server<S: KvStore + 'static>(
             None
         }
         Err(e) => {
-            warn!("TLS configuration error: {e}. Starting without TLS.");
-            None
+            return Err(format!(
+                "TLS configuration error: {e}. Refusing to start without TLS when cert/key are \
+                 provided. Fix the cert/key paths or remove them to run without TLS."
+            )
+            .into());
         }
     };
 
@@ -197,6 +206,13 @@ pub async fn start_rpc_server<S: KvStore + 'static>(
     if let (Some(signer), Some(addr)) = (proposer_signer, proposer_address) {
         handler = handler.with_proposer(signer, addr);
     }
+    if let Some((peer_id, p2p_listen)) = admin_p2p_context {
+        handler = handler.with_admin_context(peer_id, p2p_listen);
+    }
+    // Populate the RPC listen address from the configured public address.
+    // (The actual bound port may differ when using ephmeral port 0, but for
+    // admin_nodeInfo the configured address is what operators care about.)
+    handler = handler.with_admin_rpc_addr(config.listen_addr.to_string());
 
     // Build CORS middleware layer.
     let cors = if let Some(ref origins) = config.cors_allowed_origins {
@@ -226,19 +242,28 @@ pub async fn start_rpc_server<S: KvStore + 'static>(
 
     // Determine the actual bind address for jsonrpsee:
     // - With TLS: bind on loopback ephemeral port; TLS proxy fronts the public addr.
+    //   ws_addr is ignored when TLS is active — only one TLS proxy is started
+    //   (for `listen_addr`). Splitting HTTP+WS across two ports with TLS would
+    //   require a second proxy; operators should use single-port mode with TLS.
     // - Without TLS: bind directly on config.listen_addr.
     let internal_http = if tls_cfg.is_some() {
         SocketAddr::from(([127, 0, 0, 1], 0))
     } else {
         config.listen_addr
     };
-    let internal_ws = config.ws_addr.map(|ws| {
-        if tls_cfg.is_some() {
-            SocketAddr::from(([127, 0, 0, 1], 0))
-        } else {
-            ws
+    // When TLS is active, force single-port mode so the TLS proxy covers all
+    // traffic. A dedicated ws_addr would be unprotected (no TLS proxy for it).
+    let internal_ws = if tls_cfg.is_some() {
+        if config.ws_addr.is_some() {
+            warn!(
+                "ws_addr is ignored when TLS is enabled; all traffic (HTTP+WS) is served on \
+                 listen_addr through the TLS proxy. Use a single listen_addr for TLS mode."
+            );
         }
-    });
+        None
+    } else {
+        config.ws_addr
+    };
 
     // Build middleware stack:
     //   1. CORS
@@ -275,6 +300,22 @@ pub async fn start_rpc_server<S: KvStore + 'static>(
         module.merge(TraceApiServer::into_rpc(handler.clone()))?;
     }
     if ns.iter().any(|n| n == "admin") {
+        // Safety: refuse to expose the admin namespace on non-loopback listeners
+        // unless an API key is configured. The admin namespace provides
+        // operator-only methods and must not be accessible without authentication
+        // from remote hosts.
+        let exposed_publicly = !config.listen_addr.ip().is_loopback()
+            || config
+                .ws_addr
+                .map(|a| !a.ip().is_loopback())
+                .unwrap_or(false);
+        if exposed_publicly && config.api_key.is_none() {
+            return Err(
+                "refusing to expose 'admin' RPC namespace on a non-loopback listener without \
+                 API-key protection. Set --rpc-api-key or bind RPC to 127.0.0.1/::1."
+                    .into(),
+            );
+        }
         module.merge(AdminApiServer::into_rpc(handler))?;
     }
 

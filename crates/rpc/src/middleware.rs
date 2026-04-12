@@ -12,10 +12,19 @@ use parking_lot::Mutex;
 use tower::{Layer, Service};
 
 // ---------------------------------------------------------------------------
-// RateLimitLayer — fixed-window per-server request rate limiter
+// RateLimitLayer — server-wide fixed-window request rate limiter
 // ---------------------------------------------------------------------------
 
-/// Shared state for the global fixed-window rate limiter.
+/// Shared state for the server-wide fixed-window rate limiter.
+/// All connections share a single counter; this prevents a single burst of
+/// global traffic from overloading the server.
+///
+/// Note: this is a **server-wide** (not per-IP) limiter. All clients share
+/// the same request budget. A per-IP limiter would require extracting the
+/// remote address from the connection-level context (e.g. via a
+/// `ConnectInfo` extension), which is not available at the HTTP middleware
+/// layer. Operators who need per-IP limiting should use a reverse proxy
+/// (e.g. nginx/HAProxy) in front of the RPC server.
 struct RateLimiterState {
     max_per_sec: u32,
     window_start: Instant,
@@ -118,9 +127,13 @@ where
 // ApiKeyLayer — Bearer token authentication
 // ---------------------------------------------------------------------------
 
-/// Tower layer that enforces `Authorization: Bearer <key>` on all requests.
+/// Tower layer that enforces `Authorization: Bearer <key>` on **all** requests.
 /// When `api_key` is `None`, the layer is a no-op pass-through.
 /// Clone-compatible: holds the key in an `Arc<str>`.
+///
+/// Note: this layer authenticates every HTTP request regardless of the
+/// JSON-RPC method name. All methods (reads and writes) require the Bearer
+/// token when an API key is configured.
 #[derive(Clone)]
 pub struct ApiKeyLayer {
     api_key: Option<Arc<str>>,

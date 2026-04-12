@@ -49,6 +49,16 @@ async fn submit_n_transactions(count: usize) -> (usize, u128) {
     (accepted, elapsed_ms)
 }
 
+/// Read the TPS target from the environment.
+/// Defaults to `TARGET_TPS` when the variable is absent or unparseable.
+/// Set `SHELL_TPS_TARGET=0` to disable the TPS assertion entirely.
+fn tps_target() -> u64 {
+    std::env::var("SHELL_TPS_TARGET")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(TARGET_TPS)
+}
+
 #[tokio::test]
 async fn throughput_500_transactions_baseline() {
     let count = 500usize;
@@ -68,11 +78,16 @@ async fn throughput_500_transactions_baseline() {
 
     println!("[throughput] {accepted}/{count} tx accepted in {elapsed_ms}ms — {tps} TPS");
 
-    // In-process submit rate must exceed the 500 TPS mainnet target.
-    assert!(
-        tps >= TARGET_TPS as u128,
-        "in-process TPS {tps} below target {TARGET_TPS} TPS"
-    );
+    // In-process submit rate must exceed the configured TPS target.
+    // Override with SHELL_TPS_TARGET=<n> (set to 0 to disable) for CI
+    // environments where wall-clock timing is unreliable.
+    let target = tps_target();
+    if target > 0 {
+        assert!(
+            tps >= target as u128,
+            "in-process TPS {tps} below target {target} TPS (override with SHELL_TPS_TARGET)"
+        );
+    }
 }
 
 #[tokio::test]

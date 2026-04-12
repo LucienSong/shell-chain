@@ -7,9 +7,9 @@ All notable changes to this project will be documented in this file.
 ### Added
 
 **Batch 1 — Production Security**
-- RPC TLS termination via `tokio-rustls` (`--rpc-tls-cert` / `--rpc-tls-key` / `--rpc-tls-self-signed`)
-- Per-IP rate limiting middleware with token-bucket burst tolerance (`--rpc-rate-limit`, `--rpc-rate-limit-whitelist`)
-- API Key authentication for write methods (`--rpc-api-key`, `--rpc-auth-reads`)
+- RPC TLS termination via `tokio-rustls` (`--rpc-tls-cert` / `--rpc-tls-key`)
+- Server-wide request rate limiting middleware (`--rpc-rate-limit`)
+- API key authentication for all methods (`--rpc-api-key`)
 - P2P message signature verification for GossipSub block/tx broadcasts
 
 **Batch 2 — Developer Ecosystem**

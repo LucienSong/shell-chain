@@ -2257,6 +2257,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
 dependencies = [
  "allocator-api2",
+ "equivalent",
  "foldhash 0.1.5",
 ]
 
@@ -3646,6 +3647,15 @@ name = "log"
 version = "0.4.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
+
+[[package]]
+name = "lru"
+version = "0.12.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "234cf4f4a04dc1f57e24b96cc0cd600cf2af460d4161ac5ecdd0af8e1f3b2a38"
+dependencies = [
+ "hashbrown 0.15.5",
+]
 
 [[package]]
 name = "lru-slab"
@@ -5540,8 +5550,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "shell-bench"
+version = "0.13.0"
+dependencies = [
+ "criterion",
+ "shell-consensus",
+ "shell-core",
+ "shell-crypto",
+ "shell-primitives",
+ "shell-storage",
+]
+
+[[package]]
 name = "shell-cli"
-version = "0.6.0"
+version = "0.13.0"
 dependencies = [
  "alloy-rlp",
  "clap",
@@ -5570,7 +5592,7 @@ dependencies = [
 
 [[package]]
 name = "shell-consensus"
-version = "0.6.0"
+version = "0.13.0"
 dependencies = [
  "async-trait",
  "serde",
@@ -5582,7 +5604,7 @@ dependencies = [
 
 [[package]]
 name = "shell-core"
-version = "0.6.0"
+version = "0.13.0"
 dependencies = [
  "alloy-rlp",
  "criterion",
@@ -5595,7 +5617,7 @@ dependencies = [
 
 [[package]]
 name = "shell-crypto"
-version = "0.6.0"
+version = "0.13.0"
 dependencies = [
  "alloy-rlp",
  "criterion",
@@ -5614,7 +5636,7 @@ dependencies = [
 
 [[package]]
 name = "shell-e2e-tests"
-version = "0.6.0"
+version = "0.13.0"
 dependencies = [
  "hex",
  "parking_lot",
@@ -5631,7 +5653,7 @@ dependencies = [
 
 [[package]]
 name = "shell-evm"
-version = "0.6.0"
+version = "0.13.0"
 dependencies = [
  "alloy-primitives",
  "alloy-rlp",
@@ -5650,7 +5672,7 @@ dependencies = [
 
 [[package]]
 name = "shell-genesis"
-version = "0.6.0"
+version = "0.13.0"
 dependencies = [
  "hex",
  "serde",
@@ -5664,7 +5686,7 @@ dependencies = [
 
 [[package]]
 name = "shell-keystore"
-version = "0.6.0"
+version = "0.13.0"
 dependencies = [
  "argon2",
  "chacha20poly1305",
@@ -5680,7 +5702,7 @@ dependencies = [
 
 [[package]]
 name = "shell-mempool"
-version = "0.6.0"
+version = "0.13.0"
 dependencies = [
  "parking_lot",
  "serde_json",
@@ -5694,7 +5716,7 @@ dependencies = [
 
 [[package]]
 name = "shell-network"
-version = "0.6.0"
+version = "0.13.0"
 dependencies = [
  "async-trait",
  "blake3",
@@ -5712,7 +5734,7 @@ dependencies = [
 
 [[package]]
 name = "shell-node"
-version = "0.6.0"
+version = "0.13.0"
 dependencies = [
  "alloy-rlp",
  "http-body-util",
@@ -5738,7 +5760,7 @@ dependencies = [
 
 [[package]]
 name = "shell-primitives"
-version = "0.6.0"
+version = "0.13.0"
 dependencies = [
  "alloy-primitives",
  "alloy-rlp",
@@ -5753,7 +5775,7 @@ dependencies = [
 
 [[package]]
 name = "shell-rpc"
-version = "0.6.0"
+version = "0.13.0"
 dependencies = [
  "alloy-primitives",
  "alloy-rlp",
@@ -5786,7 +5808,7 @@ dependencies = [
 
 [[package]]
 name = "shell-storage"
-version = "0.6.0"
+version = "0.13.0"
 dependencies = [
  "alloy-rlp",
  "base64",
@@ -5794,6 +5816,8 @@ dependencies = [
  "eth_trie",
  "ethereum-types",
  "hex",
+ "lru",
+ "parking_lot",
  "rocksdb",
  "serde",
  "serde_json",

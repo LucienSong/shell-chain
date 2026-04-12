@@ -2,6 +2,19 @@
 pragma solidity ^0.8.30;
 
 /**
+ * @dev Interface for the ERC-721 token receiver hook required by `safeTransferFrom`.
+ *      Contracts that wish to receive ERC-721 tokens must implement this interface.
+ */
+interface IERC721Receiver {
+    function onERC721Received(
+        address operator,
+        address from,
+        uint256 tokenId,
+        bytes calldata data
+    ) external returns (bytes4);
+}
+
+/**
  * @title ShellERC721
  * @notice Reference PQ-AA-compatible ERC-721 NFT for Shell Chain.
  *
@@ -31,6 +44,7 @@ contract ShellERC721 {
     error TokenAlreadyExists(uint256 tokenId);
     error ZeroAddress();
     error Unauthorized();
+    error ERC721ReceiverCheckFailed(address to);
 
     modifier onlyContractOwner() {
         if (msg.sender != contractOwner) revert Unauthorized();
@@ -102,13 +116,32 @@ contract ShellERC721 {
     }
 
     function safeTransferFrom(address from, address to, uint256 tokenId) external {
-        transferFrom(from, to, tokenId);
-        // Shell Chain does not have EOAs; all accounts are contract-like AA accounts,
-        // so onERC721Received checks are omitted in this reference implementation.
+        safeTransferFrom(from, to, tokenId, "");
     }
 
-    function safeTransferFrom(address from, address to, uint256 tokenId, bytes calldata) external {
+    function safeTransferFrom(address from, address to, uint256 tokenId, bytes calldata data) external {
         transferFrom(from, to, tokenId);
+        _checkOnERC721Received(msg.sender, from, to, tokenId, data);
+    }
+
+    /// @dev Calls `onERC721Received` on `to` if it is a contract, and reverts
+    ///      if the return value is not the expected magic selector.
+    function _checkOnERC721Received(
+        address operator,
+        address from,
+        address to,
+        uint256 tokenId,
+        bytes memory data
+    ) private {
+        if (to.code.length > 0) {
+            try IERC721Receiver(to).onERC721Received(operator, from, tokenId, data) returns (bytes4 retval) {
+                if (retval != IERC721Receiver.onERC721Received.selector) {
+                    revert ERC721ReceiverCheckFailed(to);
+                }
+            } catch {
+                revert ERC721ReceiverCheckFailed(to);
+            }
+        }
     }
 
     // ─── Minting / burning (onlyContractOwner) ──────────────────────────────

@@ -65,10 +65,14 @@ pub struct RpcHandler<S: KvStore + 'static> {
     peer_count: Arc<std::sync::atomic::AtomicUsize>,
     /// Optional runtime dev-control handle for Hardhat/Foundry compatibility.
     dev_control: Option<DynDevRpcControl>,
-    /// Admin context: RPC listen address and local P2P identity string.
+    /// Admin context: RPC listen address and local P2P identity strings.
     /// Used by `admin_nodeInfo` and `admin_peers`.
+    /// `admin_rpc_addr`   — HTTP/RPC listen address (e.g. "127.0.0.1:8545").
+    /// `admin_peer_id`    — libp2p PeerId (base58).
+    /// `admin_p2p_listen` — P2P multiaddr the node listens on.
     admin_rpc_addr: String,
-    admin_p2p_addr: String,
+    admin_peer_id: String,
+    admin_p2p_listen: String,
 }
 
 impl<S: KvStore + 'static> Clone for RpcHandler<S> {
@@ -93,7 +97,8 @@ impl<S: KvStore + 'static> Clone for RpcHandler<S> {
             peer_count: Arc::clone(&self.peer_count),
             dev_control: self.dev_control.clone(),
             admin_rpc_addr: self.admin_rpc_addr.clone(),
-            admin_p2p_addr: self.admin_p2p_addr.clone(),
+            admin_peer_id: self.admin_peer_id.clone(),
+            admin_p2p_listen: self.admin_p2p_listen.clone(),
         }
     }
 }
@@ -134,7 +139,8 @@ impl<S: KvStore + 'static> RpcHandler<S> {
             peer_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             dev_control: None,
             admin_rpc_addr: String::new(),
-            admin_p2p_addr: String::new(),
+            admin_peer_id: String::new(),
+            admin_p2p_listen: String::new(),
         };
         FilterRegistry::start_cleanup(Arc::clone(&handler.filter_registry));
         handler
@@ -160,11 +166,23 @@ impl<S: KvStore + 'static> RpcHandler<S> {
         self
     }
 
-    /// Set the admin context (RPC listen address and P2P identity) for
-    /// `admin_nodeInfo` and `admin_peers`.
-    pub fn with_admin_context(mut self, rpc_addr: String, p2p_addr: String) -> Self {
+    /// Set the admin context for `admin_nodeInfo` and `admin_peers`.
+    ///
+    /// - `peer_id`      — libp2p PeerId in base58 format.
+    /// - `p2p_listen`   — P2P multiaddr the node is listening on.
+    ///
+    /// The RPC listen address is populated separately from the bound server
+    /// address after `start_rpc_server` returns.
+    pub fn with_admin_context(mut self, peer_id: String, p2p_listen: String) -> Self {
+        self.admin_peer_id = peer_id;
+        self.admin_p2p_listen = p2p_listen;
+        self
+    }
+
+    /// Set the RPC listen address used in `admin_nodeInfo` responses.
+    /// Called internally by `start_rpc_server` after the address is bound.
+    pub fn with_admin_rpc_addr(mut self, rpc_addr: String) -> Self {
         self.admin_rpc_addr = rpc_addr;
-        self.admin_p2p_addr = p2p_addr;
         self
     }
 
@@ -2118,8 +2136,8 @@ impl<S: KvStore + 'static> AdminApiServer for RpcHandler<S> {
 
         Ok(NodeInfo {
             name,
-            id: self.admin_p2p_addr.clone(),
-            listen_addr: self.admin_p2p_addr.clone(),
+            id: self.admin_peer_id.clone(),
+            listen_addr: self.admin_p2p_listen.clone(),
             rpc_addr: self.admin_rpc_addr.clone(),
             chain_id: self.chain_id,
             uptime_seconds,

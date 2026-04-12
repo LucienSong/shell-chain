@@ -8,8 +8,7 @@ pragma solidity ^0.8.30;
  * Key differences from standard ERC-20:
  *  - No constructor msg.sender assumption; owner set via _initialize().
  *  - Emits AccountManager-compatible events for on-chain AA tracing.
- *  - transfer/transferFrom accept PQ bech32m addresses via string overloads
- *    (optional; hex addresses still work via the standard interface).
+ *  - Exposes the standard ERC-20 address-typed transfer interface.
  */
 contract ShellERC20 {
     string public name;
