@@ -210,7 +210,7 @@ pub async fn start_rpc_server<S: KvStore + 'static>(
         handler = handler.with_admin_context(peer_id, p2p_listen);
     }
     // Populate the RPC listen address from the configured public address.
-    // (The actual bound port may differ when using ephmeral port 0, but for
+    // (The actual bound port may differ when using ephemeral port 0, but for
     // admin_nodeInfo the configured address is what operators care about.)
     handler = handler.with_admin_rpc_addr(config.listen_addr.to_string());
 
