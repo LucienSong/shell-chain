@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use shell_core::{Block, BlockHeader};
-use shell_crypto::{PQSignature, SignatureType, Signer, Verifier};
+use shell_crypto::{Signer, Verifier};
 use shell_primitives::Address;
 
 use crate::poa::PoaEngine;
@@ -188,6 +188,7 @@ impl ConsensusEngine for WPoaEngine {
 mod tests {
     use super::*;
     use crate::poa::PoaConfig;
+    use shell_crypto::{PQSignature, SignatureType};
 
     fn addr(n: u8) -> Address {
         Address::from([n; 20])

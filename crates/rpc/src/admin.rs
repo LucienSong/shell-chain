@@ -32,6 +32,8 @@ pub struct NodeInfo {
     pub block_height: u64,
     /// Number of pending transactions in the mempool.
     pub tx_pool_size: u64,
+    /// Number of currently connected peers.
+    pub peer_count: usize,
 }
 
 /// Snapshot of a single connected peer.

@@ -14,8 +14,7 @@ use std::time::Instant;
 use shell_consensus::{
     detect_double_sign, detect_offline, SlashingConfig, ValidatorSet, ValidatorSetConfig,
 };
-use shell_core::{BlockHeader, Transaction};
-use shell_crypto::{DilithiumSigner, Signer};
+use shell_core::BlockHeader;
 use shell_primitives::{Address, Bytes, ShellHash, U256};
 use shell_storage::{MemoryDb, WorldState};
 
@@ -255,7 +254,7 @@ fn world_state_missing_account_cached_as_none() {
 
 #[tokio::test]
 async fn mempool_higher_priority_fee_ordered_first() {
-    use shell_rpc::ShellApiServer;
+    use shell_rpc::api::ShellApiServer;
 
     let env = setup();
     let alice = make_funded_account(&env);
@@ -274,10 +273,12 @@ async fn mempool_higher_priority_fee_ordered_first() {
     };
     let tx_high_signed = sign_tx(&bob.signer, bob.address, tx_high);
 
-    ShellApiServer::send_transaction(&env.handler, tx_low_signed)
+    env.handler
+        .send_transaction(tx_low_signed)
         .await
         .expect("low-fee tx accepted");
-    ShellApiServer::send_transaction(&env.handler, tx_high_signed.clone())
+    env.handler
+        .send_transaction(tx_high_signed.clone())
         .await
         .expect("high-fee tx accepted");
 
@@ -291,7 +292,7 @@ async fn mempool_higher_priority_fee_ordered_first() {
 
 #[tokio::test]
 async fn mempool_replacement_requires_fee_bump() {
-    use shell_rpc::ShellApiServer;
+    use shell_rpc::api::ShellApiServer;
 
     let env = setup();
     let alice = make_funded_account(&env);
@@ -300,7 +301,8 @@ async fn mempool_replacement_requires_fee_bump() {
     // Original tx.
     let tx_orig = make_transfer(TEST_CHAIN_ID, 0, recipient, U256::from(1u64));
     let tx_orig_signed = sign_tx(&alice.signer, alice.address, tx_orig.clone());
-    ShellApiServer::send_transaction(&env.handler, tx_orig_signed)
+    env.handler
+        .send_transaction(tx_orig_signed)
         .await
         .expect("original tx accepted");
     assert_eq!(env.tx_pool.len(), 1);
@@ -311,7 +313,7 @@ async fn mempool_replacement_requires_fee_bump() {
     tx_insufficient.max_priority_fee_per_gas =
         (tx_orig.max_priority_fee_per_gas as f64 * 1.05) as u64;
     let tx_insuff_signed = sign_tx(&alice.signer, alice.address, tx_insufficient);
-    let result = ShellApiServer::send_transaction(&env.handler, tx_insuff_signed).await;
+    let result = env.handler.send_transaction(tx_insuff_signed).await;
     assert!(
         result.is_err(),
         "replacement with <10% bump must be rejected"
@@ -323,7 +325,8 @@ async fn mempool_replacement_requires_fee_bump() {
     tx_sufficient.max_priority_fee_per_gas =
         (tx_orig.max_priority_fee_per_gas as f64 * 1.10) as u64 + 1;
     let tx_suff_signed = sign_tx(&alice.signer, alice.address, tx_sufficient);
-    ShellApiServer::send_transaction(&env.handler, tx_suff_signed)
+    env.handler
+        .send_transaction(tx_suff_signed)
         .await
         .expect("replacement with >=10% bump must be accepted");
     assert_eq!(env.tx_pool.len(), 1, "replacement must not grow the pool");

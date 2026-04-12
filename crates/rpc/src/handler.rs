@@ -2143,6 +2143,7 @@ impl<S: KvStore + 'static> AdminApiServer for RpcHandler<S> {
             uptime_seconds,
             block_height,
             tx_pool_size,
+            peer_count,
         })
     }
 
