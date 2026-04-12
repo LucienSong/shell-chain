@@ -34,8 +34,10 @@ async fn submit_n_transactions(count: usize) -> (usize, u128) {
     let start = Instant::now();
 
     let mut accepted = 0usize;
-    for sender in &senders {
-        let tx = make_transfer(TEST_CHAIN_ID, 0, recipient, U256::from(1u64));
+    for (i, sender) in senders.iter().enumerate() {
+        // Use a unique value per sender to avoid tx-hash collisions (the pool
+        // deduplicates by tx hash which covers only unsigned fields).
+        let tx = make_transfer(TEST_CHAIN_ID, 0, recipient, U256::from(1u64 + i as u64));
         let signed = sign_tx(&sender.signer, sender.address, tx);
         if env.handler.send_transaction(signed).await.is_ok() {
             accepted += 1;
@@ -99,9 +101,10 @@ async fn throughput_pool_size_respected_under_load() {
     // Submit 200 transactions. Default pool size is 4096, so all should fit.
     let count = 200usize;
     let mut accepted = 0usize;
-    for _ in 0..count {
+    for i in 0..count {
         let sender = make_funded_account(&env);
-        let tx = make_transfer(TEST_CHAIN_ID, 0, recipient, U256::from(1u64));
+        // Unique value per iteration to avoid tx-hash collisions.
+        let tx = make_transfer(TEST_CHAIN_ID, 0, recipient, U256::from(1u64 + i as u64));
         let signed = sign_tx(&sender.signer, sender.address, tx);
         if env.handler.send_transaction(signed).await.is_ok() {
             accepted += 1;
