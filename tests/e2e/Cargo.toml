@@ -1,6 +1,6 @@
 [package]
 name = "shell-e2e-tests"
-version = "0.6.0"
+version = "0.13.0"
 edition = "2021"
 publish = false
 
@@ -19,6 +19,14 @@ path = "stress_test.rs"
 [[test]]
 name = "sync_test"
 path = "sync_test.rs"
+
+[[test]]
+name = "wpoa_regression"
+path = "wpoa_regression.rs"
+
+[[test]]
+name = "throughput_test"
+path = "throughput_test.rs"
 
 [dependencies]
 shell-primitives = { path = "../../crates/primitives" }

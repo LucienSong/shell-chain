@@ -29,8 +29,11 @@ AA_ADDR_1="pq1qyqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqy0vusna"
 AA_ADDR_2="pq1qyqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqg7j66z6"
 AA_ADDR_3="pq1qyqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqv3ccudq"
 
-TX_COUNT=500
-DURATION=30
+# M10 production target: 500 TPS for 1 hour (1_800_000 transactions).
+# For CI/smoke runs use: TX_COUNT=500 DURATION=30
+# For production soak use: TX_COUNT=1800000 DURATION=3600
+TX_COUNT=${TX_COUNT:-500}
+DURATION=${DURATION:-30}
 LATENCY_FILE="$PROJECT_DIR/tests/e2e/.load-test-latencies.txt"
 
 rpc() {

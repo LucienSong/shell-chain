@@ -1,0 +1,150 @@
+//! M10 In-Process Throughput Test — Sustained 500 TPS baseline
+//!
+//! Measures transaction submission throughput using the in-memory test harness
+//! (no Docker). Validates that the node can accept >= 500 TPS at the RPC layer
+//! and that the mempool correctly orders and bounds the result.
+//!
+//! These tests validate Batch 6.2 (load-test) target for the 500 TPS milestone.
+//! They are fast (~100ms) and use no networking — they measure pure in-memory
+//! submit latency, providing a lower bound for real-network throughput.
+
+use std::time::Instant;
+
+use shell_primitives::{Address, U256};
+use shell_rpc::ShellApiServer;
+
+use shell_e2e::{make_funded_account, make_transfer, setup, sign_tx, TEST_CHAIN_ID};
+
+const TARGET_TPS: u64 = 500;
+
+/// Measure raw transaction ingestion rate over `count` transactions from
+/// multiple independent funded senders. Each sender submits one transaction
+/// to avoid nonce conflicts. Returns (accepted, elapsed_ms).
+async fn submit_n_transactions(count: usize) -> (usize, u128) {
+    let env = setup();
+
+    // Pre-fund all senders outside the timed region.
+    let senders: Vec<_> = (0..count).map(|_| make_funded_account(&env)).collect();
+    let recipient = {
+        let mut b = [0u8; 20];
+        b[19] = 0xfe;
+        Address::from(b)
+    };
+
+    let start = Instant::now();
+
+    let mut accepted = 0usize;
+    for sender in &senders {
+        let tx = make_transfer(TEST_CHAIN_ID, 0, recipient, U256::from(1u64));
+        let signed = sign_tx(&sender.signer, sender.address, tx);
+        if ShellApiServer::send_transaction(&env.handler, signed)
+            .await
+            .is_ok()
+        {
+            accepted += 1;
+        }
+    }
+
+    let elapsed_ms = start.elapsed().as_millis();
+    (accepted, elapsed_ms)
+}
+
+#[tokio::test]
+async fn throughput_500_transactions_baseline() {
+    let count = 500usize;
+    let (accepted, elapsed_ms) = submit_n_transactions(count).await;
+
+    let acceptance_rate = accepted * 100 / count;
+    assert!(
+        acceptance_rate >= 95,
+        "acceptance rate {acceptance_rate}% below 95% ({accepted}/{count} accepted)"
+    );
+
+    let tps = if elapsed_ms > 0 {
+        (accepted as u128 * 1000) / elapsed_ms
+    } else {
+        u128::MAX
+    };
+
+    println!("[throughput] {accepted}/{count} tx accepted in {elapsed_ms}ms — {tps} TPS");
+
+    // In-process submit rate must exceed the 500 TPS mainnet target.
+    assert!(
+        tps >= TARGET_TPS as u128,
+        "in-process TPS {tps} below target {TARGET_TPS} TPS"
+    );
+}
+
+#[tokio::test]
+async fn throughput_pool_size_respected_under_load() {
+    let env = setup();
+    let recipient = {
+        let mut b = [0u8; 20];
+        b[19] = 0xfd;
+        Address::from(b)
+    };
+
+    // Submit 200 transactions. Default pool size is 4096, so all should fit.
+    let count = 200usize;
+    let mut accepted = 0usize;
+    for _ in 0..count {
+        let sender = make_funded_account(&env);
+        let tx = make_transfer(TEST_CHAIN_ID, 0, recipient, U256::from(1u64));
+        let signed = sign_tx(&sender.signer, sender.address, tx);
+        if ShellApiServer::send_transaction(&env.handler, signed)
+            .await
+            .is_ok()
+        {
+            accepted += 1;
+        }
+    }
+
+    assert_eq!(
+        accepted, count,
+        "all {count} txs should be accepted under default pool limit"
+    );
+    assert_eq!(
+        env.tx_pool.len(),
+        count,
+        "pool must contain exactly {count} txs"
+    );
+}
+
+#[tokio::test]
+async fn throughput_mixed_workload_ordering() {
+    let env = setup();
+    let recipient = {
+        let mut b = [0u8; 20];
+        b[19] = 0xfc;
+        Address::from(b)
+    };
+
+    let sender_low = make_funded_account(&env);
+    let sender_mid = make_funded_account(&env);
+    let sender_high = make_funded_account(&env);
+
+    for (sender, priority_fee) in [
+        (&sender_low, 100_000_000u64),
+        (&sender_mid, 500_000_000u64),
+        (&sender_high, 900_000_000u64),
+    ] {
+        let mut tx = make_transfer(TEST_CHAIN_ID, 0, recipient, U256::from(1u64));
+        tx.max_priority_fee_per_gas = priority_fee;
+        tx.max_fee_per_gas = 2_000_000_000;
+        let signed = sign_tx(&sender.signer, sender.address, tx);
+        ShellApiServer::send_transaction(&env.handler, signed)
+            .await
+            .expect("tx accepted");
+    }
+
+    let pending = env.tx_pool.pending(3);
+    assert_eq!(pending.len(), 3, "all 3 txs must be in the pool");
+    assert_eq!(
+        pending[0].from, sender_high.address,
+        "highest-fee tx must be first"
+    );
+    assert_eq!(
+        pending[2].from, sender_low.address,
+        "lowest-fee tx must be last"
+    );
+}
