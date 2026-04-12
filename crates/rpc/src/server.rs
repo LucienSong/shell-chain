@@ -140,6 +140,7 @@ pub struct RpcServerHandle {
 /// `admin_p2p_context` is an optional tuple of `(peer_id, p2p_listen_addr)`:
 ///   - `peer_id` is the base58-encoded libp2p PeerId.
 ///   - `p2p_listen_addr` is the multiaddr the P2P layer listens on.
+///
 /// Both are surfaced by `admin_nodeInfo`. Pass `None` if unavailable.
 ///
 /// Returns an [`RpcServerHandle`] for graceful shutdown.
