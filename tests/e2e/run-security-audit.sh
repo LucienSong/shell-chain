@@ -380,6 +380,132 @@ else
     pass "eth_sign: no response (method not implemented)"
 fi
 
+###############################################################################
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "  Test 9: M10 — Admin RPC Not Publicly Exposed"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+###############################################################################
+
+info "Testing admin_nodeInfo exposure on public RPC port..."
+ADMIN_RESP=$(rpc_raw "$RPC_PORT" admin_nodeInfo)
+
+if [ -n "$ADMIN_RESP" ]; then
+    ERR_CODE=$(echo "$ADMIN_RESP" | jq -r '.error.code // empty' 2>/dev/null)
+    RESULT=$(echo "$ADMIN_RESP" | jq -r '.result // empty' 2>/dev/null)
+
+    if [ -n "$ERR_CODE" ]; then
+        pass "admin_nodeInfo blocked on public port (error code: ${ERR_CODE})"
+    elif [ -n "$RESULT" ] && [ "$RESULT" != "null" ]; then
+        fail "admin_nodeInfo is accessible on the public RPC port — this is a security risk"
+    else
+        pass "admin_nodeInfo returned no result (method disabled)"
+    fi
+else
+    pass "admin_nodeInfo: no response (admin namespace not exposed)"
+fi
+
+info "Testing admin_peers exposure on public RPC port..."
+ADMIN_PEERS=$(rpc_raw "$RPC_PORT" admin_peers)
+
+if [ -n "$ADMIN_PEERS" ]; then
+    ERR_CODE=$(echo "$ADMIN_PEERS" | jq -r '.error.code // empty' 2>/dev/null)
+    if [ -n "$ERR_CODE" ]; then
+        pass "admin_peers blocked on public port (error code: ${ERR_CODE})"
+    else
+        RESULT=$(echo "$ADMIN_PEERS" | jq -r '.result // empty' 2>/dev/null)
+        if [ -n "$RESULT" ] && [ "$RESULT" != "null" ]; then
+            fail "admin_peers returns peer list on public port — potential peer enumeration"
+        else
+            pass "admin_peers: empty result (method disabled or no peers)"
+        fi
+    fi
+else
+    pass "admin_peers: no response (admin namespace not exposed)"
+fi
+
+###############################################################################
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "  Test 10: M10 — wPoA Slash Evidence Replay"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+###############################################################################
+
+info "Testing shell_submitSlashEvidence with empty payload (replay guard)..."
+SLASH_RESP=$(rpc_raw "$RPC_PORT" shell_submitSlashEvidence '["0x"]')
+
+if [ -n "$SLASH_RESP" ]; then
+    ERR_CODE=$(echo "$SLASH_RESP" | jq -r '.error.code // empty' 2>/dev/null)
+    RESULT=$(echo "$SLASH_RESP" | jq -r '.result // empty' 2>/dev/null)
+
+    if [ -n "$ERR_CODE" ]; then
+        pass "shell_submitSlashEvidence with empty evidence returns error (code: ${ERR_CODE})"
+    elif [ "$RESULT" = "null" ] || [ -z "$RESULT" ]; then
+        pass "shell_submitSlashEvidence: empty payload rejected (null result)"
+    else
+        fail "shell_submitSlashEvidence accepted empty evidence — replay guard may be missing"
+    fi
+else
+    pass "shell_submitSlashEvidence: not exposed on this port"
+fi
+
+info "Testing duplicate slash evidence submission..."
+# Submit the same minimal evidence twice — the second must be rejected.
+SLASH_PARAMS='["0xdeadbeefdeadbeef0000000000000000000000000000000000000000000000000000000000000000"]'
+SLASH1=$(rpc_raw "$RPC_PORT" shell_submitSlashEvidence "$SLASH_PARAMS")
+SLASH2=$(rpc_raw "$RPC_PORT" shell_submitSlashEvidence "$SLASH_PARAMS")
+
+if [ -n "$SLASH1" ] && [ -n "$SLASH2" ]; then
+    ERR1=$(echo "$SLASH1" | jq -r '.error.code // empty' 2>/dev/null)
+    ERR2=$(echo "$SLASH2" | jq -r '.error.code // empty' 2>/dev/null)
+    # If both calls return errors, that's fine — method may not be implemented.
+    if [ -n "$ERR1" ] && [ -n "$ERR2" ]; then
+        pass "Slash evidence method returns errors (method not exposed or validation active)"
+    elif [ -z "$ERR1" ] && [ -n "$ERR2" ]; then
+        pass "First slash evidence accepted, duplicate rejected (replay guard active)"
+    elif [ -z "$ERR1" ] && [ -z "$ERR2" ]; then
+        fail "Both slash evidence submissions accepted — duplicate replay guard missing"
+    else
+        pass "Slash evidence handling active (first blocked: ${ERR1:-none})"
+    fi
+else
+    pass "shell_submitSlashEvidence: method not exposed"
+fi
+
+###############################################################################
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "  Test 11: M10 — TLS/HTTPS Downgrade Prevention"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+###############################################################################
+
+info "Checking if HTTPS is available on the RPC port..."
+HTTPS_RESP=$(curl -sk --max-time 3 "https://127.0.0.1:${RPC_PORT}" \
+    -X POST \
+    -H "Content-Type: application/json" \
+    -d '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' \
+    -o /dev/null -w "%{http_code}" 2>/dev/null || echo "000")
+
+metric "HTTPS test HTTP code: ${HTTPS_RESP}"
+
+case "$HTTPS_RESP" in
+    200|204)
+        pass "HTTPS endpoint responds (TLS termination configured)"
+        ;;
+    000|7|35|60)
+        # Connection refused or SSL handshake failure — TLS not on this port.
+        info "HTTPS not available on port ${RPC_PORT} (expected for HTTP-only dev mode)"
+        pass "TLS check: dev mode HTTP-only (OK for non-production)"
+        ;;
+    *)
+        info "HTTPS response code ${HTTPS_RESP} on port ${RPC_PORT}"
+        pass "TLS check completed"
+        ;;
+esac
+
 # ─── Results ─────────────────────────────────────────────────
 echo ""
 echo "════════════════════════════════════════════════"

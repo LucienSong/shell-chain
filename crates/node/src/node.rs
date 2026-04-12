@@ -470,6 +470,7 @@ impl<S: KvStore + 'static> Node<S> {
             } else {
                 None
             },
+            None, // admin_p2p_context: wire peer_id + p2p_listen when P2P layer is integrated
         )
         .await
         .map_err(|e| NodeError::Startup(format!("RPC: {e}")))?;

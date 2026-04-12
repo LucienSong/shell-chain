@@ -1,6 +1,7 @@
 //! CLI command implementations.
 
 pub mod account;
+mod backup;
 mod export_state;
 mod import_state;
 mod init;
@@ -9,7 +10,9 @@ mod removedb;
 pub mod run;
 pub mod tx;
 mod version;
+pub mod wallet;
 
+pub use backup::{create_backup, restore_backup};
 pub use export_state::export_state;
 pub use import_state::import_state;
 pub use init::init;

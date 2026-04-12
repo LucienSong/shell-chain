@@ -43,10 +43,21 @@ pub struct RunArgs {
     pub rpc_cors: Option<String>,
     pub rpc_rate_limit: Option<u32>,
     pub rpc_api: Option<String>,
+    pub rpc_api_key: Option<String>,
+    /// Path to a PEM-encoded TLS certificate file.
+    pub rpc_tls_cert: Option<String>,
+    /// Path to a PEM-encoded TLS private key file.
+    pub rpc_tls_key: Option<String>,
     pub unsafe_dev_exposed: bool,
     pub metrics_addr: String,
     /// Maximum seconds between blocks when mempool is empty (0 = disabled).
     pub max_idle_interval: u64,
+    /// Maximum number of pending transactions in the mempool (default: 4096).
+    pub mempool_max_size: Option<usize>,
+    /// Minimum gas-price bump required to replace a pending transaction, in percent (default: 10).
+    pub mempool_price_bump: Option<u64>,
+    /// Account LRU cache size for the world-state trie, in MiB (default: 64).
+    pub state_cache_size_mb: Option<usize>,
 }
 
 /// Maximum genesis file size: 10 MB (F-082).
@@ -434,6 +445,8 @@ async fn run_with_store<S: KvStore + 'static>(
             .with_epoch_length(epoch_length),
         mempool: MempoolConfig {
             chain_id: genesis_config.chain_id,
+            max_pool_size: args.mempool_max_size.unwrap_or(4096),
+            replacement_fee_bump_pct: args.mempool_price_bump.unwrap_or(10),
             ..MempoolConfig::default()
         },
         rpc: RpcConfig {
@@ -451,6 +464,9 @@ async fn run_with_store<S: KvStore + 'static>(
                 .unwrap_or_else(|| vec!["eth".into(), "net".into(), "web3".into(), "shell".into()]),
             allow_unsafe_dev_exposed: args.unsafe_dev_exposed,
             max_request_body_size: 5 * 1024 * 1024,
+            api_key: args.rpc_api_key.clone(),
+            tls_cert_path: args.rpc_tls_cert.clone(),
+            tls_key_path: args.rpc_tls_key.clone(),
             ..RpcConfig::default()
         },
         network: NetworkConfig::default(),
@@ -463,6 +479,7 @@ async fn run_with_store<S: KvStore + 'static>(
             listen_addr: args.metrics_addr.parse()?,
         },
         max_idle_interval_ms: args.max_idle_interval * 1000,
+        state_cache_size_mb: args.state_cache_size_mb.unwrap_or(64),
     };
 
     // Build the node (auto-detects existing state via NodeBuilder).
