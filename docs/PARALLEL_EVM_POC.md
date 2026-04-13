@@ -49,6 +49,7 @@ Current conflict reasons:
 - incomplete rw-sets can trigger a full serial fallback
 
 The scheduler also exposes a generic `execute()` helper that runs one wave at a time and uses rayon inside parallelizable waves.
+That helper is intended for **side-effect-free per-transaction jobs** whose shared-state merge happens deterministically after the wave completes.
 
 ### 4. Feature flag
 

@@ -190,6 +190,9 @@ impl ParallelScheduler {
         E: Send,
         F: Fn(&SignedTransaction) -> Result<T, E> + Sync + Send,
     {
+        // This PoC helper assumes `execute_tx` is side-effect free with respect to
+        // shared mutable state. Parallel waves may evaluate jobs concurrently and
+        // only preserve deterministic ordering in the collected return values.
         let worker_count = self.config.max_workers.max(1);
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(worker_count)
