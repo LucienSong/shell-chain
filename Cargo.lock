@@ -5659,6 +5659,7 @@ dependencies = [
  "alloy-rlp",
  "criterion",
  "hex",
+ "rayon",
  "revm",
  "serde",
  "serde_json",
