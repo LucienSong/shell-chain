@@ -197,6 +197,10 @@ fn classify_user_contract(
         rwset.add_write(sender_balance);
         rwset.add_read(recipient_balance.clone());
         rwset.add_write(recipient_balance);
+        if has_value {
+            rwset.add_read(TxAccessPath::NativeBalance(target));
+            rwset.add_write(TxAccessPath::NativeBalance(target));
+        }
         return;
     }
 
@@ -297,6 +301,23 @@ mod tests {
             token,
             owner: recipient,
         }));
+    }
+
+    #[test]
+    fn erc20_transfer_with_value_tracks_contract_native_balance() {
+        let token = Address::from([0x66; 20]);
+        let recipient = Address::from([0x77; 20]);
+        let mut data = vec![0xa9, 0x05, 0x9c, 0xbb];
+        data.extend_from_slice(&[0u8; 12]);
+        data.extend_from_slice(recipient.as_bytes());
+        data.extend_from_slice(&[0u8; 31]);
+        data.push(1);
+
+        let tx = signed_tx(Some(token), 9, data);
+        let rwset = HeuristicRwSetExtractor.extract(&tx);
+
+        assert!(rwset.reads.contains(&TxAccessPath::NativeBalance(token)));
+        assert!(rwset.writes.contains(&TxAccessPath::NativeBalance(token)));
     }
 
     #[test]

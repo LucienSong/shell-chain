@@ -148,12 +148,19 @@ impl ParallelScheduler {
 
         let mut waves: Vec<ExecutionWave> = Vec::new();
         for tx_index in 0..graph.rwsets.len() {
-            if let Some(wave) = waves.iter_mut().find(|wave| {
-                wave.tx_indices
-                    .iter()
-                    .all(|existing| !graph.has_conflict(tx_index, *existing))
-            }) {
-                wave.tx_indices.push(tx_index);
+            let can_join_last_wave = waves
+                .last()
+                .map(|wave| {
+                    wave.tx_indices
+                        .iter()
+                        .all(|existing| !graph.has_conflict(tx_index, *existing))
+                })
+                .unwrap_or(false);
+
+            if can_join_last_wave {
+                if let Some(wave) = waves.last_mut() {
+                    wave.tx_indices.push(tx_index);
+                }
             } else {
                 waves.push(ExecutionWave {
                     tx_indices: vec![tx_index],
@@ -234,6 +241,14 @@ fn detect_conflict(
         for right_path in right.reads.iter().chain(right.writes.iter()) {
             if access_paths_conflict(left_path, right_path) {
                 push_unique(&mut shared_paths, left_path.clone());
+            }
+        }
+    }
+
+    for right_path in &right.writes {
+        for left_path in left.reads.iter().chain(left.writes.iter()) {
+            if access_paths_conflict(right_path, left_path) {
+                push_unique(&mut shared_paths, right_path.clone());
             }
         }
     }
@@ -425,5 +440,50 @@ mod tests {
             .unwrap();
 
         assert_eq!(outputs, vec![1, 2]);
+    }
+
+    #[test]
+    fn scheduler_preserves_global_transaction_order_across_waves() {
+        let shared = Address::from([0x99; 20]);
+        let txs = vec![
+            signed_tx(Address::from([0x31; 20]), 1, Vec::new()),
+            signed_tx(Address::from([0x32; 20]), 2, Vec::new()),
+            signed_tx(shared, 3, Vec::new()),
+            signed_tx(shared, 4, Vec::new()),
+            signed_tx(Address::from([0x33; 20]), 5, Vec::new()),
+        ];
+        let scheduler = ParallelScheduler::new(ParallelEvmConfig {
+            enabled: true,
+            max_workers: 4,
+            ..ParallelEvmConfig::default()
+        });
+        let (_, plan) = scheduler.plan(&txs, &HeuristicRwSetExtractor);
+        let outputs = scheduler
+            .execute(&txs, &plan, |tx| Ok::<u64, ()>(tx.tx.nonce))
+            .unwrap();
+
+        assert_eq!(outputs, vec![1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn graph_detects_symmetric_read_after_write_conflicts() {
+        let address_a = Address::from([0xaa; 20]);
+        let address_b = Address::from([0xbb; 20]);
+        let address_c = Address::from([0xcc; 20]);
+
+        let left = TxReadWriteSet {
+            reads: vec![TxAccessPath::NativeBalance(address_a)],
+            writes: vec![TxAccessPath::NativeBalance(address_b)],
+            complete: true,
+        };
+        let right = TxReadWriteSet {
+            reads: vec![TxAccessPath::NativeBalance(address_c)],
+            writes: vec![TxAccessPath::NativeBalance(address_a)],
+            complete: true,
+        };
+
+        let graph = TxConflictGraph::build(vec![left, right]);
+        assert_eq!(graph.conflicts.len(), 1);
+        assert_eq!(graph.conflicts[0].reason, ConflictReason::ReadWrite);
     }
 }
