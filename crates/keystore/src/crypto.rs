@@ -19,8 +19,8 @@ use crate::types::{CipherParams, EncryptedKey, KdfParams, KeystoreError};
 pub fn encrypt(signer: &DilithiumSigner, password: &[u8]) -> Result<EncryptedKey, KeystoreError> {
     let mut salt = [0u8; 32];
     let mut nonce = [0u8; 24]; // XChaCha20 uses 24-byte nonce
-    rand::thread_rng().fill_bytes(&mut salt);
-    rand::thread_rng().fill_bytes(&mut nonce);
+    rand::rng().fill_bytes(&mut salt);
+    rand::rng().fill_bytes(&mut nonce);
 
     let kdf_params = KdfParams {
         m_cost: 65536, // 64 MiB
@@ -130,8 +130,8 @@ pub fn encrypt_sphincs(
 ) -> Result<EncryptedKey, KeystoreError> {
     let mut salt = [0u8; 32];
     let mut nonce = [0u8; 24];
-    rand::thread_rng().fill_bytes(&mut salt);
-    rand::thread_rng().fill_bytes(&mut nonce);
+    rand::rng().fill_bytes(&mut salt);
+    rand::rng().fill_bytes(&mut nonce);
 
     let kdf_params = KdfParams {
         m_cost: 65536,
