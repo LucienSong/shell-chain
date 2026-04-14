@@ -11,7 +11,9 @@
 mod aa_validation;
 pub mod bloom;
 mod executor;
+mod parallel;
 mod precompiles;
+mod rwset;
 mod state_db;
 pub mod system_contracts;
 pub mod tracer;
@@ -21,7 +23,12 @@ pub use aa_validation::{
     validate_aa_tx, AaValidationError, AaValidationOutcome, VALIDATION_GAS_CAP,
 };
 pub use executor::{commit_evm_state, ExecutorError, ShellEvm, TxExecutionResult};
+pub use parallel::{
+    ConflictReason, ExecutionWave, ParallelEvmConfig, ParallelExecutionPlan, ParallelScheduler,
+    TxConflict, TxConflictGraph,
+};
 pub use precompiles::{ShellPrecompiles, PQ_DILITHIUM_VERIFY_GAS};
+pub use rwset::{HeuristicRwSetExtractor, ReadWriteSetExtractor, TxAccessPath, TxReadWriteSet};
 pub use state_db::{ShellStateDb, StateDbError};
 pub use system_contracts::{
     account_manager_address, account_manager_code_hash, encode_add_validator_calldata,

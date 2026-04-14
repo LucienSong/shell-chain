@@ -3,6 +3,7 @@
 use std::net::SocketAddr;
 
 use shell_consensus::PoaConfig;
+pub use shell_evm::ParallelEvmConfig;
 use shell_mempool::MempoolConfig;
 use shell_network::NetworkConfig;
 use shell_primitives::Address;
@@ -57,6 +58,8 @@ pub struct NodeConfig {
     /// Account cache size in MiB for the world state LRU trie cache.
     /// Default: 64 MiB.  Higher values reduce state trie decode overhead.
     pub state_cache_size_mb: usize,
+    /// Parallel-EVM PoC configuration. Disabled by default until promoted.
+    pub parallel_evm: ParallelEvmConfig,
 }
 
 impl NodeConfig {
@@ -82,6 +85,7 @@ impl NodeConfig {
             metrics: MetricsConfig::default(),
             max_idle_interval_ms: 0,
             state_cache_size_mb: 64,
+            parallel_evm: ParallelEvmConfig::default(),
         }
     }
 }
