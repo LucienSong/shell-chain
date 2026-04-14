@@ -86,7 +86,7 @@ impl FilterRegistry {
             return None;
         }
         // F-126: generate a random 128-bit hex ID to prevent enumeration.
-        let id = format!("0x{:032x}", rand::thread_rng().gen::<u128>());
+        let id = format!("0x{:032x}", rand::rng().random::<u128>());
         let entry = FilterEntry {
             kind,
             last_poll_block: current_block,

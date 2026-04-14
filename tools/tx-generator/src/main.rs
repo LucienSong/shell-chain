@@ -110,7 +110,7 @@ impl TxKind {
     ];
 
     fn pick(rng: &mut impl Rng) -> Self {
-        Self::ALL[rng.gen_range(0..Self::ALL.len())]
+        Self::ALL[rng.random_range(0..Self::ALL.len())]
     }
 
     fn label(self) -> &'static str {
@@ -436,7 +436,7 @@ async fn wait_for_cluster_balances(
 // ── Transaction builder ──────────────────────────────────────────────
 
 fn sample_fees(base_max_fee: u64, base_priority_fee: u64, rng: &mut impl Rng) -> (u64, u64) {
-    let jitter = rng.gen_range(0..1_000_000u64);
+    let jitter = rng.random_range(0..1_000_000u64);
     (
         base_max_fee.saturating_add(jitter),
         base_priority_fee.saturating_add(jitter),
@@ -458,7 +458,7 @@ fn build_tx(
                 chain_id,
                 nonce,
                 to: Some(recipient),
-                value: U256::from(rng.gen_range(1_000u64..1_000_000)),
+                value: U256::from(rng.random_range(1_000u64..1_000_000)),
                 data: Bytes::new(),
                 gas_limit: 21_000,
                 max_fee_per_gas,
@@ -472,7 +472,7 @@ fn build_tx(
         TxKind::ContractCreation => {
             // Minimal bytecode: PUSH1 1, PUSH1 0, MSTORE, PUSH1 32, PUSH1 0, RETURN
             let mut bytecode = hex::decode("600160005260206000f3").unwrap();
-            bytecode.extend_from_slice(&rng.gen::<u64>().to_be_bytes());
+            bytecode.extend_from_slice(&rng.random::<u64>().to_be_bytes());
             let (max_fee_per_gas, max_priority_fee_per_gas) =
                 sample_fees(1_000_000_000, 100_000_000, rng);
             Transaction {
@@ -536,7 +536,7 @@ fn build_tx(
                 chain_id,
                 nonce,
                 to: Some(recipient),
-                value: U256::from(rng.gen_range(1u64..1_000)),
+                value: U256::from(rng.random_range(1u64..1_000)),
                 data: Bytes::new(),
                 gas_limit: 10_000_000,
                 max_fee_per_gas,
@@ -827,7 +827,7 @@ async fn main() {
 
     // ── 2. Run loop ─────────────────────────────────────────────────
     let mut stats = Stats::default();
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let mut req_id: u64 = 1;
     let deadline = Instant::now() + Duration::from_secs(cli.duration);
 
@@ -838,10 +838,10 @@ async fn main() {
 
     while Instant::now() < deadline {
         // Pick random sender / recipient (distinct)
-        let sender_idx = rng.gen_range(0..accounts.len());
-        let mut recip_idx = rng.gen_range(0..accounts.len());
+        let sender_idx = rng.random_range(0..accounts.len());
+        let mut recip_idx = rng.random_range(0..accounts.len());
         while recip_idx == sender_idx {
-            recip_idx = rng.gen_range(0..accounts.len());
+            recip_idx = rng.random_range(0..accounts.len());
         }
         let recipient = accounts[recip_idx].address;
 
@@ -898,7 +898,7 @@ async fn main() {
         }
 
         // Random sleep between txs
-        let delay_ms = rng.gen_range(cli.min_interval..=cli.max_interval);
+        let delay_ms = rng.random_range(cli.min_interval..=cli.max_interval);
         tokio::time::sleep(Duration::from_millis(delay_ms)).await;
     }
 
