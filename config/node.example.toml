@@ -1,0 +1,44 @@
+# shell-chain node example configuration
+# Copy to node.toml and adjust as needed.
+# CLI flags always override values in this file.
+
+[node]
+# datadir = "shell-data"
+# chain_id = 1337
+# block_time = 2000
+# keystore = "keystore.json"
+# db = "memory"          # "memory" | "rocksdb"
+# pruning = 0            # 0 = archive (keep all), N = keep last N state roots
+
+[rpc]
+# listen_addr = "127.0.0.1:8545"
+# ws_enabled = false
+# ws_port = 8546
+# cors_origins = ["*"]
+# rate_limit = 50
+# api_modules = ["eth", "net", "web3", "shell"]
+# unsafe_dev_exposed = false
+
+[p2p]
+# enabled = false
+# listen_addr = "0.0.0.0:30303"
+# bootnodes = ["/ip4/1.2.3.4/tcp/30303/p2p/<peer-id>"]
+# enable_mdns = false
+
+[consensus]
+# engine = "poa"
+
+[metrics]
+# enabled = true
+# listen_addr = "127.0.0.1:9090"
+
+[logging]
+# level = "info"    # trace | debug | info | warn | error
+# format = "text"   # text | compact | json
+
+# ── Parallel-EVM scheduler ────────────────────────────────────────────────────
+# Enables conflict-graph-based parallel transaction scheduling.
+# Equivalent CLI flags: --parallel-evm  --parallel-evm-workers <N>
+[parallel_evm]
+# enabled = false
+# worker_threads = 4
