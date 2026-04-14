@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.14.0] — 2026-04-14 — M12: Parallel EVM Release
+
+### Added
+
+- **Parallel EVM executor** (`crates/evm`): `ConflictMetric` type with `ReadWrite`, `WriteWrite`, and `Incomplete` variants for tracking inter-transaction state conflicts.
+- `plan_with_metrics()`: transaction dependency graph builder that returns a `Vec<ConflictMetric>` alongside the execution plan.
+- CLI flag `--parallel-evm` (default: **OFF**) to opt-in to the parallel execution path.
+- CLI flag `--parallel-evm-workers <N>` to control the Rayon worker-pool size (default: number of logical CPUs).
+- `config/node.example.toml` updated with a `[parallel_evm]` section documenting both flags.
+- State validation tests: 11 unit tests in `crates/evm`, 3 benchmarks in `crates/bench` (`parallel_evm_throughput`, `conflict_detection_overhead`, `sequential_baseline`).
+
+### Changed
+
+- `parallel-evm` feature is gated behind the CLI flag and disabled on production nodes until further notice.
+
+### Previous release: [0.13.0]
+
 ## [0.13.0] — 2026-04-15 — M10: Mainnet Readiness
 
 ### Added
