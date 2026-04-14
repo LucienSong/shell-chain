@@ -50,7 +50,7 @@ zeroize = { version = "1", features = ["derive"] }
 # --- keystore ---
 argon2 = "0.5"
 chacha20poly1305 = "0.10"
-rand = "0.8"
+rand = "0.9"
 
 # --- consensus ---
 async-trait = "0.1"
@@ -99,7 +99,7 @@ http-body-util = "0.1"
 rayon = "1.10"
 
 # --- caching ---
-lru = "0.12"
+lru = "0.16"
 
 # --- benchmarks ---
 criterion = { version = "0.5", features = ["html_reports"] }
