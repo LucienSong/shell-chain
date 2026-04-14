@@ -15,7 +15,11 @@ use shell_rpc::api::ShellApiServer;
 
 use shell_e2e::{make_funded_account, make_transfer, setup, sign_tx, TEST_CHAIN_ID};
 
+/// Release-build TPS target. Debug builds use a lower threshold automatically.
+#[cfg(not(debug_assertions))]
 const TARGET_TPS: u64 = 500;
+#[cfg(debug_assertions)]
+const TARGET_TPS: u64 = 200;
 
 /// Measure raw transaction ingestion rate over `count` transactions from
 /// multiple independent funded senders. Each sender submits one transaction
