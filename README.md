@@ -2,7 +2,7 @@
 
 <!-- [![Build Status](https://img.shields.io/github/actions/workflow/status/LucienSong/shell-chain/ci.yml?branch=main)](https://github.com/LucienSong/shell-chain/actions) -->
 <!-- [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE) -->
-<!-- [![Version](https://img.shields.io/badge/version-0.6.0-green.svg)](CHANGELOG.md) -->
+<!-- [![Version](https://img.shields.io/badge/version-0.13.0-green.svg)](CHANGELOG.md) -->
 
 A **post-quantum secure, EVM-compatible blockchain** — quantum safety from day one, no migration needed.
 
@@ -16,11 +16,12 @@ Shell-Chain follows [Vitalik Buterin's vision](https://ethresear.ch/t/how-to-har
 - ⚙️ **EVM Compatible** — Cancun-spec EVM; run Solidity contracts with familiar tooling (Hardhat, ethers.js, MetaMask)
 - 🏗️ **Native Account Abstraction** — protocol-level smart accounts with built-in PQ validation, key rotation, and custom validator hooks
 - 🧩 **PQ Precompiles** — on-chain Dilithium/SPHINCS+ verification, Kyber decapsulation, STARK proof verification
-- 🔗 **PoA Consensus** — epoch-based Proof-of-Authority with dynamic validator management and finality tracking
-- 🌐 **P2P Networking** — libp2p with GossipSub, Kademlia DHT, NAT traversal, and peer scoring
-- 📡 **Full JSON-RPC** — Ethereum-compatible `eth_*`, `web3_*`, `net_*`, `debug_*`, plus Shell-specific APIs
-- 🐳 **Production Ready** — Docker Compose orchestration, Prometheus/Grafana monitoring, TOML configuration
-- 🛡️ **Security Hardened** — 50+ audit findings addressed across all subsystems
+- ⚖️ **wPoA Consensus** — Weighted Proof-of-Authority with stake-weighted proposer selection, slashing, and finality tracking
+- 🛠️ **Developer Ecosystem** — TypeScript SDK (`shell-sdk`) with viem-based PQ signers and AA transaction builders
+- 🌐 **P2P Networking** — libp2p with GossipSub, Kademlia DHT, peer scoring, and message signature verification
+- 📡 **Full JSON-RPC** — Ethereum-compatible `eth_*`, `web3_*`, `net_*`, `debug_*`, plus Shell-specific APIs, secured by TLS, rate limiting, and API keys
+- 🐳 **Production Ready** — Docker Compose orchestration, Prometheus/Grafana monitoring, hot backups, and TOML configuration
+- 🛡️ **Security Hardened** — 50+ audit findings addressed, Criterion benchmarks, and continuous fuzzing
 
 ## Quick Start
 
@@ -85,7 +86,7 @@ For the full design and current implementation status, see
 | `shell-crypto` | CRYSTALS-Dilithium & SPHINCS+ signing, multi-algorithm Signer/Verifier traits |
 | `shell-core` | Block, Transaction (AA-native), Account, Receipt, EIP-1559 gas model |
 | `shell-storage` | RocksDB backend, Merkle Patricia Trie, RLP serialization, state pruning |
-| `shell-consensus` | Epoch-based PoA engine, finality tracker, fork choice rule, dynamic validator set |
+| `shell-consensus` | Weighted PoA (wPoA) engine, finality tracker, fork choice rule, dynamic validator set, slashing |
 | `shell-evm` | revm integration (Cancun spec), PQ precompiles, EIP-2930/4844, system contracts |
 | `shell-mempool` | Transaction pool with PQ validation, fee-priority ordering, Replace-by-Fee |
 | `shell-network` | libp2p P2P: GossipSub, Kademlia DHT, NAT traversal, peer scoring, tx gossip |
@@ -102,7 +103,7 @@ shell-chain/
 ├── Cargo.toml           # Workspace root
 ├── crates/
 │   ├── cli/             # CLI binary and TOML config
-│   ├── consensus/       # PoA consensus engine
+│   ├── consensus/       # Weighted PoA consensus engine and slashing
 │   ├── core/            # Block, Transaction, Account
 │   ├── crypto/          # Post-quantum cryptography
 │   ├── evm/             # EVM executor and precompiles
@@ -115,6 +116,7 @@ shell-chain/
 │   ├── rpc/             # JSON-RPC server
 │   └── storage/         # RocksDB storage
 ├── tests/e2e/           # End-to-end tests
+├── fuzz/                # Fuzzing targets for serialization and protocols
 ├── docs/                # Documentation
 ├── CHANGELOG.md         # Release history
 ├── LICENSE              # MIT
