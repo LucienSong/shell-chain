@@ -58,6 +58,10 @@ pub struct RunArgs {
     pub mempool_price_bump: Option<u64>,
     /// Account LRU cache size for the world-state trie, in MiB (default: 64).
     pub state_cache_size_mb: Option<usize>,
+    /// Enable the parallel-EVM conflict-graph scheduler.
+    pub parallel_evm: bool,
+    /// Number of worker threads for the parallel-EVM scheduler (default: logical CPUs).
+    pub parallel_evm_workers: Option<usize>,
 }
 
 /// Maximum genesis file size: 10 MB (F-082).
@@ -480,7 +484,15 @@ async fn run_with_store<S: KvStore + 'static>(
         },
         max_idle_interval_ms: args.max_idle_interval * 1000,
         state_cache_size_mb: args.state_cache_size_mb.unwrap_or(64),
-        parallel_evm: shell_node::config::ParallelEvmConfig::default(),
+        parallel_evm: shell_node::config::ParallelEvmConfig {
+            enabled: args.parallel_evm,
+            max_workers: args.parallel_evm_workers.unwrap_or_else(|| {
+                std::thread::available_parallelism()
+                    .map(usize::from)
+                    .unwrap_or(1)
+            }),
+            ..shell_node::config::ParallelEvmConfig::default()
+        },
     };
 
     // Build the node (auto-detects existing state via NodeBuilder).
@@ -630,9 +642,57 @@ mod tests {
     use super::*;
     use shell_core::BlockHeader;
     use shell_genesis::initialize_genesis;
+    use shell_node::config::ParallelEvmConfig;
     use shell_primitives::{Bytes, U256};
     use shell_storage::MemoryDb;
     use std::collections::HashMap;
+
+    /// Verify that `--parallel-evm --parallel-evm-workers 4` produces the correct config.
+    #[test]
+    fn parallel_evm_args_produce_correct_config() {
+        let args = RunArgs {
+            datadir: std::path::PathBuf::from("shell-data"),
+            rpc_addr: "127.0.0.1:8545".into(),
+            block_time: 2000,
+            keystore: None,
+            chain_id: 1337,
+            db: "memory".into(),
+            ws: false,
+            ws_port: 8546,
+            p2p: false,
+            p2p_addr: "0.0.0.0:30303".into(),
+            bootnodes: vec![],
+            enable_mdns: false,
+            pruning: 0,
+            checkpoint_url: None,
+            rpc_cors: None,
+            rpc_rate_limit: None,
+            rpc_api: None,
+            rpc_api_key: None,
+            rpc_tls_cert: None,
+            rpc_tls_key: None,
+            unsafe_dev_exposed: false,
+            metrics_addr: "127.0.0.1:9090".into(),
+            max_idle_interval: 0,
+            mempool_max_size: None,
+            mempool_price_bump: None,
+            state_cache_size_mb: None,
+            parallel_evm: true,
+            parallel_evm_workers: Some(4),
+        };
+
+        let expected = ParallelEvmConfig {
+            enabled: args.parallel_evm,
+            max_workers: args.parallel_evm_workers.unwrap(),
+            ..ParallelEvmConfig::default()
+        };
+
+        assert!(expected.enabled, "--parallel-evm must set enabled = true");
+        assert_eq!(
+            expected.max_workers, 4,
+            "--parallel-evm-workers 4 must set max_workers = 4"
+        );
+    }
 
     #[test]
     fn dev_authority_signer_is_persisted() {

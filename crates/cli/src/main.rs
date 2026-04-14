@@ -158,6 +158,14 @@ enum Commands {
         /// Account LRU cache size for the world-state trie in MiB.
         #[arg(long)]
         state_cache_size_mb: Option<usize>,
+
+        /// Enable the parallel-EVM conflict-graph scheduler.
+        #[arg(long)]
+        parallel_evm: bool,
+
+        /// Worker threads for the parallel-EVM scheduler (default: logical CPUs).
+        #[arg(long)]
+        parallel_evm_workers: Option<usize>,
     },
 
     /// Initialize genesis block and data directory.
@@ -330,6 +338,8 @@ async fn main() {
             mempool_max_size,
             mempool_price_bump,
             state_cache_size_mb,
+            parallel_evm,
+            parallel_evm_workers,
         } => {
             // Load config file if specified (CLI args override file values).
             let file_config = match &config_path {
@@ -429,6 +439,11 @@ async fn main() {
                 .or(file_config.metrics.listen_addr)
                 .unwrap_or_else(|| "127.0.0.1:9090".to_string());
 
+            let effective_parallel_evm =
+                parallel_evm || file_config.parallel_evm.enabled.unwrap_or(false);
+            let effective_parallel_evm_workers =
+                parallel_evm_workers.or(file_config.parallel_evm.worker_threads);
+
             commands::run(commands::run::RunArgs {
                 datadir,
                 rpc_addr: effective_rpc_addr,
@@ -456,6 +471,8 @@ async fn main() {
                 mempool_max_size,
                 mempool_price_bump,
                 state_cache_size_mb,
+                parallel_evm: effective_parallel_evm,
+                parallel_evm_workers: effective_parallel_evm_workers,
             })
             .await
         }

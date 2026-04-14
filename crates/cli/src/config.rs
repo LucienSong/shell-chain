@@ -15,6 +15,7 @@ pub struct ShellConfig {
     pub consensus: ConsensusSection,
     pub metrics: MetricsSection,
     pub logging: LoggingSection,
+    pub parallel_evm: ParallelEvmSection,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -67,6 +68,16 @@ pub struct MetricsSection {
 pub struct LoggingSection {
     pub level: Option<String>,
     pub format: Option<String>,
+}
+
+/// Parallel-EVM scheduling configuration.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct ParallelEvmSection {
+    /// Enable conflict-graph scheduling.
+    pub enabled: Option<bool>,
+    /// Maximum worker threads for parallelizable waves.
+    pub worker_threads: Option<usize>,
 }
 
 /// Load and parse a TOML configuration file.
