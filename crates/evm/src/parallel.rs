@@ -128,6 +128,19 @@ impl ParallelScheduler {
         (graph, plan)
     }
 
+    /// Like [`plan`], but also returns a [`ConflictMetric`] for the batch.
+    pub fn plan_with_metrics<E: ReadWriteSetExtractor>(
+        &self,
+        txs: &[SignedTransaction],
+        extractor: &E,
+    ) -> (TxConflictGraph, ParallelExecutionPlan, ConflictMetric) {
+        let graph = self.build_graph(txs, extractor);
+        let mut metric = ConflictMetric::from(&graph);
+        metric.finalize(txs.len());
+        let plan = self.plan_from_graph(&graph);
+        (graph, plan, metric)
+    }
+
     pub fn plan_from_graph(&self, graph: &TxConflictGraph) -> ParallelExecutionPlan {
         if graph.rwsets.is_empty() {
             return ParallelExecutionPlan::default();
@@ -220,6 +233,62 @@ impl ParallelScheduler {
         }
 
         Ok(outputs)
+    }
+}
+
+/// Tracks conflict statistics over a single scheduling run.
+///
+/// Use [`ConflictMetric::record_conflict`] to accumulate individual conflict
+/// events, then call [`ConflictMetric::finalize`] with the total transaction
+/// count to compute `conflict_ratio`.
+#[derive(Debug, Clone, Default)]
+pub struct ConflictMetric {
+    /// Total number of conflict edges detected.
+    pub total_conflicts: usize,
+    /// Cumulative count of transactions flagged for re-execution due to conflicts.
+    pub reexecuted_txs: usize,
+    /// Fraction of detected conflicts relative to total transactions (0.0 – 1.0+).
+    pub conflict_ratio: f64,
+}
+
+impl ConflictMetric {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record one conflict event involving `reexecuted` additional transactions.
+    pub fn record_conflict(&mut self, reexecuted: usize) {
+        self.total_conflicts += 1;
+        self.reexecuted_txs += reexecuted;
+    }
+
+    /// Compute `conflict_ratio` given `total_txs` processed in the batch.
+    pub fn finalize(&mut self, total_txs: usize) {
+        self.conflict_ratio = if total_txs == 0 {
+            0.0
+        } else {
+            self.total_conflicts as f64 / total_txs as f64
+        };
+    }
+
+    /// Return a human-readable summary of the conflict statistics.
+    pub fn summary(&self) -> String {
+        format!(
+            "ConflictMetric {{ total_conflicts: {}, reexecuted_txs: {}, conflict_ratio: {:.4} }}",
+            self.total_conflicts, self.reexecuted_txs, self.conflict_ratio
+        )
+    }
+}
+
+impl From<&TxConflictGraph> for ConflictMetric {
+    /// Derive metrics directly from an already-built conflict graph.
+    fn from(graph: &TxConflictGraph) -> Self {
+        let mut metric = ConflictMetric::new();
+        for _ in &graph.conflicts {
+            metric.record_conflict(1);
+        }
+        metric.finalize(graph.rwsets.len());
+        metric
     }
 }
 
@@ -325,6 +394,164 @@ fn access_paths_conflict(left: &TxAccessPath, right: &TxAccessPath) -> bool {
         (ContractStorageAny(addr), Erc20Balance { token, .. })
         | (Erc20Balance { token, .. }, ContractStorageAny(addr)) => addr == token,
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod parallel_validation {
+    use super::*;
+    use shell_core::{SignedTransaction, Transaction};
+    use shell_crypto::{PQSignature, SignatureType};
+    use shell_primitives::{Address, Bytes, U256};
+
+    use crate::rwset::{HeuristicRwSetExtractor, TxAccessPath, TxReadWriteSet};
+
+    fn make_tx(to: Address, nonce: u64) -> SignedTransaction {
+        let from = Address::from([0x20 + nonce as u8; 20]);
+        let tx = Transaction {
+            chain_id: 424242,
+            nonce,
+            to: Some(to),
+            value: U256::from(nonce),
+            data: Bytes::default(),
+            gas_limit: 21_000,
+            max_fee_per_gas: 1_000_000_000,
+            max_priority_fee_per_gas: 100_000_000,
+            access_list: None,
+            tx_type: 2,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
+        };
+        SignedTransaction::new(
+            from,
+            tx,
+            PQSignature::new(SignatureType::Dilithium3, vec![0x77; 32]),
+        )
+    }
+
+    /// Test 1: sequential vs parallel produces identical read/write sets.
+    #[test]
+    fn sequential_and_parallel_rwsets_are_identical() {
+        let txs = vec![
+            make_tx(Address::from([0x31; 20]), 1),
+            make_tx(Address::from([0x32; 20]), 2),
+            make_tx(Address::from([0x33; 20]), 3),
+        ];
+        let extractor = HeuristicRwSetExtractor;
+
+        // Sequential: extract rwsets one by one.
+        let sequential_rwsets: Vec<TxReadWriteSet> =
+            txs.iter().map(|tx| extractor.extract(tx)).collect();
+
+        // Parallel: build graph, which extracts rwsets internally.
+        let scheduler_parallel = ParallelScheduler::new(ParallelEvmConfig {
+            enabled: true,
+            ..ParallelEvmConfig::default()
+        });
+        let graph = scheduler_parallel.build_graph(&txs, &extractor);
+
+        assert_eq!(
+            sequential_rwsets.len(),
+            graph.rwsets.len(),
+            "rwset count must match"
+        );
+        for (i, (seq, par)) in sequential_rwsets
+            .iter()
+            .zip(graph.rwsets.iter())
+            .enumerate()
+        {
+            assert_eq!(seq.reads, par.reads, "reads differ at tx {i}");
+            assert_eq!(seq.writes, par.writes, "writes differ at tx {i}");
+            assert_eq!(seq.complete, par.complete, "completeness differs at tx {i}");
+        }
+    }
+
+    /// Test 2: conflict detection correctly identifies overlapping storage slots.
+    #[test]
+    fn conflict_detection_identifies_overlapping_storage_slots() {
+        let shared_addr = Address::from([0xAA; 20]);
+
+        // Both txs write to the same native balance (shared_addr is recipient).
+        let tx_a = make_tx(shared_addr, 1);
+        let tx_b = make_tx(shared_addr, 2);
+        let graph = TxConflictGraph::build(vec![
+            HeuristicRwSetExtractor.extract(&tx_a),
+            HeuristicRwSetExtractor.extract(&tx_b),
+        ]);
+
+        assert!(
+            !graph.conflicts.is_empty(),
+            "overlapping recipient should produce a conflict"
+        );
+        assert!(
+            graph.has_conflict(0, 1),
+            "tx 0 and tx 1 must be detected as conflicting"
+        );
+
+        // Two txs targeting different addresses should not conflict.
+        let tx_c = make_tx(Address::from([0xBB; 20]), 3);
+        let tx_d = make_tx(Address::from([0xCC; 20]), 4);
+        let clean_graph = TxConflictGraph::build(vec![
+            HeuristicRwSetExtractor.extract(&tx_c),
+            HeuristicRwSetExtractor.extract(&tx_d),
+        ]);
+        assert!(
+            clean_graph.conflicts.is_empty(),
+            "non-overlapping txs should have no conflicts"
+        );
+    }
+
+    /// Test 3: empty tx batch produces empty rwset.
+    #[test]
+    fn empty_batch_produces_empty_rwset() {
+        let graph = TxConflictGraph::build(vec![]);
+        assert!(graph.rwsets.is_empty(), "rwsets should be empty");
+        assert!(graph.conflicts.is_empty(), "conflicts should be empty");
+
+        let scheduler = ParallelScheduler::new(ParallelEvmConfig::default());
+        let plan = scheduler.plan_from_graph(&graph);
+        assert!(
+            plan.waves.is_empty(),
+            "plan should have no waves for empty batch"
+        );
+    }
+
+    /// Test 4: single tx produces correct read/write set entries.
+    #[test]
+    fn single_tx_produces_correct_rwset_entries() {
+        let recipient = Address::from([0x55; 20]);
+        let tx = make_tx(recipient, 7);
+        let rwset = HeuristicRwSetExtractor.extract(&tx);
+
+        assert!(rwset.complete, "simple native transfer must be complete");
+        assert!(
+            rwset.reads.contains(&TxAccessPath::NativeBalance(tx.from)),
+            "must read sender balance"
+        );
+        assert!(
+            rwset.reads.contains(&TxAccessPath::NativeNonce(tx.from)),
+            "must read sender nonce"
+        );
+        assert!(
+            rwset.writes.contains(&TxAccessPath::NativeBalance(tx.from)),
+            "must write sender balance"
+        );
+        assert!(
+            rwset.writes.contains(&TxAccessPath::NativeNonce(tx.from)),
+            "must write sender nonce"
+        );
+        assert!(
+            rwset
+                .reads
+                .contains(&TxAccessPath::NativeBalance(recipient)),
+            "must read recipient balance"
+        );
+        assert!(
+            rwset
+                .writes
+                .contains(&TxAccessPath::NativeBalance(recipient)),
+            "must write recipient balance"
+        );
     }
 }
 
@@ -493,5 +720,45 @@ mod tests {
         let graph = TxConflictGraph::build(vec![left, right]);
         assert_eq!(graph.conflicts.len(), 1);
         assert_eq!(graph.conflicts[0].reason, ConflictReason::ReadWrite);
+    }
+
+    #[test]
+    fn conflict_metrics_track_correctly() {
+        // Two conflicting txs (same recipient) → 1 conflict edge.
+        let shared = Address::from([0x77; 20]);
+        let txs_conflict = vec![
+            signed_tx(shared, 1, Vec::new()),
+            signed_tx(shared, 2, Vec::new()),
+        ];
+        let scheduler = ParallelScheduler::new(ParallelEvmConfig {
+            enabled: true,
+            ..ParallelEvmConfig::default()
+        });
+        let (graph, _, metric) =
+            scheduler.plan_with_metrics(&txs_conflict, &HeuristicRwSetExtractor);
+        assert_eq!(graph.conflicts.len(), 1, "should detect one conflict");
+        assert_eq!(metric.total_conflicts, 1);
+        assert_eq!(metric.reexecuted_txs, 1);
+        assert!(metric.conflict_ratio > 0.0, "ratio must be positive");
+
+        let summary = metric.summary();
+        assert!(summary.contains("total_conflicts: 1"));
+        assert!(summary.contains("reexecuted_txs: 1"));
+
+        // Two non-conflicting txs → 0 conflicts.
+        let txs_clean = vec![
+            signed_tx(Address::from([0x31; 20]), 3, Vec::new()),
+            signed_tx(Address::from([0x32; 20]), 4, Vec::new()),
+        ];
+        let (_, _, clean_metric) =
+            scheduler.plan_with_metrics(&txs_clean, &HeuristicRwSetExtractor);
+        assert_eq!(clean_metric.total_conflicts, 0);
+        assert_eq!(clean_metric.reexecuted_txs, 0);
+        assert_eq!(clean_metric.conflict_ratio, 0.0);
+
+        // Empty batch.
+        let (_, _, empty_metric) = scheduler.plan_with_metrics(&[], &HeuristicRwSetExtractor);
+        assert_eq!(empty_metric.total_conflicts, 0);
+        assert_eq!(empty_metric.conflict_ratio, 0.0);
     }
 }

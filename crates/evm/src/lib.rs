@@ -24,8 +24,8 @@ pub use aa_validation::{
 };
 pub use executor::{commit_evm_state, ExecutorError, ShellEvm, TxExecutionResult};
 pub use parallel::{
-    ConflictReason, ExecutionWave, ParallelEvmConfig, ParallelExecutionPlan, ParallelScheduler,
-    TxConflict, TxConflictGraph,
+    ConflictMetric, ConflictReason, ExecutionWave, ParallelEvmConfig, ParallelExecutionPlan,
+    ParallelScheduler, TxConflict, TxConflictGraph,
 };
 pub use precompiles::{ShellPrecompiles, PQ_DILITHIUM_VERIFY_GAS};
 pub use rwset::{HeuristicRwSetExtractor, ReadWriteSetExtractor, TxAccessPath, TxReadWriteSet};

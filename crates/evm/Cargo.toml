@@ -26,3 +26,7 @@ criterion = { workspace = true }
 [[bench]]
 name = "parallel_poc"
 harness = false
+
+[[bench]]
+name = "parallel_bench"
+harness = false
