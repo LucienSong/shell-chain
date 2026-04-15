@@ -1,0 +1,29 @@
+[package]
+name = "shell-load-test"
+version = "0.14.0"
+edition = "2021"
+description = "High-TPS load test harness for Shell-chain node"
+
+[[bin]]
+name = "shell-load-test"
+path = "src/main.rs"
+
+[dependencies]
+shell-core      = { path = "../../crates/core" }
+shell-crypto    = { path = "../../crates/crypto" }
+shell-primitives = { path = "../../crates/primitives" }
+
+tokio     = { workspace = true }
+serde     = { workspace = true }
+serde_json = { workspace = true }
+clap      = { workspace = true }
+tracing   = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow    = "1"
+hex       = { workspace = true }
+alloy-rlp = { workspace = true }
+reqwest   = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+hdrhistogram = "7"
+csv       = "1"
+chrono    = { version = "0.4", features = ["serde"] }
+rand      = "0.8"
