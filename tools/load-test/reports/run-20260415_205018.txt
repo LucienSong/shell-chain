@@ -1,0 +1,51 @@
+═══════════════════════════════════════════════════════════════════
+Shell-chain Load Test Report
+Run ID : 20260415_205018
+Date   : 2026-04-15 20:54:30 UTC
+═══════════════════════════════════════════════════════════════════
+
+Test Parameters
+───────────────
+  CSV source      : /tmp/shell-load-test/load-test-20260415_205018.csv
+  First timestamp : 2026-04-15T20:50:48Z
+  Last timestamp  : 2026-04-15T20:54:19Z
+  Periods logged  : 8  (× 30s each)
+  Elapsed (approx): 4 minutes
+
+Transaction Submit Metrics (mempool-accept)
+───────────────────────────────────────────
+  Total submitted   : 61760 txs
+  Total errors      : 62621
+  Success rate      : 49.7%
+  Avg TPS           : 256.9
+  Peak TPS          : 292.2
+  Min  TPS          : 249.6
+  Latest period TPS : 254.65
+  Latest period err : 6720
+
+Latency (submit → mempool accept)
+──────────────────────────────────
+  Avg p50  : 0.0 ms
+  Avg p95  : 1.1 ms
+  Avg p99  : 1.8 ms
+  Peak max : 22.0 ms
+
+Block Finalization (from node log)
+───────────────────────────────────
+  Blocks produced       : 131
+  Avg txs / block       : 481
+  Est. committed TPS    : 240 TPS  (block-time=2s)
+
+Period-by-Period Detail
+───────────────────────
+Timestamp                Submit   Errors      TPS  LastTPS  p50ms  p95ms  p99ms
+2026-04-15T20:50:48Z       8780     9627    292.2    292.2      0      2      4
+2026-04-15T20:51:18Z       7500     8547    249.6    249.6      0      1      1
+2026-04-15T20:51:49Z       7500     8257    249.6    249.6      0      1      2
+2026-04-15T20:52:19Z       7500     7714    249.6    249.6      0      1      1
+2026-04-15T20:52:49Z       7522     7530    250.3    250.3      0      1      2
+2026-04-15T20:53:19Z       7587     7232    252.5    252.5      0      1      2
+2026-04-15T20:53:49Z       7720     6994    257.0    257.0      0      1      1
+2026-04-15T20:54:19Z       7651     6720    254.7    254.7      0      1      1
+
+═══════════════════════════════════════════════════════════════════
