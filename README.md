@@ -4,7 +4,7 @@
 <!-- [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE) -->
 <!-- [![Version](https://img.shields.io/badge/version-0.13.0-green.svg)](CHANGELOG.md) -->
 
-A **post-quantum secure, EVM-compatible blockchain** — quantum safety from day one, no migration needed.
+The first EVM-compatible, post-quantum blockchain — quantum-safe **before Q-Day**, no migration needed.
 
 ## Overview
 
