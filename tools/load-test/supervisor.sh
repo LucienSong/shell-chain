@@ -11,7 +11,8 @@
 set -euo pipefail
 
 LOG=/tmp/shell-local-test/supervisor.log
-mkdir -p /tmp/shell-local-test /tmp/shell-load-test
+CHAIN_DATA=/tmp/shell-local-test/chain-data
+mkdir -p /tmp/shell-local-test /tmp/shell-load-test "$CHAIN_DATA"
 
 log() {
     local msg="[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] $*"
@@ -33,7 +34,8 @@ lt_pid=0
 start_node() {
     log "Starting shell-node…"
     (nohup "$SHELL_NODE" run \
-        --db memory \
+        --db rocksdb \
+        --datadir "$CHAIN_DATA" \
         --rpc-addr 127.0.0.1:8545 \
         --rpc-api eth,net,web3,shell,evm \
         --chain-id 1337 \
