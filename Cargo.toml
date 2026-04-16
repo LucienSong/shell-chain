@@ -75,7 +75,7 @@ futures-util = "0.3"
 libp2p = { version = "0.56", features = ["tcp", "dns", "noise", "yamux", "gossipsub", "mdns", "tokio", "identify", "kad", "macros", "relay", "dcutr", "autonat"] }
 
 # --- storage (rocksdb) ---
-rocksdb = { version = "0.22", default-features = false, features = ["snappy"] }
+rocksdb = { version = "0.22", default-features = false, features = ["snappy", "zstd"] }
 
 # --- tls ---
 rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
