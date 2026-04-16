@@ -13,4 +13,6 @@ pub use fee::{
 };
 pub use log::{Log, LogError, MAX_LOG_TOPICS};
 pub use receipt::TransactionReceipt;
-pub use transaction::{AccessListItem, SignedTransaction, Transaction, MAX_BLOB_HASHES_PER_TX};
+pub use transaction::{
+    AccessListItem, PubkeyMode, SignedTransaction, Transaction, MAX_BLOB_HASHES_PER_TX,
+};

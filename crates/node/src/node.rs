@@ -1198,8 +1198,8 @@ impl<S: KvStore + 'static> Node<S> {
             let tx_hashes: Vec<ShellHash> = block.transactions.iter().map(|tx| tx.hash()).collect();
             let mut resolved_pks: Vec<Vec<u8>> = Vec::with_capacity(block.transactions.len());
             for tx in &block.transactions {
-                let pk = match &tx.sender_pubkey {
-                    Some(pk) => {
+                let pk = match &tx.pubkey_mode {
+                    shell_core::PubkeyMode::Embedded(pk) => {
                         block_pubkeys.entry(tx.from).or_insert_with(|| pk.clone());
                         if import_cs
                             .get_pubkey(&tx.from)
@@ -1215,7 +1215,7 @@ impl<S: KvStore + 'static> Node<S> {
                         }
                         pk.clone()
                     }
-                    None => {
+                    shell_core::PubkeyMode::Reference => {
                         if let Some(pk) = block_pubkeys.get(&tx.from) {
                             pk.clone()
                         } else {
@@ -1270,9 +1270,9 @@ impl<S: KvStore + 'static> Node<S> {
             let mut validation_pubkeys: HashMap<Address, Vec<u8>> = HashMap::new();
             for tx in &block.transactions {
                 let mut tx_for_validation = tx.clone();
-                if tx_for_validation.sender_pubkey.is_none() {
+                if tx_for_validation.pubkey_mode.is_reference() {
                     if let Some(pk) = validation_pubkeys.get(&tx.from) {
-                        tx_for_validation.sender_pubkey = Some(pk.clone());
+                        tx_for_validation.pubkey_mode = shell_core::PubkeyMode::Embedded(pk.clone());
                     }
                 }
 
@@ -1290,7 +1290,7 @@ impl<S: KvStore + 'static> Node<S> {
                     ))
                 })?;
 
-                if let Some(pk) = &tx.sender_pubkey {
+                if let shell_core::PubkeyMode::Embedded(pk) = &tx.pubkey_mode {
                     validation_pubkeys
                         .entry(tx.from)
                         .or_insert_with(|| pk.clone());

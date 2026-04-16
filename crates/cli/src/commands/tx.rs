@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 
 use clap::Subcommand;
-use shell_core::{SignedTransaction, Transaction};
+use shell_core::{PubkeyMode, SignedTransaction, Transaction};
 use shell_crypto::Signer;
 use shell_keystore::{decrypt, EncryptedKey};
 use shell_primitives::{Address, Bytes, U256};
@@ -160,7 +160,7 @@ fn cmd_send(
         ..tx
     };
 
-    let signed = sign_and_build(from, tx, &*signer)?;
+    let signed = sign_and_build(from, tx, &*signer, &rpc_url)?;
     let tx_hash = submit_tx(&rpc_url, &signed)?;
     eprintln!("✓ Transaction submitted");
     println!("{tx_hash}");
@@ -212,7 +212,7 @@ fn cmd_deploy(
         blob_versioned_hashes: None,
     };
 
-    let signed = sign_and_build(from, tx, &*signer)?;
+    let signed = sign_and_build(from, tx, &*signer, &rpc_url)?;
     let tx_hash = submit_tx(&rpc_url, &signed)?;
     eprintln!("✓ Contract deployment submitted");
     println!("{tx_hash}");
@@ -311,15 +311,46 @@ fn parse_hex_bytes(s: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
 }
 
 /// Sign a transaction and build a SignedTransaction.
+/// Sign and build a [`SignedTransaction`].
+///
+/// Checks the on-chain pubkey registry via `rpc_url`: if the sender's pubkey
+/// is already registered, uses [`PubkeyMode::Reference`] (saves ~1,932 bytes).
+/// On the first transaction from a new address, uses [`PubkeyMode::Embedded`].
 fn sign_and_build(
     from: Address,
     tx: Transaction,
     signer: &dyn Signer,
+    rpc_url: &str,
 ) -> Result<SignedTransaction, Box<dyn std::error::Error>> {
     let tx_hash = tx.hash();
     let sig = signer.sign(tx_hash.as_bytes())?;
-    let signed = SignedTransaction::with_pubkey(from, tx, sig, signer.public_key().to_vec());
+
+    let pubkey_registered = rpc_is_pubkey_registered(rpc_url, &from).unwrap_or(false);
+    let signed = if pubkey_registered {
+        SignedTransaction::new(from, tx, sig)
+    } else {
+        SignedTransaction::with_pubkey(from, tx, sig, signer.public_key().to_vec())
+    };
     Ok(signed)
+}
+
+/// Returns `true` if the sender's pubkey is already registered on-chain.
+///
+/// Calls `shell_getPqPubkey`. On any error (network, node not running), returns
+/// `false` so the caller falls back to `Embedded` mode (safe default).
+fn rpc_is_pubkey_registered(
+    rpc_url: &str,
+    addr: &Address,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "shell_getPqPubkey",
+        "params": [format!("0x{}", hex::encode(addr.as_ref()))],
+        "id": 1
+    });
+    let result = rpc_post(rpc_url, &body)?;
+    // result is Some(hex_pubkey_string) if registered, null if not
+    Ok(!result["result"].is_null())
 }
 
 /// RLP-encode and hex-encode a signed transaction, then submit via RPC.

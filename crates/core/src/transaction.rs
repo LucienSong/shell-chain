@@ -326,16 +326,65 @@ impl Transaction {
     }
 }
 
+/// How the sender's public key is conveyed in a [`SignedTransaction`].
+///
+/// Post-quantum signatures (Dilithium3) are not key-recoverable, so the sender
+/// public key must be provided explicitly. To avoid the 1,952-byte key overhead
+/// on every transaction, Shell uses a **hybrid registry model**:
+///
+/// - **First tx** from a new address → `Embedded`: carry the full key inline.
+///   The node verifies the address derivation and stores the key in the pubkey
+///   registry. Wire overhead: +1,952 bytes once.
+/// - **All subsequent txs** → `Reference`: key is omitted; the node resolves
+///   it from the on-chain registry by the `from` address. Saves ~1,932 bytes
+///   per transaction after the initial registration.
+///
+/// ## Wire encoding (RLP)
+/// - `Embedded(pk)` → raw key bytes (1,952 bytes for Dilithium3)
+/// - `Reference`    → empty byte string (1 byte overhead)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", content = "key", rename_all = "snake_case")]
+pub enum PubkeyMode {
+    /// Full Dilithium3 public key (1,952 bytes) inline. Used on first tx.
+    Embedded(Vec<u8>),
+    /// Key omitted; resolved from on-chain registry by `from` address.
+    Reference,
+}
+
+impl PubkeyMode {
+    /// Returns `true` if this is an embedded (inline) public key.
+    pub fn is_embedded(&self) -> bool {
+        matches!(self, PubkeyMode::Embedded(_))
+    }
+
+    /// Returns `true` if the key is a registry reference (not inline).
+    pub fn is_reference(&self) -> bool {
+        matches!(self, PubkeyMode::Reference)
+    }
+
+    /// Returns the embedded public key bytes, or `None` for [`Reference`](PubkeyMode::Reference).
+    pub fn pubkey_bytes(&self) -> Option<&[u8]> {
+        match self {
+            PubkeyMode::Embedded(b) => Some(b),
+            PubkeyMode::Reference => None,
+        }
+    }
+}
+
+impl Default for PubkeyMode {
+    fn default() -> Self {
+        PubkeyMode::Reference
+    }
+}
+
 /// A transaction with an attached PQ signature.
 ///
 /// PQ signatures (unlike ECDSA) do not allow public key recovery from the
 /// signature alone. The sender must explicitly declare their address so
 /// nodes can look up the account and verify the signature.
 ///
-/// The optional `sender_pubkey` field implements the **Hybrid registration**
-/// model: the first transaction from a new address carries the full PQ
-/// public key (~1952 bytes for Dilithium3). Subsequent transactions omit it,
-/// and the pubkey is read from the on-chain registry.
+/// The `pubkey_mode` field implements the **Hybrid registration** model —
+/// see [`PubkeyMode`] for full documentation.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SignedTransaction {
     /// The sender's address (derived from their PQ public key).
@@ -343,10 +392,9 @@ pub struct SignedTransaction {
     pub from: Address,
     pub tx: Transaction,
     pub signature: PQSignature,
-    /// Optional full PQ public key for first-time registration.
-    /// If present, the node registers it on-chain after verification.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sender_pubkey: Option<Vec<u8>>,
+    /// How the sender's public key is provided (inline or registry reference).
+    #[serde(default)]
+    pub pubkey_mode: PubkeyMode,
     /// Lazily cached hash — computed from the unsigned tx on first access.
     #[serde(skip)]
     tx_hash: OnceLock<ShellHash>,
@@ -362,7 +410,7 @@ impl Clone for SignedTransaction {
             from: self.from,
             tx: self.tx.clone(),
             signature: self.signature.clone(),
-            sender_pubkey: self.sender_pubkey.clone(),
+            pubkey_mode: self.pubkey_mode.clone(),
             tx_hash: lock,
         }
     }
@@ -373,25 +421,32 @@ impl PartialEq for SignedTransaction {
         self.from == other.from
             && self.tx == other.tx
             && self.signature == other.signature
-            && self.sender_pubkey == other.sender_pubkey
+            && self.pubkey_mode == other.pubkey_mode
     }
 }
 
 impl Eq for SignedTransaction {}
 
 impl SignedTransaction {
+    /// Create a transaction using registry reference mode (no inline pubkey).
+    ///
+    /// Use this for all transactions after the first from a given address.
+    /// The node resolves the public key from the on-chain registry.
     pub fn new(from: Address, tx: Transaction, signature: PQSignature) -> Self {
         Self {
             from,
             tx,
             signature,
-            sender_pubkey: None,
+            pubkey_mode: PubkeyMode::Reference,
             tx_hash: OnceLock::new(),
         }
     }
 
-    /// Create a signed transaction with an attached public key for
-    /// first-time registration on the PQ pubkey registry.
+    /// Create a transaction with an embedded public key for first-time registration.
+    ///
+    /// Use this for the **first transaction** from a new address. The node
+    /// verifies the key–address binding and registers the pubkey for future
+    /// reference-mode lookups. After registration, use [`SignedTransaction::new`].
     pub fn with_pubkey(
         from: Address,
         tx: Transaction,
@@ -402,7 +457,7 @@ impl SignedTransaction {
             from,
             tx,
             signature,
-            sender_pubkey: Some(pubkey),
+            pubkey_mode: PubkeyMode::Embedded(pubkey),
             tx_hash: OnceLock::new(),
         }
     }
@@ -432,10 +487,11 @@ impl Encodable for SignedTransaction {
         self.from.encode(out);
         self.tx.encode(out);
         self.signature.encode(out);
-        // Encode sender_pubkey: Some(bytes) → bytes, None → empty bytes
-        match &self.sender_pubkey {
-            Some(pk) => pk.as_slice().encode(out),
-            None => {
+        // Embedded → encode key bytes; Reference → encode empty bytes (1B).
+        // Wire format is identical to the former Option<Vec<u8>> encoding.
+        match &self.pubkey_mode {
+            PubkeyMode::Embedded(pk) => pk.as_slice().encode(out),
+            PubkeyMode::Reference => {
                 let empty: &[u8] = &[];
                 empty.encode(out);
             }
@@ -455,9 +511,9 @@ impl Encodable for SignedTransaction {
 
 impl SignedTransaction {
     fn fields_len(&self) -> usize {
-        let pk_len = match &self.sender_pubkey {
-            Some(pk) => pk.as_slice().length(),
-            None => 1, // RLP encoding of empty bytes
+        let pk_len = match &self.pubkey_mode {
+            PubkeyMode::Embedded(pk) => pk.as_slice().length(),
+            PubkeyMode::Reference => 1, // RLP empty bytes = 1 byte
         };
         self.from
             .length()
@@ -596,12 +652,13 @@ impl Decodable for SignedTransaction {
         let tx = Transaction::decode(buf)?;
         let signature = PQSignature::decode(buf)?;
 
-        // sender_pubkey: empty bytes → None, non-empty → Some
+        // Empty bytes → Reference (key in registry); non-empty → Embedded.
+        // Wire format is unchanged from the former Option<Vec<u8>> encoding.
         let pk_bytes = alloy_rlp::Header::decode_bytes(buf, false)?;
-        let sender_pubkey = if pk_bytes.is_empty() {
-            None
+        let pubkey_mode = if pk_bytes.is_empty() {
+            PubkeyMode::Reference
         } else {
-            Some(pk_bytes.to_vec())
+            PubkeyMode::Embedded(pk_bytes.to_vec())
         };
 
         let consumed = remaining.saturating_sub(buf.len());
@@ -616,7 +673,7 @@ impl Decodable for SignedTransaction {
             from,
             tx,
             signature,
-            sender_pubkey,
+            pubkey_mode,
             tx_hash: OnceLock::new(),
         })
     }
@@ -1330,6 +1387,83 @@ mod tests {
             t0.hash(),
             t2.hash(),
             "contract creation hashes should differ by type"
+        );
+    }
+
+    // ─── A2: PubkeyMode tests ─────────────────────────────────────────────────
+
+    fn sample_signed(from: Address, pubkey: Option<Vec<u8>>) -> SignedTransaction {
+        let tx = sample_tx();
+        let sig = PQSignature::new(SignatureType::Dilithium3, vec![0xBB; 3309]);
+        match pubkey {
+            Some(pk) => SignedTransaction::with_pubkey(from, tx, sig, pk),
+            None => SignedTransaction::new(from, tx, sig),
+        }
+    }
+
+    #[test]
+    fn pubkey_mode_embedded_rlp_roundtrip() {
+        let from = Address::from([0x11; 20]);
+        let pk = vec![0xCC; 1952];
+        let stx = sample_signed(from, Some(pk.clone()));
+
+        assert!(stx.pubkey_mode.is_embedded());
+        assert_eq!(stx.pubkey_mode.pubkey_bytes(), Some(pk.as_slice()));
+
+        // RLP round-trip
+        let encoded = alloy_rlp::encode(&stx);
+        let decoded = SignedTransaction::decode(&mut encoded.as_slice()).unwrap();
+
+        assert!(decoded.pubkey_mode.is_embedded());
+        assert_eq!(decoded.pubkey_mode.pubkey_bytes(), Some(pk.as_slice()));
+        assert_eq!(decoded.from, from);
+    }
+
+    #[test]
+    fn pubkey_mode_reference_rlp_roundtrip() {
+        let from = Address::from([0x22; 20]);
+        let stx = sample_signed(from, None);
+
+        assert!(stx.pubkey_mode.is_reference());
+        assert_eq!(stx.pubkey_mode.pubkey_bytes(), None);
+
+        // RLP round-trip
+        let encoded = alloy_rlp::encode(&stx);
+        let decoded = SignedTransaction::decode(&mut encoded.as_slice()).unwrap();
+
+        assert!(decoded.pubkey_mode.is_reference());
+        assert_eq!(decoded.pubkey_mode.pubkey_bytes(), None);
+    }
+
+    #[test]
+    fn pubkey_mode_accessors() {
+        let embedded = PubkeyMode::Embedded(vec![0x01; 32]);
+        let reference = PubkeyMode::Reference;
+
+        assert!(embedded.is_embedded());
+        assert!(!embedded.is_reference());
+        assert_eq!(embedded.pubkey_bytes(), Some([0x01u8; 32].as_slice()));
+
+        assert!(!reference.is_embedded());
+        assert!(reference.is_reference());
+        assert_eq!(reference.pubkey_bytes(), None);
+    }
+
+    #[test]
+    fn reference_mode_saves_bytes_vs_embedded() {
+        let from = Address::from([0x33; 20]);
+        let pk = vec![0xDD; 1952];
+
+        let embedded = sample_signed(from, Some(pk));
+        let reference = sample_signed(from, None);
+
+        let embedded_size = alloy_rlp::encode(&embedded).len();
+        let reference_size = alloy_rlp::encode(&reference).len();
+
+        // Reference mode must be significantly smaller (saves ~1952 bytes)
+        assert!(
+            embedded_size > reference_size + 1900,
+            "embedded={embedded_size}, reference={reference_size}"
         );
     }
 }
