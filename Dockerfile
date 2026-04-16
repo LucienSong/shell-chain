@@ -42,7 +42,10 @@ USER shelluser
 
 EXPOSE 8545 30303 9090
 
-HEALTHCHECK --interval=10s --timeout=3s --retries=3 \
-    CMD curl -sf http://localhost:9090/health || exit 1
+HEALTHCHECK --interval=10s --timeout=3s --retries=12 --start-period=20s \
+    CMD curl -sf -X POST http://localhost:8545 \
+        -H 'Content-Type: application/json' \
+        -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' \
+        | grep -q '"result"' || exit 1
 
 ENTRYPOINT ["/entrypoint.sh"]
