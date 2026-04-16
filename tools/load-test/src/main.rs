@@ -102,11 +102,11 @@ fn pick_tx_type(counter: u64) -> TxType {
 
 // ─── Dummy bytecodes ─────────────────────────────────────────────────────────
 
-/// Minimal EVM STOP bytecode (1 byte) padded to ~200 bytes to simulate a real
-/// deployment payload.
+/// Deploy bytecode that stores a 1-byte runtime code (STOP opcode).
+/// Initializer: PUSH1 0x01, PUSH1 0x00, RETURN → runtime = memory[0..1] = 0x00
+/// eth_getCode returns "0x00", which is non-empty → detected as Contract.
 fn dummy_deploy_data() -> Vec<u8> {
-    // PUSH1 0x00, PUSH1 0x00, RETURN
-    let mut data = vec![0x60, 0x00, 0x60, 0x00, 0xf3];
+    let mut data = vec![0x60, 0x01, 0x60, 0x00, 0xf3]; // deploy 1-byte runtime code
     data.extend(std::iter::repeat(0x00).take(195)); // pad to 200 bytes
     data
 }
