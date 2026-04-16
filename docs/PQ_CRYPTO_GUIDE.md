@@ -35,7 +35,7 @@ While large-scale quantum computers don't exist yet, the threat is real:
 - **"Harvest now, decrypt later"** attacks mean adversaries can record blockchain traffic today and break it once quantum computers arrive.
 - Key transitions take years — blockchains must migrate *before* quantum computers become practical.
 
-Shell-chain eliminates this risk by using **NIST-standardized lattice-based** and **hash-based** signature schemes from day one.
+Shell-chain eliminates this risk by using **NIST-standardized lattice-based** and **hash-based** signature schemes **before Q-Day** — no migration, no emergency hard fork needed.
 
 ---
 
