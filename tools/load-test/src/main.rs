@@ -33,7 +33,7 @@ use hdrhistogram::Histogram;
 use reqwest::Client;
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 use shell_core::{SignedTransaction, Transaction};
 use shell_crypto::{DilithiumSigner, Signer};
@@ -100,7 +100,53 @@ fn pick_tx_type(counter: u64) -> TxType {
     }
 }
 
-// ─── Dummy bytecodes ─────────────────────────────────────────────────────────
+use rand::Rng;
+
+// ─── Load tier ────────────────────────────────────────────────────────────────
+
+/// Five load tiers that control how many txs are injected per block window.
+#[derive(Clone, Copy, Debug)]
+enum LoadTier {
+    Zero,   //   0 txs  — complete pause
+    Few,    //   1–50   — light traffic
+    Medium, //  51–200  — moderate traffic
+    Many,   // 201–400  — heavy traffic
+    Max,    // 401–500  — saturate mempool
+}
+
+impl LoadTier {
+    fn budget(self, rng: &mut impl Rng) -> i64 {
+        match self {
+            LoadTier::Zero   => 0,
+            LoadTier::Few    => rng.gen_range(1..=50),
+            LoadTier::Medium => rng.gen_range(51..=200),
+            LoadTier::Many   => rng.gen_range(201..=400),
+            LoadTier::Max    => rng.gen_range(401..=500),
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            LoadTier::Zero   => "ZERO",
+            LoadTier::Few    => "FEW",
+            LoadTier::Medium => "MED",
+            LoadTier::Many   => "MANY",
+            LoadTier::Max    => "MAX",
+        }
+    }
+}
+
+fn pick_load_tier(rng: &mut impl Rng) -> LoadTier {
+    match rng.gen_range(0u8..5) {
+        0 => LoadTier::Zero,
+        1 => LoadTier::Few,
+        2 => LoadTier::Medium,
+        3 => LoadTier::Many,
+        _ => LoadTier::Max,
+    }
+}
+
+
 
 /// Deploy bytecode that stores a 1-byte runtime code (STOP opcode).
 /// Initializer: PUSH1 0x01, PUSH1 0x00, RETURN → runtime = memory[0..1] = 0x00
@@ -200,7 +246,11 @@ impl Worker {
         Worker { id, signer, address, pq_address, nonce: 0, chain_id, tx_counter: 0 }
     }
 
-    fn build_tx(&self, tx_type: TxType, recipient: Address) -> Transaction {
+    fn build_tx(&self, tx_type: TxType, recipient: Address, rng_seed: u64) -> Transaction {
+        // Pick a random transfer value: 1–1000 SHELL (non-zero)
+        let shell_amount = (rng_seed % 1000) + 1; // 1–1000 SHELL
+        let transfer_value = U256::from(shell_amount) * U256::from(10u64).pow(U256::from(18u64));
+
         match tx_type {
             TxType::Transfer => Transaction {
                 chain_id: self.chain_id,
@@ -209,7 +259,7 @@ impl Worker {
                 max_priority_fee_per_gas: 100_000_000,
                 gas_limit: 21_000,
                 to: Some(recipient),
-                value: U256::from(1_u64),
+                value: transfer_value,
                 data: Bytes::default(),
                 access_list: None,
                 tx_type: 2,
@@ -421,6 +471,29 @@ async fn main() -> AResult<()> {
     // Recipient pool (round-robin among workers)
     let addrs: Vec<Address> = workers.iter().map(|w| w.address).collect();
 
+    // ── Block budget controller ───────────────────────────────────────────────
+    // Shared atomic budget: workers atomically decrement before each send.
+    // A background task resets the budget every BLOCK_MS with a random tier.
+    const BLOCK_MS: u64 = 2000;
+    let block_budget = Arc::new(AtomicU64::new(200)); // start with Medium
+    {
+        let budget = block_budget.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(BLOCK_MS)).await;
+                // Generate random tier+budget without holding ThreadRng across await
+                let new_budget: u64 = {
+                    let mut rng = rand::thread_rng();
+                    let tier = pick_load_tier(&mut rng);
+                    let b = tier.budget(&mut rng) as u64;
+                    if b == 0 { info!("Block budget: 0 ({})", tier.label()); }
+                    b
+                };
+                budget.store(new_budget, Ordering::Relaxed);
+            }
+        });
+    }
+
     // ── Spawn workers ────────────────────────────────────────────────────────
     info!("Starting load ({} workers)…", cli.workers);
     println!();
@@ -440,16 +513,28 @@ async fn main() -> AResult<()> {
         let total_submitted = total_submitted.clone();
         let total_errors = total_errors.clone();
         let addrs = addrs.clone();
+        let block_budget = block_budget.clone();
 
         let handle = tokio::spawn(async move {
             let mut rng_counter: u64 = w.id as u64 * 1_000_000;
 
             while test_start.elapsed() < deadline {
+                // Respect block budget: try to claim a slot
+                let slot = block_budget.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |b| {
+                    if b > 0 { Some(b - 1) } else { None }
+                });
+                if slot.is_err() {
+                    // Budget exhausted (Zero tier or window full) — wait for next window
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    rng_counter = rng_counter.wrapping_add(1);
+                    continue;
+                }
+
                 let tx_type = pick_tx_type(rng_counter);
                 let recipient_idx = (rng_counter as usize + w.id) % addrs.len();
                 let recipient = addrs[recipient_idx];
 
-                let tx = w.build_tx(tx_type, recipient);
+                let tx = w.build_tx(tx_type, recipient, rng_counter);
                 let signed = w.sign(tx);
 
                 let t0 = Instant::now();
