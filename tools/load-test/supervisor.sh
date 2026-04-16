@@ -13,7 +13,11 @@ set -euo pipefail
 LOG=/tmp/shell-local-test/supervisor.log
 mkdir -p /tmp/shell-local-test /tmp/shell-load-test
 
-log() { echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] $*" | tee -a "$LOG"; }
+log() {
+    local msg="[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] $*"
+    echo "$msg" >> "$LOG"
+    echo "$msg" >&2
+}
 
 SHELL_NODE=/Users/luciensong/Shell/shell-dev/shell-chain/target/release/shell-node
 LOAD_TEST=/Users/luciensong/Shell/shell-dev/shell-chain/target/release/shell-load-test
@@ -94,7 +98,7 @@ log "Supervisor started (PID $$, goal: ${TEST_DURATION}s of load testing)"
 echo $$ > /tmp/shell-local-test/supervisor.pid
 
 # Kill any pre-existing instances
-existing_node=$(lsof -ti :8545 2>/dev/null | head -1 || true)
+existing_node=$(lsof -i :8545 | awk 'NR>1 {print $2; exit}' 2>/dev/null || true)
 if [[ -n "$existing_node" ]]; then
     log "Killing existing node on :8545 (PID $existing_node)"
     kill "$existing_node" 2>/dev/null || true
