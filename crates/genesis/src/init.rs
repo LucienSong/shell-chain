@@ -195,6 +195,7 @@ mod tests {
         GenesisConfig {
             chain_id: 1337,
             chain_name: "test-chain".to_string(),
+            network_type: crate::config::NetworkType::Dev,
             timestamp: 1700000000,
             gas_limit: 30_000_000,
             extra_data: "genesis".to_string(),

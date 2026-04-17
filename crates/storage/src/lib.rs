@@ -14,7 +14,7 @@ mod world_state;
 mod rocks_db;
 
 pub use body_pruner::{BodyPruneResult, BodyPruner, DEFAULT_BODY_RETENTION};
-pub use chain_store::{ChainConfig, ChainStore, WitnessStore, MAX_ADDRESS_TX_HISTORY_OFFSET};
+pub use chain_store::{ChainConfig, ChainStore, ProofAmendmentStore, WitnessStore, MAX_ADDRESS_TX_HISTORY_OFFSET};
 pub use error::StorageError;
 pub use kv_store::{KvStore, WriteBatch, WriteBatchOp};
 pub use memory_db::MemoryDb;

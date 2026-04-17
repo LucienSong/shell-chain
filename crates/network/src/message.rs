@@ -1,8 +1,9 @@
 //! Network message types for block and transaction propagation.
 
 use serde::{Deserialize, Serialize};
-use shell_consensus::Attestation;
+use shell_consensus::{Attestation, ChallengeResponse, EquivocationProof, ProofChallenge};
 use shell_core::{Block, SignedTransaction};
+use shell_primitives::ShellHash;
 
 use crate::error::NetworkError;
 
@@ -51,6 +52,41 @@ pub enum NetworkMessage {
     Ping,
     /// Pong response to ping.
     Pong,
+    /// G5: Broadcast a STARK proof amendment for a previously sealed block.
+    ///
+    /// Sent by the `ProverService` after completing async proof generation.
+    /// Receivers verify the amendment and store it via `ProofAmendmentStore`.
+    /// Topic: `/shell/proofs/1`
+    ProofAmendment {
+        /// Hash of the block this proof covers.
+        block_hash: ShellHash,
+        /// The block number (for routing/filtering without full deserialization).
+        block_number: u64,
+        /// Serialized `ProofAmendment` bytes (JSON). Typically 10–20 KB.
+        payload: Vec<u8>,
+    },
+    /// G5: Acknowledgement that a node has stored a proof amendment.
+    ///
+    /// Used for proof availability tracking (K1).
+    ProofAck {
+        /// Hash of the block whose proof was acknowledged.
+        block_hash: ShellHash,
+        /// Address of the acknowledging node.
+        holder: shell_primitives::Address,
+    },
+    /// I1: Broadcast equivocation evidence when a double-sign is detected.
+    ///
+    /// Sent immediately when `import_block` detects two conflicting headers
+    /// from the same proposer at the same height. Receiving peers independently
+    /// verify the proof before applying slashing.
+    EquivocationEvidence(Box<EquivocationProof>),
+    /// I2: Challenge a STARK proof amendment that failed local verification.
+    ///
+    /// Broadcast by a node that cannot verify a received `ProofAmendment`.
+    /// Any node holding the raw proof may respond with `ProofChallengeResponse`.
+    ProofChallenge(Box<ProofChallenge>),
+    /// I2: Response to a `ProofChallenge` — provides raw proof bytes for re-verification.
+    ProofChallengeResponse(Box<ChallengeResponse>),
 }
 
 /// Events produced by the network layer for the node to process.

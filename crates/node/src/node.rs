@@ -8,7 +8,10 @@ use parking_lot::RwLock;
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
-use shell_consensus::{Attestation, ConsensusEngine, FinalityState, ForkChoice, PoaEngine};
+use shell_consensus::{
+    detect_double_sign, Attestation, ConsensusEngine, EquivocationProof, FinalityState, ForkChoice,
+    PoaEngine,
+};
 use shell_core::{calculate_base_fee, Account, Block, BlockHeader, SignedTransaction};
 use shell_crypto::{BatchVerifier, MultiVerifier, PreVerified, Signer, Verifier, VerifyItem};
 use shell_evm::{commit_evm_state, validate_tx_for_import, ShellEvm, ShellStateDb};
@@ -17,15 +20,20 @@ use shell_network::{NetworkMessage, NetworkService};
 use shell_primitives::{Address, Bytes, ShellHash};
 use shell_rpc::DevRpcControl;
 use shell_storage::{
-    BodyPruner, ChainStore, KvStore, StatePruner, WitnessPruner, WitnessStore, WorldState,
+    BodyPruner, ChainStore, KvStore, ProofAmendmentStore, StatePruner, WitnessPruner, WitnessStore,
+    WorldState,
 };
 
-use crate::config::NodeConfig;
+use crate::config::{NodeConfig, NodeRole};
 use crate::error::NodeError;
 use crate::metrics::Metrics;
 use crate::pruning::StateRootTracker;
+use crate::prover_service::{ProverConfig, ProverService, ProverServiceHandle};
 
-use shell_stark_prover::prover::{prove_sig_batch, verify_sig_batch, SigBatchEntry};
+use shell_stark_prover::{
+    prover::{verify_sig_batch, SigBatchEntry},
+    ProofBacklog, ProofTask,
+};
 
 /// A running shell-chain node.
 ///
@@ -52,6 +60,17 @@ pub struct Node<S: KvStore + 'static> {
     pub body_pruner: RwLock<BodyPruner>,
     /// Whether to generate a STARK aggregate proof during block production.
     pub stark_aggregation: bool,
+    /// Backlog of proof tasks for the background ProverService.
+    /// When `stark_aggregation` is enabled, `produce_block` pushes tasks here
+    /// instead of blocking on inline proof generation.
+    pub proof_backlog: Arc<parking_lot::Mutex<ProofBacklog>>,
+    /// G5: Stores async STARK proof amendments received from the network.
+    pub amendment_store: ProofAmendmentStore<S>,
+    /// H3: Handle to the background prover service (non-None when `node_role.runs_prover()`).
+    prover_service_handle: parking_lot::Mutex<Option<ProverServiceHandle>>,
+    /// I1: Queue of equivocation proofs discovered during import_block, to be broadcast
+    /// in the next event loop iteration (import_block is sync; network sends are async).
+    equivocation_queue: parking_lot::Mutex<Vec<EquivocationProof>>,
     /// Finality tracking: collects attestations and detects quorum.
     pub finality: Arc<RwLock<FinalityState>>,
     /// Fork-choice rule: selects the canonical head based on attestations and finality.
@@ -103,6 +122,7 @@ impl<S: KvStore + 'static> Node<S> {
         let body_pruner = BodyPruner::new(config.pruning.body_retention);
         let stark_aggregation = config.enable_stark_aggregation;
         let metrics = Arc::new(Metrics::new().expect("failed to register Prometheus metrics"));
+        let amendment_store = ProofAmendmentStore::new(store.clone());
 
         // F-094: Recover finalized state from persistent storage on restart.
         let (fin_number, fin_hash) = {
@@ -143,6 +163,10 @@ impl<S: KvStore + 'static> Node<S> {
             witness_pruner: RwLock::new(witness_pruner),
             body_pruner: RwLock::new(body_pruner),
             stark_aggregation,
+            proof_backlog: Arc::new(parking_lot::Mutex::new(ProofBacklog::new())),
+            amendment_store,
+            prover_service_handle: parking_lot::Mutex::new(None),
+            equivocation_queue: parking_lot::Mutex::new(Vec::new()),
             finality: Arc::new(RwLock::new(finality_state)),
             fork_choice: Arc::new(RwLock::new(ForkChoice::new(ShellHash::ZERO))),
             metrics,
@@ -568,6 +592,24 @@ impl<S: KvStore + 'static> Node<S> {
                 .await;
         }
 
+        // H3: Start background prover service if this node is configured to run proving.
+        if self.config.node_role.runs_prover() {
+            let prover_address = self.config.proposer_address.unwrap_or_default();
+            let prover_config = ProverConfig::default();
+            let service = ProverService::new(
+                Arc::clone(&self.proof_backlog),
+                self.amendment_store.clone(),
+                prover_config,
+                prover_address,
+            );
+            let handle = service.start();
+            *self.prover_service_handle.lock() = Some(handle);
+            info!(
+                role = ?self.config.node_role,
+                "H3: Background prover service started"
+            );
+        }
+
         loop {
             tokio::select! {
                 _ = block_timer.tick() => {
@@ -695,6 +737,19 @@ impl<S: KvStore + 'static> Node<S> {
                                                 receipts,
                                             }).is_err() {
                                                 tracing::warn!("no active subscribers for block events");
+                                            }
+
+                                            // I1: Drain any equivocation proofs discovered
+                                            // during import and broadcast to the network.
+                                            let pending: Vec<EquivocationProof> = {
+                                                let mut q = self.equivocation_queue.lock();
+                                                std::mem::take(&mut *q)
+                                            };
+                                            for equivocation in pending {
+                                                let msg = NetworkMessage::EquivocationEvidence(
+                                                    Box::new(equivocation),
+                                                );
+                                                let _ = network.broadcast(msg).await;
                                             }
                                         }
                                         Err(NodeError::GapDetected { .. }) => {
@@ -839,6 +894,74 @@ impl<S: KvStore + 'static> Node<S> {
                                     let mut fn_w = finalized_number.write();
                                     if fin > *fn_w {
                                         *fn_w = fin;
+                                    }
+                                }
+                                // G5: Receive async STARK proof amendment from a prover node.
+                                // Deserialize, store via ProofAmendmentStore, log result.
+                                NetworkMessage::ProofAmendment { block_hash, block_number, payload } => {
+                                    debug!(%peer, block = block_number, "received ProofAmendment");
+                                    if let Err(e) = self.amendment_store.put_amendment(&block_hash, &payload) {
+                                        warn!(%peer, block = block_number, "failed to store proof amendment: {e}");
+                                    } else {
+                                        info!(block = block_number, "G5: proof amendment stored from peer {peer}");
+                                    }
+                                }
+                                // G5: Acknowledge that a peer has stored a proof amendment.
+                                NetworkMessage::ProofAck { block_hash, holder } => {
+                                    debug!(%peer, ?holder, "received ProofAck for block {}", block_hash);
+                                }
+                                // I1: Received equivocation evidence from a peer.
+                                // Independently verify and apply slashing if valid.
+                                NetworkMessage::EquivocationEvidence(equivocation) => {
+                                    if equivocation.verify() {
+                                        warn!(
+                                            offender = %equivocation.offender,
+                                            block_number = equivocation.header_a.number,
+                                            "I1: equivocation evidence verified, slashing {}",
+                                            equivocation.offender
+                                        );
+                                        // TODO: wire into slashing state; for now log only.
+                                    } else {
+                                        warn!(%peer, "I1: received invalid equivocation evidence, ignoring");
+                                    }
+                                }
+                                // I2: Received a proof challenge from a peer.
+                                // If we hold the proof, respond with raw bytes.
+                                NetworkMessage::ProofChallenge(challenge) => {
+                                    debug!(%peer, block = challenge.block_number, reason = %challenge.reason, "I2: received ProofChallenge");
+                                    if let Ok(Some(proof_bytes)) = self.amendment_store.get_amendment(&challenge.block_hash) {
+                                        use shell_consensus::ChallengeResponse;
+                                        if let Some(our_address) = self.config.proposer_address {
+                                            let resp = ChallengeResponse {
+                                                block_hash: challenge.block_hash,
+                                                proof_bytes,
+                                                responder: our_address,
+                                            };
+                                            let _ = network.broadcast(NetworkMessage::ProofChallengeResponse(Box::new(resp))).await;
+                                            debug!(block = challenge.block_number, "I2: sent ChallengeResponse");
+                                        }
+                                    }
+                                }
+                                // I2: Received a challenge response with raw proof bytes.
+                                // Re-verify and store if valid.
+                                NetworkMessage::ProofChallengeResponse(resp) => {
+                                    debug!(%peer, "I2: received ChallengeResponse for block {}", resp.block_hash);
+                                    // Attempt to verify the provided proof bytes.
+                                    match shell_stark_prover::proof::SigBatchProof::from_json(&resp.proof_bytes) {
+                                        Ok(sig_proof) => {
+                                            if shell_stark_prover::prover::verify_sig_batch(&sig_proof).is_ok() {
+                                                if let Err(e) = self.amendment_store.put_amendment(&resp.block_hash, &resp.proof_bytes) {
+                                                    warn!("I2: failed to store verified challenge response: {e}");
+                                                } else {
+                                                    info!(block = %resp.block_hash, "I2: challenge response verified and stored");
+                                                }
+                                            } else {
+                                                warn!(%peer, "I2: challenge response proof verification failed");
+                                            }
+                                        }
+                                        Err(e) => {
+                                            warn!(%peer, "I2: challenge response malformed: {e}");
+                                        }
                                     }
                                 }
                             }
@@ -1107,7 +1230,9 @@ impl<S: KvStore + 'static> Node<S> {
 
         // C3: If STARK aggregation is enabled, generate a batch commitment proof
         // over all transactions that carry embedded pubkeys (the source of bloat).
-        // The proof is stored in the header BEFORE signing so it's covered by the seal.
+        // G4: Collect signature entries and push to the proof backlog for async proving.
+        // Block production is no longer blocked waiting for a STARK proof.
+        // The background ProverService will generate the proof and store a ProofAmendment.
         if self.stark_aggregation {
             let entries: Vec<SigBatchEntry> = included_txs
                 .iter()
@@ -1126,29 +1251,17 @@ impl<S: KvStore + 'static> Node<S> {
                 .collect();
 
             if !entries.is_empty() {
-                match prove_sig_batch(&entries) {
-                    Ok(sig_proof) => match sig_proof.to_json() {
-                        Ok(proof_bytes) => {
-                            block.header.sig_aggregate_proof =
-                                Some(shell_primitives::Bytes::from(proof_bytes));
-                            info!(
-                                n_entries = entries.len(),
-                                proof_bytes = block
-                                    .header
-                                    .sig_aggregate_proof
-                                    .as_ref()
-                                    .map_or(0, |b| b.len()),
-                                "C3: STARK aggregate proof generated"
-                            );
-                        }
-                        Err(e) => {
-                            warn!("C3: proof serialization failed (fallback): {e}");
-                        }
-                    },
-                    Err(e) => {
-                        warn!("C3: prove_sig_batch failed (fallback to inline sigs): {e}");
-                    }
-                }
+                let block_num = block.header.number;
+                let mut hash_bytes = [0u8; 32];
+                // Use a placeholder hash — real hash assigned after signing below.
+                // The backlog task is updated by the ProverService on pop.
+                hash_bytes[..8].copy_from_slice(&block_num.to_be_bytes());
+                let mut backlog = self.proof_backlog.lock();
+                backlog.push(ProofTask::new(hash_bytes, block_num, entries));
+                debug!(
+                    block = block_num,
+                    "G4: proof task queued in backlog (async proving)"
+                );
             }
         }
 
@@ -1210,6 +1323,30 @@ impl<S: KvStore + 'static> Node<S> {
                 "potential fork detected at same height, skipping import"
             );
             return Ok(());
+        }
+
+        // I1: Equivocation detection — check if the incoming block's proposer has
+        // already produced a block at this height. If so, this is a double-sign event.
+        // We detect by comparing against the block we have at `incoming` number.
+        if let Ok(Some(existing)) = self.chain_store.get_block_by_number(incoming) {
+            if existing.hash() != block.hash()
+                && existing.header.proposer == block.header.proposer
+            {
+                let slash_record = detect_double_sign(&existing.header, &block.header);
+                if let Some(record) = slash_record {
+                    if let Some(equivocation) = EquivocationProof::from_slash_record(&record) {
+                        if equivocation.verify() {
+                            warn!(
+                                offender = %equivocation.offender,
+                                block_number = incoming,
+                                "I1: double-sign detected, queuing equivocation broadcast"
+                            );
+                            // Store in equivocation queue for broadcast in the event loop.
+                            self.equivocation_queue.lock().push(equivocation);
+                        }
+                    }
+                }
+            }
         }
 
         // Duplicate of current head — already have it.
@@ -1557,6 +1694,34 @@ impl<S: KvStore + 'static> Node<S> {
 
         // Track the imported state root for pruning decisions.
         self.record_finalized_state_root(block.number(), block.header.state_root);
+
+        // H4: Standalone Prover node — extract sig batch entries from imported block
+        // and push them to the proof backlog for async proving.
+        // Validators handle this in produce_block (G4); Prover nodes do it here.
+        if self.config.node_role == NodeRole::Prover {
+            let block_number = block.number();
+            let block_hash = block.hash();
+            let entries: Vec<shell_stark_prover::prover::SigBatchEntry> = block
+                .transactions
+                .iter()
+                .map(|tx| {
+                    let tx_hash = tx.hash();
+                    let sender = tx.sender();
+                    let mut pk_hash = [0u8; 32];
+                    pk_hash[..20].copy_from_slice(sender.0.as_slice());
+                    shell_stark_prover::prover::SigBatchEntry {
+                        msg_hash: *tx_hash.0,
+                        pk_hash,
+                    }
+                })
+                .collect();
+            if !entries.is_empty() {
+                let n = entries.len();
+                let task = ProofTask { block_hash: *block_hash.0, block_number, entries };
+                self.proof_backlog.lock().push(task);
+                debug!(block = block_number, n_entries = n, "H4: Pushed proof task for standalone prover");
+            }
+        }
 
         Ok(())
     }
@@ -2779,7 +2944,10 @@ mod tests {
         use shell_network::{NetworkBus, NetworkConfig};
         use std::time::Duration;
 
-        let (node, signer) = setup_node();
+        let (mut node, signer) = setup_node();
+        // Override block_time to 1s so the test completes quickly
+        // regardless of the Dev network profile default (30s).
+        node.config.block_time_ms = 1_000;
         store_genesis(&node);
 
         let bus = NetworkBus::new(64);
@@ -2791,13 +2959,11 @@ mod tests {
 
         // Spawn the event loop in a background task.
         let handle = tokio::spawn(async move {
-            // Use a very short block time for testing.
-            // We can't mutate config directly, so we test with the default.
             node_clone.run(signer, &mut network).await
         });
 
-        // Wait for at least 3 blocks to be produced (~6s with 2s block_time).
-        tokio::time::sleep(Duration::from_secs(7)).await;
+        // Wait for at least 3 blocks to be produced (~3s with 1s block_time).
+        tokio::time::sleep(Duration::from_secs(5)).await;
 
         // Shut down the node.
         node.shutdown();

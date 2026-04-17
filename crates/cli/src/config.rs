@@ -23,6 +23,8 @@ pub struct ShellConfig {
 pub struct NodeSection {
     pub datadir: Option<String>,
     pub chain_id: Option<u64>,
+    /// Network profile: "dev", "testnet", or "mainnet".
+    pub network: Option<String>,
     pub block_time: Option<u64>,
     pub keystore: Option<String>,
     pub db: Option<String>,

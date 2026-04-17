@@ -5731,6 +5731,7 @@ version = "0.14.0"
 dependencies = [
  "async-trait",
  "serde",
+ "serde_json",
  "shell-core",
  "shell-crypto",
  "shell-primitives",
@@ -5907,6 +5908,7 @@ dependencies = [
  "shell-core",
  "shell-crypto",
  "shell-evm",
+ "shell-genesis",
  "shell-mempool",
  "shell-network",
  "shell-primitives",

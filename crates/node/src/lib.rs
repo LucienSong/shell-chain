@@ -10,13 +10,15 @@ pub mod config;
 pub mod error;
 pub mod metrics;
 pub mod node;
+pub mod prover_service;
 pub mod pruning;
 pub mod reorg;
 
 pub use builder::NodeBuilder;
-pub use config::{MetricsConfig, NodeConfig};
+pub use config::{MetricsConfig, NodeConfig, NodeRole};
 pub use error::NodeError;
 pub use metrics::Metrics;
 pub use node::Node;
+pub use prover_service::{ProverConfig, ProverService, ProverServiceHandle, ProvingPriority};
 pub use pruning::{PruningConfig, StateRootTracker};
 pub use reorg::{ReorgEngine, ReorgResult};

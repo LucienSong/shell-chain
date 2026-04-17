@@ -30,6 +30,8 @@ pub struct NetworkConfig {
     pub txs_topic: String,
     /// Gossipsub topic name for attestation announcements.
     pub attestation_topic: String,
+    /// Gossipsub topic name for STARK proof amendment announcements (G5).
+    pub proofs_topic: String,
     /// Maximum number of peers to maintain.
     pub max_peers: usize,
     /// Enable mDNS local peer discovery (disable in production/cloud).
@@ -74,6 +76,7 @@ impl Default for NetworkConfig {
             blocks_topic: "/shell/blocks/1".into(),
             txs_topic: "/shell/txs/1".into(),
             attestation_topic: "/shell/attestation/1".into(),
+            proofs_topic: "/shell/proofs/1".into(),
             max_peers: 50,
             enable_mdns: false,
             enable_kademlia: true,

@@ -38,11 +38,33 @@
 //! grinding 16, no field extension.
 
 pub mod air;
+pub mod amendment;
+pub mod availability;
+pub mod backlog;
+pub mod metadata;
 pub mod proof;
 pub mod prover;
+pub mod prover_health;
+pub mod recursive_air;
+pub mod scheduler;
+pub mod state_machine;
 
+pub use amendment::{amendment_key, ProofAmendment, PROOF_AMENDMENT_VERSION, AMENDMENT_KEY_PREFIX};
+pub use availability::{AvailabilityConfig, ProofAvailability, ProofAvailabilityTracker};
+pub use backlog::{ProofBacklog, ProofTask, DEFAULT_WATERMARK_THRESHOLD};
+pub use metadata::{
+    proof_metadata_key, ProofLevel, ProofMetadata, PROOF_METADATA_KEY_PREFIX,
+    PROOF_METADATA_VERSION,
+};
 pub use proof::{SigBatchProof, SIG_BATCH_PROOF_VERSION};
 pub use prover::{prove_sig_batch, verify_sig_batch, SigBatchEntry};
+pub use prover_health::{HealthStatus, ProverHealth, ProverHealthConfig};
+pub use recursive_air::{
+    compute_aggregate_root, AggregationJob, RecursivePublicInputs, RecursiveVerifierAir,
+    REC_COL_ACC, REC_COL_ROOT, REC_TRACE_WIDTH,
+};
+pub use scheduler::{AggregationConfig, AggregationScheduler, AggregationTrigger, TriggerReason};
+pub use state_machine::{BlockProofState, BlockStateMachine, InvalidTransition};
 
 /// Current protocol version for [`SigBatchProof`] serialization.
 pub const PROTOCOL_VERSION: u8 = 1;

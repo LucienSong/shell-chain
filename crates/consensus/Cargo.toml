@@ -12,3 +12,6 @@ shell-crypto.workspace = true
 async-trait.workspace = true
 thiserror.workspace = true
 serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

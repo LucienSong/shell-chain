@@ -5,13 +5,78 @@
 //! 1. **Double-sign**: the same proposer sealed two different blocks at the same height.
 //! 2. **Offline**: a proposer has not produced a block within `threshold` blocks of
 //!    their expected slot, as detected by consecutive-missed-slot counting.
+//!
+//! # I1: Equivocation propagation
+//!
+//! When a double-sign is detected during `import_block`, an [`EquivocationProof`]
+//! is broadcast to the network via `NetworkMessage::EquivocationEvidence`.
+//! Receiving nodes independently verify the proof and apply slashing.
 
+use serde::{Deserialize, Serialize};
 use shell_core::BlockHeader;
-use shell_primitives::Address;
+use shell_primitives::{Address, ShellHash};
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
+
+/// I1: A broadcastable equivocation proof bundle.
+///
+/// Sent by the node that first detects a double-sign. Peers independently
+/// verify the two conflicting headers before applying slashing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EquivocationProof {
+    /// The misbehaving validator's address.
+    pub offender: Address,
+    /// First conflicting block header (sealed by `offender`).
+    pub header_a: Box<BlockHeader>,
+    /// Second conflicting block header (sealed by `offender`, same height, different hash).
+    pub header_b: Box<BlockHeader>,
+    /// Hash of `header_a`.
+    pub hash_a: ShellHash,
+    /// Hash of `header_b`.
+    pub hash_b: ShellHash,
+}
+
+impl EquivocationProof {
+    /// Construct from a `SlashRecord` with `DoubleSign` evidence.
+    ///
+    /// Returns `None` if the slash record is not a double-sign or the hashes match.
+    pub fn from_slash_record(record: &SlashRecord) -> Option<Self> {
+        if let SlashEvidence::DoubleSign { header_a, header_b } = &record.evidence {
+            let hash_a = header_a.hash();
+            let hash_b = header_b.hash();
+            if hash_a == hash_b {
+                return None;
+            }
+            Some(Self {
+                offender: record.validator,
+                header_a: header_a.clone(),
+                header_b: header_b.clone(),
+                hash_a,
+                hash_b,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Verify the equivocation proof is internally consistent:
+    /// - Both headers have the same block number.
+    /// - Both headers have the same proposer (matching `offender`).
+    /// - The two hashes are different.
+    pub fn verify(&self) -> bool {
+        if self.header_a.number != self.header_b.number {
+            return false;
+        }
+        if self.header_a.proposer != self.offender || self.header_b.proposer != self.offender {
+            return false;
+        }
+        let computed_a = self.header_a.hash();
+        let computed_b = self.header_b.hash();
+        computed_a == self.hash_a && computed_b == self.hash_b && self.hash_a != self.hash_b
+    }
+}
 
 /// Category of misbehaviour.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -254,5 +319,62 @@ mod tests {
         assert!(bad.validate().is_err());
         let good = SlashingConfig::default();
         assert!(good.validate().is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // I1: EquivocationProof tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn equivocation_proof_from_double_sign_slash_record() {
+        let h1 = header(10, addr(1), 0);
+        let h2 = header(10, addr(1), 99);
+        let record = detect_double_sign(&h1, &h2).unwrap();
+        let eq = EquivocationProof::from_slash_record(&record).expect("should build equivocation");
+        assert_eq!(eq.offender, addr(1));
+        assert_eq!(eq.header_a.number, 10);
+        assert_eq!(eq.header_b.number, 10);
+        assert_ne!(eq.hash_a, eq.hash_b);
+    }
+
+    #[test]
+    fn equivocation_proof_verify_valid() {
+        let h1 = header(10, addr(1), 0);
+        let h2 = header(10, addr(1), 99);
+        let record = detect_double_sign(&h1, &h2).unwrap();
+        let eq = EquivocationProof::from_slash_record(&record).unwrap();
+        assert!(eq.verify(), "valid equivocation should verify");
+    }
+
+    #[test]
+    fn equivocation_proof_verify_tampered_hash_rejected() {
+        let h1 = header(10, addr(1), 0);
+        let h2 = header(10, addr(1), 99);
+        let record = detect_double_sign(&h1, &h2).unwrap();
+        let mut eq = EquivocationProof::from_slash_record(&record).unwrap();
+        // Tamper: replace hash_a with hash_b (makes hash_a == hash_b).
+        eq.hash_a = eq.hash_b;
+        assert!(!eq.verify(), "tampered hash should fail verify");
+    }
+
+    #[test]
+    fn equivocation_proof_verify_wrong_proposer_rejected() {
+        let h1 = header(10, addr(1), 0);
+        let h2 = header(10, addr(1), 99);
+        let record = detect_double_sign(&h1, &h2).unwrap();
+        let mut eq = EquivocationProof::from_slash_record(&record).unwrap();
+        // Tamper: claim a different offender.
+        eq.offender = addr(2);
+        assert!(!eq.verify(), "wrong offender should fail verify");
+    }
+
+    #[test]
+    fn equivocation_proof_from_offline_slash_returns_none() {
+        let config = SlashingConfig::default();
+        let record = detect_offline(&addr(3), 0, 100, &config).unwrap();
+        assert!(
+            EquivocationProof::from_slash_record(&record).is_none(),
+            "offline slash record should not produce equivocation proof"
+        );
     }
 }

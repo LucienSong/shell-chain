@@ -688,6 +688,69 @@ impl<S: KvStore> WitnessStore<S> {
     }
 }
 
+// ── ProofAmendmentStore ───────────────────────────────────────────────────────
+
+/// Storage for async STARK [`ProofAmendment`]s.
+///
+/// When a block is sealed without an inline proof (async proving), a
+/// [`ProofAmendment`] is generated later (possibly by a standalone Prover
+/// node) and gossiped via P2P.  Nodes store amendments here, keyed by the
+/// block hash, so that block import can verify the proof without storing the
+/// full PQ signatures permanently.
+///
+/// Key format: `pa/` + block_hash (32 bytes) → JSON-encoded `ProofAmendment`.
+///
+/// Note: This store holds raw bytes so it does not take a dependency on the
+/// `shell-stark-prover` crate.  Callers in the `shell-node` crate (which
+/// already depends on the prover) perform serialization/deserialization.
+pub struct ProofAmendmentStore<S: KvStore> {
+    store: Arc<S>,
+}
+
+impl<S: KvStore> Clone for ProofAmendmentStore<S> {
+    fn clone(&self) -> Self {
+        Self { store: Arc::clone(&self.store) }
+    }
+}
+
+/// Key prefix for proof amendments (`pa/`).
+const PA_PREFIX: &[u8] = b"pa/";
+
+impl<S: KvStore> ProofAmendmentStore<S> {
+    pub fn new(store: Arc<S>) -> Self {
+        Self { store }
+    }
+
+    fn key(block_hash: &ShellHash) -> Vec<u8> {
+        let mut k = PA_PREFIX.to_vec();
+        k.extend_from_slice(block_hash.as_bytes());
+        k
+    }
+
+    /// Store a serialized `ProofAmendment` for a block.
+    ///
+    /// `bytes` should be the JSON or other canonical encoding of the
+    /// amendment produced by the prover.
+    pub fn put_amendment(&self, block_hash: &ShellHash, bytes: &[u8]) -> Result<(), StorageError> {
+        self.store.put(&Self::key(block_hash), bytes)
+    }
+
+    /// Retrieve the raw bytes of the `ProofAmendment` for a block, if present.
+    pub fn get_amendment(&self, block_hash: &ShellHash) -> Result<Option<Vec<u8>>, StorageError> {
+        self.store.get(&Self::key(block_hash))
+    }
+
+    /// Returns `true` if a proof amendment is stored for the given block hash.
+    pub fn has_amendment(&self, block_hash: &ShellHash) -> Result<bool, StorageError> {
+        Ok(self.store.get(&Self::key(block_hash))?.is_some())
+    }
+
+    /// Delete the proof amendment for a block (e.g., after sig stripping).
+    pub fn delete_amendment(&self, block_hash: &ShellHash) -> Result<(), StorageError> {
+        self.store.delete(&Self::key(block_hash))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
