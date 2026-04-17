@@ -16,7 +16,7 @@ use shell_mempool::TxPool;
 use shell_network::{NetworkMessage, NetworkService};
 use shell_primitives::{Address, Bytes, ShellHash};
 use shell_rpc::DevRpcControl;
-use shell_storage::{ChainStore, KvStore, StatePruner, WorldState};
+use shell_storage::{ChainStore, KvStore, StatePruner, WitnessStore, WorldState};
 
 use crate::config::NodeConfig;
 use crate::error::NodeError;
@@ -40,6 +40,8 @@ pub struct Node<S: KvStore + 'static> {
     pub state_root_tracker: RwLock<StateRootTracker>,
     /// State pruner: removes old canonical mappings (F-303).
     pub state_pruner: RwLock<StatePruner>,
+    /// Witness store: holds per-block signature witness bundles.
+    pub witness_store: Arc<WitnessStore<S>>,
     /// Finality tracking: collects attestations and detects quorum.
     pub finality: Arc<RwLock<FinalityState>>,
     /// Fork-choice rule: selects the canonical head based on attestations and finality.
@@ -86,6 +88,7 @@ impl<S: KvStore + 'static> Node<S> {
         let (shutdown_tx, _) = watch::channel(false);
         let tracker = StateRootTracker::new(config.pruning.clone());
         let state_pruner = StatePruner::new(128);
+        let witness_store = Arc::new(WitnessStore::new(store.clone()));
         let metrics = Arc::new(Metrics::new().expect("failed to register Prometheus metrics"));
 
         // F-094: Recover finalized state from persistent storage on restart.
@@ -123,6 +126,7 @@ impl<S: KvStore + 'static> Node<S> {
             known_authorities: Arc::new(RwLock::new(HashMap::new())),
             state_root_tracker: RwLock::new(tracker),
             state_pruner: RwLock::new(state_pruner),
+            witness_store,
             finality: Arc::new(RwLock::new(finality_state)),
             fork_choice: Arc::new(RwLock::new(ForkChoice::new(ShellHash::ZERO))),
             metrics,
@@ -471,7 +475,7 @@ impl<S: KvStore + 'static> Node<S> {
                 None
             },
             None, // admin_p2p_context: wire peer_id + p2p_listen when P2P layer is integrated
-            None, // witness_store: wire when WitnessStore is stored on Node (B4 follow-up)
+            Some(Arc::clone(&self.witness_store)), // B5: witness store wired
         )
         .await
         .map_err(|e| NodeError::Startup(format!("RPC: {e}")))?;
@@ -1350,6 +1354,41 @@ impl<S: KvStore + 'static> Node<S> {
             )));
         }
 
+        // B5: Validate witness_root when present.
+        // If the header declares a witness_root, the stored bundle must hash to it.
+        if let Some(expected_root) = block.header.witness_root {
+            let block_hash_for_witness = block.hash();
+            match self.witness_store.get_bundle(&block_hash_for_witness) {
+                Ok(Some(bundle)) => {
+                    let computed = bundle.compute_root();
+                    if computed != expected_root {
+                        return Err(NodeError::Startup(format!(
+                            "block {} witness_root mismatch: header={:?}, computed={:?}",
+                            block.number(),
+                            expected_root,
+                            computed
+                        )));
+                    }
+                }
+                Ok(None) => {
+                    // Witness bundle not yet available (e.g. not yet delivered by network).
+                    // Log and allow import — full validation requires witness propagation
+                    // (Phase B network layer). Reject only if bundle is present but wrong.
+                    debug!(
+                        block = block.number(),
+                        witness_root = ?expected_root,
+                        "witness bundle not in store; skipping witness_root check for now"
+                    );
+                }
+                Err(e) => {
+                    return Err(NodeError::Startup(format!(
+                        "block {} witness store lookup failed: {e}",
+                        block.number()
+                    )));
+                }
+            }
+        }
+
         let committed_world_state = WorldState::at_root(self.store.clone(), &imported_state_root)?;
         {
             let mut live_ws = self.world_state.write();
@@ -1629,6 +1668,7 @@ mod tests {
                 parent_beacon_block_root: ShellHash::ZERO,
                 blob_gas_used: 0,
                 excess_blob_gas: 0,
+                witness_root: None,
             },
             transactions: vec![],
             proposer_seal: None,
@@ -1928,6 +1968,7 @@ mod tests {
                 parent_beacon_block_root: ShellHash::ZERO,
                 blob_gas_used: 0,
                 excess_blob_gas: 0,
+                witness_root: None,
             },
             transactions: vec![],
             proposer_seal: None,
@@ -2290,6 +2331,7 @@ mod tests {
                 parent_beacon_block_root: ShellHash::ZERO,
                 blob_gas_used: 0,
                 excess_blob_gas: 0,
+                witness_root: None,
             },
             transactions: vec![signed0, signed1], // Reference first = wrong order
             proposer_seal: None,
@@ -2555,6 +2597,7 @@ mod tests {
                 parent_beacon_block_root: ShellHash::ZERO,
                 blob_gas_used: 0,
                 excess_blob_gas: 0,
+                witness_root: None,
             },
             transactions: vec![],
             proposer_seal: None,
@@ -2867,6 +2910,7 @@ mod tests {
                     parent_beacon_block_root: ShellHash::ZERO,
                     blob_gas_used: 0,
                     excess_blob_gas: 0,
+                    witness_root: None,
                 },
                 transactions: vec![],
                 proposer_seal: None,
@@ -2915,6 +2959,7 @@ mod tests {
                 parent_beacon_block_root: ShellHash::ZERO,
                 blob_gas_used: 0,
                 excess_blob_gas: 0,
+                witness_root: None,
             },
             transactions: vec![],
             proposer_seal: None,
@@ -2960,6 +3005,7 @@ mod tests {
                 parent_beacon_block_root: ShellHash::ZERO,
                 blob_gas_used: 0,
                 excess_blob_gas: 0,
+                witness_root: None,
             },
             transactions: vec![],
             proposer_seal: None,
@@ -2991,6 +3037,7 @@ mod tests {
                 parent_beacon_block_root: ShellHash::ZERO,
                 blob_gas_used: 0,
                 excess_blob_gas: 0,
+                witness_root: None,
             },
             transactions: vec![],
             proposer_seal: None,
@@ -3077,6 +3124,7 @@ mod tests {
                 parent_beacon_block_root: ShellHash::ZERO,
                 blob_gas_used: 0,
                 excess_blob_gas: 0,
+                witness_root: None,
             },
             transactions: vec![],
             proposer_seal: None,
@@ -3262,6 +3310,7 @@ mod tests {
                 parent_beacon_block_root: ShellHash::ZERO,
                 blob_gas_used: 0,
                 excess_blob_gas: 0,
+                witness_root: None,
             },
             transactions: vec![],
             proposer_seal: None,
@@ -3321,6 +3370,117 @@ mod tests {
         assert!(
             err_msg.contains("equivocation"),
             "error should mention equivocation: {err_msg}"
+        );
+    }
+
+    // ── B5: witness_root validation tests ────────────────────────────────────
+
+    /// Build a height-1 block with an optional witness_root set.
+    fn make_block_at_1(node: &Node<MemoryDb>, witness_root: Option<ShellHash>) -> Block {
+        let current_root = current_state_root(node);
+        Block {
+            header: BlockHeader {
+                parent_hash: node.chain_store.get_head_hash().unwrap().unwrap(),
+                state_root: current_root,
+                transactions_root: ShellHash::default(),
+                receipts_root: ShellHash::default(),
+                logs_bloom: Bytes::default(),
+                number: 1,
+                gas_limit: 30_000_000,
+                gas_used: 0,
+                timestamp: 1_700_000_001,
+                extra_data: Bytes::default(),
+                proposer: node.config.proposer_address.unwrap(),
+                sig_aggregate_proof: None,
+                base_fee_per_gas: shell_core::INITIAL_BASE_FEE,
+                withdrawals_root: ShellHash::ZERO,
+                parent_beacon_block_root: ShellHash::ZERO,
+                blob_gas_used: 0,
+                excess_blob_gas: 0,
+                witness_root,
+            },
+            transactions: vec![],
+            proposer_seal: None,
+        }
+    }
+
+    #[test]
+    fn import_block_no_witness_root_succeeds() {
+        // Block with no witness_root: validation is skipped.
+        let (node, _signer) = setup_node();
+        store_genesis(&node);
+        let block = make_block_at_1(&node, None);
+        let verifier = MultiVerifier;
+        assert!(node.import_block(block, &verifier).is_ok());
+    }
+
+    #[test]
+    fn import_block_witness_root_no_bundle_still_imports() {
+        // witness_root is set but no bundle in store → logged, import allowed.
+        let (node, _signer) = setup_node();
+        store_genesis(&node);
+        let fake_root = ShellHash::from([0xab; 32]);
+        let block = make_block_at_1(&node, Some(fake_root));
+        let verifier = MultiVerifier;
+        assert!(
+            node.import_block(block, &verifier).is_ok(),
+            "should accept block when bundle not yet delivered"
+        );
+    }
+
+    #[test]
+    fn import_block_witness_root_matches_bundle_succeeds() {
+        use shell_core::{TxWitness, WitnessBundle};
+        use shell_crypto::PQSignature;
+        use shell_crypto::SignatureType;
+
+        let (node, _signer) = setup_node();
+        store_genesis(&node);
+
+        // Build a minimal bundle and compute its root.
+        let sig = PQSignature { sig_type: SignatureType::Dilithium3, data: vec![0xAA; 16] };
+        let witness = TxWitness { signature: sig, pubkey: None };
+        let bundle = WitnessBundle { witnesses: vec![witness] };
+        let root = bundle.compute_root();
+
+        // Store the bundle before the block hash exists — we need the future hash.
+        // Build block first, then store bundle, then import.
+        let block = make_block_at_1(&node, Some(root));
+        let block_hash = block.hash();
+        node.witness_store.put_bundle(&block_hash, &bundle).unwrap();
+
+        let verifier = MultiVerifier;
+        assert!(node.import_block(block, &verifier).is_ok());
+    }
+
+    #[test]
+    fn import_block_witness_root_mismatch_rejected() {
+        use shell_core::{TxWitness, WitnessBundle};
+        use shell_crypto::PQSignature;
+        use shell_crypto::SignatureType;
+
+        let (node, _signer) = setup_node();
+        store_genesis(&node);
+
+        let wrong_root = ShellHash::from([0xFF; 32]);
+        let block = make_block_at_1(&node, Some(wrong_root));
+        let block_hash = block.hash();
+
+        // Store a bundle whose root does NOT match wrong_root.
+        let sig = PQSignature { sig_type: SignatureType::Dilithium3, data: vec![0xBB; 16] };
+        let witness = TxWitness { signature: sig, pubkey: None };
+        let bundle = WitnessBundle { witnesses: vec![witness] };
+        // Verify the bundle root is not wrong_root.
+        assert_ne!(bundle.compute_root(), wrong_root);
+        node.witness_store.put_bundle(&block_hash, &bundle).unwrap();
+
+        let verifier = MultiVerifier;
+        let result = node.import_block(block, &verifier);
+        assert!(result.is_err(), "mismatch must be rejected");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("witness_root mismatch"),
+            "error must mention witness_root mismatch: {msg}"
         );
     }
 }
