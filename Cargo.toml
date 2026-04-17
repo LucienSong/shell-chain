@@ -105,6 +105,9 @@ lru = "0.16"
 # --- benchmarks ---
 criterion = { version = "0.5", features = ["html_reports"] }
 
+# --- stark prover (Phase C) ---
+winterfell = "0.13"
+
 [patch.crates-io]
 ark-relations = { path = "deps/ark-relations" }
 libp2p-yamux = { path = "deps/libp2p-yamux" }
