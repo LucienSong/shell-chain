@@ -163,6 +163,7 @@ mod tests {
                 parent_beacon_block_root: ShellHash::ZERO,
                 blob_gas_used: 0,
                 excess_blob_gas: 0,
+            witness_root: None,
             },
             transactions: vec![],
             proposer_seal: None,

@@ -67,6 +67,8 @@ pub struct RunArgs {
     pub witness_retention: u64,
     /// Number of recent blocks whose full bodies are retained (0 = archive, default: 512).
     pub body_retention: u64,
+    /// Enable STARK aggregate proof generation during block production (off by default).
+    pub enable_stark_aggregation: bool,
 }
 
 /// Maximum genesis file size: 10 MB (F-082).
@@ -502,6 +504,7 @@ async fn run_with_store<S: KvStore + 'static>(
             }),
             ..shell_node::config::ParallelEvmConfig::default()
         },
+        enable_stark_aggregation: args.enable_stark_aggregation,
     };
 
     // Build the node (auto-detects existing state via NodeBuilder).
@@ -690,6 +693,7 @@ mod tests {
             parallel_evm_workers: Some(4),
             witness_retention: DEFAULT_WITNESS_RETENTION,
             body_retention: DEFAULT_BODY_RETENTION,
+            enable_stark_aggregation: false,
         };
 
         let expected = ParallelEvmConfig {

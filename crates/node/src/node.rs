@@ -25,6 +25,8 @@ use crate::error::NodeError;
 use crate::metrics::Metrics;
 use crate::pruning::StateRootTracker;
 
+use shell_stark_prover::prover::{prove_sig_batch, verify_sig_batch, SigBatchEntry};
+
 /// A running shell-chain node.
 ///
 /// Orchestrates storage, consensus, EVM, mempool, network, and RPC
@@ -48,6 +50,8 @@ pub struct Node<S: KvStore + 'static> {
     pub witness_pruner: RwLock<WitnessPruner>,
     /// Body pruner: removes old block bodies after finality (EIP-4444 style).
     pub body_pruner: RwLock<BodyPruner>,
+    /// Whether to generate a STARK aggregate proof during block production.
+    pub stark_aggregation: bool,
     /// Finality tracking: collects attestations and detects quorum.
     pub finality: Arc<RwLock<FinalityState>>,
     /// Fork-choice rule: selects the canonical head based on attestations and finality.
@@ -97,6 +101,7 @@ impl<S: KvStore + 'static> Node<S> {
         let witness_store = Arc::new(WitnessStore::new(store.clone()));
         let witness_pruner = WitnessPruner::new(config.pruning.witness_retention);
         let body_pruner = BodyPruner::new(config.pruning.body_retention);
+        let stark_aggregation = config.enable_stark_aggregation;
         let metrics = Arc::new(Metrics::new().expect("failed to register Prometheus metrics"));
 
         // F-094: Recover finalized state from persistent storage on restart.
@@ -137,6 +142,7 @@ impl<S: KvStore + 'static> Node<S> {
             witness_store,
             witness_pruner: RwLock::new(witness_pruner),
             body_pruner: RwLock::new(body_pruner),
+            stark_aggregation,
             finality: Arc::new(RwLock::new(finality_state)),
             fork_choice: Arc::new(RwLock::new(ForkChoice::new(ShellHash::ZERO))),
             metrics,
@@ -1099,6 +1105,53 @@ impl<S: KvStore + 'static> Node<S> {
             proposer_seal: None,
         };
 
+        // C3: If STARK aggregation is enabled, generate a batch commitment proof
+        // over all transactions that carry embedded pubkeys (the source of bloat).
+        // The proof is stored in the header BEFORE signing so it's covered by the seal.
+        if self.stark_aggregation {
+            let entries: Vec<SigBatchEntry> = included_txs
+                .iter()
+                .filter_map(|tx| {
+                    if let shell_core::PubkeyMode::Embedded(ref pk) = tx.pubkey_mode {
+                        let mut msg_hash = [0u8; 32];
+                        msg_hash.copy_from_slice(tx.hash().as_bytes());
+                        let mut pk_hash = [0u8; 32];
+                        let copy_len = pk.len().min(32);
+                        pk_hash[..copy_len].copy_from_slice(&pk[..copy_len]);
+                        Some(SigBatchEntry { msg_hash, pk_hash })
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            if !entries.is_empty() {
+                match prove_sig_batch(&entries) {
+                    Ok(sig_proof) => match sig_proof.to_json() {
+                        Ok(proof_bytes) => {
+                            block.header.sig_aggregate_proof =
+                                Some(shell_primitives::Bytes::from(proof_bytes));
+                            info!(
+                                n_entries = entries.len(),
+                                proof_bytes = block
+                                    .header
+                                    .sig_aggregate_proof
+                                    .as_ref()
+                                    .map_or(0, |b| b.len()),
+                                "C3: STARK aggregate proof generated"
+                            );
+                        }
+                        Err(e) => {
+                            warn!("C3: proof serialization failed (fallback): {e}");
+                        }
+                    },
+                    Err(e) => {
+                        warn!("C3: prove_sig_batch failed (fallback to inline sigs): {e}");
+                    }
+                }
+            }
+        }
+
         // Sign the block with the proposer's key.
         self.consensus.read().sign_block(&mut block, signer)?;
 
@@ -1235,6 +1288,34 @@ impl<S: KvStore + 'static> Node<S> {
                     proposer = %block.header.proposer,
                     "imported block has no proposer seal (M1b: allowed, will be strict in M2)"
                 );
+            }
+        }
+
+        // C3: If the block carries a STARK aggregate proof, verify it.
+        // A valid proof means the block producer correctly accumulated all
+        // tx signature entries; this is belt-and-suspenders verification on top
+        // of the existing individual sig checks below.
+        if let Some(proof_bytes) = &block.header.sig_aggregate_proof {
+            match shell_stark_prover::proof::SigBatchProof::from_json(proof_bytes.as_ref()) {
+                Ok(sig_proof) => {
+                    if let Err(e) = verify_sig_batch(&sig_proof) {
+                        return Err(NodeError::Startup(format!(
+                            "block {} STARK aggregate proof verification failed: {e}",
+                            block.number()
+                        )));
+                    }
+                    debug!(
+                        block = block.number(),
+                        n_sigs = sig_proof.n_sigs,
+                        "C3: STARK aggregate proof verified"
+                    );
+                }
+                Err(e) => {
+                    return Err(NodeError::Startup(format!(
+                        "block {} STARK aggregate proof deserialization failed: {e}",
+                        block.number()
+                    )));
+                }
             }
         }
 

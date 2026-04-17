@@ -60,6 +60,11 @@ pub struct NodeConfig {
     pub state_cache_size_mb: usize,
     /// Parallel-EVM PoC configuration. Disabled by default until promoted.
     pub parallel_evm: ParallelEvmConfig,
+    /// Enable STARK aggregate proof generation during block production.
+    /// When true, `produce_block` calls `prove_sig_batch()` over all transaction
+    /// entries and stores the result in `BlockHeader::sig_aggregate_proof`.
+    /// Off by default — generating a STARK proof per block is expensive (~150ms).
+    pub enable_stark_aggregation: bool,
 }
 
 impl NodeConfig {
@@ -86,6 +91,7 @@ impl NodeConfig {
             max_idle_interval_ms: 0,
             state_cache_size_mb: 64,
             parallel_evm: ParallelEvmConfig::default(),
+            enable_stark_aggregation: false,
         }
     }
 }

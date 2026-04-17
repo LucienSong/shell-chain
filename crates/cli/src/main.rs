@@ -174,6 +174,10 @@ enum Commands {
         /// Number of recent blocks whose full bodies are retained (0 = archive, default: 512).
         #[arg(long, default_value = "512")]
         body_retention: u64,
+        /// Enable STARK aggregate proof generation during block production.
+        /// WARNING: expensive (~150ms per block). Off by default.
+        #[arg(long, default_value = "false")]
+        enable_stark_aggregation: bool,
     },
 
     /// Initialize genesis block and data directory.
@@ -350,6 +354,7 @@ async fn main() {
             parallel_evm_workers,
             witness_retention,
             body_retention,
+            enable_stark_aggregation,
         } => {
             // Load config file if specified (CLI args override file values).
             let file_config = match &config_path {
@@ -485,6 +490,7 @@ async fn main() {
                 parallel_evm_workers: effective_parallel_evm_workers,
                 witness_retention,
                 body_retention,
+                enable_stark_aggregation,
             })
             .await
         }
