@@ -37,9 +37,12 @@ pub const CF_STATE: &str = "state";
 pub const CF_CHAIN: &str = "chain";
 pub const CF_RECEIPTS: &str = "receipts";
 pub const CF_INDEX: &str = "index";
+/// Witness column family: stores `WitnessBundle` per block (Phase B).
+/// Kept separate from `chain` CF to allow independent pruning after finality.
+pub const CF_WITNESS: &str = "witness";
 
 /// All column family names, in canonical order.
-pub const ALL_CFS: &[&str] = &[CF_STATE, CF_CHAIN, CF_RECEIPTS, CF_INDEX];
+pub const ALL_CFS: &[&str] = &[CF_STATE, CF_CHAIN, CF_RECEIPTS, CF_INDEX, CF_WITNESS];
 
 type RocksDb = DBWithThreadMode<MultiThreaded>;
 
@@ -133,6 +136,8 @@ pub struct RocksDbStores {
     pub chain: RocksDbStore,
     pub receipts: RocksDbStore,
     pub index: RocksDbStore,
+    /// Witness bundles per block (Phase B). Prunable after finality.
+    pub witness: RocksDbStore,
 }
 
 impl RocksDbStores {
@@ -147,6 +152,7 @@ impl RocksDbStores {
             (&self.chain, CF_CHAIN),
             (&self.receipts, CF_RECEIPTS),
             (&self.index, CF_INDEX),
+            (&self.witness, CF_WITNESS),
         ];
         for (store, cf_name) in &stores {
             store.get(b"__integrity_probe__").map_err(|e| {
@@ -262,6 +268,7 @@ impl RocksDbStore {
             (CF_CHAIN, true),
             (CF_RECEIPTS, true),
             (CF_INDEX, false),
+            (CF_WITNESS, false), // witness: default compression (Snappy); prunable CF
         ]
         .iter()
         .map(|(name, bulk)| ColumnFamilyDescriptor::new(*name, make_cf_opts(*bulk)))
@@ -302,8 +309,12 @@ impl RocksDbStore {
                 cf_name: CF_RECEIPTS,
             },
             index: RocksDbStore {
-                db,
+                db: db.clone(),
                 cf_name: CF_INDEX,
+            },
+            witness: RocksDbStore {
+                db,
+                cf_name: CF_WITNESS,
             },
         })
     }

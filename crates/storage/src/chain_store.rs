@@ -608,6 +608,61 @@ impl<S: KvStore> ChainStore<S> {
     }
 }
 
+// ── WitnessStore ──────────────────────────────────────────────────────────────
+
+/// Storage for [`WitnessBundle`]s in the dedicated `witness` column family.
+///
+/// A `WitnessBundle` contains all PQ signatures for a block's transactions
+/// (Phase B witness separation). Stored separately from the block body to
+/// allow independent pruning after finality (Phase D1).
+///
+/// Key format: block hash (32 bytes) → RLP-encoded `WitnessBundle`.
+pub struct WitnessStore<S: KvStore> {
+    store: Arc<S>,
+}
+
+impl<S: KvStore> WitnessStore<S> {
+    pub fn new(store: Arc<S>) -> Self {
+        Self { store }
+    }
+
+    /// Store a [`WitnessBundle`] for a block identified by its hash.
+    pub fn put_bundle(
+        &self,
+        block_hash: &ShellHash,
+        bundle: &shell_core::WitnessBundle,
+    ) -> Result<(), StorageError> {
+        let mut buf = Vec::new();
+        bundle.encode(&mut buf);
+        self.store.put(block_hash.as_bytes(), &buf)
+    }
+
+    /// Retrieve the [`WitnessBundle`] for a block, if stored.
+    pub fn get_bundle(
+        &self,
+        block_hash: &ShellHash,
+    ) -> Result<Option<shell_core::WitnessBundle>, StorageError> {
+        match self.store.get(block_hash.as_bytes())? {
+            None => Ok(None),
+            Some(bytes) => {
+                let bundle = shell_core::WitnessBundle::decode(&mut bytes.as_slice())
+                    .map_err(|e| StorageError::Codec(format!("witness decode: {e}")))?;
+                Ok(Some(bundle))
+            }
+        }
+    }
+
+    /// Delete the [`WitnessBundle`] for a block (witness pruning, Phase D1).
+    pub fn delete_bundle(&self, block_hash: &ShellHash) -> Result<(), StorageError> {
+        self.store.delete(block_hash.as_bytes())
+    }
+
+    /// Returns `true` if a witness bundle exists for the given block hash.
+    pub fn has_bundle(&self, block_hash: &ShellHash) -> Result<bool, StorageError> {
+        Ok(self.store.get(block_hash.as_bytes())?.is_some())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -634,6 +689,7 @@ mod tests {
                 parent_beacon_block_root: ShellHash::ZERO,
                 blob_gas_used: 0,
                 excess_blob_gas: 0,
+                witness_root: None,
             },
             transactions: vec![],
             proposer_seal: None,
@@ -1395,5 +1451,85 @@ mod tests {
             rlp_bytes.len(),
             json_bytes.len()
         );
+    }
+
+    // ── WitnessStore tests ─────────────────────────────────────────────────
+
+    use shell_core::{WitnessBundle, TxWitness};
+    use shell_crypto::{DilithiumSigner, Signer};
+
+    fn dummy_bundle() -> WitnessBundle {
+        let signer = DilithiumSigner::generate();
+        let pk = signer.public_key().to_vec();
+        let sig1 = signer.sign(b"tx0").expect("sign");
+        let sig2 = signer.sign(b"tx1").expect("sign");
+        WitnessBundle::new(vec![
+            TxWitness::new_embedded(sig1, pk),
+            TxWitness::new_reference(sig2),
+        ])
+    }
+
+    #[test]
+    fn witness_store_put_and_get() {
+        let store = Arc::new(MemoryDb::default());
+        let ws = WitnessStore::new(store);
+        let hash = shell_primitives::keccak256(b"block-hash");
+        let bundle = dummy_bundle();
+
+        ws.put_bundle(&hash, &bundle).unwrap();
+        let loaded = ws.get_bundle(&hash).unwrap().unwrap();
+        assert_eq!(loaded, bundle);
+    }
+
+    #[test]
+    fn witness_store_get_missing_returns_none() {
+        let store = Arc::new(MemoryDb::default());
+        let ws = WitnessStore::new(store);
+        let hash = shell_primitives::keccak256(b"nonexistent");
+        assert!(ws.get_bundle(&hash).unwrap().is_none());
+    }
+
+    #[test]
+    fn witness_store_has_bundle() {
+        let store = Arc::new(MemoryDb::default());
+        let ws = WitnessStore::new(store);
+        let hash = shell_primitives::keccak256(b"block");
+        let bundle = dummy_bundle();
+
+        assert!(!ws.has_bundle(&hash).unwrap());
+        ws.put_bundle(&hash, &bundle).unwrap();
+        assert!(ws.has_bundle(&hash).unwrap());
+    }
+
+    #[test]
+    fn witness_store_delete_bundle() {
+        let store = Arc::new(MemoryDb::default());
+        let ws = WitnessStore::new(store);
+        let hash = shell_primitives::keccak256(b"block");
+        let bundle = dummy_bundle();
+
+        ws.put_bundle(&hash, &bundle).unwrap();
+        assert!(ws.has_bundle(&hash).unwrap());
+        ws.delete_bundle(&hash).unwrap();
+        assert!(!ws.has_bundle(&hash).unwrap());
+    }
+
+    #[test]
+    fn witness_store_independent_from_chain_store() {
+        // Witness and chain stores use the same MemoryDb but different key spaces
+        // (witness keys = raw 32-byte block hash; chain keys = prefixed).
+        let db = Arc::new(MemoryDb::default());
+        let cs = ChainStore::new(Arc::clone(&db));
+        let ws = WitnessStore::new(Arc::clone(&db));
+        let block = empty_block(1);
+        let hash = block.hash();
+        let bundle = dummy_bundle();
+
+        cs.put_block(&block).unwrap();
+        ws.put_bundle(&hash, &bundle).unwrap();
+
+        // Both can be retrieved independently
+        assert!(cs.get_block_by_hash(&hash).unwrap().is_some());
+        assert!(ws.get_bundle(&hash).unwrap().is_some());
     }
 }

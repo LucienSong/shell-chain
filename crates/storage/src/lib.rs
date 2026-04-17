@@ -11,7 +11,7 @@ mod world_state;
 #[cfg(feature = "rocksdb")]
 mod rocks_db;
 
-pub use chain_store::{ChainConfig, ChainStore, MAX_ADDRESS_TX_HISTORY_OFFSET};
+pub use chain_store::{ChainConfig, ChainStore, WitnessStore, MAX_ADDRESS_TX_HISTORY_OFFSET};
 pub use error::StorageError;
 pub use kv_store::{KvStore, WriteBatch, WriteBatchOp};
 pub use memory_db::MemoryDb;
@@ -24,5 +24,5 @@ pub use world_state::{account_manager_addr, validator_registry_addr, WorldState}
 #[cfg(feature = "rocksdb")]
 pub use rocks_db::{
     CfCompressionStrategy, RocksCompactionStyle, RocksDbConfig, RocksDbStore, RocksDbStores,
-    CF_CHAIN, CF_INDEX, CF_RECEIPTS, CF_STATE,
+    CF_CHAIN, CF_INDEX, CF_RECEIPTS, CF_STATE, CF_WITNESS,
 };
