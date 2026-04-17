@@ -453,4 +453,21 @@ pub trait ShellApi {
         page: Option<u64>,
         limit: Option<u64>,
     ) -> Result<serde_json::Value, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns the witness bundle for a block (PQ signatures separated from tx bodies).
+    ///
+    /// `block` can be a block hash (0x-prefixed 32-byte hex) or a block tag
+    /// ("latest", "0x<number>").  Returns `null` when no witness bundle has
+    /// been stored for the block (pre-B3 blocks or pruned witnesses).
+    ///
+    /// Response fields:
+    /// - `blockHash`    — canonical block hash
+    /// - `witnessRoot`  — `witness_root` field from the block header
+    /// - `witnessCount` — number of witnesses in the bundle
+    /// - `witnesses`    — array of `{ txIndex, sigType, signature, pubkey? }`
+    #[method(name = "getBlockWitnesses")]
+    async fn get_block_witnesses(
+        &self,
+        block: String,
+    ) -> Result<serde_json::Value, jsonrpsee::types::ErrorObjectOwned>;
 }

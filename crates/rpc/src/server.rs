@@ -15,7 +15,7 @@ use shell_core::SignedTransaction;
 use shell_crypto::Signer;
 use shell_mempool::TxPool;
 use shell_primitives::Address;
-use shell_storage::{ChainStore, KvStore, WorldState};
+use shell_storage::{ChainStore, KvStore, WitnessStore, WorldState};
 
 use crate::admin::AdminApiServer;
 use crate::api::{
@@ -160,6 +160,7 @@ pub async fn start_rpc_server<S: KvStore + 'static>(
     peer_count: Arc<std::sync::atomic::AtomicUsize>,
     dev_control: Option<DynDevRpcControl>,
     admin_p2p_context: Option<(String, String)>,
+    witness_store: Option<Arc<WitnessStore<S>>>,
 ) -> Result<RpcServerHandle, Box<dyn std::error::Error + Send + Sync>> {
     // Load and validate TLS configuration.
     // When cert+key are provided, we start jsonrpsee on an internal loopback
@@ -209,6 +210,9 @@ pub async fn start_rpc_server<S: KvStore + 'static>(
     }
     if let Some((peer_id, p2p_listen)) = admin_p2p_context {
         handler = handler.with_admin_context(peer_id, p2p_listen);
+    }
+    if let Some(ws) = witness_store {
+        handler = handler.with_witness_store(ws);
     }
     // Populate the RPC listen address from the configured public address.
     // (The actual bound port may differ when using ephemeral port 0, but for

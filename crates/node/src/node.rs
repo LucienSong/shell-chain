@@ -471,6 +471,7 @@ impl<S: KvStore + 'static> Node<S> {
                 None
             },
             None, // admin_p2p_context: wire peer_id + p2p_listen when P2P layer is integrated
+            None, // witness_store: wire when WitnessStore is stored on Node (B4 follow-up)
         )
         .await
         .map_err(|e| NodeError::Startup(format!("RPC: {e}")))?;
