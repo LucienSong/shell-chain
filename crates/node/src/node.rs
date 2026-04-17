@@ -937,6 +937,7 @@ impl<S: KvStore + 'static> Node<S> {
             parent_beacon_block_root: ShellHash::ZERO,
             blob_gas_used: 0,
             excess_blob_gas: 0,
+            witness_root: None,
         };
 
         let mut included_txs: Vec<SignedTransaction> = Vec::new();

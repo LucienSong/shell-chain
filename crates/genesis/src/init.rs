@@ -64,6 +64,7 @@ pub fn initialize_genesis<S: KvStore + 'static>(
         parent_beacon_block_root: ShellHash::ZERO,
         blob_gas_used: 0,
         excess_blob_gas: 0,
+        witness_root: None,
     };
 
     let block = Block {

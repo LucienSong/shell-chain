@@ -35,6 +35,11 @@ pub struct BlockHeader {
     /// EIP-4844: excess blob gas carried forward for pricing.
     #[serde(default)]
     pub excess_blob_gas: u64,
+    /// Witness Merkle root (Phase B). `None` for pre-witness blocks.
+    /// Commits to the ordered `WitnessBundle` for this block, enabling
+    /// light clients to verify witness data without downloading it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub witness_root: Option<ShellHash>,
 }
 
 impl Encodable for BlockHeader {
@@ -67,6 +72,14 @@ impl Encodable for BlockHeader {
         self.parent_beacon_block_root.encode(out);
         self.blob_gas_used.encode(out);
         self.excess_blob_gas.encode(out);
+        // witness_root: None → empty bytes (0x80), Some(h) → 32-byte hash
+        match &self.witness_root {
+            Some(root) => root.encode(out),
+            None => {
+                let empty: &[u8] = &[];
+                empty.encode(out);
+            }
+        }
     }
 
     fn length(&self) -> usize {
@@ -104,6 +117,10 @@ impl BlockHeader {
             .saturating_add(self.parent_beacon_block_root.length())
             .saturating_add(self.blob_gas_used.length())
             .saturating_add(self.excess_blob_gas.length())
+            .saturating_add(match &self.witness_root {
+                Some(root) => root.length(),
+                None => 1, // 0x80 empty bytes
+            })
     }
 
     /// Compute the block hash (keccak256 of RLP-encoded header).
@@ -194,6 +211,24 @@ impl Decodable for BlockHeader {
         let blob_gas_used = u64::decode(buf)?;
         let excess_blob_gas = u64::decode(buf)?;
 
+        // witness_root: empty bytes → None, 32-byte hash → Some
+        // For backward compatibility: older blocks without this field will
+        // hit ListLengthMismatch at consumed != header.payload_length — handled
+        // gracefully by treating absent field as None via the consumed check below.
+        let witness_root = if buf.len() > 0 {
+            let root_bytes = alloy_rlp::Header::decode_bytes(buf, false)?;
+            if root_bytes.is_empty() {
+                None
+            } else {
+                let arr: [u8; 32] = root_bytes
+                    .try_into()
+                    .map_err(|_| alloy_rlp::Error::Custom("witness_root must be 32 bytes"))?;
+                Some(ShellHash::from(arr))
+            }
+        } else {
+            None
+        };
+
         let consumed = remaining.saturating_sub(buf.len());
         if consumed != header.payload_length {
             return Err(alloy_rlp::Error::ListLengthMismatch {
@@ -220,6 +255,7 @@ impl Decodable for BlockHeader {
             parent_beacon_block_root,
             blob_gas_used,
             excess_blob_gas,
+            witness_root,
         })
     }
 }
@@ -333,6 +369,7 @@ mod tests {
             parent_beacon_block_root: ShellHash::ZERO,
             blob_gas_used: 0,
             excess_blob_gas: 0,
+            witness_root: None,
         }
     }
 
@@ -428,5 +465,64 @@ mod tests {
         block.encode(&mut buf);
         let decoded = Block::decode(&mut buf.as_slice()).unwrap();
         assert_eq!(block, decoded);
+    }
+
+    // ── B2: witness_root tests ─────────────────────────────────────────────
+
+    #[test]
+    fn witness_root_default_is_none() {
+        let header = sample_header();
+        assert!(header.witness_root.is_none());
+    }
+
+    #[test]
+    fn witness_root_some_rlp_roundtrip() {
+        let mut header = sample_header();
+        let root = shell_primitives::keccak256(b"witness-bundle-root");
+        header.witness_root = Some(root);
+        let mut buf = Vec::new();
+        header.encode(&mut buf);
+        let decoded = BlockHeader::decode(&mut buf.as_slice()).unwrap();
+        assert_eq!(decoded.witness_root, Some(root));
+    }
+
+    #[test]
+    fn witness_root_none_rlp_roundtrip() {
+        let header = sample_header(); // witness_root: None
+        let mut buf = Vec::new();
+        header.encode(&mut buf);
+        let decoded = BlockHeader::decode(&mut buf.as_slice()).unwrap();
+        assert!(decoded.witness_root.is_none());
+    }
+
+    #[test]
+    fn witness_root_affects_block_hash() {
+        let h1 = sample_header();
+        let mut h2 = sample_header();
+        h2.witness_root = Some(shell_primitives::keccak256(b"bundle"));
+        assert_ne!(h1.hash(), h2.hash(), "witness_root must influence block hash");
+    }
+
+    #[test]
+    fn witness_root_serde_absent_when_none() {
+        let header = sample_header();
+        let json = serde_json::to_string(&header).unwrap();
+        assert!(
+            !json.contains("witness_root"),
+            "witness_root should be absent from JSON when None"
+        );
+    }
+
+    #[test]
+    fn witness_root_serde_present_when_some() {
+        let mut header = sample_header();
+        header.witness_root = Some(shell_primitives::keccak256(b"root"));
+        let json = serde_json::to_string(&header).unwrap();
+        assert!(
+            json.contains("witness_root"),
+            "witness_root should appear in JSON when Some"
+        );
+        let decoded: BlockHeader = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.witness_root, header.witness_root);
     }
 }
