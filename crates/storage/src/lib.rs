@@ -6,6 +6,7 @@ mod merkle_trie;
 mod snapshot;
 mod state_pruner;
 mod trie_adapter;
+mod witness_pruner;
 mod world_state;
 
 #[cfg(feature = "rocksdb")]
@@ -19,6 +20,7 @@ pub use merkle_trie::MerkleTrie;
 pub use snapshot::{SnapshotEntry, SnapshotMetadata, SnapshotReader, SnapshotWriter};
 pub use state_pruner::{PruneResult, StatePruner};
 pub use trie_adapter::KvStoreTrieDb;
+pub use witness_pruner::{WitnessPruneResult, WitnessPruner, DEFAULT_WITNESS_RETENTION};
 pub use world_state::{account_manager_addr, validator_registry_addr, WorldState};
 
 #[cfg(feature = "rocksdb")]

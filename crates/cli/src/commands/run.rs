@@ -18,6 +18,7 @@ use shell_network::{NetworkBus, NetworkConfig};
 use shell_node::config::NodeConfig;
 use shell_node::pruning::PruningConfig;
 use shell_primitives::{Address, ShellHash};
+use shell_storage::DEFAULT_WITNESS_RETENTION;
 use shell_rpc::RpcConfig;
 use shell_storage::{ChainStore, KvStore, MemoryDb, WorldState};
 
@@ -62,6 +63,8 @@ pub struct RunArgs {
     pub parallel_evm: bool,
     /// Number of worker threads for the parallel-EVM scheduler (default: logical CPUs).
     pub parallel_evm_workers: Option<usize>,
+    /// Number of recent blocks whose witness bundles are retained (0 = archive, default: 128).
+    pub witness_retention: u64,
 }
 
 /// Maximum genesis file size: 10 MB (F-082).
@@ -477,7 +480,10 @@ async fn run_with_store<S: KvStore + 'static>(
         proposer_address: Some(authority),
         block_time_ms: args.block_time,
         data_dir: args.datadir.to_string_lossy().into(),
-        pruning: PruningConfig::new(args.pruning),
+        pruning: PruningConfig {
+            keep_recent: args.pruning,
+            witness_retention: args.witness_retention,
+        },
         metrics: shell_node::config::MetricsConfig {
             enabled: true,
             listen_addr: args.metrics_addr.parse()?,
@@ -679,6 +685,7 @@ mod tests {
             state_cache_size_mb: None,
             parallel_evm: true,
             parallel_evm_workers: Some(4),
+            witness_retention: shell_storage::DEFAULT_WITNESS_RETENTION,
         };
 
         let expected = ParallelEvmConfig {

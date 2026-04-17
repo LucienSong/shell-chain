@@ -16,7 +16,7 @@ use shell_mempool::TxPool;
 use shell_network::{NetworkMessage, NetworkService};
 use shell_primitives::{Address, Bytes, ShellHash};
 use shell_rpc::DevRpcControl;
-use shell_storage::{ChainStore, KvStore, StatePruner, WitnessStore, WorldState};
+use shell_storage::{ChainStore, KvStore, StatePruner, WitnessPruner, WitnessStore, WorldState};
 
 use crate::config::NodeConfig;
 use crate::error::NodeError;
@@ -42,6 +42,8 @@ pub struct Node<S: KvStore + 'static> {
     pub state_pruner: RwLock<StatePruner>,
     /// Witness store: holds per-block signature witness bundles.
     pub witness_store: Arc<WitnessStore<S>>,
+    /// Witness pruner: removes old witness bundles after finality.
+    pub witness_pruner: RwLock<WitnessPruner>,
     /// Finality tracking: collects attestations and detects quorum.
     pub finality: Arc<RwLock<FinalityState>>,
     /// Fork-choice rule: selects the canonical head based on attestations and finality.
@@ -89,6 +91,7 @@ impl<S: KvStore + 'static> Node<S> {
         let tracker = StateRootTracker::new(config.pruning.clone());
         let state_pruner = StatePruner::new(128);
         let witness_store = Arc::new(WitnessStore::new(store.clone()));
+        let witness_pruner = WitnessPruner::new(config.pruning.witness_retention);
         let metrics = Arc::new(Metrics::new().expect("failed to register Prometheus metrics"));
 
         // F-094: Recover finalized state from persistent storage on restart.
@@ -127,6 +130,7 @@ impl<S: KvStore + 'static> Node<S> {
             state_root_tracker: RwLock::new(tracker),
             state_pruner: RwLock::new(state_pruner),
             witness_store,
+            witness_pruner: RwLock::new(witness_pruner),
             finality: Arc::new(RwLock::new(finality_state)),
             fork_choice: Arc::new(RwLock::new(ForkChoice::new(ShellHash::ZERO))),
             metrics,
@@ -371,6 +375,31 @@ impl<S: KvStore + 'static> Node<S> {
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "state pruner: prune failed");
+                    }
+                }
+            }
+        }
+
+        // D1: Drive WitnessPruner — prune old witness bundles after finality.
+        {
+            let mut wpruner = self.witness_pruner.write();
+            if !wpruner.is_archive() {
+                match wpruner.prune_before(
+                    block_number,
+                    &self.chain_store,
+                    &self.witness_store,
+                ) {
+                    Ok(result) => {
+                        if result.pruned_count > 0 {
+                            tracing::info!(
+                                pruned = result.pruned_count,
+                                block = block_number,
+                                "witness pruner: removed old witness bundles"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "witness pruner: prune failed");
                     }
                 }
             }

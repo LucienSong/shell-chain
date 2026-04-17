@@ -253,6 +253,22 @@ impl<S: KvStore> ChainStore<S> {
         self.get_block_by_hash(&hash)
     }
 
+    /// Get only the block hash for a given block number (canonical mapping).
+    /// More efficient than `get_block_by_number` when only the hash is needed.
+    pub fn get_block_hash_by_number(
+        &self,
+        number: u64,
+    ) -> Result<Option<ShellHash>, StorageError> {
+        match self.store.get(&Self::number_key(number))? {
+            Some(hash_bytes) => {
+                let hash = ShellHash::try_from_slice(&hash_bytes)
+                    .map_err(|e| StorageError::Codec(e.to_string()))?;
+                Ok(Some(hash))
+            }
+            None => Ok(None),
+        }
+    }
+
     /// Get a block header by hash.
     pub fn get_header_by_hash(
         &self,
