@@ -313,9 +313,9 @@ impl Worker {
 
     fn sign(&self, tx: Transaction) -> SignedTransaction {
         let sig = self.signer.sign(tx.hash().0.as_slice()).unwrap();
-        let pubkey = self.signer.public_key().to_vec();
         // Include pubkey on first tx so the node registers the account
         if self.nonce == 0 {
+            let pubkey = self.signer.public_key().to_vec();
             SignedTransaction::with_pubkey(self.address, tx, sig, pubkey)
         } else {
             SignedTransaction::new(self.address, tx, sig)

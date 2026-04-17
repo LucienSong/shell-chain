@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 
 use clap::Subcommand;
-use shell_core::{PubkeyMode, SignedTransaction, Transaction};
+use shell_core::{SignedTransaction, Transaction};
 use shell_crypto::Signer;
 use shell_keystore::{decrypt, EncryptedKey};
 use shell_primitives::{Address, Bytes, U256};
@@ -310,12 +310,11 @@ fn parse_hex_bytes(s: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     Ok(hex::decode(s)?)
 }
 
-/// Sign a transaction and build a SignedTransaction.
 /// Sign and build a [`SignedTransaction`].
 ///
 /// Checks the on-chain pubkey registry via `rpc_url`: if the sender's pubkey
-/// is already registered, uses [`PubkeyMode::Reference`] (saves ~1,932 bytes).
-/// On the first transaction from a new address, uses [`PubkeyMode::Embedded`].
+/// is already registered, uses [`shell_core::PubkeyMode::Reference`] (saves ~1,952 bytes).
+/// On the first transaction from a new address, uses [`shell_core::PubkeyMode::Embedded`].
 fn sign_and_build(
     from: Address,
     tx: Transaction,
@@ -386,7 +385,11 @@ fn rpc_post(
     url: &str,
     body: &serde_json::Value,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
-    let resp = ureq::post(url)
+    let agent = ureq::AgentBuilder::new()
+        .timeout(std::time::Duration::from_secs(5))
+        .build();
+    let resp = agent
+        .post(url)
         .set("Content-Type", "application/json")
         .send_string(&body.to_string())?;
     let json: serde_json::Value = resp.into_json()?;

@@ -1266,6 +1266,16 @@ impl<S: KvStore + 'static> Node<S> {
             // Non-signature validation (chain-id, gas, sender binding).
             // Uses PreVerified to skip redundant individual
             // sig checks — signatures were already batch-verified above.
+            //
+            // IMPORTANT: validate_tx_for_import is READ-ONLY — it does NOT register
+            // pubkeys (unlike validate_tx used in the mempool path). Pubkey registration
+            // is deferred to the `new_pubkeys` commit at the end of import_block.
+            // The `new_pubkeys` HashMap uses `or_insert_with` (first-write-wins), so
+            // even if multiple Embedded txs from the same sender appear in one block,
+            // only the first pubkey is written — registration is idempotent by design.
+            //
+            // Reference txs mutated to Embedded here (for validation) do NOT trigger
+            // re-registration because validate_tx_for_import performs no writes.
             let pre_verified = PreVerified;
             let mut validation_pubkeys: HashMap<Address, Vec<u8>> = HashMap::new();
             for tx in &block.transactions {
@@ -2089,6 +2099,211 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(follower_account.nonce, 2);
+    }
+
+    /// F-405 Test 1: Block with [Embedded TX₀, Reference TX₁] from same sender.
+    ///
+    /// The two-pass pubkey resolution must handle Reference txs that follow
+    /// an Embedded tx from the same sender **within the same block**.
+    /// The follower starts with no registered pubkey for the sender.
+    #[test]
+    fn block_import_pubkey_dedup_embedded_then_reference_same_block() {
+        let (leader, proposer_signer) = setup_node();
+        store_genesis(&leader);
+        let proposer = leader.config.proposer_address.unwrap();
+
+        let tx_signer = DilithiumSigner::generate();
+        let sender = Address::from_public_key(tx_signer.public_key(), tx_signer.sig_type().as_u8());
+        let receiver = Address::from([0xEE; 20]);
+        let initial_balance = U256::from(100_000_000_000_000u64);
+        fund_account(&leader, &sender, initial_balance);
+
+        let verifier = MultiVerifier;
+
+        // TX₀: Embedded — first tx from this sender carries the public key
+        let tx0 = Transaction {
+            chain_id: 1337,
+            nonce: 0,
+            to: Some(receiver),
+            value: U256::from(1u64),
+            data: shell_primitives::Bytes::new(),
+            gas_limit: 21_000,
+            max_fee_per_gas: shell_core::INITIAL_BASE_FEE,
+            max_priority_fee_per_gas: 0,
+            access_list: None,
+            tx_type: 2,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
+        };
+        let sig0 = tx_signer.sign(tx0.hash().0.as_slice()).expect("sign failed");
+        let signed0 =
+            SignedTransaction::with_pubkey(sender, tx0, sig0, tx_signer.public_key().to_vec());
+
+        // TX₁: Reference — subsequent tx omits the public key
+        let tx1 = Transaction {
+            chain_id: 1337,
+            nonce: 1,
+            to: Some(receiver),
+            value: U256::from(2u64),
+            data: shell_primitives::Bytes::new(),
+            gas_limit: 21_000,
+            max_fee_per_gas: shell_core::INITIAL_BASE_FEE,
+            max_priority_fee_per_gas: 0,
+            access_list: None,
+            tx_type: 2,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
+        };
+        let sig1 = tx_signer.sign(tx1.hash().0.as_slice()).expect("sign failed");
+        let signed1 = SignedTransaction::new(sender, tx1, sig1);
+
+        let mut ws = leader.world_state.write();
+        leader
+            .tx_pool
+            .insert(signed0, &mut ws, leader.chain_store.as_ref(), &verifier)
+            .unwrap();
+        // Leader already registered pubkey from TX₀; TX₁ Reference resolves fine
+        leader
+            .tx_pool
+            .insert(signed1, &mut ws, leader.chain_store.as_ref(), &verifier)
+            .unwrap();
+        drop(ws);
+
+        let block1 = leader.produce_block(&proposer_signer, 100).unwrap();
+
+        // Follower has no prior knowledge of sender's pubkey
+        let follower_db = Arc::new(MemoryDb::new());
+        let follower_cs = Arc::new(ChainStore::new(follower_db.clone()));
+        let follower_ws = Arc::new(RwLock::new(WorldState::new(follower_db.clone())));
+        let consensus = Arc::new(RwLock::new(PoaEngine::new(PoaConfig::new(
+            vec![proposer],
+            1,
+        ))));
+        let tx_pool = Arc::new(TxPool::new(MempoolConfig {
+            chain_id: 1337,
+            ..MempoolConfig::default()
+        }));
+        let follower = Node::new(
+            NodeConfig::dev(proposer),
+            follower_db,
+            follower_cs,
+            follower_ws,
+            tx_pool,
+            consensus,
+        );
+        store_genesis(&follower);
+        fund_account(&follower, &sender, initial_balance);
+        follower.register_authority_pubkey(proposer, proposer_signer.public_key().to_vec());
+
+        // Should succeed: Embedded TX₀ registers pubkey; Reference TX₁ resolves from block_pubkeys
+        follower.import_block(block1, &verifier).unwrap();
+
+        // Pubkey is now registered on the follower
+        assert_eq!(
+            follower.chain_store.get_pubkey(&sender).unwrap().unwrap(),
+            tx_signer.public_key().to_vec()
+        );
+        // Both txs executed; sender nonce = 2
+        let account = follower
+            .world_state
+            .read()
+            .get_account(&sender)
+            .unwrap()
+            .unwrap();
+        assert_eq!(account.nonce, 2);
+    }
+
+    /// F-405 Test 2: Block with Reference TX₀ before Embedded TX₁ must be rejected.
+    ///
+    /// When a Reference tx appears before the Embedded tx that would register
+    /// the pubkey, the first-pass resolver cannot find the pubkey and the
+    /// block import must fail immediately.
+    #[test]
+    fn block_import_reference_before_embedded_fails() {
+        let (node, _) = setup_node();
+        store_genesis(&node);
+        let proposer = node.config.proposer_address.unwrap();
+
+        let tx_signer = DilithiumSigner::generate();
+        let sender = Address::from_public_key(tx_signer.public_key(), tx_signer.sig_type().as_u8());
+        let receiver = Address::from([0xFF; 20]);
+        fund_account(&node, &sender, U256::from(100_000_000_000_000u64));
+
+        // TX₀: Reference — wrong order; no Embedded tx has preceded it in this block
+        let tx0 = Transaction {
+            chain_id: 1337,
+            nonce: 0,
+            to: Some(receiver),
+            value: U256::from(1u64),
+            data: shell_primitives::Bytes::new(),
+            gas_limit: 21_000,
+            max_fee_per_gas: shell_core::INITIAL_BASE_FEE,
+            max_priority_fee_per_gas: 0,
+            access_list: None,
+            tx_type: 2,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
+        };
+        // Sign tx0 properly so sig is structurally valid (error occurs before sig verify)
+        let sig0 = tx_signer.sign(tx0.hash().0.as_slice()).expect("sign failed");
+        let signed0 = SignedTransaction::new(sender, tx0, sig0); // Reference mode
+
+        // TX₁: Embedded — has the key, but comes too late
+        let tx1 = Transaction {
+            chain_id: 1337,
+            nonce: 1,
+            to: Some(receiver),
+            value: U256::from(2u64),
+            data: shell_primitives::Bytes::new(),
+            gas_limit: 21_000,
+            max_fee_per_gas: shell_core::INITIAL_BASE_FEE,
+            max_priority_fee_per_gas: 0,
+            access_list: None,
+            tx_type: 2,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
+        };
+        let sig1 = tx_signer.sign(tx1.hash().0.as_slice()).expect("sign failed");
+        let signed1 =
+            SignedTransaction::with_pubkey(sender, tx1, sig1, tx_signer.public_key().to_vec());
+
+        // Build a minimally valid block (proposer_seal=None is allowed in M1b)
+        let genesis_hash = node.chain_store.get_head_hash().unwrap().expect("genesis head");
+        let bad_block = shell_core::Block {
+            header: shell_core::BlockHeader {
+                parent_hash: genesis_hash,
+                state_root: ShellHash::default(),
+                transactions_root: ShellHash::default(),
+                receipts_root: ShellHash::default(),
+                logs_bloom: shell_primitives::Bytes::default(),
+                number: 1,
+                gas_limit: 30_000_000,
+                gas_used: 0,
+                timestamp: 1_700_000_001,
+                extra_data: shell_primitives::Bytes::default(),
+                proposer,
+                sig_aggregate_proof: None,
+                base_fee_per_gas: shell_core::INITIAL_BASE_FEE,
+                withdrawals_root: ShellHash::ZERO,
+                parent_beacon_block_root: ShellHash::ZERO,
+                blob_gas_used: 0,
+                excess_blob_gas: 0,
+            },
+            transactions: vec![signed0, signed1], // Reference first = wrong order
+            proposer_seal: None,
+        };
+
+        let verifier = MultiVerifier;
+        let result = node.import_block(bad_block, &verifier);
+        assert!(
+            result.is_err(),
+            "import should fail when Reference tx precedes Embedded in same block"
+        );
+        let err_msg = result.unwrap_err().to_string().to_lowercase();
+        assert!(
+            err_msg.contains("pubkey") || err_msg.contains("missing"),
+            "expected pubkey-related error, got: {err_msg}"
+        );
     }
 
     #[test]

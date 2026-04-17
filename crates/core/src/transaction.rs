@@ -326,6 +326,9 @@ impl Transaction {
     }
 }
 
+/// Expected Dilithium3 public key length in bytes.
+pub const DILITHIUM3_PUBKEY_LEN: usize = 1952;
+
 /// How the sender's public key is conveyed in a [`SignedTransaction`].
 ///
 /// Post-quantum signatures (Dilithium3) are not key-recoverable, so the sender
@@ -385,6 +388,12 @@ impl Default for PubkeyMode {
 ///
 /// The `pubkey_mode` field implements the **Hybrid registration** model —
 /// see [`PubkeyMode`] for full documentation.
+///
+/// **Note**: Always construct via [`SignedTransaction::new`] or
+/// [`SignedTransaction::with_pubkey`]. Direct struct initialization is
+/// intentionally prevented (`#[non_exhaustive]`) to ensure `pubkey_mode`
+/// defaults are not silently misapplied.
+#[non_exhaustive]
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SignedTransaction {
     /// The sender's address (derived from their PQ public key).
@@ -453,6 +462,12 @@ impl SignedTransaction {
         signature: PQSignature,
         pubkey: Vec<u8>,
     ) -> Self {
+        debug_assert_eq!(
+            pubkey.len(),
+            DILITHIUM3_PUBKEY_LEN,
+            "PubkeyMode::Embedded: expected {DILITHIUM3_PUBKEY_LEN} bytes, got {}",
+            pubkey.len()
+        );
         Self {
             from,
             tx,
