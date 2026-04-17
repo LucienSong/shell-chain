@@ -226,6 +226,15 @@ impl<S: KvStore> ChainStore<S> {
         self.store.delete(&Self::number_key(number))
     }
 
+    /// Delete the block body for the given block hash.
+    ///
+    /// The block header and canonical mapping are preserved; only the
+    /// transaction list (the bulk of the data) is removed.  This is the
+    /// EIP-4444-style body expiry operation.
+    pub fn delete_body(&self, hash: &ShellHash) -> Result<(), StorageError> {
+        self.store.delete(&Self::body_key(hash))
+    }
+
     /// Set the HEAD pointer to the given block hash.
     pub fn set_head(&self, hash: &ShellHash) -> Result<(), StorageError> {
         self.store.put(prefix::HEAD_BLOCK, hash.as_bytes())

@@ -1,3 +1,4 @@
+mod body_pruner;
 mod chain_store;
 mod error;
 mod kv_store;
@@ -12,6 +13,7 @@ mod world_state;
 #[cfg(feature = "rocksdb")]
 mod rocks_db;
 
+pub use body_pruner::{BodyPruneResult, BodyPruner, DEFAULT_BODY_RETENTION};
 pub use chain_store::{ChainConfig, ChainStore, WitnessStore, MAX_ADDRESS_TX_HISTORY_OFFSET};
 pub use error::StorageError;
 pub use kv_store::{KvStore, WriteBatch, WriteBatchOp};

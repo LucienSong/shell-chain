@@ -18,7 +18,7 @@ use shell_network::{NetworkBus, NetworkConfig};
 use shell_node::config::NodeConfig;
 use shell_node::pruning::PruningConfig;
 use shell_primitives::{Address, ShellHash};
-use shell_storage::DEFAULT_WITNESS_RETENTION;
+use shell_storage::{DEFAULT_BODY_RETENTION, DEFAULT_WITNESS_RETENTION};
 use shell_rpc::RpcConfig;
 use shell_storage::{ChainStore, KvStore, MemoryDb, WorldState};
 
@@ -65,6 +65,8 @@ pub struct RunArgs {
     pub parallel_evm_workers: Option<usize>,
     /// Number of recent blocks whose witness bundles are retained (0 = archive, default: 128).
     pub witness_retention: u64,
+    /// Number of recent blocks whose full bodies are retained (0 = archive, default: 512).
+    pub body_retention: u64,
 }
 
 /// Maximum genesis file size: 10 MB (F-082).
@@ -483,6 +485,7 @@ async fn run_with_store<S: KvStore + 'static>(
         pruning: PruningConfig {
             keep_recent: args.pruning,
             witness_retention: args.witness_retention,
+            body_retention: args.body_retention,
         },
         metrics: shell_node::config::MetricsConfig {
             enabled: true,
@@ -685,7 +688,8 @@ mod tests {
             state_cache_size_mb: None,
             parallel_evm: true,
             parallel_evm_workers: Some(4),
-            witness_retention: shell_storage::DEFAULT_WITNESS_RETENTION,
+            witness_retention: DEFAULT_WITNESS_RETENTION,
+            body_retention: DEFAULT_BODY_RETENTION,
         };
 
         let expected = ParallelEvmConfig {
@@ -771,6 +775,7 @@ mod tests {
                 parent_beacon_block_root: ShellHash::ZERO,
                 blob_gas_used: 0,
                 excess_blob_gas: 0,
+                witness_root: None,
             },
             transactions: vec![],
             proposer_seal: None,

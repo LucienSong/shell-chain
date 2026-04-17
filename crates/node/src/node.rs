@@ -16,7 +16,9 @@ use shell_mempool::TxPool;
 use shell_network::{NetworkMessage, NetworkService};
 use shell_primitives::{Address, Bytes, ShellHash};
 use shell_rpc::DevRpcControl;
-use shell_storage::{ChainStore, KvStore, StatePruner, WitnessPruner, WitnessStore, WorldState};
+use shell_storage::{
+    BodyPruner, ChainStore, KvStore, StatePruner, WitnessPruner, WitnessStore, WorldState,
+};
 
 use crate::config::NodeConfig;
 use crate::error::NodeError;
@@ -44,6 +46,8 @@ pub struct Node<S: KvStore + 'static> {
     pub witness_store: Arc<WitnessStore<S>>,
     /// Witness pruner: removes old witness bundles after finality.
     pub witness_pruner: RwLock<WitnessPruner>,
+    /// Body pruner: removes old block bodies after finality (EIP-4444 style).
+    pub body_pruner: RwLock<BodyPruner>,
     /// Finality tracking: collects attestations and detects quorum.
     pub finality: Arc<RwLock<FinalityState>>,
     /// Fork-choice rule: selects the canonical head based on attestations and finality.
@@ -92,6 +96,7 @@ impl<S: KvStore + 'static> Node<S> {
         let state_pruner = StatePruner::new(128);
         let witness_store = Arc::new(WitnessStore::new(store.clone()));
         let witness_pruner = WitnessPruner::new(config.pruning.witness_retention);
+        let body_pruner = BodyPruner::new(config.pruning.body_retention);
         let metrics = Arc::new(Metrics::new().expect("failed to register Prometheus metrics"));
 
         // F-094: Recover finalized state from persistent storage on restart.
@@ -131,6 +136,7 @@ impl<S: KvStore + 'static> Node<S> {
             state_pruner: RwLock::new(state_pruner),
             witness_store,
             witness_pruner: RwLock::new(witness_pruner),
+            body_pruner: RwLock::new(body_pruner),
             finality: Arc::new(RwLock::new(finality_state)),
             fork_choice: Arc::new(RwLock::new(ForkChoice::new(ShellHash::ZERO))),
             metrics,
@@ -400,6 +406,27 @@ impl<S: KvStore + 'static> Node<S> {
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "witness pruner: prune failed");
+                    }
+                }
+            }
+        }
+
+        // D2: Drive BodyPruner — expire old block bodies after finality.
+        {
+            let mut bpruner = self.body_pruner.write();
+            if !bpruner.is_archive() {
+                match bpruner.prune_before(block_number, &self.chain_store) {
+                    Ok(result) => {
+                        if result.bodies_pruned > 0 {
+                            tracing::info!(
+                                pruned = result.bodies_pruned,
+                                block = block_number,
+                                "body pruner: expired old block bodies"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "body pruner: prune failed");
                     }
                 }
             }

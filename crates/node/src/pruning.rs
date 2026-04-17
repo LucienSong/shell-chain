@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 use shell_primitives::ShellHash;
-use shell_storage::DEFAULT_WITNESS_RETENTION;
+use shell_storage::{DEFAULT_BODY_RETENTION, DEFAULT_WITNESS_RETENTION};
 use std::collections::VecDeque;
 
 /// Configuration for state-root pruning.
@@ -20,6 +20,10 @@ pub struct PruningConfig {
     /// `0` means archive mode — no witness bundles are ever pruned.
     /// Default: 128 (matches `DEFAULT_WITNESS_RETENTION`).
     pub witness_retention: u64,
+    /// Number of recent blocks whose full bodies are retained.
+    /// `0` means archive mode — no bodies are ever pruned.
+    /// Default: 512 (matches `DEFAULT_BODY_RETENTION`).
+    pub body_retention: u64,
 }
 
 impl PruningConfig {
@@ -27,7 +31,8 @@ impl PruningConfig {
     pub fn new(keep_recent: u64) -> Self {
         Self {
             keep_recent,
-            witness_retention: shell_storage::DEFAULT_WITNESS_RETENTION,
+            witness_retention: DEFAULT_WITNESS_RETENTION,
+            body_retention: DEFAULT_BODY_RETENTION,
         }
     }
 

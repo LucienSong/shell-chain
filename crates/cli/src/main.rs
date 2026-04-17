@@ -170,6 +170,10 @@ enum Commands {
         /// Number of recent blocks whose witness bundles are retained (0 = archive, default: 128).
         #[arg(long, default_value = "128")]
         witness_retention: u64,
+
+        /// Number of recent blocks whose full bodies are retained (0 = archive, default: 512).
+        #[arg(long, default_value = "512")]
+        body_retention: u64,
     },
 
     /// Initialize genesis block and data directory.
@@ -345,6 +349,7 @@ async fn main() {
             parallel_evm,
             parallel_evm_workers,
             witness_retention,
+            body_retention,
         } => {
             // Load config file if specified (CLI args override file values).
             let file_config = match &config_path {
@@ -479,6 +484,7 @@ async fn main() {
                 parallel_evm: effective_parallel_evm,
                 parallel_evm_workers: effective_parallel_evm_workers,
                 witness_retention,
+                body_retention,
             })
             .await
         }
