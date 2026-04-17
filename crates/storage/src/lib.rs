@@ -23,6 +23,6 @@ pub use world_state::{account_manager_addr, validator_registry_addr, WorldState}
 
 #[cfg(feature = "rocksdb")]
 pub use rocks_db::{
-    RocksCompactionStyle, RocksDbConfig, RocksDbStore, RocksDbStores, CF_CHAIN, CF_INDEX,
-    CF_RECEIPTS, CF_STATE,
+    CfCompressionStrategy, RocksCompactionStyle, RocksDbConfig, RocksDbStore, RocksDbStores,
+    CF_CHAIN, CF_INDEX, CF_RECEIPTS, CF_STATE,
 };

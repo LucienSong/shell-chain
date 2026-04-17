@@ -10,9 +10,11 @@ publish = false
 criterion = { workspace = true }
 shell-primitives = { workspace = true }
 shell-crypto = { workspace = true }
-shell-storage = { workspace = true }
+shell-storage = { workspace = true, features = ["rocksdb"] }
 shell-core = { workspace = true }
 shell-consensus = { workspace = true }
+alloy-rlp = { workspace = true }
+tempfile = "3"
 
 [[bench]]
 name = "bench_crypto"
@@ -24,4 +26,8 @@ harness = false
 
 [[bench]]
 name = "bench_consensus"
+harness = false
+
+[[bench]]
+name = "bench_compression"
 harness = false

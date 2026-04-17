@@ -5686,12 +5686,14 @@ dependencies = [
 name = "shell-bench"
 version = "0.14.0"
 dependencies = [
+ "alloy-rlp",
  "criterion",
  "shell-consensus",
  "shell-core",
  "shell-crypto",
  "shell-primitives",
  "shell-storage",
+ "tempfile",
 ]
 
 [[package]]
