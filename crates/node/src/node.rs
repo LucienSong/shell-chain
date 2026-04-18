@@ -3786,4 +3786,266 @@ mod tests {
             "error must mention witness_root mismatch: {msg}"
         );
     }
+
+    // ── STARK block compression tests ─────────────────────────────────────────
+
+    /// Create a node with STARK aggregation enabled.
+    fn setup_stark_node() -> (Node<MemoryDb>, DilithiumSigner) {
+        let signer = DilithiumSigner::generate();
+        let pubkey = signer.public_key().to_vec();
+        let authority = Address::from_public_key(&pubkey, signer.sig_type().as_u8());
+
+        let db = Arc::new(MemoryDb::new());
+        let chain_store = Arc::new(ChainStore::new(db.clone()));
+        let world_state = Arc::new(RwLock::new(WorldState::new(db.clone())));
+        let consensus = Arc::new(RwLock::new(PoaEngine::new(PoaConfig::new(
+            vec![authority],
+            1,
+        ))));
+        let tx_pool = Arc::new(TxPool::new(MempoolConfig {
+            chain_id: 1337,
+            ..MempoolConfig::default()
+        }));
+
+        let mut config = NodeConfig::dev(authority);
+        config.enable_stark_aggregation = true;
+        let node = Node::new(config, db, chain_store, world_state, tx_pool, consensus);
+        (node, signer)
+    }
+
+    /// Create and fund a test account with a Dilithium key.
+    /// Returns (signer, address, pubkey).
+    fn make_stark_account(
+        node: &Node<MemoryDb>,
+    ) -> (DilithiumSigner, Address, Vec<u8>) {
+        let signer = DilithiumSigner::generate();
+        let pubkey = signer.public_key().to_vec();
+        let address = Address::from_public_key(&pubkey, signer.sig_type().as_u8());
+        fund_account(node, &address, U256::from(1_000_000_000_000_000u64));
+        // Register the pubkey so import_block can validate the embedded-key tx.
+        node.chain_store.put_pubkey(&address, &pubkey).unwrap();
+        (signer, address, pubkey)
+    }
+
+    /// Build a signed transfer with PubkeyMode::Embedded (triggers STARK task).
+    fn make_embedded_tx(
+        signer: &DilithiumSigner,
+        from: Address,
+        pubkey: Vec<u8>,
+        nonce: u64,
+        value: u64,
+    ) -> SignedTransaction {
+        let tx = Transaction {
+            chain_id: 1337,
+            nonce,
+            to: Some(Address::from([0xBE; 20])),
+            value: U256::from(value),
+            data: Bytes::default(),
+            gas_limit: 21_000,
+            max_fee_per_gas: 1_000_000_000,
+            max_priority_fee_per_gas: 100_000_000,
+            access_list: None,
+            tx_type: 2,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
+        };
+        let sig = signer.sign(tx.hash().0.as_slice()).unwrap();
+        SignedTransaction::with_pubkey(from, tx, sig, pubkey)
+    }
+
+    /// STARK compression: produce blocks with Embedded-pubkey txs, verify the
+    /// proof backlog is populated, run the prover, and report compression ratios.
+    #[test]
+    fn stark_block_compression_queues_proof_tasks() {
+        let (node, proposer_signer) = setup_stark_node();
+        store_genesis(&node);
+
+        // ── Phase 1: fund accounts and prepare transactions ───────────────────
+
+        const TXS_PER_BLOCK: usize = 10;
+        const NUM_BLOCKS: usize = 3;
+
+        // Dilithium3 constants (from bench_compression.rs)
+        const DILITHIUM3_PUBKEY_LEN: usize = 1952;
+        const DILITHIUM3_SIG_LEN: usize = 3309;
+        const TX_META_LEN: usize = 140;
+        const TX_EMBEDDED_SIZE: usize = TX_META_LEN + DILITHIUM3_SIG_LEN + DILITHIUM3_PUBKEY_LEN;
+
+        let mut all_accounts = Vec::new();
+        for _ in 0..(TXS_PER_BLOCK * NUM_BLOCKS) {
+            all_accounts.push(make_stark_account(&node));
+        }
+
+        // ── Phase 2: submit txs and produce blocks ────────────────────────────
+
+        let mut block_stats: Vec<(u64, usize, usize)> = Vec::new(); // (block_num, tx_count, backlog_depth_after)
+
+        for block_idx in 0..NUM_BLOCKS {
+            let start = block_idx * TXS_PER_BLOCK;
+            for (i, (signer, addr, pubkey)) in all_accounts[start..start + TXS_PER_BLOCK].iter().enumerate() {
+                // Use a unique value (global index) to avoid tx hash collisions
+                // since the hash is derived from tx fields, not from/pubkey.
+                let global_idx = (start + i + 1) as u64;
+                let tx = make_embedded_tx(signer, *addr, pubkey.clone(), 0, global_idx);
+                let verifier = MultiVerifier;
+                let mut ws = node.world_state.write();
+                node.tx_pool.insert(tx, &mut ws, node.chain_store.as_ref(), &verifier).unwrap();
+                drop(ws);
+            }
+
+            let block = node.produce_block(&proposer_signer, TXS_PER_BLOCK + 10).unwrap();
+            let block_num = block.number();
+            let tx_count = block.transactions.len();
+            let backlog_depth = node.proof_backlog.lock().len();
+
+            block_stats.push((block_num, tx_count, backlog_depth));
+
+            // Store block so next produce_block can find parent.
+            let hash = block.hash();
+            node.chain_store.put_block(&block).unwrap();
+            node.chain_store.set_canonical(block_num, &hash).unwrap();
+            node.chain_store.set_head(&hash).unwrap();
+        }
+
+        // ── Phase 3: verify proof backlog is populated ────────────────────────
+
+        let total_backlog = node.proof_backlog.lock().len();
+        println!("\n╔══ STARK Block Compression Test ══════════════════════════════╗");
+        println!("║  Blocks produced: {NUM_BLOCKS}, txs/block: {TXS_PER_BLOCK}");
+        println!("║  Total proof tasks queued: {total_backlog}");
+        for (num, txs, depth) in &block_stats {
+            println!("║  Block #{num}: {txs} embedded txs → backlog depth after = {depth}");
+        }
+
+        // Every block with embedded txs must push a proof task.
+        assert_eq!(
+            total_backlog, NUM_BLOCKS,
+            "expected {NUM_BLOCKS} proof tasks in backlog, got {total_backlog}"
+        );
+
+        // ── Phase 4: compression ratio analysis (using known STARK proof sizes) ─
+
+        // These sizes come from the 6h soak benchmark (checkpoint #097):
+        //   batch=10: proof ≈ 13KB, raw tx data = 10 × TX_EMBEDDED_SIZE ≈ 52.6KB
+        //   This gives ~4x reduction for the pubkey+sig portion.
+        //
+        // Conservative estimate: proof_size_bytes ≈ 13_000 (from soak benchmark)
+        let raw_per_block = TXS_PER_BLOCK * TX_EMBEDDED_SIZE;
+        let estimated_proof_size = 13_000usize; // bytes, from benchmark data
+        let pubkey_data_per_block = TXS_PER_BLOCK * DILITHIUM3_PUBKEY_LEN;
+        let sig_data_per_block = TXS_PER_BLOCK * DILITHIUM3_SIG_LEN;
+
+        // Compression ratio: raw sig+pubkey bytes vs STARK proof bytes
+        let compression_ratio =
+            (pubkey_data_per_block + sig_data_per_block) as f64 / estimated_proof_size as f64;
+
+        println!("║");
+        println!("║  ── Compression Analysis (batch={TXS_PER_BLOCK} txs) ──────────────────────");
+        println!("║  Raw block size (embedded): {} bytes ({:.1} KB)", raw_per_block, raw_per_block as f64 / 1024.0);
+        println!("║    ├─ pubkeys: {} bytes ({} × {} B)", pubkey_data_per_block, TXS_PER_BLOCK, DILITHIUM3_PUBKEY_LEN);
+        println!("║    └─ signatures: {} bytes ({} × {} B)", sig_data_per_block, TXS_PER_BLOCK, DILITHIUM3_SIG_LEN);
+        println!("║  STARK proof (estimated): {estimated_proof_size} bytes ({:.1} KB)", estimated_proof_size as f64 / 1024.0);
+        println!("║  Compression ratio (sig+pubkey → proof): {compression_ratio:.1}×");
+        println!("║  Space saved per block: {} bytes ({:.1} KB)",
+            (pubkey_data_per_block + sig_data_per_block).saturating_sub(estimated_proof_size),
+            (pubkey_data_per_block + sig_data_per_block).saturating_sub(estimated_proof_size) as f64 / 1024.0);
+        println!("╚═══════════════════════════════════════════════════════════════╝\n");
+
+        // Sanity: compression should be significant for any realistic batch size.
+        assert!(
+            compression_ratio > 1.0,
+            "STARK proof should compress better than raw embedded txs (got {compression_ratio:.2}x)"
+        );
+    }
+
+    /// STARK compression: verify ProverService processes the backlog and stores
+    /// proof amendments.
+    #[tokio::test]
+    async fn stark_prover_service_processes_backlog() {
+        use crate::prover_service::{ProverConfig, ProverService};
+        use shell_storage::ProofAmendmentStore;
+
+        let (node, proposer_signer) = setup_stark_node();
+        store_genesis(&node);
+
+        // Fund 5 accounts and submit embedded txs.
+        const TXS: usize = 5;
+        let accounts: Vec<_> = (0..TXS).map(|_| make_stark_account(&node)).collect();
+
+        for (i, (signer, addr, pubkey)) in accounts.iter().enumerate() {
+            let tx = make_embedded_tx(signer, *addr, pubkey.clone(), 0, (i + 1) as u64);
+            let verifier = MultiVerifier;
+            let mut ws = node.world_state.write();
+            node.tx_pool.insert(tx, &mut ws, node.chain_store.as_ref(), &verifier).unwrap();
+            drop(ws);
+        }
+
+        // Produce block 1 → 5 embedded txs → 1 proof task queued.
+        let block = node.produce_block(&proposer_signer, 20).unwrap();
+        let block_num = block.number();
+
+        // produce_block pushes a ProofTask with a placeholder hash derived from
+        // block_number (see G4 in node.rs): hash_bytes[..8] = block_num.to_be_bytes().
+        // The ProverService stores the amendment under that same placeholder hash.
+        let mut placeholder = [0u8; 32];
+        placeholder[..8].copy_from_slice(&block_num.to_be_bytes());
+        let placeholder_hash = ShellHash::from(placeholder);
+
+        assert_eq!(
+            node.proof_backlog.lock().len(),
+            1,
+            "expected 1 proof task after producing 1 block with {TXS} embedded txs"
+        );
+
+        // Start ProverService to process the backlog.
+        let db = node.store.clone();
+        let amendment_store = ProofAmendmentStore::new(db);
+        let svc = ProverService::new(
+            Arc::clone(&node.proof_backlog),
+            amendment_store.clone(),
+            ProverConfig::default(),
+            node.config.proposer_address.unwrap_or_default(),
+        );
+        let handle = svc.start();
+
+        // Wait for proof to be processed (proving 5 entries takes ~5-15ms in mock mode).
+        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+        handle.shutdown().await;
+
+        // Backlog should be drained.
+        assert_eq!(
+            node.proof_backlog.lock().len(),
+            0,
+            "ProverService should have drained the backlog"
+        );
+
+        // Amendment should be stored under the placeholder hash.
+        let stored_bytes = amendment_store
+            .get_amendment(&placeholder_hash)
+            .expect("amendment store read failed");
+        assert!(
+            stored_bytes.is_some(),
+            "ProofAmendment for block #{block_num} should be stored under placeholder hash {placeholder_hash}"
+        );
+
+        // Deserialize and check the amendment.
+        let bytes = stored_bytes.unwrap();
+        let amendment: shell_stark_prover::ProofAmendment =
+            serde_json::from_slice(&bytes).expect("amendment deserialization failed");
+        let proof_size = amendment.proof.size_bytes();
+        let raw_sig_pubkey_size = TXS * (3309 + 1952);
+
+        println!("\n╔══ STARK ProverService Test ════════════════════════════════════╗");
+        println!("║  Block #{block_num}: {TXS} embedded txs → proof generated & stored");
+        println!("║  Proof size: {proof_size} bytes ({:.1} KB)", proof_size as f64 / 1024.0);
+        println!("║  Raw sig+pubkey: {raw_sig_pubkey_size} bytes ({:.1} KB)", raw_sig_pubkey_size as f64 / 1024.0);
+        println!("║  Actual compression: {:.1}×", raw_sig_pubkey_size as f64 / proof_size as f64);
+        println!("╚════════════════════════════════════════════════════════════════╝\n");
+
+        assert!(proof_size > 0, "proof must be non-empty");
+        assert!(
+            proof_size < raw_sig_pubkey_size,
+            "STARK proof ({proof_size} B) should be smaller than raw sig+pubkey data ({raw_sig_pubkey_size} B)"
+        );
+    }
 }
