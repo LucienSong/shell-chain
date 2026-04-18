@@ -21,7 +21,6 @@ use shell_node::pruning::PruningConfig;
 use shell_primitives::{Address, ShellHash};
 use shell_rpc::RpcConfig;
 use shell_storage::{ChainStore, KvStore, MemoryDb, WorldState};
-use shell_storage::{DEFAULT_BODY_RETENTION, DEFAULT_WITNESS_RETENTION};
 
 use tracing::{error, info, warn};
 
@@ -672,7 +671,7 @@ mod tests {
     use shell_genesis::initialize_genesis;
     use shell_node::config::ParallelEvmConfig;
     use shell_primitives::{Bytes, U256};
-    use shell_storage::MemoryDb;
+    use shell_storage::{MemoryDb, DEFAULT_BODY_RETENTION, DEFAULT_WITNESS_RETENTION};
     use std::collections::HashMap;
 
     /// Verify that `--parallel-evm --parallel-evm-workers 4` produces the correct config.

@@ -474,7 +474,7 @@ async fn main() -> AResult<()> {
         fund_account(&client, &cli.rpc, &w.pq_address, &fund_hex)
             .await
             .map_err(|e| anyhow::anyhow!("fund worker {i}: {e}"))?;
-        if i % 10 == 0 {
+        if i.is_multiple_of(10) {
             info!("  Funded {}/{}", i + 1, cli.workers);
         }
         workers.push(w);

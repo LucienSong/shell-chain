@@ -415,7 +415,7 @@ async fn main() {
                 _ => 30_000u64, // dev + testnet
             };
             let effective_block_time = block_time
-                .or_else(|| file_config.node.block_time)
+                .or(file_config.node.block_time)
                 .unwrap_or(network_default_block_time);
 
             let effective_keystore =
