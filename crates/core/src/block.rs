@@ -215,7 +215,7 @@ impl Decodable for BlockHeader {
         // For backward compatibility: older blocks without this field will
         // hit ListLengthMismatch at consumed != header.payload_length — handled
         // gracefully by treating absent field as None via the consumed check below.
-        let witness_root = if buf.len() > 0 {
+        let witness_root = if !buf.is_empty() {
             let root_bytes = alloy_rlp::Header::decode_bytes(buf, false)?;
             if root_bytes.is_empty() {
                 None

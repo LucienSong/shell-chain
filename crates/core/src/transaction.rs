@@ -345,12 +345,13 @@ pub const DILITHIUM3_PUBKEY_LEN: usize = 1952;
 /// ## Wire encoding (RLP)
 /// - `Embedded(pk)` → raw key bytes (1,952 bytes for Dilithium3)
 /// - `Reference`    → empty byte string (1 byte overhead)
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(tag = "mode", content = "key", rename_all = "snake_case")]
 pub enum PubkeyMode {
     /// Full Dilithium3 public key (1,952 bytes) inline. Used on first tx.
     Embedded(Vec<u8>),
     /// Key omitted; resolved from on-chain registry by `from` address.
+    #[default]
     Reference,
 }
 
@@ -371,12 +372,6 @@ impl PubkeyMode {
             PubkeyMode::Embedded(b) => Some(b),
             PubkeyMode::Reference => None,
         }
-    }
-}
-
-impl Default for PubkeyMode {
-    fn default() -> Self {
-        PubkeyMode::Reference
     }
 }
 
