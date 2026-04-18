@@ -149,10 +149,11 @@ impl AggregationScheduler {
         }
 
         // 3. Epoch boundary.
-        if self.config.epoch_length > 0 && block_number > 0 {
-            if block_number % self.config.epoch_length == 0 {
-                return Some(TriggerReason::EpochBoundary);
-            }
+        if self.config.epoch_length > 0
+            && block_number > 0
+            && block_number.is_multiple_of(self.config.epoch_length)
+        {
+            return Some(TriggerReason::EpochBoundary);
         }
 
         None

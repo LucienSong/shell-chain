@@ -39,8 +39,8 @@ impl SigBatchEntry {
     /// Derive the field element entry value for this signature.
     pub fn to_field_element(&self) -> BaseElement {
         let mut bytes = [0u8; 16];
-        for i in 0..16 {
-            bytes[i] = self.msg_hash[i] ^ self.pk_hash[i];
+        for (i, b) in bytes.iter_mut().enumerate() {
+            *b = self.msg_hash[i] ^ self.pk_hash[i];
         }
         BaseElement::new(u128::from_le_bytes(bytes))
     }
