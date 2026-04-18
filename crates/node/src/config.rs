@@ -45,15 +45,6 @@ impl NodeRole {
             )),
         }
     }
-}
-
-impl std::str::FromStr for NodeRole {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Self::from_role_str(s)
-    }
-}
 
     /// Returns true if this role involves block production.
     pub fn is_validator(&self) -> bool {
@@ -63,6 +54,14 @@ impl std::str::FromStr for NodeRole {
     /// Returns true if this role runs the prover service.
     pub fn runs_prover(&self) -> bool {
         matches!(self, Self::ValidatorProver | Self::Prover)
+    }
+}
+
+impl std::str::FromStr for NodeRole {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::from_role_str(s)
     }
 }
 
