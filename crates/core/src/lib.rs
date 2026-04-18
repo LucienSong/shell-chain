@@ -4,6 +4,7 @@ pub mod fee;
 mod log;
 mod receipt;
 mod transaction;
+mod witness;
 
 pub use account::Account;
 pub use block::{Block, BlockHeader};
@@ -13,4 +14,8 @@ pub use fee::{
 };
 pub use log::{Log, LogError, MAX_LOG_TOPICS};
 pub use receipt::TransactionReceipt;
-pub use transaction::{AccessListItem, SignedTransaction, Transaction, MAX_BLOB_HASHES_PER_TX};
+pub use transaction::{
+    AccessListItem, PubkeyMode, SignedTransaction, Transaction, DILITHIUM3_PUBKEY_LEN,
+    MAX_BLOB_HASHES_PER_TX,
+};
+pub use witness::{StrippedTransaction, TxWitness, WitnessBundle};

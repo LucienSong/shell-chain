@@ -14,7 +14,7 @@ use shell_evm::bloom::BLOOM_SIZE;
 use shell_evm::{ShellEvm, ShellStateDb};
 use shell_mempool::TxPool;
 use shell_primitives::{Address, Bytes, ShellHash, U256};
-use shell_storage::{ChainStore, KvStore, WorldState, MAX_ADDRESS_TX_HISTORY_OFFSET};
+use shell_storage::{ChainStore, KvStore, WitnessStore, WorldState, MAX_ADDRESS_TX_HISTORY_OFFSET};
 
 use crate::admin::{AdminApiServer, NodeInfo, PeerInfo};
 use crate::api::{
@@ -73,6 +73,8 @@ pub struct RpcHandler<S: KvStore + 'static> {
     admin_rpc_addr: String,
     admin_peer_id: String,
     admin_p2p_listen: String,
+    /// Optional witness store for Phase B witness bundle queries (B4).
+    witness_store: Option<Arc<WitnessStore<S>>>,
 }
 
 impl<S: KvStore + 'static> Clone for RpcHandler<S> {
@@ -99,6 +101,7 @@ impl<S: KvStore + 'static> Clone for RpcHandler<S> {
             admin_rpc_addr: self.admin_rpc_addr.clone(),
             admin_peer_id: self.admin_peer_id.clone(),
             admin_p2p_listen: self.admin_p2p_listen.clone(),
+            witness_store: self.witness_store.clone(),
         }
     }
 }
@@ -141,9 +144,16 @@ impl<S: KvStore + 'static> RpcHandler<S> {
             admin_rpc_addr: String::new(),
             admin_peer_id: String::new(),
             admin_p2p_listen: String::new(),
+            witness_store: None,
         };
         FilterRegistry::start_cleanup(Arc::clone(&handler.filter_registry));
         handler
+    }
+
+    /// Attach a witness store for `shell_getBlockWitnesses` (Phase B4).
+    pub fn with_witness_store(mut self, ws: Arc<WitnessStore<S>>) -> Self {
+        self.witness_store = Some(ws);
+        self
     }
 
     /// Set the proposer signer for governance RPCs.
@@ -393,6 +403,7 @@ impl<S: KvStore + 'static> RpcHandler<S> {
             parent_beacon_block_root: ShellHash::ZERO,
             blob_gas_used: 0,
             excess_blob_gas: 0,
+            witness_root: None,
         };
 
         let result = evm
@@ -1927,6 +1938,95 @@ impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
             "transactions": txs,
         }))
     }
+
+    async fn get_block_witnesses(
+        &self,
+        block: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // Resolve block hash from tag or hash string.
+        let block_hash = if block.starts_with("0x") && block.len() == 66 {
+            // 32-byte hex hash
+            let bytes = hex::decode(&block[2..])
+                .map_err(|e| internal_err(format!("invalid block hash hex: {e}")))?;
+            let arr: [u8; 32] = bytes
+                .try_into()
+                .map_err(|_| internal_err("block hash must be 32 bytes"))?;
+            ShellHash::from(arr)
+        } else {
+            // Block number / tag → look up canonical hash
+            let tag = parse_block_tag(&block)?;
+            let blk = match tag {
+                BlockTag::Latest | BlockTag::Finalized | BlockTag::Pending => {
+                    self.chain_store.get_head_block().map_err(internal_err)?
+                }
+                BlockTag::Number(n) => self
+                    .chain_store
+                    .get_block_by_number(n)
+                    .map_err(internal_err)?,
+            };
+            match blk {
+                None => return Ok(serde_json::Value::Null),
+                Some(b) => b.hash(),
+            }
+        };
+
+        // Retrieve the block header for witness_root.
+        let header = self
+            .chain_store
+            .get_header_by_hash(&block_hash)
+            .map_err(internal_err)?;
+        let witness_root = header
+            .as_ref()
+            .and_then(|h| h.witness_root)
+            .map(|r| format!("0x{}", hex::encode(r.as_bytes())))
+            .unwrap_or_else(|| "null".into());
+
+        // Look up the witness bundle if a store is wired.
+        let Some(ws) = &self.witness_store else {
+            return Ok(serde_json::json!({
+                "blockHash": block_hash,
+                "witnessRoot": witness_root,
+                "witnessCount": null,
+                "witnesses": null,
+                "error": "witness store not available on this node",
+            }));
+        };
+
+        let bundle = ws.get_bundle(&block_hash).map_err(internal_err)?;
+        let Some(bundle) = bundle else {
+            return Ok(serde_json::json!({
+                "blockHash": block_hash,
+                "witnessRoot": witness_root,
+                "witnessCount": 0,
+                "witnesses": [],
+            }));
+        };
+
+        let witnesses: Vec<serde_json::Value> = bundle
+            .witnesses
+            .iter()
+            .enumerate()
+            .map(|(i, w)| {
+                let sig_type = format!("{:?}", w.signature.sig_type);
+                let mut obj = serde_json::json!({
+                    "txIndex": i,
+                    "sigType": sig_type,
+                    "signature": format!("0x{}", hex::encode(&w.signature.data)),
+                });
+                if let Some(pk) = &w.pubkey {
+                    obj["pubkey"] = serde_json::Value::String(format!("0x{}", hex::encode(pk)));
+                }
+                obj
+            })
+            .collect();
+
+        Ok(serde_json::json!({
+            "blockHash": block_hash,
+            "witnessRoot": witness_root,
+            "witnessCount": witnesses.len(),
+            "witnesses": witnesses,
+        }))
+    }
 }
 
 #[jsonrpsee::core::async_trait]
@@ -2185,7 +2285,7 @@ mod tests {
     use shell_core::{Block, BlockHeader, Transaction, TransactionReceipt};
     use shell_crypto::{DilithiumSigner, Signer};
     use shell_primitives::Bytes;
-    use shell_storage::MemoryDb;
+    use shell_storage::{MemoryDb, WitnessStore};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     #[derive(Default)]
@@ -2268,6 +2368,7 @@ mod tests {
                 parent_beacon_block_root: ShellHash::ZERO,
                 blob_gas_used: 0,
                 excess_blob_gas: 0,
+                witness_root: None,
             },
             transactions: vec![],
             proposer_seal: None,
@@ -2477,6 +2578,121 @@ mod tests {
         let result = ShellApiServer::get_pq_pubkey(&handler, addr).await.unwrap();
         assert!(result.is_some());
         assert!(result.unwrap().starts_with("0x"));
+    }
+
+    // ── shell_getBlockWitnesses tests ──────────────────────────────────────
+
+    fn setup_with_witness() -> RpcHandler<MemoryDb> {
+        let db = Arc::new(MemoryDb::new());
+        let chain_store = Arc::new(ChainStore::new(db.clone()));
+        let world_state = Arc::new(parking_lot::RwLock::new(WorldState::new(db.clone())));
+        let witness_store = Arc::new(WitnessStore::new(db));
+        let tx_pool = Arc::new(TxPool::new(shell_mempool::MempoolConfig {
+            chain_id: 42,
+            ..shell_mempool::MempoolConfig::default()
+        }));
+        let (block_events, _) = tokio::sync::broadcast::channel(16);
+        let finalized_number = Arc::new(parking_lot::RwLock::new(0u64));
+        let finality = Arc::new(parking_lot::RwLock::new(FinalityState::new()));
+        RpcHandler::new(
+            chain_store,
+            world_state,
+            tx_pool,
+            42,
+            None,
+            block_events,
+            finalized_number,
+            finality,
+        )
+        .with_witness_store(witness_store)
+    }
+
+    #[tokio::test]
+    async fn shell_get_block_witnesses_no_store() {
+        // Without a witness store wired in, returns an error field.
+        let handler = setup();
+        let block = make_genesis_block();
+        let hash = block.hash();
+        handler.chain_store.put_block(&block).unwrap();
+        handler.chain_store.set_canonical(0, &hash).unwrap();
+        handler.chain_store.set_head(&hash).unwrap();
+
+        let result = ShellApiServer::get_block_witnesses(&handler, "latest".to_string())
+            .await
+            .unwrap();
+        assert!(result["error"]
+            .as_str()
+            .unwrap()
+            .contains("witness store not available"));
+    }
+
+    #[tokio::test]
+    async fn shell_get_block_witnesses_empty_bundle() {
+        // Block exists, witness store is wired, but no bundle stored → empty array.
+        let handler = setup_with_witness();
+        let block = make_genesis_block();
+        let hash = block.hash();
+        handler.chain_store.put_block(&block).unwrap();
+        handler.chain_store.set_canonical(0, &hash).unwrap();
+        handler.chain_store.set_head(&hash).unwrap();
+
+        let result = ShellApiServer::get_block_witnesses(&handler, "latest".to_string())
+            .await
+            .unwrap();
+        assert_eq!(result["witnessCount"], 0);
+        assert!(result["witnesses"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn shell_get_block_witnesses_with_bundle() {
+        use shell_core::{TxWitness, WitnessBundle};
+
+        let handler = setup_with_witness();
+        let block = make_genesis_block();
+        let block_hash = block.hash();
+        handler.chain_store.put_block(&block).unwrap();
+        handler.chain_store.set_canonical(0, &block_hash).unwrap();
+        handler.chain_store.set_head(&block_hash).unwrap();
+
+        // Build and store a witness bundle.
+        let signer = DilithiumSigner::generate();
+        let pk = signer.public_key().to_vec();
+        let sig = signer.sign(b"tx0").unwrap();
+        let bundle = WitnessBundle::new(vec![TxWitness::new_embedded(sig, pk)]);
+        handler
+            .witness_store
+            .as_ref()
+            .unwrap()
+            .put_bundle(&block_hash, &bundle)
+            .unwrap();
+
+        let result = ShellApiServer::get_block_witnesses(
+            &handler,
+            format!("0x{}", hex::encode(block_hash.as_bytes())),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result["witnessCount"], 1);
+        let witnesses = result["witnesses"].as_array().unwrap();
+        assert_eq!(witnesses[0]["txIndex"], 0);
+        assert_eq!(witnesses[0]["sigType"], "Dilithium3");
+        assert!(witnesses[0]["signature"]
+            .as_str()
+            .unwrap()
+            .starts_with("0x"));
+        assert!(witnesses[0]["pubkey"].as_str().unwrap().starts_with("0x"));
+    }
+
+    #[tokio::test]
+    async fn shell_get_block_witnesses_null_for_unknown_hash() {
+        let handler = setup_with_witness();
+        let fake_hash = format!("0x{}", "ab".repeat(32));
+        let result = ShellApiServer::get_block_witnesses(&handler, fake_hash)
+            .await
+            .unwrap();
+        // Block header not found, but no bundle stored → empty witnesses.
+        assert_eq!(result["witnessCount"], 0);
     }
 
     #[tokio::test]
@@ -2789,6 +3005,7 @@ mod tests {
                 parent_beacon_block_root: ShellHash::ZERO,
                 blob_gas_used: 0,
                 excess_blob_gas: 0,
+                witness_root: None,
             },
             transactions: vec![],
             proposer_seal: None,
@@ -3548,6 +3765,7 @@ mod tests {
                 parent_beacon_block_root: ShellHash::ZERO,
                 blob_gas_used: 0,
                 excess_blob_gas: 0,
+                witness_root: None,
             },
             transactions: vec![],
             proposer_seal: None,
@@ -3622,6 +3840,7 @@ mod tests {
                 parent_beacon_block_root: ShellHash::ZERO,
                 blob_gas_used: 0,
                 excess_blob_gas: 0,
+                witness_root: None,
             },
             transactions: vec![],
             proposer_seal: None,
@@ -4019,6 +4238,7 @@ mod tests {
                 parent_beacon_block_root: ShellHash::ZERO,
                 blob_gas_used: 0,
                 excess_blob_gas: 0,
+                witness_root: None,
             },
             transactions: vec![signed],
             proposer_seal: None,

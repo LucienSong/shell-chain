@@ -11,6 +11,7 @@ use shell_core::Block;
 use shell_crypto::{DilithiumSigner, Signer};
 use shell_genesis::{
     initialize_authority_pubkeys, initialize_genesis, AllocEntry, ConsensusConfig, GenesisConfig,
+    NetworkType,
 };
 use shell_keystore::{decrypt, EncryptedKey};
 use shell_mempool::MempoolConfig;
@@ -28,6 +29,8 @@ use tracing::{error, info, warn};
 pub struct RunArgs {
     pub datadir: PathBuf,
     pub rpc_addr: String,
+    /// Network profile string: "dev", "testnet", or "mainnet".
+    pub network: String,
     pub block_time: u64,
     pub keystore: Option<PathBuf>,
     pub chain_id: u64,
@@ -62,6 +65,12 @@ pub struct RunArgs {
     pub parallel_evm: bool,
     /// Number of worker threads for the parallel-EVM scheduler (default: logical CPUs).
     pub parallel_evm_workers: Option<usize>,
+    /// Number of recent blocks whose witness bundles are retained (0 = archive, default: 128).
+    pub witness_retention: u64,
+    /// Number of recent blocks whose full bodies are retained (0 = archive, default: 512).
+    pub body_retention: u64,
+    /// Enable STARK aggregate proof generation during block production (off by default).
+    pub enable_stark_aggregation: bool,
 }
 
 /// Maximum genesis file size: 10 MB (F-082).
@@ -329,6 +338,8 @@ async fn run_with_store<S: KvStore + 'static>(
         }
     }
 
+    let network_type: NetworkType = args.network.parse().unwrap_or_default();
+
     // Load genesis config.
     let genesis_file = args.datadir.join("genesis.json");
     let genesis_config = if genesis_file.exists() {
@@ -360,7 +371,8 @@ async fn run_with_store<S: KvStore + 'static>(
 
         let config = GenesisConfig {
             chain_id: args.chain_id,
-            chain_name: "shell-chain-dev".into(),
+            chain_name: format!("shell-chain-{}", args.network),
+            network_type,
             timestamp: 1_700_000_000,
             gas_limit: 30_000_000,
             extra_data: String::new(),
@@ -418,22 +430,28 @@ async fn run_with_store<S: KvStore + 'static>(
     }
 
     // Extract authorities and epoch_length from genesis.
-    let (authorities, authority_pubkeys, block_time_secs, max_future_secs, epoch_length) =
+    let (authorities, authority_pubkeys, max_future_secs, epoch_length) =
         match &genesis_config.consensus {
             ConsensusConfig::PoA {
                 authorities,
                 authority_pubkeys,
-                block_time_secs,
                 max_future_secs,
                 epoch_length,
+                ..
             } => (
                 authorities.clone(),
                 authority_pubkeys.clone(),
-                *block_time_secs,
                 *max_future_secs,
                 *epoch_length,
             ),
         };
+
+    // F4: validate network_type vs block_time_secs consistency, warn on mismatch.
+    if let Err(e) = genesis_config.validate_network_consistency() {
+        eprintln!("⚠️  Genesis warning: {e}");
+    }
+    // F4: use effective block time (explicit consensus value or network-type default).
+    let block_time_secs = genesis_config.effective_block_time_secs();
 
     // Build node configuration.
     let listen_addr: SocketAddr = args.rpc_addr.parse()?;
@@ -444,6 +462,7 @@ async fn run_with_store<S: KvStore + 'static>(
     };
     let node_config = NodeConfig {
         chain_id: genesis_config.chain_id,
+        network_type,
         consensus: PoaConfig::new(authorities.clone(), block_time_secs)
             .with_max_future_secs(max_future_secs)
             .with_epoch_length(epoch_length),
@@ -477,7 +496,11 @@ async fn run_with_store<S: KvStore + 'static>(
         proposer_address: Some(authority),
         block_time_ms: args.block_time,
         data_dir: args.datadir.to_string_lossy().into(),
-        pruning: PruningConfig::new(args.pruning),
+        pruning: PruningConfig {
+            keep_recent: args.pruning,
+            witness_retention: args.witness_retention,
+            body_retention: args.body_retention,
+        },
         metrics: shell_node::config::MetricsConfig {
             enabled: true,
             listen_addr: args.metrics_addr.parse()?,
@@ -493,6 +516,8 @@ async fn run_with_store<S: KvStore + 'static>(
             }),
             ..shell_node::config::ParallelEvmConfig::default()
         },
+        enable_stark_aggregation: args.enable_stark_aggregation,
+        node_role: shell_node::config::NodeRole::default(),
     };
 
     // Build the node (auto-detects existing state via NodeBuilder).
@@ -529,6 +554,7 @@ async fn run_with_store<S: KvStore + 'static>(
             let mut network = shell_network::Libp2pNetwork::new(&net_config).await?;
 
             eprintln!("🚀 Shell-chain node starting...");
+            eprintln!("   Network:     {}", args.network);
             eprintln!("   Chain ID:    {}", genesis_config.chain_id);
             eprintln!("   RPC:         http://{listen_addr}");
             if let Some(ws) = ws_addr {
@@ -586,6 +612,7 @@ async fn run_with_store<S: KvStore + 'static>(
         let mut network = bus.join(&NetworkConfig::default());
 
         eprintln!("🚀 Shell-chain node starting...");
+        eprintln!("   Network:     {}", args.network);
         eprintln!("   Chain ID:    {}", genesis_config.chain_id);
         eprintln!("   RPC:         http://{listen_addr}");
         if let Some(ws) = ws_addr {
@@ -644,7 +671,7 @@ mod tests {
     use shell_genesis::initialize_genesis;
     use shell_node::config::ParallelEvmConfig;
     use shell_primitives::{Bytes, U256};
-    use shell_storage::MemoryDb;
+    use shell_storage::{MemoryDb, DEFAULT_BODY_RETENTION, DEFAULT_WITNESS_RETENTION};
     use std::collections::HashMap;
 
     /// Verify that `--parallel-evm --parallel-evm-workers 4` produces the correct config.
@@ -679,6 +706,10 @@ mod tests {
             state_cache_size_mb: None,
             parallel_evm: true,
             parallel_evm_workers: Some(4),
+            witness_retention: DEFAULT_WITNESS_RETENTION,
+            body_retention: DEFAULT_BODY_RETENTION,
+            enable_stark_aggregation: false,
+            network: "dev".into(),
         };
 
         let expected = ParallelEvmConfig {
@@ -741,6 +772,7 @@ mod tests {
                 },
             )]),
             boot_nodes: vec![],
+            network_type: NetworkType::Dev,
         }
     }
 
@@ -764,6 +796,7 @@ mod tests {
                 parent_beacon_block_root: ShellHash::ZERO,
                 blob_gas_used: 0,
                 excess_blob_gas: 0,
+                witness_root: None,
             },
             transactions: vec![],
             proposer_seal: None,

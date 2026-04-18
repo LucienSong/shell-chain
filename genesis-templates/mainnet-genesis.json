@@ -1,0 +1,19 @@
+{
+  "chain_id": 1,
+  "chain_name": "shell-chain",
+  "network_type": "Mainnet",
+  "timestamp": 1700000000,
+  "gas_limit": 30000000,
+  "extra_data": "",
+  "consensus": {
+    "PoA": {
+      "authorities": [],
+      "authority_pubkeys": [],
+      "block_time_secs": 2,
+      "max_future_secs": 10,
+      "epoch_length": 1000
+    }
+  },
+  "alloc": {},
+  "boot_nodes": []
+}

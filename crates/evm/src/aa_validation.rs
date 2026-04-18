@@ -74,8 +74,9 @@ pub fn validate_aa_tx<S: KvStore + 'static, V: Verifier>(
     if let Some(account) = account.as_ref() {
         if let Some(validation_code_hash) = account.validation_code_hash {
             let pubkey = signed_tx
-                .sender_pubkey
-                .clone()
+                .pubkey_mode
+                .pubkey_bytes()
+                .map(|b| b.to_vec())
                 .or(registered_pubkey.clone())
                 .unwrap_or_default();
 
@@ -104,9 +105,12 @@ pub fn validate_aa_tx<S: KvStore + 'static, V: Verifier>(
         ));
     }
 
-    let pubkey = resolve_pubkey(signed_tx.sender_pubkey.as_ref(), registered_pubkey.as_ref())?;
+    let pubkey = resolve_pubkey(
+        signed_tx.pubkey_mode.pubkey_bytes(),
+        registered_pubkey.as_ref(),
+    )?;
 
-    if signed_tx.sender_pubkey.is_some() {
+    if signed_tx.pubkey_mode.is_embedded() {
         if let Some(registered) = registered_pubkey.as_ref() {
             if registered != &pubkey {
                 return Err(AaValidationError::PubkeyConflict);
@@ -138,18 +142,18 @@ pub fn validate_aa_tx<S: KvStore + 'static, V: Verifier>(
     }
 
     Ok(AaValidationOutcome {
-        should_register_pubkey: signed_tx.sender_pubkey.is_some() && registered_pubkey.is_none(),
+        should_register_pubkey: signed_tx.pubkey_mode.is_embedded() && registered_pubkey.is_none(),
         pubkey,
         protocol_checks_nonce: true,
     })
 }
 
 fn resolve_pubkey(
-    sender_pubkey: Option<&Vec<u8>>,
+    sender_pubkey: Option<&[u8]>,
     registered_pubkey: Option<&Vec<u8>>,
 ) -> Result<Vec<u8>, AaValidationError> {
     if let Some(pk) = sender_pubkey {
-        return Ok(pk.clone());
+        return Ok(pk.to_vec());
     }
     match registered_pubkey {
         Some(pk) => Ok(pk.clone()),

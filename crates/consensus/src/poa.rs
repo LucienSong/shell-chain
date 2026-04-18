@@ -1,6 +1,6 @@
 use shell_core::{Block, BlockHeader};
 use shell_crypto::{PQSignature, Signer, Verifier};
-use shell_primitives::Address;
+use shell_primitives::{keccak256, Address};
 
 use crate::{ConsensusEngine, ConsensusError, EngineType};
 
@@ -9,6 +9,10 @@ use crate::{ConsensusEngine, ConsensusError, EngineType};
 pub struct PoaConfig {
     /// Ordered list of authority addresses. Position determines round-robin slot.
     pub authorities: Vec<Address>,
+    /// Optional per-authority weights. When non-empty, `authorities` and `authority_weights`
+    /// must have the same length. Zero-weight authorities are treated as weight 1.
+    /// When empty, all authorities are assigned equal weight (standard round-robin).
+    pub authority_weights: Vec<u64>,
     /// Minimum seconds between consecutive blocks.
     pub block_time_secs: u64,
     /// Maximum seconds a block timestamp may be ahead of the current wall-clock.
@@ -25,6 +29,7 @@ impl PoaConfig {
     pub fn new(authorities: Vec<Address>, block_time_secs: u64) -> Self {
         Self {
             authorities,
+            authority_weights: Vec::new(),
             block_time_secs,
             max_future_secs: DEFAULT_MAX_FUTURE_SECS,
             epoch_length: 0,
@@ -38,6 +43,20 @@ impl PoaConfig {
 
     pub fn with_epoch_length(mut self, epoch_length: u64) -> Self {
         self.epoch_length = epoch_length;
+        self
+    }
+
+    /// Attach per-authority weights for weighted proposer rotation.
+    ///
+    /// `weights` must have the same length as `authorities`. Zero-weight
+    /// entries are normalised to 1. Panics if lengths differ.
+    pub fn with_weights(mut self, weights: Vec<u64>) -> Self {
+        assert_eq!(
+            weights.len(),
+            self.authorities.len(),
+            "authority_weights length must equal authorities length"
+        );
+        self.authority_weights = weights;
         self
     }
 
@@ -58,12 +77,16 @@ impl PoaConfig {
     }
 
     /// Return the expected proposer for a given block number.
+    ///
+    /// If `authority_weights` is non-empty, delegates to
+    /// [`weighted_proposer_for_block`]; otherwise uses simple round-robin.
     pub fn proposer_for_block(&self, block_number: u64) -> Address {
         let n = self.authorities.len();
         if n == 0 {
-            // SAFETY: set_authorities ensures the authority set is non-empty.
-            // This branch is unreachable in normal operation.
             return Address::default();
+        }
+        if !self.authority_weights.is_empty() {
+            return self.weighted_proposer_for_block(block_number);
         }
         let idx = if self.epoch_length > 0 {
             (block_number.checked_rem(self.epoch_length).unwrap_or(0) as usize)
@@ -76,6 +99,58 @@ impl PoaConfig {
             .get(idx)
             .copied()
             .unwrap_or_else(|| unreachable!("idx < authorities.len()"))
+    }
+
+    /// Weighted proposer selection for a given block number.
+    ///
+    /// Uses a deterministic hash-based virtual-lottery to map a block number to
+    /// a proposer slot weighted by `authority_weights`. Authorities with higher
+    /// weight receive proportionally more slots.
+    ///
+    /// Algorithm:
+    /// 1. Compute `seed = keccak256(block_number_le_bytes)`.
+    /// 2. Convert the first 8 bytes of the seed to a `u64`.
+    /// 3. `ticket = seed_u64 % total_weight`.
+    /// 4. Walk the authorities in order, accumulating weight; select the first
+    ///    authority whose cumulative weight exceeds `ticket`.
+    ///
+    /// Guarantees determinism: same `block_number` always yields the same proposer
+    /// regardless of which node evaluates it.
+    pub fn weighted_proposer_for_block(&self, block_number: u64) -> Address {
+        debug_assert_eq!(
+            self.authority_weights.len(),
+            self.authorities.len(),
+            "weights/authorities length mismatch"
+        );
+        let n = self.authorities.len();
+        if n == 0 {
+            return Address::default();
+        }
+
+        // Normalise: replace zero weights with 1 so no authority is excluded.
+        let weights: Vec<u64> = self
+            .authority_weights
+            .iter()
+            .map(|&w| if w == 0 { 1 } else { w })
+            .collect();
+
+        let total_weight: u64 = weights.iter().sum();
+
+        // Deterministic seed from block number.
+        let seed_bytes = keccak256(&block_number.to_le_bytes());
+        let seed_u64 =
+            u64::from_le_bytes(seed_bytes.as_bytes()[..8].try_into().unwrap_or([0u8; 8]));
+        let ticket = seed_u64 % total_weight;
+
+        let mut cumulative: u64 = 0;
+        for (i, &w) in weights.iter().enumerate() {
+            cumulative += w;
+            if ticket < cumulative {
+                return self.authorities[i];
+            }
+        }
+        // Fallback (unreachable if total_weight > 0).
+        self.authorities[n - 1]
     }
 
     pub fn is_authority(&self, address: &Address) -> bool {
@@ -288,6 +363,7 @@ mod tests {
             parent_beacon_block_root: ShellHash::ZERO,
             blob_gas_used: 0,
             excess_blob_gas: 0,
+            witness_root: None,
         }
     }
 
@@ -759,5 +835,240 @@ mod tests {
                 "single validator header should always be valid"
             );
         }
+    }
+
+    // ── F4: Network-type block time propagation ───────────────────────────────
+
+    fn make_signed_block(
+        signer: &DilithiumSigner,
+        addr: Address,
+        number: u64,
+        timestamp: u64,
+        parent: &BlockHeader,
+    ) -> (BlockHeader, shell_crypto::PQSignature) {
+        let mut h = sample_header(number, addr, timestamp);
+        h.parent_hash = parent.hash();
+        let mut block = Block {
+            header: h,
+            transactions: vec![],
+            proposer_seal: None,
+        };
+        let config = PoaConfig::new(vec![addr], 1);
+        let engine = PoaEngine::new(config);
+        engine.sign_block(&mut block, signer).unwrap();
+        let seal = block.proposer_seal.unwrap();
+        (block.header, seal)
+    }
+
+    #[test]
+    fn poa_config_dev_block_time() {
+        let config = PoaConfig::new(make_addrs(1), 30);
+        assert_eq!(config.block_time_secs, 30);
+    }
+
+    #[test]
+    fn poa_config_testnet_block_time() {
+        let config = PoaConfig::new(make_addrs(3), 30);
+        assert_eq!(config.block_time_secs, 30);
+    }
+
+    #[test]
+    fn poa_config_mainnet_block_time() {
+        let config = PoaConfig::new(make_addrs(5), 2);
+        assert_eq!(config.block_time_secs, 2);
+    }
+
+    #[test]
+    fn poa_engine_accepts_30s_block_on_dev_network() {
+        let signer = DilithiumSigner::generate();
+        let addr = Address::from_public_key(signer.public_key(), signer.sig_type().as_u8());
+        let config = PoaConfig::new(vec![addr], 30);
+        let engine = PoaEngine::new(config);
+        let parent = sample_header(0, addr, 1_000);
+        let (child, seal) = make_signed_block(&signer, addr, 1, 1_030, &parent);
+        let verifier = DilithiumVerifier;
+        assert!(engine
+            .verify_header_with_parent(
+                &child,
+                &parent,
+                &seal,
+                signer.public_key(),
+                &verifier,
+                10_000
+            )
+            .is_ok());
+    }
+
+    #[test]
+    fn poa_engine_rejects_block_too_early_for_30s_network() {
+        let signer = DilithiumSigner::generate();
+        let addr = Address::from_public_key(signer.public_key(), signer.sig_type().as_u8());
+        let config = PoaConfig::new(vec![addr], 30);
+        let engine = PoaEngine::new(config);
+        let parent = sample_header(0, addr, 1_000);
+        let (child, seal) = make_signed_block(&signer, addr, 1, 1_015, &parent); // only +15s
+        let verifier = DilithiumVerifier;
+        assert!(engine
+            .verify_header_with_parent(
+                &child,
+                &parent,
+                &seal,
+                signer.public_key(),
+                &verifier,
+                10_000
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn poa_engine_accepts_mainnet_2s_block() {
+        let signer = DilithiumSigner::generate();
+        let addr = Address::from_public_key(signer.public_key(), signer.sig_type().as_u8());
+        let config = PoaConfig::new(vec![addr], 2);
+        let engine = PoaEngine::new(config);
+        let parent = sample_header(0, addr, 1_000);
+        let (child, seal) = make_signed_block(&signer, addr, 1, 1_002, &parent); // exactly +2s
+        let verifier = DilithiumVerifier;
+        assert!(engine
+            .verify_header_with_parent(
+                &child,
+                &parent,
+                &seal,
+                signer.public_key(),
+                &verifier,
+                10_000
+            )
+            .is_ok());
+    }
+
+    #[test]
+    fn poa_engine_rejects_mainnet_block_only_1s_apart() {
+        let signer = DilithiumSigner::generate();
+        let addr = Address::from_public_key(signer.public_key(), signer.sig_type().as_u8());
+        let config = PoaConfig::new(vec![addr], 2);
+        let engine = PoaEngine::new(config);
+        let parent = sample_header(0, addr, 1_000);
+        let (child, seal) = make_signed_block(&signer, addr, 1, 1_001, &parent); // only +1s
+        let verifier = DilithiumVerifier;
+        assert!(engine
+            .verify_header_with_parent(
+                &child,
+                &parent,
+                &seal,
+                signer.public_key(),
+                &verifier,
+                10_000
+            )
+            .is_err());
+    }
+
+    // ── H1: Weighted proposer rotation ───────────────────────────────────────
+
+    fn make_weighted_addrs(n: usize) -> Vec<Address> {
+        (0..n)
+            .map(|i| {
+                Address::from_public_key(
+                    shell_primitives::keccak256(format!("w_auth{i}").as_bytes()).as_bytes(),
+                    0,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn weighted_proposer_no_weights_falls_back_to_round_robin() {
+        let addrs = make_weighted_addrs(3);
+        let config = PoaConfig::new(addrs.clone(), 2);
+        // Without weights, should behave identically to proposer_for_block.
+        for block in 0u64..9 {
+            assert_eq!(
+                config.proposer_for_block(block),
+                addrs[(block as usize) % 3]
+            );
+        }
+    }
+
+    #[test]
+    fn weighted_proposer_equal_weights_distributes_roughly_uniformly() {
+        let addrs = make_weighted_addrs(3);
+        let config = PoaConfig::new(addrs.clone(), 2).with_weights(vec![1, 1, 1]);
+        let mut counts = [0u32; 3];
+        for block in 0u64..300 {
+            let proposer = config.proposer_for_block(block);
+            let idx = addrs.iter().position(|a| a == &proposer).unwrap();
+            counts[idx] += 1;
+        }
+        for &c in &counts {
+            assert!(c > 80 && c < 120, "uneven distribution: {:?}", counts);
+        }
+    }
+
+    #[test]
+    fn weighted_proposer_higher_weight_gets_more_slots() {
+        let addrs = make_weighted_addrs(2);
+        // auth0 has 3× weight of auth1 → ~75% vs ~25%.
+        let config = PoaConfig::new(addrs.clone(), 2).with_weights(vec![3, 1]);
+        let mut counts = [0u32; 2];
+        for block in 0u64..1000 {
+            let proposer = config.proposer_for_block(block);
+            let idx = addrs.iter().position(|a| a == &proposer).unwrap();
+            counts[idx] += 1;
+        }
+        assert!(
+            counts[0] > 700 && counts[0] < 800,
+            "expected ~750, got {:?}",
+            counts
+        );
+        assert!(
+            counts[1] > 200 && counts[1] < 300,
+            "expected ~250, got {:?}",
+            counts
+        );
+    }
+
+    #[test]
+    fn weighted_proposer_single_authority_always_wins() {
+        let addrs = make_weighted_addrs(1);
+        let config = PoaConfig::new(addrs.clone(), 2).with_weights(vec![42]);
+        for block in 0u64..20 {
+            assert_eq!(config.proposer_for_block(block), addrs[0]);
+        }
+    }
+
+    #[test]
+    fn weighted_proposer_zero_weight_normalised_to_one() {
+        let addrs = make_weighted_addrs(2);
+        let config = PoaConfig::new(addrs.clone(), 2).with_weights(vec![0, 0]);
+        let mut counts = [0u32; 2];
+        for block in 0u64..200 {
+            let proposer = config.proposer_for_block(block);
+            let idx = addrs.iter().position(|a| a == &proposer).unwrap();
+            counts[idx] += 1;
+        }
+        for &c in &counts {
+            assert!(
+                c > 60 && c < 140,
+                "zero-weight normalisation failed: {:?}",
+                counts
+            );
+        }
+    }
+
+    #[test]
+    fn weighted_proposer_is_deterministic() {
+        let addrs = make_weighted_addrs(3);
+        let config = PoaConfig::new(addrs.clone(), 2).with_weights(vec![5, 3, 2]);
+        for block in 0u64..50 {
+            let p1 = config.proposer_for_block(block);
+            let p2 = config.proposer_for_block(block);
+            assert_eq!(p1, p2, "non-deterministic at block {block}");
+        }
+    }
+
+    #[test]
+    fn with_weights_builder_sets_field() {
+        let addrs = make_weighted_addrs(2);
+        let config = PoaConfig::new(addrs.clone(), 2).with_weights(vec![10, 5]);
+        assert_eq!(config.authority_weights, vec![10, 5]);
     }
 }

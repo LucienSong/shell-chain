@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use shell_crypto::DilithiumSigner;
 use shell_crypto::Signer;
-use shell_genesis::{initialize_genesis, AllocEntry, ConsensusConfig, GenesisConfig};
+use shell_genesis::{initialize_genesis, AllocEntry, ConsensusConfig, GenesisConfig, NetworkType};
 use shell_primitives::{Address, U256};
 use shell_storage::MemoryDb;
 
@@ -19,11 +19,13 @@ const DEV_AUTHORITY_INITIAL_BALANCE: u128 = 1_000_000_000_000_000_000_000_000_00
 /// Initialize a data directory with genesis block.
 ///
 /// If no genesis.json is provided, creates a dev genesis with a single
-/// pre-funded authority account.
+/// pre-funded authority account. The `network` parameter controls block time
+/// and feature defaults ("dev", "testnet", or "mainnet").
 pub fn init(
     datadir: PathBuf,
     genesis_path: Option<PathBuf>,
     chain_id: u64,
+    network: String,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // F-096: Canonicalize data directory path.
     let datadir = if datadir.exists() {
@@ -57,7 +59,13 @@ pub fn init(
             GenesisConfig::from_file(&path)?
         }
         None => {
-            info!("No genesis.json provided, generating dev genesis");
+            let network_type: NetworkType = network.parse().unwrap_or_default();
+            let block_time_secs = network_type.default_block_time_secs();
+            info!(
+                "No genesis.json provided, generating {} genesis (block_time={}s)",
+                network_type.as_str(),
+                block_time_secs
+            );
             let signer = DilithiumSigner::generate();
             let authority =
                 Address::from_public_key(signer.public_key(), signer.sig_type().as_u8());
@@ -75,14 +83,15 @@ pub fn init(
 
             GenesisConfig {
                 chain_id,
-                chain_name: "shell-chain-dev".into(),
+                chain_name: format!("shell-chain-{}", network_type.as_str()),
+                network_type,
                 timestamp: 1_700_000_000,
                 gas_limit: 30_000_000,
                 extra_data: String::new(),
                 consensus: ConsensusConfig::PoA {
                     authorities: vec![authority],
                     authority_pubkeys: vec![format!("0x{}", hex::encode(signer.public_key()))],
-                    block_time_secs: 2,
+                    block_time_secs,
                     max_future_secs: 60,
                     epoch_length: 0,
                 },
@@ -107,6 +116,7 @@ pub fn init(
     );
 
     eprintln!("✓ Genesis initialized at {}", datadir.display());
+    eprintln!("  Network:    {}", network);
     eprintln!("  Block hash: {:?}", genesis_block.hash());
     eprintln!("  State root: {:?}", genesis_block.header.state_root);
     eprintln!("  Alloc accounts: {}", genesis_config.alloc.len());

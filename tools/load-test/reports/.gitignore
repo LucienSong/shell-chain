@@ -1,0 +1,4 @@
+# Ignore CSV copies (large binary-ish data)
+*.csv
+# Keep snapshot and final reports
+!*.txt

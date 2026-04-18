@@ -1,0 +1,20 @@
+[package]
+name = "shell-stark-prover"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "STARK-based aggregate proof for PQ (Dilithium3) signature batches"
+
+[dependencies]
+winterfell.workspace = true
+shell-crypto = { path = "../crypto" }
+shell-core = { path = "../core" }
+shell-primitives = { path = "../primitives" }
+tracing.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+criterion = { workspace = true }

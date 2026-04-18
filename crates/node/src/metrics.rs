@@ -36,6 +36,21 @@ pub struct Metrics {
     pub validator_weight: GaugeVec,
     /// Per-validator missed-slot counter: `shell_consensus_slot_miss_total{validator="0x..."}`.
     pub validator_slot_miss: CounterVec,
+    // -----------------------------------------------------------------------
+    // K4: STARK prover metrics
+    // -----------------------------------------------------------------------
+    /// Total STARK proofs successfully generated.
+    pub stark_proofs_generated: IntCounter,
+    /// Total STARK proof generation failures.
+    pub stark_proof_failures: IntCounter,
+    /// STARK proof generation latency in seconds.
+    pub stark_proof_duration_seconds: Histogram,
+    /// Current proof backlog depth (tasks pending).
+    pub stark_backlog_depth: IntGauge,
+    /// Total ProofAmendment messages broadcast.
+    pub stark_amendments_broadcast: IntCounter,
+    /// Total equivocation proofs detected and broadcast.
+    pub stark_equivocations_detected: IntCounter,
     /// Timestamp when the node started, used for uptime calculation.
     pub uptime_start: Instant,
     registry: Registry,
@@ -90,6 +105,35 @@ impl Metrics {
             &["validator"],
         )?;
 
+        // K4: STARK prover metrics
+        let stark_proofs_generated = IntCounter::with_opts(Opts::new(
+            "shell_stark_proofs_generated_total",
+            "Total STARK proofs successfully generated",
+        ))?;
+        let stark_proof_failures = IntCounter::with_opts(Opts::new(
+            "shell_stark_proof_failures_total",
+            "Total STARK proof generation failures",
+        ))?;
+        let stark_proof_duration_seconds = Histogram::with_opts(
+            HistogramOpts::new(
+                "shell_stark_proof_duration_seconds",
+                "STARK proof generation latency",
+            )
+            .buckets(vec![0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0]),
+        )?;
+        let stark_backlog_depth = IntGauge::with_opts(Opts::new(
+            "shell_stark_backlog_depth",
+            "Current STARK proof backlog depth",
+        ))?;
+        let stark_amendments_broadcast = IntCounter::with_opts(Opts::new(
+            "shell_stark_amendments_broadcast_total",
+            "Total ProofAmendment messages broadcast",
+        ))?;
+        let stark_equivocations_detected = IntCounter::with_opts(Opts::new(
+            "shell_stark_equivocations_detected_total",
+            "Total equivocation proofs detected and broadcast",
+        ))?;
+
         registry.register(Box::new(block_height.clone()))?;
         registry.register(Box::new(peer_count.clone()))?;
         registry.register(Box::new(tx_pool_size.clone()))?;
@@ -100,6 +144,12 @@ impl Metrics {
         registry.register(Box::new(validator_active_count.clone()))?;
         registry.register(Box::new(validator_weight.clone()))?;
         registry.register(Box::new(validator_slot_miss.clone()))?;
+        registry.register(Box::new(stark_proofs_generated.clone()))?;
+        registry.register(Box::new(stark_proof_failures.clone()))?;
+        registry.register(Box::new(stark_proof_duration_seconds.clone()))?;
+        registry.register(Box::new(stark_backlog_depth.clone()))?;
+        registry.register(Box::new(stark_amendments_broadcast.clone()))?;
+        registry.register(Box::new(stark_equivocations_detected.clone()))?;
 
         Ok(Self {
             block_height,
@@ -112,6 +162,12 @@ impl Metrics {
             validator_active_count,
             validator_weight,
             validator_slot_miss,
+            stark_proofs_generated,
+            stark_proof_failures,
+            stark_proof_duration_seconds,
+            stark_backlog_depth,
+            stark_amendments_broadcast,
+            stark_equivocations_detected,
             uptime_start: Instant::now(),
             registry,
         })

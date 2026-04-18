@@ -59,9 +59,17 @@ enum Commands {
         #[arg(long, default_value = "127.0.0.1:8545")]
         rpc_addr: String,
 
+        /// Network profile: "dev", "testnet", or "mainnet".
+        /// Drives block time (dev/testnet=30s, mainnet=2s) and feature defaults.
+        /// Block time can be further overridden with --block-time.
+        #[arg(long, default_value = "dev")]
+        network: String,
+
         /// Block production interval in milliseconds.
-        #[arg(long, default_value = "2000")]
-        block_time: u64,
+        /// Defaults to the network profile default (dev/testnet: 30000, mainnet: 2000).
+        /// Explicit values override the network profile default.
+        #[arg(long)]
+        block_time: Option<u64>,
 
         /// Path to the encrypted keystore file.
         #[arg(long)]
@@ -166,6 +174,18 @@ enum Commands {
         /// Worker threads for the parallel-EVM scheduler (default: logical CPUs).
         #[arg(long)]
         parallel_evm_workers: Option<usize>,
+
+        /// Number of recent blocks whose witness bundles are retained (0 = archive, default: 128).
+        #[arg(long, default_value = "128")]
+        witness_retention: u64,
+
+        /// Number of recent blocks whose full bodies are retained (0 = archive, default: 512).
+        #[arg(long, default_value = "512")]
+        body_retention: u64,
+        /// Enable STARK aggregate proof generation during block production.
+        /// WARNING: expensive (~150ms per block). Off by default.
+        #[arg(long, default_value = "false")]
+        enable_stark_aggregation: bool,
     },
 
     /// Initialize genesis block and data directory.
@@ -177,6 +197,10 @@ enum Commands {
         /// Chain ID.
         #[arg(long, default_value = "1337")]
         chain_id: u64,
+
+        /// Network profile: "dev", "testnet", or "mainnet".
+        #[arg(long, default_value = "dev")]
+        network: String,
     },
 
     /// Key management subcommands.
@@ -313,6 +337,7 @@ async fn main() {
         Commands::Run {
             config: config_path,
             rpc_addr,
+            network,
             block_time,
             keystore,
             chain_id,
@@ -340,6 +365,9 @@ async fn main() {
             state_cache_size_mb,
             parallel_evm,
             parallel_evm_workers,
+            witness_retention,
+            body_retention,
+            enable_stark_aggregation,
         } => {
             // Load config file if specified (CLI args override file values).
             let file_config = match &config_path {
@@ -370,11 +398,25 @@ async fn main() {
                 file_config.rpc.listen_addr.unwrap_or(rpc_addr)
             };
 
-            let effective_block_time = if block_time != 2000 {
-                block_time
+            // Resolve network type first so block_time default can come from it.
+            let effective_network = if network != "dev" {
+                network.clone()
             } else {
-                file_config.node.block_time.unwrap_or(block_time)
+                file_config
+                    .node
+                    .network
+                    .clone()
+                    .unwrap_or_else(|| network.clone())
             };
+
+            // Block time: explicit CLI > config file > network-profile default.
+            let network_default_block_time = match effective_network.as_str() {
+                "mainnet" => 2_000u64,
+                _ => 30_000u64, // dev + testnet
+            };
+            let effective_block_time = block_time
+                .or(file_config.node.block_time)
+                .unwrap_or(network_default_block_time);
 
             let effective_keystore =
                 keystore.or_else(|| file_config.node.keystore.map(PathBuf::from));
@@ -447,6 +489,7 @@ async fn main() {
             commands::run(commands::run::RunArgs {
                 datadir,
                 rpc_addr: effective_rpc_addr,
+                network: effective_network,
                 block_time: effective_block_time,
                 keystore: effective_keystore,
                 chain_id: effective_chain_id,
@@ -473,10 +516,17 @@ async fn main() {
                 state_cache_size_mb,
                 parallel_evm: effective_parallel_evm,
                 parallel_evm_workers: effective_parallel_evm_workers,
+                witness_retention,
+                body_retention,
+                enable_stark_aggregation,
             })
             .await
         }
-        Commands::Init { genesis, chain_id } => commands::init(cli.datadir, genesis, chain_id),
+        Commands::Init {
+            genesis,
+            chain_id,
+            network,
+        } => commands::init(cli.datadir, genesis, chain_id, network),
         Commands::Key { action } => match action {
             KeyCommands::Generate { output } => commands::key_generate(output),
             KeyCommands::Inspect { path } => commands::key_inspect(path),
