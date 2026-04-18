@@ -20,8 +20,9 @@ log() {
     echo "$msg" >&2
 }
 
-SHELL_NODE=/Users/luciensong/Shell/shell-dev/shell-chain/target/release/shell-node
-LOAD_TEST=/Users/luciensong/Shell/shell-dev/shell-chain/target/release/shell-load-test
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+SHELL_NODE="${REPO_ROOT}/target/release/shell-node"
+LOAD_TEST="${REPO_ROOT}/target/release/shell-load-test"
 OUT_DIR=/tmp/shell-load-test
 TEST_DURATION=36000   # 10 hours
 
@@ -141,9 +142,9 @@ done
 log "Supervisor done. Generating final report…"
 LATEST_CSV=$(ls -t "${OUT_DIR}"/load-test-*.csv 2>/dev/null | head -1 || true)
 if [[ -n "$LATEST_CSV" ]]; then
-    /Users/luciensong/Shell/shell-dev/shell-chain/tools/load-test/gen-report.sh \
+    "${REPO_ROOT}/tools/load-test/gen-report.sh" \
         "$LATEST_CSV" /tmp/shell-local-test/node-supervised.log \
-        > /Users/luciensong/Shell/shell-dev/shell-chain/tools/load-test/reports/final-supervised.txt 2>/dev/null
+        > "${REPO_ROOT}/tools/load-test/reports/final-supervised.txt" 2>/dev/null
     log "Final report: tools/load-test/reports/final-supervised.txt"
 fi
 log "Supervisor exiting."
