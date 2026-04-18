@@ -59,7 +59,7 @@ pub fn init(
             GenesisConfig::from_file(&path)?
         }
         None => {
-            let network_type = NetworkType::from_str(&network);
+            let network_type: NetworkType = network.parse().unwrap_or_default();
             let block_time_secs = network_type.default_block_time_secs();
             info!(
                 "No genesis.json provided, generating {} genesis (block_time={}s)",

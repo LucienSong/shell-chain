@@ -82,12 +82,20 @@ impl NetworkType {
     }
 
     /// Parse from a string, defaulting to `Dev` for unknown values.
-    pub fn from_str(s: &str) -> Self {
+    pub fn from_network_str(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "mainnet" => NetworkType::Mainnet,
             "testnet" => NetworkType::Testnet,
             _ => NetworkType::Dev,
         }
+    }
+}
+
+impl std::str::FromStr for NetworkType {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self::from_network_str(s))
     }
 }
 

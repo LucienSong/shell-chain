@@ -339,7 +339,7 @@ async fn run_with_store<S: KvStore + 'static>(
         }
     }
 
-    let network_type = NetworkType::from_str(&args.network);
+    let network_type: NetworkType = args.network.parse().unwrap_or_default();
 
     // Load genesis config.
     let genesis_file = args.datadir.join("genesis.json");
