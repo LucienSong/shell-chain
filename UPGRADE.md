@@ -1,4 +1,56 @@
-# Upgrade Guide — v0.9 → v0.13.0 (M10: Mainnet Readiness)
+# Upgrade Guide
+
+## v0.14.0 → v0.15.0 (M13: wPoA+STARK)
+
+### Overview
+
+v0.15.0 introduces STARK signature aggregation. The upgrade is **non-breaking** for existing nodes — new fields have safe defaults and the prover service starts disabled until explicitly enabled.
+
+### New CLI Flags (`shell-node run`)
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--network <dev\|testnet\|mainnet>` | `dev` | Network profile; sets STARK/block-time defaults |
+| `--witness-retention <blocks>` | 1000 | How many blocks of witness data to keep |
+| `--body-retention <blocks>` | 0 (forever) | How many blocks of full bodies to keep before stripping |
+
+### New Config Keys (`config.toml`)
+
+```toml
+[node]
+network = "dev"          # or testnet / mainnet
+witness_retention = 1000
+body_retention    = 0
+
+[stark]
+enabled           = false   # set true to run the prover service
+batch_size        = 10      # signatures per STARK proof
+backlog_limit     = 1000    # max queued proof tasks
+```
+
+### New Prometheus Metrics
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `shell_stark_proofs_total` | Counter | STARK proofs generated |
+| `shell_stark_proof_latency_seconds` | Histogram | End-to-end prove latency |
+| `shell_stark_backlog_depth` | Gauge | Current proof task queue depth |
+| `shell_stark_amendments_broadcast_total` | Counter | ProofAmendment gossip messages sent |
+
+### Docker image
+
+```yaml
+image: ghcr.io/lucienSong/shell-chain:v0.15.0
+```
+
+### Data directory
+
+No migration required. Two new RocksDB column families are created automatically:
+`witness_store`, `proof_amendments`.
+
+---
+
+## v0.9 → v0.13.0 (M10: Mainnet Readiness)
 
 This guide covers breaking changes and migration steps when upgrading a
 `shell-chain` node from any v0.9.x release to v0.13.0.

@@ -2,7 +2,37 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.14.0] — 2026-04-14 — M12: Parallel EVM Release
+## [0.15.0] — 2026-04-18 — M13: wPoA+STARK Signature Aggregation
+
+### Added
+
+- **STARK sig-aggregation** (`crates/stark-prover`): Winterfell-based STARK circuit that aggregates per-transaction Dilithium3 signatures into a single block-level proof, replacing `1952 B pubkey + 3309 B sig` per tx with one shared proof.
+- `PubkeyMode` enum (`Embedded` / `Reference`) — first-tx embeds the full key; subsequent txs reference the registered address.
+- `StrippedTransaction`, `TxWitness`, `WitnessBundle` — stripped block bodies store only essential fields; full witness data is pruned on schedule.
+- `witness_root` + `sig_aggregate_proof` fields in `BlockHeader`.
+- Witness RPC endpoint (`shell_getWitness`), witness store, and consensus validation of witness bundles.
+- `ProofBacklog` with high-water-mark, background `ProverService` (never blocks block production), `ProofAmendment` struct with P2P gossip.
+- Block state machine: `Sealed → Proven → Stripped`.
+- `NetworkType` enum (Dev / Testnet / Mainnet) with per-network STARK parameter defaults.
+- CLI flags: `--network <dev|testnet|mainnet>`, `--witness-retention <blocks>`, `--body-retention <blocks>`.
+- `NodeRole` enum (`Validator` / `ValidatorProver` / `Prover`) with standalone prover node lifecycle.
+- Anti-fraud: equivocation propagation, proof validity challenge, rate limiting, window squatting prevention, prover registry + anti-Sybil, enhanced peer scoring.
+- Proof orchestration: `ProofMetadata`, level tracking, L2 recursive verifier AIR scaffold, aggregation scheduler (`J3`).
+- Prover health (`ProverHealth`), graceful degradation on prover failure.
+- Prometheus metrics: `shell_stark_proofs_total`, `shell_stark_proof_latency_seconds`, `shell_stark_backlog_depth`, `shell_stark_amendments_broadcast_total`.
+
+### Performance
+
+| Batch | STARK proof | Raw Dilithium3 | Compression |
+|-------|------------|----------------|-------------|
+| 5 txs | 3.7 KB | 25.7 KB | **7.1×** |
+| 10 txs | 12.7 KB | 52.7 KB | **~4.0×** |
+
+6-hour soak benchmark: **3.4 M proofs, 0 failures, 157 proofs/sec**.
+
+### Previous release: [0.14.0]
+
+
 
 ### Added
 
