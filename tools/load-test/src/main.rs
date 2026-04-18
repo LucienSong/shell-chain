@@ -151,7 +151,7 @@ fn pick_load_tier(rng: &mut impl Rng) -> LoadTier {
 /// eth_getCode returns "0x00", which is non-empty → detected as Contract.
 fn dummy_deploy_data() -> Vec<u8> {
     let mut data = vec![0x60, 0x01, 0x60, 0x00, 0xf3]; // deploy 1-byte runtime code
-    data.extend(std::iter::repeat(0x00).take(195)); // pad to 200 bytes
+    data.extend(std::iter::repeat_n(0x00, 195)); // pad to 200 bytes
     data
 }
 
@@ -419,7 +419,7 @@ fn write_csv_header(w: &mut csv::Writer<std::fs::File>) {
 }
 
 fn write_csv_row(w: &mut csv::Writer<std::fs::File>, m: &PeriodMetrics) {
-    w.write_record(&[
+    w.write_record([
         &m.ts,
         &m.period_secs.to_string(),
         &m.submitted.to_string(),
@@ -655,7 +655,7 @@ async fn main() -> AResult<()> {
                 pm.p99_ms
             );
 
-            if period_num % 10 == 0 {
+            if period_num.is_multiple_of(10) {
                 println!(
                     "  ↳ cumulative: {} txs, {} errors, {:.1} avg TPS, {:.1} peak TPS",
                     grand_submitted, grand_errors, overall_tps, peak_tps

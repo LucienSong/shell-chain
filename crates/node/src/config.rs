@@ -35,7 +35,7 @@ pub enum NodeRole {
 
 impl NodeRole {
     /// Parse from a CLI string (`validator`, `validator-prover`, `prover`).
-    pub fn from_str(s: &str) -> Result<Self, String> {
+    pub fn from_role_str(s: &str) -> Result<Self, String> {
         match s.to_lowercase().as_str() {
             "validator" => Ok(Self::Validator),
             "validator-prover" => Ok(Self::ValidatorProver),
@@ -45,6 +45,15 @@ impl NodeRole {
             )),
         }
     }
+}
+
+impl std::str::FromStr for NodeRole {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::from_role_str(s)
+    }
+}
 
     /// Returns true if this role involves block production.
     pub fn is_validator(&self) -> bool {
@@ -309,29 +318,29 @@ mod tests {
     #[test]
     fn node_role_from_str_valid() {
         assert_eq!(
-            NodeRole::from_str("validator").unwrap(),
+            "validator".parse::<NodeRole>().unwrap(),
             NodeRole::Validator
         );
         assert_eq!(
-            NodeRole::from_str("validator-prover").unwrap(),
+            "validator-prover".parse::<NodeRole>().unwrap(),
             NodeRole::ValidatorProver
         );
-        assert_eq!(NodeRole::from_str("prover").unwrap(), NodeRole::Prover);
+        assert_eq!("prover".parse::<NodeRole>().unwrap(), NodeRole::Prover);
     }
 
     #[test]
     fn node_role_from_str_case_insensitive() {
         assert_eq!(
-            NodeRole::from_str("Validator").unwrap(),
+            "Validator".parse::<NodeRole>().unwrap(),
             NodeRole::Validator
         );
-        assert_eq!(NodeRole::from_str("PROVER").unwrap(), NodeRole::Prover);
+        assert_eq!("PROVER".parse::<NodeRole>().unwrap(), NodeRole::Prover);
     }
 
     #[test]
     fn node_role_from_str_unknown_is_error() {
-        assert!(NodeRole::from_str("miner").is_err());
-        assert!(NodeRole::from_str("").is_err());
+        assert!("miner".parse::<NodeRole>().is_err());
+        assert!("".parse::<NodeRole>().is_err());
     }
 
     #[test]

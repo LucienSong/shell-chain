@@ -128,11 +128,7 @@ impl BatchStats {
 
     fn record_success(&mut self, prove_us: u64, verify_ns: u64, proof_bytes: usize) {
         let raw_bytes = self.batch_size * 64;
-        let ratio_x100 = if proof_bytes > 0 {
-            (raw_bytes * 100) / proof_bytes
-        } else {
-            0
-        };
+        let ratio_x100 = (raw_bytes * 100).checked_div(proof_bytes).unwrap_or(0);
         let _ = self.prove_hist.record(prove_us.max(1));
         let _ = self.verify_hist.record(verify_ns.max(1));
         let _ = self.proof_size_hist.record(proof_bytes as u64);
@@ -345,7 +341,7 @@ fn main() -> Result<()> {
         })?;
 
         // Flush CSV periodically (every 100 records)
-        if total_proofs % 100 == 0 {
+        if total_proofs.is_multiple_of(100) {
             csv_writer.flush()?;
         }
 
