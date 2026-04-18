@@ -48,13 +48,17 @@ use sysinfo::{ProcessExt, System, SystemExt};
 use tracing::{info, warn};
 
 use shell_stark_prover::{
-    prove_sig_batch, verify_sig_batch, HealthStatus, ProverHealth, ProverHealthConfig, SigBatchEntry,
+    prove_sig_batch, verify_sig_batch, HealthStatus, ProverHealth, ProverHealthConfig,
+    SigBatchEntry,
 };
 
 // ─── CLI ─────────────────────────────────────────────────────────────────────
 
 #[derive(Parser, Debug)]
-#[command(name = "shell-stark-bench", about = "STARK block-compression soak benchmark")]
+#[command(
+    name = "shell-stark-bench",
+    about = "STARK block-compression soak benchmark"
+)]
 struct Cli {
     /// Total benchmark duration in seconds (default 21600 = 6 h)
     #[arg(long, default_value_t = 21_600)]
@@ -101,8 +105,8 @@ struct Record {
 
 struct BatchStats {
     batch_size: usize,
-    prove_hist: Histogram<u64>,   // microseconds
-    verify_hist: Histogram<u64>,  // nanoseconds
+    prove_hist: Histogram<u64>,  // microseconds
+    verify_hist: Histogram<u64>, // nanoseconds
     proof_size_hist: Histogram<u64>,
     compression_hist: Histogram<u64>, // × 100 (fixed-point)
     ok: u64,
@@ -142,7 +146,11 @@ impl BatchStats {
 
     fn print_summary(&self) {
         let total = self.ok + self.fail;
-        let success_rate = if total > 0 { 100.0 * self.ok as f64 / total as f64 } else { 0.0 };
+        let success_rate = if total > 0 {
+            100.0 * self.ok as f64 / total as f64
+        } else {
+            0.0
+        };
         if self.prove_hist.is_empty() {
             info!(
                 "  batch={:>4}tx  proofs={:>6}  failures={:>4}  success={:.1}%  [no data yet]",
@@ -159,9 +167,15 @@ impl BatchStats {
             "  batch={:>4}tx  proofs={:>6}  fail={:>4}  ok={:.1}%  \
              prove p50={:.1}ms p99={:.1}ms  verify p50={:.1}µs  \
              proof_bytes p50={}  ratio p50={:.1}×",
-            self.batch_size, self.ok, self.fail, success_rate,
-            prove_p50_ms, prove_p99_ms, verify_p50_us,
-            proof_median, ratio_median,
+            self.batch_size,
+            self.ok,
+            self.fail,
+            success_rate,
+            prove_p50_ms,
+            prove_p99_ms,
+            verify_p50_us,
+            proof_median,
+            ratio_median,
         );
     }
 }
@@ -203,14 +217,22 @@ fn main() -> Result<()> {
     let report_interval = Duration::from_secs(cli.report_interval);
 
     let out_path = cli.out.unwrap_or_else(|| {
-        PathBuf::from(format!("stark-bench-{}.csv", Utc::now().format("%Y%m%dT%H%M%S")))
+        PathBuf::from(format!(
+            "stark-bench-{}.csv",
+            Utc::now().format("%Y%m%dT%H%M%S")
+        ))
     });
 
     info!("╔══════════════════════════════════════════════════════════╗");
     info!("║  Shell-chain STARK Block-Compression Soak Benchmark      ║");
     info!("╚══════════════════════════════════════════════════════════╝");
-    info!("Duration    : {}h {:02}m {:02}s ({} s)",
-        cli.duration / 3600, (cli.duration % 3600) / 60, cli.duration % 60, cli.duration);
+    info!(
+        "Duration    : {}h {:02}m {:02}s ({} s)",
+        cli.duration / 3600,
+        (cli.duration % 3600) / 60,
+        cli.duration % 60,
+        cli.duration
+    );
     info!("Batch sizes : {:?}", batch_sizes);
     info!("Report every: {}s", cli.report_interval);
     info!("CSV output  : {}", out_path.display());
@@ -344,11 +366,16 @@ fn main() -> Result<()> {
                 .map(|p| p.memory())
                 .unwrap_or(0);
 
-            info!("─── Report @ {}h{:02}m{:02}s  ({}h{:02}m remaining)  health={} ───",
-                h_elapsed, m_elapsed, s_elapsed, h_rem, m_rem, hs);
-            info!("Total proofs: {}  failures: {}  mem: {:.1} MB",
-                total_proofs, total_failures,
-                mem_kb as f64 / 1024.0);
+            info!(
+                "─── Report @ {}h{:02}m{:02}s  ({}h{:02}m remaining)  health={} ───",
+                h_elapsed, m_elapsed, s_elapsed, h_rem, m_rem, hs
+            );
+            info!(
+                "Total proofs: {}  failures: {}  mem: {:.1} MB",
+                total_proofs,
+                total_failures,
+                mem_kb as f64 / 1024.0
+            );
             for s in &stats {
                 s.print_summary();
             }
@@ -360,14 +387,20 @@ fn main() -> Result<()> {
 
     let total_elapsed = start.elapsed();
     info!("══════════════════════════════════════════════════════════");
-    info!("FINAL SUMMARY  ({:.1}h elapsed)", total_elapsed.as_secs_f64() / 3600.0);
+    info!(
+        "FINAL SUMMARY  ({:.1}h elapsed)",
+        total_elapsed.as_secs_f64() / 3600.0
+    );
     info!("══════════════════════════════════════════════════════════");
     info!("Total proofs   : {}", total_proofs);
-    info!("Total failures : {} ({:.2}%)",
+    info!(
+        "Total failures : {} ({:.2}%)",
         total_failures,
         if total_proofs + total_failures > 0 {
             100.0 * total_failures as f64 / (total_proofs + total_failures) as f64
-        } else { 0.0 }
+        } else {
+            0.0
+        }
     );
     info!("ProverHealth   : {}", health.status(0));
     info!("CSV written to : {}", out_path.display());

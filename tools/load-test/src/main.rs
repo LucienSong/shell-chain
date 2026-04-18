@@ -85,10 +85,10 @@ struct Cli {
 
 #[derive(Clone, Copy, Debug)]
 enum TxType {
-    Transfer,       // 60 % — simple value transfer
-    DataTransfer,   // 20 % — zero-value + 32-byte data
-    Deploy,         // 15 % — contract deployment
-    LargeData,      //  5 % — self-transfer, 1 KB data
+    Transfer,     // 60 % — simple value transfer
+    DataTransfer, // 20 % — zero-value + 32-byte data
+    Deploy,       // 15 % — contract deployment
+    LargeData,    //  5 % — self-transfer, 1 KB data
 }
 
 fn pick_tx_type(counter: u64) -> TxType {
@@ -117,21 +117,21 @@ enum LoadTier {
 impl LoadTier {
     fn budget(self, rng: &mut impl Rng) -> i64 {
         match self {
-            LoadTier::Zero   => 0,
-            LoadTier::Few    => rng.gen_range(1..=50),
+            LoadTier::Zero => 0,
+            LoadTier::Few => rng.gen_range(1..=50),
             LoadTier::Medium => rng.gen_range(51..=200),
-            LoadTier::Many   => rng.gen_range(201..=400),
-            LoadTier::Max    => rng.gen_range(401..=500),
+            LoadTier::Many => rng.gen_range(201..=400),
+            LoadTier::Max => rng.gen_range(401..=500),
         }
     }
 
     fn label(self) -> &'static str {
         match self {
-            LoadTier::Zero   => "ZERO",
-            LoadTier::Few    => "FEW",
+            LoadTier::Zero => "ZERO",
+            LoadTier::Few => "FEW",
             LoadTier::Medium => "MED",
-            LoadTier::Many   => "MANY",
-            LoadTier::Max    => "MAX",
+            LoadTier::Many => "MANY",
+            LoadTier::Max => "MAX",
         }
     }
 }
@@ -145,8 +145,6 @@ fn pick_load_tier(rng: &mut impl Rng) -> LoadTier {
         _ => LoadTier::Max,
     }
 }
-
-
 
 /// Deploy bytecode that stores a 1-byte runtime code (STOP opcode).
 /// Initializer: PUSH1 0x01, PUSH1 0x00, RETURN → runtime = memory[0..1] = 0x00
@@ -192,10 +190,12 @@ async fn rpc_call(client: &Client, rpc_url: &str, method: &str, params: Value) -
 
 async fn get_nonce(client: &Client, rpc_url: &str, addr: &str) -> AResult<u64> {
     let result = rpc_call(
-        client, rpc_url,
+        client,
+        rpc_url,
         "eth_getTransactionCount",
         json!([addr, "latest"]),
-    ).await?;
+    )
+    .await?;
     let hex = result.as_str().unwrap_or("0x0");
     Ok(u64::from_str_radix(hex.trim_start_matches("0x"), 16)?)
 }
@@ -215,7 +215,9 @@ async fn submit_signed_tx(
     let hex_data = format!("0x{}", hex::encode(&encoded));
 
     let result = rpc_call(client, rpc_url, "eth_sendRawTransaction", json!([hex_data])).await?;
-    let hex_str = result.as_str().ok_or_else(|| anyhow::anyhow!("no result hash from eth_sendRawTransaction"))?;
+    let hex_str = result
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("no result hash from eth_sendRawTransaction"))?;
     let bytes = hex::decode(hex_str.trim_start_matches("0x"))?;
     if bytes.len() != 32 {
         anyhow::bail!("unexpected tx hash length: {}", bytes.len());
@@ -241,9 +243,18 @@ impl Worker {
     fn new(id: usize, chain_id: u64) -> Self {
         let signer = DilithiumSigner::generate();
         let pubkey = signer.public_key().to_vec();
-        let address = Address::from_public_key(&pubkey, shell_crypto::SignatureType::Dilithium3.as_u8());
+        let address =
+            Address::from_public_key(&pubkey, shell_crypto::SignatureType::Dilithium3.as_u8());
         let pq_address = address.to_string(); // Display trait formats as pq1...
-        Worker { id, signer, address, pq_address, nonce: 0, chain_id, tx_counter: 0 }
+        Worker {
+            id,
+            signer,
+            address,
+            pq_address,
+            nonce: 0,
+            chain_id,
+            tx_counter: 0,
+        }
     }
 
     fn build_tx(&self, tx_type: TxType, recipient: Address, rng_seed: u64) -> Transaction {
@@ -392,9 +403,18 @@ impl MetricsCollector {
 
 fn write_csv_header(w: &mut csv::Writer<std::fs::File>) {
     w.write_record([
-        "timestamp", "period_secs", "submitted", "confirmed", "errors",
-        "tps_submit", "p50_ms", "p95_ms", "p99_ms", "max_ms",
-    ]).unwrap();
+        "timestamp",
+        "period_secs",
+        "submitted",
+        "confirmed",
+        "errors",
+        "tps_submit",
+        "p50_ms",
+        "p95_ms",
+        "p99_ms",
+        "max_ms",
+    ])
+    .unwrap();
     w.flush().unwrap();
 }
 
@@ -410,7 +430,8 @@ fn write_csv_row(w: &mut csv::Writer<std::fs::File>, m: &PeriodMetrics) {
         &m.p95_ms.to_string(),
         &m.p99_ms.to_string(),
         &m.max_ms.to_string(),
-    ]).unwrap();
+    ])
+    .unwrap();
     w.flush().unwrap();
 }
 
@@ -429,7 +450,11 @@ async fn main() -> AResult<()> {
     let csv_path = cli.out_dir.join(format!("load-test-{run_id}.csv"));
     info!("Load test starting — run_id={run_id}");
     info!("RPC: {}", cli.rpc);
-    info!("Duration: {}s ({:.1}h)", cli.duration, cli.duration as f64 / 3600.0);
+    info!(
+        "Duration: {}s ({:.1}h)",
+        cli.duration,
+        cli.duration as f64 / 3600.0
+    );
     info!("Workers:  {}", cli.workers);
     info!("Output:   {}", csv_path.display());
 
@@ -446,14 +471,18 @@ async fn main() -> AResult<()> {
     let mut workers: Vec<Worker> = Vec::with_capacity(cli.workers);
     for i in 0..cli.workers {
         let w = Worker::new(i, cli.chain_id);
-        fund_account(&client, &cli.rpc, &w.pq_address, &fund_hex).await
+        fund_account(&client, &cli.rpc, &w.pq_address, &fund_hex)
+            .await
             .map_err(|e| anyhow::anyhow!("fund worker {i}: {e}"))?;
         if i % 10 == 0 {
             info!("  Funded {}/{}", i + 1, cli.workers);
         }
         workers.push(w);
     }
-    info!("All {} accounts funded with {} SHELL each", cli.workers, cli.fund_shell);
+    info!(
+        "All {} accounts funded with {} SHELL each",
+        cli.workers, cli.fund_shell
+    );
 
     // Shared metrics collector
     let metrics = Arc::new(Mutex::new(MetricsCollector::new()));
@@ -486,7 +515,9 @@ async fn main() -> AResult<()> {
                     let mut rng = rand::thread_rng();
                     let tier = pick_load_tier(&mut rng);
                     let b = tier.budget(&mut rng) as u64;
-                    if b == 0 { info!("Block budget: 0 ({})", tier.label()); }
+                    if b == 0 {
+                        info!("Block budget: 0 ({})", tier.label());
+                    }
                     b
                 };
                 budget.store(new_budget, Ordering::Relaxed);
@@ -521,7 +552,11 @@ async fn main() -> AResult<()> {
             while test_start.elapsed() < deadline {
                 // Respect block budget: try to claim a slot
                 let slot = block_budget.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |b| {
-                    if b > 0 { Some(b - 1) } else { None }
+                    if b > 0 {
+                        Some(b - 1)
+                    } else {
+                        None
+                    }
                 });
                 if slot.is_err() {
                     // Budget exhausted (Zero tier or window full) — wait for next window
@@ -609,9 +644,15 @@ async fn main() -> AResult<()> {
                 "[{:>5}s / {:>5}s remain] period #{:>4} | \
                  submit={:>6}  err={:>4}  TPS={:>7.1}  \
                  p50={:>4}ms  p95={:>5}ms  p99={:>5}ms",
-                elapsed_total, remaining, period_num,
-                pm.submitted, pm.errors, pm.tps_submit,
-                pm.p50_ms, pm.p95_ms, pm.p99_ms
+                elapsed_total,
+                remaining,
+                period_num,
+                pm.submitted,
+                pm.errors,
+                pm.tps_submit,
+                pm.p50_ms,
+                pm.p95_ms,
+                pm.p99_ms
             );
 
             if period_num % 10 == 0 {
@@ -650,10 +691,17 @@ async fn main() -> AResult<()> {
     println!("════════════════════════════════════════════════════════");
     println!("  Load Test Complete");
     println!("════════════════════════════════════════════════════════");
-    println!("  Total duration:    {}s ({:.2}h)", elapsed_s, elapsed_s as f64 / 3600.0);
+    println!(
+        "  Total duration:    {}s ({:.2}h)",
+        elapsed_s,
+        elapsed_s as f64 / 3600.0
+    );
     println!("  Total submitted:   {}", grand_submitted);
     println!("  Total errors:      {}", grand_errors);
-    println!("  Error rate:        {:.2}%", grand_errors as f64 * 100.0 / grand_submitted.max(1) as f64);
+    println!(
+        "  Error rate:        {:.2}%",
+        grand_errors as f64 * 100.0 / grand_submitted.max(1) as f64
+    );
     println!("  Average TPS:       {:.1}", avg_tps);
     println!("  Peak TPS (period): {:.1}", peak_tps);
     println!("  CSV output:        {}", csv_path.display());
