@@ -74,7 +74,15 @@ pub fn build_trace(entries: &[SigBatchEntry]) -> (TraceTable<BaseElement>, BaseE
 
     // Minimum trace length is 8 rows (Winterfell requirement); round up to
     // next power of two.
-    let trace_len = (entries.len().max(8)).next_power_of_two();
+    //
+    // IMPORTANT: we always add +1 before rounding so there is **at least one
+    // padding row**.  The boundary assertion checks `acc[trace_len - 1] ==
+    // batch_root`, which is only true if the last row is a stable padding row
+    // where `acc` has already been updated by all real entries.  If
+    // `trace_len == n_entries` exactly (no padding), the last row would hold
+    // the intermediate accumulator before the final entry is applied — causing
+    // `InconsistentOodConstraintEvaluations` during verification.
+    let trace_len = ((entries.len() + 1).max(8)).next_power_of_two();
 
     // Pre-compute all accumulator values and entry values.
     let mut acc = BaseElement::ZERO;

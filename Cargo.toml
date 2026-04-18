@@ -18,6 +18,7 @@ members = [
     "tests/e2e",
     "crates/bench",
     "tools/load-test",
+    "tools/stark-bench",
 ]
 
 [workspace.package]
