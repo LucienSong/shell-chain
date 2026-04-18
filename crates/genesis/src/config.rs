@@ -231,7 +231,9 @@ impl GenesisConfig {
     /// needs to set `network_type` without repeating the block time.
     pub fn effective_block_time_secs(&self) -> u64 {
         let explicit = match &self.consensus {
-            ConsensusConfig::PoA { block_time_secs, .. } => *block_time_secs,
+            ConsensusConfig::PoA {
+                block_time_secs, ..
+            } => *block_time_secs,
         };
         if explicit > 0 {
             explicit
@@ -251,7 +253,9 @@ impl GenesisConfig {
     /// intentional operator customization with a small tolerance.
     pub fn validate_network_consistency(&self) -> Result<(), GenesisError> {
         let explicit = match &self.consensus {
-            ConsensusConfig::PoA { block_time_secs, .. } => *block_time_secs,
+            ConsensusConfig::PoA {
+                block_time_secs, ..
+            } => *block_time_secs,
         };
         // Zero means "use network default" — always valid.
         if explicit == 0 {

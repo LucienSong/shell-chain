@@ -184,7 +184,9 @@ mod tests {
         for i in 1u64..=8 {
             sched.on_proof(i);
         }
-        let trigger = sched.on_block(10).expect("should trigger on proof threshold");
+        let trigger = sched
+            .on_block(10)
+            .expect("should trigger on proof threshold");
         assert_eq!(trigger.reason, TriggerReason::ProofThreshold);
         assert_eq!(trigger.at_block, 10);
     }
@@ -192,8 +194,10 @@ mod tests {
     #[test]
     fn block_interval_triggers_aggregation() {
         let mut sched = default_scheduler(); // interval = 50
-        // No proofs — block 50 hits interval.
-        let trigger = sched.on_block(50).expect("should trigger on block interval");
+                                             // No proofs — block 50 hits interval.
+        let trigger = sched
+            .on_block(50)
+            .expect("should trigger on block interval");
         assert_eq!(trigger.reason, TriggerReason::BlockInterval);
     }
 
@@ -207,7 +211,9 @@ mod tests {
         };
         let mut sched = AggregationScheduler::new(config, 0);
         // Block 100 is epoch boundary.
-        let trigger = sched.on_block(100).expect("should trigger on epoch boundary");
+        let trigger = sched
+            .on_block(100)
+            .expect("should trigger on epoch boundary");
         assert_eq!(trigger.reason, TriggerReason::EpochBoundary);
     }
 
@@ -261,7 +267,10 @@ mod tests {
         let mut sched = AggregationScheduler::new(config, 0);
         // No triggers should fire for many blocks.
         for b in 1u64..=200 {
-            assert!(sched.on_block(b).is_none(), "unexpected trigger at block {b}");
+            assert!(
+                sched.on_block(b).is_none(),
+                "unexpected trigger at block {b}"
+            );
         }
     }
 

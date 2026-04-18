@@ -26,11 +26,11 @@ use tokio::sync::watch;
 use tracing::{debug, error, info, warn};
 
 use parking_lot::Mutex;
-use shell_primitives::{ShellHash, Bytes};
+use shell_primitives::{Bytes, ShellHash};
 use shell_stark_prover::{
     prove_sig_batch, ProofAmendment, ProofBacklog, ProofTask, PROOF_AMENDMENT_VERSION,
 };
-use shell_storage::{ProofAmendmentStore, KvStore};
+use shell_storage::{KvStore, ProofAmendmentStore};
 
 // ── ProverConfig ──────────────────────────────────────────────────────────────
 
@@ -108,7 +108,12 @@ impl<S: KvStore + Send + Sync + 'static> ProverService<S> {
         config: ProverConfig,
         prover_address: shell_primitives::Address,
     ) -> Self {
-        Self { backlog, amendment_store, config, prover_address }
+        Self {
+            backlog,
+            amendment_store,
+            config,
+            prover_address,
+        }
     }
 
     /// Spawn the prover service as a background tokio task.
@@ -117,11 +122,17 @@ impl<S: KvStore + Send + Sync + 'static> ProverService<S> {
     pub fn start(self) -> ProverServiceHandle {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let join_handle = tokio::spawn(self.run_loop(shutdown_rx));
-        ProverServiceHandle { shutdown_tx, join_handle }
+        ProverServiceHandle {
+            shutdown_tx,
+            join_handle,
+        }
     }
 
     async fn run_loop(self, mut shutdown_rx: watch::Receiver<bool>) {
-        info!("ProverService started (max_concurrent={})", self.config.max_concurrent_proofs);
+        info!(
+            "ProverService started (max_concurrent={})",
+            self.config.max_concurrent_proofs
+        );
         let idle_sleep = tokio::time::Duration::from_millis(self.config.idle_poll_ms);
 
         loop {
@@ -177,15 +188,16 @@ impl<S: KvStore + Send + Sync + 'static> ProverService<S> {
         // Run the CPU-intensive proof generation on a blocking thread so the
         // tokio executor is not starved.
         let entries = task.entries.clone();
-        let proof_result =
-            tokio::task::spawn_blocking(move || prove_sig_batch(&entries)).await;
+        let proof_result = tokio::task::spawn_blocking(move || prove_sig_batch(&entries)).await;
 
         match proof_result {
             Err(join_err) => {
                 error!("ProverService: proof task panicked for block #{block_number}: {join_err}");
             }
             Ok(Err(prove_err)) => {
-                warn!("ProverService: proof generation failed for block #{block_number}: {prove_err}");
+                warn!(
+                    "ProverService: proof generation failed for block #{block_number}: {prove_err}"
+                );
             }
             Ok(Ok(proof)) => {
                 let block_hash_shell: ShellHash = block_hash.into();
@@ -204,7 +216,10 @@ impl<S: KvStore + Send + Sync + 'static> ProverService<S> {
                         error!("ProverService: failed to serialize amendment for block #{block_number}: {e}");
                     }
                     Ok(bytes) => {
-                        match self.amendment_store.put_amendment(&block_hash_shell, &bytes) {
+                        match self
+                            .amendment_store
+                            .put_amendment(&block_hash_shell, &bytes)
+                        {
                             Ok(()) => {
                                 info!(
                                     "ProverService: proof amendment stored for block #{block_number}"
@@ -232,20 +247,13 @@ mod tests {
     use shell_stark_prover::{ProofBacklog, ProofTask};
     use shell_storage::{MemoryDb, ProofAmendmentStore};
 
-    fn make_service() -> (
-        ProverService<MemoryDb>,
-        Arc<Mutex<ProofBacklog>>,
-    ) {
+    fn make_service() -> (ProverService<MemoryDb>, Arc<Mutex<ProofBacklog>>) {
         let backlog = Arc::new(Mutex::new(ProofBacklog::new()));
         let db = Arc::new(MemoryDb::new());
         let amendment_store = ProofAmendmentStore::new(db);
         let config = ProverConfig::default();
-        let service = ProverService::new(
-            backlog.clone(),
-            amendment_store,
-            config,
-            Address::default(),
-        );
+        let service =
+            ProverService::new(backlog.clone(), amendment_store, config, Address::default());
         (service, backlog)
     }
 

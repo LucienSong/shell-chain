@@ -138,7 +138,8 @@ impl PoaConfig {
 
         // Deterministic seed from block number.
         let seed_bytes = keccak256(&block_number.to_le_bytes());
-        let seed_u64 = u64::from_le_bytes(seed_bytes.as_bytes()[..8].try_into().unwrap_or([0u8; 8]));
+        let seed_u64 =
+            u64::from_le_bytes(seed_bytes.as_bytes()[..8].try_into().unwrap_or([0u8; 8]));
         let ticket = seed_u64 % total_weight;
 
         let mut cumulative: u64 = 0;
@@ -886,7 +887,16 @@ mod tests {
         let parent = sample_header(0, addr, 1_000);
         let (child, seal) = make_signed_block(&signer, addr, 1, 1_030, &parent);
         let verifier = DilithiumVerifier;
-        assert!(engine.verify_header_with_parent(&child, &parent, &seal, signer.public_key(), &verifier, 10_000).is_ok());
+        assert!(engine
+            .verify_header_with_parent(
+                &child,
+                &parent,
+                &seal,
+                signer.public_key(),
+                &verifier,
+                10_000
+            )
+            .is_ok());
     }
 
     #[test]
@@ -898,7 +908,16 @@ mod tests {
         let parent = sample_header(0, addr, 1_000);
         let (child, seal) = make_signed_block(&signer, addr, 1, 1_015, &parent); // only +15s
         let verifier = DilithiumVerifier;
-        assert!(engine.verify_header_with_parent(&child, &parent, &seal, signer.public_key(), &verifier, 10_000).is_err());
+        assert!(engine
+            .verify_header_with_parent(
+                &child,
+                &parent,
+                &seal,
+                signer.public_key(),
+                &verifier,
+                10_000
+            )
+            .is_err());
     }
 
     #[test]
@@ -910,7 +929,16 @@ mod tests {
         let parent = sample_header(0, addr, 1_000);
         let (child, seal) = make_signed_block(&signer, addr, 1, 1_002, &parent); // exactly +2s
         let verifier = DilithiumVerifier;
-        assert!(engine.verify_header_with_parent(&child, &parent, &seal, signer.public_key(), &verifier, 10_000).is_ok());
+        assert!(engine
+            .verify_header_with_parent(
+                &child,
+                &parent,
+                &seal,
+                signer.public_key(),
+                &verifier,
+                10_000
+            )
+            .is_ok());
     }
 
     #[test]
@@ -922,7 +950,16 @@ mod tests {
         let parent = sample_header(0, addr, 1_000);
         let (child, seal) = make_signed_block(&signer, addr, 1, 1_001, &parent); // only +1s
         let verifier = DilithiumVerifier;
-        assert!(engine.verify_header_with_parent(&child, &parent, &seal, signer.public_key(), &verifier, 10_000).is_err());
+        assert!(engine
+            .verify_header_with_parent(
+                &child,
+                &parent,
+                &seal,
+                signer.public_key(),
+                &verifier,
+                10_000
+            )
+            .is_err());
     }
 
     // ── H1: Weighted proposer rotation ───────────────────────────────────────
@@ -944,7 +981,10 @@ mod tests {
         let config = PoaConfig::new(addrs.clone(), 2);
         // Without weights, should behave identically to proposer_for_block.
         for block in 0u64..9 {
-            assert_eq!(config.proposer_for_block(block), addrs[(block as usize) % 3]);
+            assert_eq!(
+                config.proposer_for_block(block),
+                addrs[(block as usize) % 3]
+            );
         }
     }
 
@@ -974,8 +1014,16 @@ mod tests {
             let idx = addrs.iter().position(|a| a == &proposer).unwrap();
             counts[idx] += 1;
         }
-        assert!(counts[0] > 700 && counts[0] < 800, "expected ~750, got {:?}", counts);
-        assert!(counts[1] > 200 && counts[1] < 300, "expected ~250, got {:?}", counts);
+        assert!(
+            counts[0] > 700 && counts[0] < 800,
+            "expected ~750, got {:?}",
+            counts
+        );
+        assert!(
+            counts[1] > 200 && counts[1] < 300,
+            "expected ~250, got {:?}",
+            counts
+        );
     }
 
     #[test]
@@ -998,7 +1046,11 @@ mod tests {
             counts[idx] += 1;
         }
         for &c in &counts {
-            assert!(c > 60 && c < 140, "zero-weight normalisation failed: {:?}", counts);
+            assert!(
+                c > 60 && c < 140,
+                "zero-weight normalisation failed: {:?}",
+                counts
+            );
         }
     }
 

@@ -500,7 +500,11 @@ mod tests {
         let h1 = sample_header();
         let mut h2 = sample_header();
         h2.witness_root = Some(shell_primitives::keccak256(b"bundle"));
-        assert_ne!(h1.hash(), h2.hash(), "witness_root must influence block hash");
+        assert_ne!(
+            h1.hash(),
+            h2.hash(),
+            "witness_root must influence block hash"
+        );
     }
 
     #[test]

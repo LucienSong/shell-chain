@@ -69,12 +69,16 @@ pub struct BlockStateMachine {
 
 impl BlockStateMachine {
     pub fn new() -> Self {
-        Self { states: HashMap::new() }
+        Self {
+            states: HashMap::new(),
+        }
     }
 
     /// Get the current state for a block (defaults to `Sealed` if unseen).
     pub fn state(&self, block_hash: &ShellHash) -> &BlockProofState {
-        self.states.get(block_hash).unwrap_or(&BlockProofState::Sealed)
+        self.states
+            .get(block_hash)
+            .unwrap_or(&BlockProofState::Sealed)
     }
 
     /// Transition a block to `Proving`.
@@ -83,9 +87,14 @@ impl BlockStateMachine {
         block_hash: ShellHash,
         claimer: shell_primitives::Address,
     ) -> Result<(), InvalidTransition> {
-        match self.states.get(&block_hash).unwrap_or(&BlockProofState::Sealed) {
+        match self
+            .states
+            .get(&block_hash)
+            .unwrap_or(&BlockProofState::Sealed)
+        {
             BlockProofState::Sealed => {
-                self.states.insert(block_hash, BlockProofState::Proving { claimer });
+                self.states
+                    .insert(block_hash, BlockProofState::Proving { claimer });
                 Ok(())
             }
             other => Err(InvalidTransition {
@@ -97,7 +106,11 @@ impl BlockStateMachine {
 
     /// Transition a block to `Proven`.
     pub fn mark_proven(&mut self, block_hash: ShellHash) -> Result<(), InvalidTransition> {
-        match self.states.get(&block_hash).unwrap_or(&BlockProofState::Sealed) {
+        match self
+            .states
+            .get(&block_hash)
+            .unwrap_or(&BlockProofState::Sealed)
+        {
             BlockProofState::Sealed | BlockProofState::Proving { .. } => {
                 self.states.insert(block_hash, BlockProofState::Proven);
                 Ok(())
@@ -117,7 +130,9 @@ impl BlockStateMachine {
                 Ok(())
             }
             other => Err(InvalidTransition {
-                from: other.map(|s| s.to_string()).unwrap_or_else(|| "Sealed".to_string()),
+                from: other
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "Sealed".to_string()),
                 to: "Available".to_string(),
             }),
         }
@@ -131,7 +146,9 @@ impl BlockStateMachine {
                 Ok(())
             }
             other => Err(InvalidTransition {
-                from: other.map(|s| s.to_string()).unwrap_or_else(|| "Sealed".to_string()),
+                from: other
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "Sealed".to_string()),
                 to: "Stripped".to_string(),
             }),
         }
@@ -139,10 +156,15 @@ impl BlockStateMachine {
 
     /// Mark a block's proof as unavailable (window expired).
     pub fn mark_unavailable(&mut self, block_hash: ShellHash) {
-        match self.states.get(&block_hash).unwrap_or(&BlockProofState::Sealed) {
+        match self
+            .states
+            .get(&block_hash)
+            .unwrap_or(&BlockProofState::Sealed)
+        {
             BlockProofState::Proven | BlockProofState::Available | BlockProofState::Stripped => {}
             _ => {
-                self.states.insert(block_hash, BlockProofState::ProofUnavailable);
+                self.states
+                    .insert(block_hash, BlockProofState::ProofUnavailable);
             }
         }
     }
@@ -172,8 +194,12 @@ mod tests {
     use super::*;
     use shell_primitives::{Address, ShellHash};
 
-    fn hash(n: u8) -> ShellHash { ShellHash::from([n; 32]) }
-    fn addr(n: u8) -> Address { Address::from([n; 20]) }
+    fn hash(n: u8) -> ShellHash {
+        ShellHash::from([n; 32])
+    }
+    fn addr(n: u8) -> Address {
+        Address::from([n; 20])
+    }
 
     #[test]
     fn default_state_is_sealed() {
@@ -185,7 +211,10 @@ mod tests {
     fn sealed_to_proving() {
         let mut sm = BlockStateMachine::new();
         sm.start_proving(hash(1), addr(1)).unwrap();
-        assert!(matches!(sm.state(&hash(1)), BlockProofState::Proving { .. }));
+        assert!(matches!(
+            sm.state(&hash(1)),
+            BlockProofState::Proving { .. }
+        ));
     }
 
     #[test]

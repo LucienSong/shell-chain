@@ -308,14 +308,23 @@ mod tests {
 
     #[test]
     fn node_role_from_str_valid() {
-        assert_eq!(NodeRole::from_str("validator").unwrap(), NodeRole::Validator);
-        assert_eq!(NodeRole::from_str("validator-prover").unwrap(), NodeRole::ValidatorProver);
+        assert_eq!(
+            NodeRole::from_str("validator").unwrap(),
+            NodeRole::Validator
+        );
+        assert_eq!(
+            NodeRole::from_str("validator-prover").unwrap(),
+            NodeRole::ValidatorProver
+        );
         assert_eq!(NodeRole::from_str("prover").unwrap(), NodeRole::Prover);
     }
 
     #[test]
     fn node_role_from_str_case_insensitive() {
-        assert_eq!(NodeRole::from_str("Validator").unwrap(), NodeRole::Validator);
+        assert_eq!(
+            NodeRole::from_str("Validator").unwrap(),
+            NodeRole::Validator
+        );
         assert_eq!(NodeRole::from_str("PROVER").unwrap(), NodeRole::Prover);
     }
 

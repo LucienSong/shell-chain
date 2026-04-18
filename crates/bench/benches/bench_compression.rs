@@ -24,7 +24,8 @@ const TX_METADATA_LEN: usize = 140;
 /// Baseline tx size with embedded pubkey (first tx from new address).
 pub const TX_SIZE_EMBEDDED: usize = TX_METADATA_LEN + DILITHIUM3_SIG_LEN + DILITHIUM3_PUBKEY_LEN;
 /// Reference tx size (subsequent txs from registered address).
-pub const TX_SIZE_REFERENCE: usize = TX_METADATA_LEN + DILITHIUM3_SIG_LEN + PUBKEY_REFERENCE_RLP_LEN;
+pub const TX_SIZE_REFERENCE: usize =
+    TX_METADATA_LEN + DILITHIUM3_SIG_LEN + PUBKEY_REFERENCE_RLP_LEN;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -163,7 +164,8 @@ fn bench_rocksdb_write_throughput(c: &mut Criterion) {
         bulk_compression: CfCompressionStrategy::None,
         ..Default::default()
     };
-    let stores_none: RocksDbStores = RocksDbStore::open_all(dir_none.path(), Some(cfg_none)).unwrap();
+    let stores_none: RocksDbStores =
+        RocksDbStore::open_all(dir_none.path(), Some(cfg_none)).unwrap();
 
     group.bench_function("write_no_compression", |b| {
         let mut seq = 0u64;
@@ -180,7 +182,8 @@ fn bench_rocksdb_write_throughput(c: &mut Criterion) {
         bulk_compression: CfCompressionStrategy::ZstdCold,
         ..Default::default()
     };
-    let stores_zstd: RocksDbStores = RocksDbStore::open_all(dir_zstd.path(), Some(cfg_zstd)).unwrap();
+    let stores_zstd: RocksDbStores =
+        RocksDbStore::open_all(dir_zstd.path(), Some(cfg_zstd)).unwrap();
 
     group.bench_function("write_zstd_cold", |b| {
         let mut seq = 0u64;

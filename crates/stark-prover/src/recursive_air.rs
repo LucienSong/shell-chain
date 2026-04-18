@@ -144,11 +144,22 @@ impl Air for RecursiveVerifierAir {
     type BaseField = BaseElement;
     type PublicInputs = RecursivePublicInputs;
 
-    fn new(trace_info: TraceInfo, pub_inputs: RecursivePublicInputs, options: ProofOptions) -> Self {
-        assert_eq!(trace_info.width(), REC_TRACE_WIDTH, "recursive AIR requires 2-column trace");
+    fn new(
+        trace_info: TraceInfo,
+        pub_inputs: RecursivePublicInputs,
+        options: ProofOptions,
+    ) -> Self {
+        assert_eq!(
+            trace_info.width(),
+            REC_TRACE_WIDTH,
+            "recursive AIR requires 2-column trace"
+        );
         let degrees = vec![TransitionConstraintDegree::new(3)];
         let context = AirContext::new(trace_info, degrees, 2, options);
-        Self { context, pub_inputs }
+        Self {
+            context,
+            pub_inputs,
+        }
     }
 
     fn context(&self) -> &AirContext<Self::BaseField> {
@@ -243,7 +254,10 @@ impl AggregationJob {
         if !self.ready {
             return None;
         }
-        Some(RecursivePublicInputs::from_l1_roots(&self.l1_roots, self.start_block))
+        Some(RecursivePublicInputs::from_l1_roots(
+            &self.l1_roots,
+            self.start_block,
+        ))
     }
 }
 

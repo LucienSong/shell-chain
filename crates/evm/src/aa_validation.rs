@@ -105,7 +105,10 @@ pub fn validate_aa_tx<S: KvStore + 'static, V: Verifier>(
         ));
     }
 
-    let pubkey = resolve_pubkey(signed_tx.pubkey_mode.pubkey_bytes(), registered_pubkey.as_ref())?;
+    let pubkey = resolve_pubkey(
+        signed_tx.pubkey_mode.pubkey_bytes(),
+        registered_pubkey.as_ref(),
+    )?;
 
     if signed_tx.pubkey_mode.is_embedded() {
         if let Some(registered) = registered_pubkey.as_ref() {

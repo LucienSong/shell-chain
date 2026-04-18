@@ -72,7 +72,7 @@ impl ProofAmendment {
             + 8   // block_number
             + 20  // prover address
             + self.prover_signature.len()
-            + 16  // JSON overhead estimate
+            + 16 // JSON overhead estimate
     }
 }
 
@@ -100,8 +100,14 @@ mod tests {
     fn make_amendment() -> ProofAmendment {
         use crate::prover::{prove_sig_batch, SigBatchEntry};
         let entries = vec![
-            SigBatchEntry { msg_hash: [1u8; 32], pk_hash: [2u8; 32] },
-            SigBatchEntry { msg_hash: [3u8; 32], pk_hash: [4u8; 32] },
+            SigBatchEntry {
+                msg_hash: [1u8; 32],
+                pk_hash: [2u8; 32],
+            },
+            SigBatchEntry {
+                msg_hash: [3u8; 32],
+                pk_hash: [4u8; 32],
+            },
         ];
         let proof = prove_sig_batch(&entries).expect("prove failed");
         ProofAmendment {

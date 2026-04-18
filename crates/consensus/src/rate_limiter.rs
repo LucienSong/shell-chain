@@ -51,7 +51,11 @@ struct Bucket {
 impl Bucket {
     fn new(initial_tokens: u64) -> Self {
         let now = Instant::now();
-        Self { tokens: initial_tokens, last_refill: now, last_used: now }
+        Self {
+            tokens: initial_tokens,
+            last_refill: now,
+            last_used: now,
+        }
     }
 
     /// Refill tokens based on elapsed time, capped at `initial_tokens`.
@@ -80,7 +84,10 @@ pub struct ProofRateLimiter {
 
 impl ProofRateLimiter {
     pub fn new(config: RateLimiterConfig) -> Self {
-        Self { config, buckets: HashMap::new() }
+        Self {
+            config,
+            buckets: HashMap::new(),
+        }
     }
 
     /// Try to consume one token for `address`.

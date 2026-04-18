@@ -1959,11 +1959,10 @@ impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
                 BlockTag::Latest | BlockTag::Finalized | BlockTag::Pending => {
                     self.chain_store.get_head_block().map_err(internal_err)?
                 }
-                BlockTag::Number(n) => {
-                    self.chain_store
-                        .get_block_by_number(n)
-                        .map_err(internal_err)?
-                }
+                BlockTag::Number(n) => self
+                    .chain_store
+                    .get_block_by_number(n)
+                    .map_err(internal_err)?,
             };
             match blk {
                 None => return Ok(serde_json::Value::Null),
@@ -2015,9 +2014,7 @@ impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
                     "signature": format!("0x{}", hex::encode(&w.signature.data)),
                 });
                 if let Some(pk) = &w.pubkey {
-                    obj["pubkey"] = serde_json::Value::String(
-                        format!("0x{}", hex::encode(pk))
-                    );
+                    obj["pubkey"] = serde_json::Value::String(format!("0x{}", hex::encode(pk)));
                 }
                 obj
             })
@@ -2623,7 +2620,10 @@ mod tests {
         let result = ShellApiServer::get_block_witnesses(&handler, "latest".to_string())
             .await
             .unwrap();
-        assert!(result["error"].as_str().unwrap().contains("witness store not available"));
+        assert!(result["error"]
+            .as_str()
+            .unwrap()
+            .contains("witness store not available"));
     }
 
     #[tokio::test]
@@ -2677,7 +2677,10 @@ mod tests {
         let witnesses = result["witnesses"].as_array().unwrap();
         assert_eq!(witnesses[0]["txIndex"], 0);
         assert_eq!(witnesses[0]["sigType"], "Dilithium3");
-        assert!(witnesses[0]["signature"].as_str().unwrap().starts_with("0x"));
+        assert!(witnesses[0]["signature"]
+            .as_str()
+            .unwrap()
+            .starts_with("0x"));
         assert!(witnesses[0]["pubkey"].as_str().unwrap().starts_with("0x"));
     }
 

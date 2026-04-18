@@ -152,10 +152,14 @@ impl ProverHealth {
     }
 
     /// Total successful proofs.
-    pub fn total_proofs(&self) -> u64 { self.total_proofs }
+    pub fn total_proofs(&self) -> u64 {
+        self.total_proofs
+    }
 
     /// Total failed proofs.
-    pub fn total_failures(&self) -> u64 { self.total_failures }
+    pub fn total_failures(&self) -> u64 {
+        self.total_failures
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -207,8 +211,12 @@ mod tests {
     fn failing_when_failure_rate_exceeded() {
         let mut h = health();
         // 5 failures out of 10 = 50% rate = exactly at threshold → Failing.
-        for _ in 0..5 { h.record_success(); }
-        for _ in 0..5 { h.record_failure(); }
+        for _ in 0..5 {
+            h.record_success();
+        }
+        for _ in 0..5 {
+            h.record_failure();
+        }
         assert_eq!(h.status(0), HealthStatus::Failing);
     }
 

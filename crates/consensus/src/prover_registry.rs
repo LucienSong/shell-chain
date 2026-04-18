@@ -25,8 +25,8 @@
 //! - Provers flagged as unreliable by the `ProofWindowManager` (I4) receive
 //!   a reputation penalty via `penalize()`.
 
-use std::collections::HashMap;
 use shell_primitives::Address;
+use std::collections::HashMap;
 
 /// Configuration for the prover registry.
 #[derive(Debug, Clone)]
@@ -108,7 +108,10 @@ pub struct ProverRegistry {
 
 impl ProverRegistry {
     pub fn new(config: ProverRegistryConfig) -> Self {
-        Self { config, provers: HashMap::new() }
+        Self {
+            config,
+            provers: HashMap::new(),
+        }
     }
 
     /// Register a new prover node.
@@ -142,13 +145,22 @@ impl ProverRegistry {
 
     /// Deregister a prover (voluntary exit or forced by low reputation).
     pub fn deregister(&mut self, address: &Address) -> Result<(), RegistryError> {
-        self.provers.remove(address).ok_or(RegistryError::NotRegistered)?;
+        self.provers
+            .remove(address)
+            .ok_or(RegistryError::NotRegistered)?;
         Ok(())
     }
 
     /// Record a successful proof submission.
-    pub fn record_proof(&mut self, address: &Address, current_block: u64) -> Result<(), RegistryError> {
-        let record = self.provers.get_mut(address).ok_or(RegistryError::NotRegistered)?;
+    pub fn record_proof(
+        &mut self,
+        address: &Address,
+        current_block: u64,
+    ) -> Result<(), RegistryError> {
+        let record = self
+            .provers
+            .get_mut(address)
+            .ok_or(RegistryError::NotRegistered)?;
         record.proofs_submitted += 1;
         record.last_active_block = current_block;
         record.reputation = (record.reputation + self.config.reputation_per_proof)
@@ -158,7 +170,10 @@ impl ProverRegistry {
 
     /// Apply a reputation penalty.
     pub fn penalize(&mut self, address: &Address, penalty: i64) -> Result<(), RegistryError> {
-        let record = self.provers.get_mut(address).ok_or(RegistryError::NotRegistered)?;
+        let record = self
+            .provers
+            .get_mut(address)
+            .ok_or(RegistryError::NotRegistered)?;
         record.reputation += penalty;
         Ok(())
     }
@@ -215,7 +230,9 @@ mod tests {
     use super::*;
     use shell_primitives::Address;
 
-    fn addr(n: u8) -> Address { Address::from([n; 20]) }
+    fn addr(n: u8) -> Address {
+        Address::from([n; 20])
+    }
 
     fn registry() -> ProverRegistry {
         ProverRegistry::new(ProverRegistryConfig::default())
@@ -239,7 +256,10 @@ mod tests {
     fn double_register_fails() {
         let mut r = registry();
         r.register(addr(1), 1_000, 0).unwrap();
-        assert_eq!(r.register(addr(1), 1_000, 0), Err(RegistryError::AlreadyRegistered));
+        assert_eq!(
+            r.register(addr(1), 1_000, 0),
+            Err(RegistryError::AlreadyRegistered)
+        );
     }
 
     #[test]

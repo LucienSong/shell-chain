@@ -594,7 +594,7 @@ mod tests {
         let stores = RocksDbStore::open_all(dir.path(), Some(cfg)).unwrap();
 
         // Simulate realistic PQ transaction data sizes
-        let sig_bytes = vec![0xD3u8; 3309];   // Dilithium3 signature
+        let sig_bytes = vec![0xD3u8; 3309]; // Dilithium3 signature
         let pubkey_bytes = vec![0xABu8; 1952]; // Dilithium3 public key
         let payload_bytes = vec![0x11u8; 140]; // Tx payload
 
@@ -604,7 +604,10 @@ mod tests {
 
         assert_eq!(stores.chain.get(b"sig").unwrap(), Some(sig_bytes));
         assert_eq!(stores.chain.get(b"pk").unwrap(), Some(pubkey_bytes));
-        assert_eq!(stores.receipts.get(b"payload").unwrap(), Some(payload_bytes));
+        assert_eq!(
+            stores.receipts.get(b"payload").unwrap(),
+            Some(payload_bytes)
+        );
     }
 
     #[test]

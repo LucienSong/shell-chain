@@ -21,8 +21,8 @@
 //! The `ProofWindowManager` tracks in-memory window state. On restart, windows for
 //! recent unproven blocks are reconstructed from the chain store.
 
-use std::collections::HashMap;
 use shell_primitives::{Address, ShellHash};
+use std::collections::HashMap;
 
 /// Configuration for proof window management.
 #[derive(Debug, Clone)]
@@ -112,7 +112,11 @@ impl ProofWindowManager {
                 );
                 Ok(())
             }
-            Some(WindowState::Claimed { claimer: existing, expires_at_block, .. }) => {
+            Some(WindowState::Claimed {
+                claimer: existing,
+                expires_at_block,
+                ..
+            }) => {
                 if current_block >= *expires_at_block {
                     // Claim has expired — release and re-claim.
                     let expired_claimer = *existing;
@@ -152,7 +156,11 @@ impl ProofWindowManager {
         current_block: u64,
     ) -> Result<(), WindowError> {
         match self.windows.get(&block_number) {
-            Some(WindowState::Claimed { claimer, expires_at_block, .. }) => {
+            Some(WindowState::Claimed {
+                claimer,
+                expires_at_block,
+                ..
+            }) => {
                 if *claimer != prover {
                     return Err(WindowError::NotClaimer {
                         block_number,
@@ -165,22 +173,23 @@ impl ProofWindowManager {
                     self.windows.insert(block_number, WindowState::Expired);
                     return Err(WindowError::WindowExpired { block_number });
                 }
-                self.windows.insert(block_number, WindowState::Fulfilled { prover });
+                self.windows
+                    .insert(block_number, WindowState::Fulfilled { prover });
                 Ok(())
             }
             Some(WindowState::Fulfilled { .. }) => {
                 Err(WindowError::AlreadyFulfilled { block_number })
             }
-            None | Some(WindowState::Unclaimed) => {
-                Err(WindowError::NotClaimed { block_number })
-            }
+            None | Some(WindowState::Unclaimed) => Err(WindowError::NotClaimed { block_number }),
             Some(WindowState::Expired) => Err(WindowError::WindowExpired { block_number }),
         }
     }
 
     /// Get the current window state for a block.
     pub fn state(&self, block_number: u64) -> &WindowState {
-        self.windows.get(&block_number).unwrap_or(&WindowState::Unclaimed)
+        self.windows
+            .get(&block_number)
+            .unwrap_or(&WindowState::Unclaimed)
     }
 
     /// Number of expired claims for a prover.
@@ -198,12 +207,14 @@ impl ProofWindowManager {
     /// Should be called once per block import.
     pub fn advance(&mut self, current_block: u64) {
         for (block_number, state) in self.windows.iter_mut() {
-            if let WindowState::Claimed { claimer, expires_at_block, .. } = state {
+            if let WindowState::Claimed {
+                claimer,
+                expires_at_block,
+                ..
+            } = state
+            {
                 if current_block > *expires_at_block {
-                    *self
-                        .expired_claims
-                        .entry(*claimer)
-                        .or_insert(0) += 1;
+                    *self.expired_claims.entry(*claimer).or_insert(0) += 1;
                     let block_number = *block_number;
                     let _ = block_number; // used for context
                     *state = WindowState::Expired;
@@ -237,7 +248,11 @@ pub enum WindowError {
     /// Window has expired (past `window_size_blocks`).
     WindowExpired { block_number: u64 },
     /// Fulfillment attempted by a non-claimer.
-    NotClaimer { block_number: u64, expected: Address, got: Address },
+    NotClaimer {
+        block_number: u64,
+        expected: Address,
+        got: Address,
+    },
     /// Fulfillment attempted on an unclaimed window.
     NotClaimed { block_number: u64 },
 }
@@ -245,7 +260,10 @@ pub enum WindowError {
 impl std::fmt::Display for WindowError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::AlreadyClaimed { block_number, claimer } => {
+            Self::AlreadyClaimed {
+                block_number,
+                claimer,
+            } => {
                 write!(f, "block {block_number} already claimed by {claimer}")
             }
             Self::AlreadyFulfilled { block_number } => {
@@ -254,8 +272,15 @@ impl std::fmt::Display for WindowError {
             Self::WindowExpired { block_number } => {
                 write!(f, "proof window for block {block_number} has expired")
             }
-            Self::NotClaimer { block_number, expected, got } => {
-                write!(f, "block {block_number}: expected claimer {expected}, got {got}")
+            Self::NotClaimer {
+                block_number,
+                expected,
+                got,
+            } => {
+                write!(
+                    f,
+                    "block {block_number}: expected claimer {expected}, got {got}"
+                )
             }
             Self::NotClaimed { block_number } => {
                 write!(f, "block {block_number} not yet claimed")
@@ -273,8 +298,12 @@ mod tests {
     use super::*;
     use shell_primitives::{Address, ShellHash};
 
-    fn addr(n: u8) -> Address { Address::from([n; 20]) }
-    fn hash(n: u8) -> ShellHash { ShellHash::from([n; 32]) }
+    fn addr(n: u8) -> Address {
+        Address::from([n; 20])
+    }
+    fn hash(n: u8) -> ShellHash {
+        ShellHash::from([n; 32])
+    }
 
     fn default_mgr() -> ProofWindowManager {
         ProofWindowManager::new(WindowConfig {
@@ -294,7 +323,9 @@ mod tests {
     fn claim_succeeds_on_unclaimed() {
         let mut mgr = default_mgr();
         mgr.claim(10, addr(1), 5).unwrap();
-        assert!(matches!(mgr.state(10), WindowState::Claimed { claimer, .. } if *claimer == addr(1)));
+        assert!(
+            matches!(mgr.state(10), WindowState::Claimed { claimer, .. } if *claimer == addr(1))
+        );
     }
 
     #[test]
@@ -309,9 +340,11 @@ mod tests {
     fn expired_claim_allows_re_claim() {
         let mut mgr = default_mgr();
         mgr.claim(10, addr(1), 5).unwrap(); // expires_at = 5+20=25
-        // Advance past expiry.
+                                            // Advance past expiry.
         mgr.claim(10, addr(2), 30).unwrap(); // re-claim after expiry
-        assert!(matches!(mgr.state(10), WindowState::Claimed { claimer, .. } if *claimer == addr(2)));
+        assert!(
+            matches!(mgr.state(10), WindowState::Claimed { claimer, .. } if *claimer == addr(2))
+        );
         assert_eq!(mgr.expired_claim_count(&addr(1)), 1);
     }
 

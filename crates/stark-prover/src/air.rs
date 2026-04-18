@@ -25,10 +25,7 @@ pub struct SigBatchPublicInputs {
 
 impl ToElements<BaseElement> for SigBatchPublicInputs {
     fn to_elements(&self) -> Vec<BaseElement> {
-        vec![
-            self.batch_root,
-            BaseElement::new(self.n_sigs as u128),
-        ]
+        vec![self.batch_root, BaseElement::new(self.n_sigs as u128)]
     }
 }
 

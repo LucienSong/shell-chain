@@ -25,7 +25,11 @@ pub struct ProofTask {
 impl ProofTask {
     /// Create a new proof task.
     pub fn new(block_hash: [u8; 32], block_number: u64, entries: Vec<SigBatchEntry>) -> Self {
-        Self { block_hash, block_number, entries }
+        Self {
+            block_hash,
+            block_number,
+            entries,
+        }
     }
 
     /// Number of signatures in this task.
@@ -279,8 +283,14 @@ mod tests {
     #[test]
     fn proof_task_entry_count() {
         let entries = vec![
-            SigBatchEntry { msg_hash: [0u8; 32], pk_hash: [1u8; 32] },
-            SigBatchEntry { msg_hash: [2u8; 32], pk_hash: [3u8; 32] },
+            SigBatchEntry {
+                msg_hash: [0u8; 32],
+                pk_hash: [1u8; 32],
+            },
+            SigBatchEntry {
+                msg_hash: [2u8; 32],
+                pk_hash: [3u8; 32],
+            },
         ];
         let task = ProofTask::new([0u8; 32], 1, entries);
         assert_eq!(task.entry_count(), 2);

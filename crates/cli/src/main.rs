@@ -522,7 +522,11 @@ async fn main() {
             })
             .await
         }
-        Commands::Init { genesis, chain_id, network } => commands::init(cli.datadir, genesis, chain_id, network),
+        Commands::Init {
+            genesis,
+            chain_id,
+            network,
+        } => commands::init(cli.datadir, genesis, chain_id, network),
         Commands::Key { action } => match action {
             KeyCommands::Generate { output } => commands::key_generate(output),
             KeyCommands::Inspect { path } => commands::key_inspect(path),

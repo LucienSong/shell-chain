@@ -264,7 +264,11 @@ mod tests {
     #[test]
     fn proof_metadata_mark_proven_async() {
         let mut m = ProofMetadata::sealed(5);
-        m.mark_proven(ProofLevel::Async, Some(Address::from([0x01; 20])), 1_700_000_100);
+        m.mark_proven(
+            ProofLevel::Async,
+            Some(Address::from([0x01; 20])),
+            1_700_000_100,
+        );
         assert_eq!(m.level, ProofLevel::Async);
         assert!(m.can_strip());
         m.mark_stripped();

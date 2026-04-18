@@ -47,7 +47,7 @@ fn make_header(number: u64, proposer: Address, extra: &[u8]) -> BlockHeader {
         parent_beacon_block_root: ShellHash::ZERO,
         blob_gas_used: 0,
         excess_blob_gas: 0,
-            witness_root: None,
+        witness_root: None,
     }
 }
 

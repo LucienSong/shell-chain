@@ -19,9 +19,9 @@ use shell_network::{NetworkBus, NetworkConfig};
 use shell_node::config::NodeConfig;
 use shell_node::pruning::PruningConfig;
 use shell_primitives::{Address, ShellHash};
-use shell_storage::{DEFAULT_BODY_RETENTION, DEFAULT_WITNESS_RETENTION};
 use shell_rpc::RpcConfig;
 use shell_storage::{ChainStore, KvStore, MemoryDb, WorldState};
+use shell_storage::{DEFAULT_BODY_RETENTION, DEFAULT_WITNESS_RETENTION};
 
 use tracing::{error, info, warn};
 
@@ -710,6 +710,7 @@ mod tests {
             witness_retention: DEFAULT_WITNESS_RETENTION,
             body_retention: DEFAULT_BODY_RETENTION,
             enable_stark_aggregation: false,
+            network: "dev".into(),
         };
 
         let expected = ParallelEvmConfig {
@@ -772,6 +773,7 @@ mod tests {
                 },
             )]),
             boot_nodes: vec![],
+            network_type: NetworkType::Dev,
         }
     }
 

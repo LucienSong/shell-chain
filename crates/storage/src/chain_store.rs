@@ -264,10 +264,7 @@ impl<S: KvStore> ChainStore<S> {
 
     /// Get only the block hash for a given block number (canonical mapping).
     /// More efficient than `get_block_by_number` when only the hash is needed.
-    pub fn get_block_hash_by_number(
-        &self,
-        number: u64,
-    ) -> Result<Option<ShellHash>, StorageError> {
+    pub fn get_block_hash_by_number(&self, number: u64) -> Result<Option<ShellHash>, StorageError> {
         match self.store.get(&Self::number_key(number))? {
             Some(hash_bytes) => {
                 let hash = ShellHash::try_from_slice(&hash_bytes)
@@ -709,7 +706,9 @@ pub struct ProofAmendmentStore<S: KvStore> {
 
 impl<S: KvStore> Clone for ProofAmendmentStore<S> {
     fn clone(&self) -> Self {
-        Self { store: Arc::clone(&self.store) }
+        Self {
+            store: Arc::clone(&self.store),
+        }
     }
 }
 
@@ -1543,7 +1542,7 @@ mod tests {
 
     // ── WitnessStore tests ─────────────────────────────────────────────────
 
-    use shell_core::{WitnessBundle, TxWitness};
+    use shell_core::{TxWitness, WitnessBundle};
     use shell_crypto::{DilithiumSigner, Signer};
 
     fn dummy_bundle() -> WitnessBundle {

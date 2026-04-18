@@ -5,6 +5,7 @@
 //! - [`prove_sig_batch`]: build trace from entries, generate STARK proof.
 //! - [`verify_sig_batch`]: verify a [`SigBatchProof`] against claimed public inputs.
 
+use winterfell::verify;
 use winterfell::{
     crypto::{hashers::Blake3_256, DefaultRandomCoin, MerkleTree},
     math::{fields::f128::BaseElement, FieldElement, StarkField},
@@ -13,7 +14,6 @@ use winterfell::{
     DefaultConstraintCommitment, DefaultConstraintEvaluator, DefaultTraceLde, FieldExtension,
     PartitionOptions, ProofOptions, Prover, StarkDomain, TracePolyTable, TraceTable,
 };
-use winterfell::verify;
 
 use crate::{
     air::{SigBatchAir, SigBatchPublicInputs, COL_ACC, COL_ENTRY, TRACE_WIDTH},
@@ -53,14 +53,14 @@ impl SigBatchEntry {
 /// Tuned for fast verification (~50 µs) with ~100-bit conjectured security.
 pub fn default_proof_options() -> ProofOptions {
     ProofOptions::new(
-        28,                        // number of queries
-        8,                         // blowup factor
-        16,                        // grinding factor
-        FieldExtension::None,      // f128 is large enough
+        28,                   // number of queries
+        8,                    // blowup factor
+        16,                   // grinding factor
+        FieldExtension::None, // f128 is large enough
         8,
         255,
-        BatchingMethod::Linear,    // constraint composition batching
-        BatchingMethod::Linear,    // DEEP polynomial batching
+        BatchingMethod::Linear, // constraint composition batching
+        BatchingMethod::Linear, // DEEP polynomial batching
     )
 }
 
@@ -140,7 +140,10 @@ struct SigBatchProverImpl {
 
 impl SigBatchProverImpl {
     fn new(options: ProofOptions, pub_inputs: SigBatchPublicInputs) -> Self {
-        Self { options, pub_inputs }
+        Self {
+            options,
+            pub_inputs,
+        }
     }
 }
 

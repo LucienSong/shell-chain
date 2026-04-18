@@ -207,7 +207,10 @@ mod tests {
         let mut pruner = WitnessPruner::archive();
         let result = pruner.prune_before(500, &cs, &ws).unwrap();
         assert_eq!(result.pruned_count, 0);
-        assert!(ws.has_bundle(&hash).unwrap(), "archive: bundle must survive");
+        assert!(
+            ws.has_bundle(&hash).unwrap(),
+            "archive: bundle must survive"
+        );
     }
 
     #[test]

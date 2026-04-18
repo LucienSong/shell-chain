@@ -15,8 +15,8 @@
 //! Actual verification is done by `ProofAmendmentStore` (G3) and the challenge
 //! mechanism (I2).
 
-use std::collections::{HashMap, HashSet};
 use shell_primitives::{Address, ShellHash};
+use std::collections::{HashMap, HashSet};
 
 /// Configuration for proof availability.
 #[derive(Debug, Clone)]
@@ -69,26 +69,35 @@ pub struct ProofAvailabilityTracker {
 
 impl ProofAvailabilityTracker {
     pub fn new(config: AvailabilityConfig) -> Self {
-        Self { config, records: HashMap::new() }
+        Self {
+            config,
+            records: HashMap::new(),
+        }
     }
 
     /// Record that we have received and stored a proof locally for `block_hash`.
     pub fn record_local_proof(&mut self, block_hash: ShellHash, current_block: u64) {
-        let record = self.records.entry(block_hash).or_insert_with(|| BlockProofRecord {
-            local: false,
-            acks: HashSet::new(),
-            first_seen_at: current_block,
-        });
+        let record = self
+            .records
+            .entry(block_hash)
+            .or_insert_with(|| BlockProofRecord {
+                local: false,
+                acks: HashSet::new(),
+                first_seen_at: current_block,
+            });
         record.local = true;
     }
 
     /// Record a `ProofAck` from a peer for `block_hash`.
     pub fn record_ack(&mut self, block_hash: ShellHash, holder: Address, current_block: u64) {
-        let record = self.records.entry(block_hash).or_insert_with(|| BlockProofRecord {
-            local: false,
-            acks: HashSet::new(),
-            first_seen_at: current_block,
-        });
+        let record = self
+            .records
+            .entry(block_hash)
+            .or_insert_with(|| BlockProofRecord {
+                local: false,
+                acks: HashSet::new(),
+                first_seen_at: current_block,
+            });
         record.acks.insert(holder);
     }
 
@@ -115,9 +124,8 @@ impl ProofAvailabilityTracker {
     /// Remove records for blocks older than `availability_timeout_blocks`.
     pub fn gc(&mut self, current_block: u64) {
         let timeout = self.config.availability_timeout_blocks;
-        self.records.retain(|_, r| {
-            current_block <= r.first_seen_at + timeout + 10
-        });
+        self.records
+            .retain(|_, r| current_block <= r.first_seen_at + timeout + 10);
     }
 
     /// Number of tracked blocks.
@@ -139,8 +147,12 @@ mod tests {
     use super::*;
     use shell_primitives::{Address, ShellHash};
 
-    fn hash(n: u8) -> ShellHash { ShellHash::from([n; 32]) }
-    fn addr(n: u8) -> Address { Address::from([n; 20]) }
+    fn hash(n: u8) -> ShellHash {
+        ShellHash::from([n; 32])
+    }
+    fn addr(n: u8) -> Address {
+        Address::from([n; 20])
+    }
 
     fn tracker() -> ProofAvailabilityTracker {
         ProofAvailabilityTracker::new(AvailabilityConfig {
@@ -167,7 +179,10 @@ mod tests {
         let mut t = tracker();
         t.record_local_proof(hash(1), 0);
         t.record_ack(hash(1), addr(1), 0);
-        assert!(matches!(t.availability(&hash(1), 0), ProofAvailability::Available { ack_count: 2 }));
+        assert!(matches!(
+            t.availability(&hash(1), 0),
+            ProofAvailability::Available { ack_count: 2 }
+        ));
     }
 
     #[test]
@@ -175,7 +190,10 @@ mod tests {
         let mut t = tracker();
         t.record_ack(hash(1), addr(1), 0);
         t.record_ack(hash(1), addr(2), 0);
-        assert!(matches!(t.availability(&hash(1), 0), ProofAvailability::Available { ack_count: 2 }));
+        assert!(matches!(
+            t.availability(&hash(1), 0),
+            ProofAvailability::Available { ack_count: 2 }
+        ));
     }
 
     #[test]
@@ -190,8 +208,11 @@ mod tests {
     fn unavailable_after_timeout() {
         let mut t = tracker();
         t.record_local_proof(hash(1), 0); // only 1 holder
-        // Advance past timeout.
-        assert_eq!(t.availability(&hash(1), 101), ProofAvailability::Unavailable);
+                                          // Advance past timeout.
+        assert_eq!(
+            t.availability(&hash(1), 101),
+            ProofAvailability::Unavailable
+        );
     }
 
     #[test]

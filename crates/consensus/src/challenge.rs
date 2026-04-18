@@ -66,7 +66,13 @@ impl ProofChallenge {
         challenger: Address,
         sequence: u64,
     ) -> Self {
-        Self { block_hash, block_number, reason, challenger, sequence }
+        Self {
+            block_hash,
+            block_number,
+            reason,
+            challenger,
+            sequence,
+        }
     }
 }
 
@@ -100,13 +106,8 @@ mod tests {
 
     #[test]
     fn proof_challenge_round_trip_serialization() {
-        let challenge = ProofChallenge::new(
-            hash(1),
-            42,
-            ChallengeReason::VerificationFailed,
-            addr(2),
-            7,
-        );
+        let challenge =
+            ProofChallenge::new(hash(1), 42, ChallengeReason::VerificationFailed, addr(2), 7);
         let json = serde_json::to_string(&challenge).unwrap();
         let decoded: ProofChallenge = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.block_hash, challenge.block_hash);
@@ -132,10 +133,22 @@ mod tests {
 
     #[test]
     fn challenge_reason_display() {
-        assert_eq!(ChallengeReason::VerificationFailed.to_string(), "verification-failed");
-        assert_eq!(ChallengeReason::BlockNotFound.to_string(), "block-not-found");
-        assert_eq!(ChallengeReason::MalformedPayload.to_string(), "malformed-payload");
-        assert_eq!(ChallengeReason::StateRootMismatch.to_string(), "state-root-mismatch");
+        assert_eq!(
+            ChallengeReason::VerificationFailed.to_string(),
+            "verification-failed"
+        );
+        assert_eq!(
+            ChallengeReason::BlockNotFound.to_string(),
+            "block-not-found"
+        );
+        assert_eq!(
+            ChallengeReason::MalformedPayload.to_string(),
+            "malformed-payload"
+        );
+        assert_eq!(
+            ChallengeReason::StateRootMismatch.to_string(),
+            "state-root-mismatch"
+        );
     }
 
     #[test]

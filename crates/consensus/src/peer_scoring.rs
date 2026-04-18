@@ -29,11 +29,15 @@ use std::collections::HashMap;
 pub struct PeerId(pub String);
 
 impl From<&str> for PeerId {
-    fn from(s: &str) -> Self { Self(s.to_string()) }
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
 }
 
 impl From<String> for PeerId {
-    fn from(s: String) -> Self { Self(s) }
+    fn from(s: String) -> Self {
+        Self(s)
+    }
 }
 
 /// Scoring deltas for prover-specific peer events.
@@ -86,7 +90,10 @@ pub struct PeerScorer {
 
 impl PeerScorer {
     pub fn new(config: PeerScoringConfig) -> Self {
-        Self { config, scores: HashMap::new() }
+        Self {
+            config,
+            scores: HashMap::new(),
+        }
     }
 
     /// Record an event for a peer, adjusting their score accordingly.
@@ -99,13 +106,19 @@ impl PeerScorer {
             PeerEvent::EquivocationDetected => self.config.delta_equivocation,
             PeerEvent::DuplicateMessage => self.config.delta_duplicate_message,
         };
-        let score = self.scores.entry(peer.clone()).or_insert(self.config.initial_score);
+        let score = self
+            .scores
+            .entry(peer.clone())
+            .or_insert(self.config.initial_score);
         *score = (*score + delta).min(self.config.max_score);
     }
 
     /// Get the current score for a peer (returns `initial_score` if unseen).
     pub fn score(&self, peer: &PeerId) -> i64 {
-        self.scores.get(peer).copied().unwrap_or(self.config.initial_score)
+        self.scores
+            .get(peer)
+            .copied()
+            .unwrap_or(self.config.initial_score)
     }
 
     /// Whether a peer's score is below the disconnect threshold.
@@ -145,7 +158,9 @@ impl PeerScorer {
 mod tests {
     use super::*;
 
-    fn peer(s: &str) -> PeerId { PeerId(s.to_string()) }
+    fn peer(s: &str) -> PeerId {
+        PeerId(s.to_string())
+    }
 
     fn scorer() -> PeerScorer {
         PeerScorer::new(PeerScoringConfig::default())

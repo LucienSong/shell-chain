@@ -27,8 +27,8 @@ use shell_storage::{
 use crate::config::{NodeConfig, NodeRole};
 use crate::error::NodeError;
 use crate::metrics::Metrics;
-use crate::pruning::StateRootTracker;
 use crate::prover_service::{ProverConfig, ProverService, ProverServiceHandle};
+use crate::pruning::StateRootTracker;
 
 use shell_stark_prover::{
     prover::{verify_sig_batch, SigBatchEntry},
@@ -420,11 +420,7 @@ impl<S: KvStore + 'static> Node<S> {
         {
             let mut wpruner = self.witness_pruner.write();
             if !wpruner.is_archive() {
-                match wpruner.prune_before(
-                    block_number,
-                    &self.chain_store,
-                    &self.witness_store,
-                ) {
+                match wpruner.prune_before(block_number, &self.chain_store, &self.witness_store) {
                     Ok(result) => {
                         if result.pruned_count > 0 {
                             tracing::info!(
@@ -1329,8 +1325,7 @@ impl<S: KvStore + 'static> Node<S> {
         // already produced a block at this height. If so, this is a double-sign event.
         // We detect by comparing against the block we have at `incoming` number.
         if let Ok(Some(existing)) = self.chain_store.get_block_by_number(incoming) {
-            if existing.hash() != block.hash()
-                && existing.header.proposer == block.header.proposer
+            if existing.hash() != block.hash() && existing.header.proposer == block.header.proposer
             {
                 let slash_record = detect_double_sign(&existing.header, &block.header);
                 if let Some(record) = slash_record {
@@ -1562,7 +1557,8 @@ impl<S: KvStore + 'static> Node<S> {
                 let mut tx_for_validation = tx.clone();
                 if tx_for_validation.pubkey_mode.is_reference() {
                     if let Some(pk) = validation_pubkeys.get(&tx.from) {
-                        tx_for_validation.pubkey_mode = shell_core::PubkeyMode::Embedded(pk.clone());
+                        tx_for_validation.pubkey_mode =
+                            shell_core::PubkeyMode::Embedded(pk.clone());
                     }
                 }
 
@@ -1717,9 +1713,17 @@ impl<S: KvStore + 'static> Node<S> {
                 .collect();
             if !entries.is_empty() {
                 let n = entries.len();
-                let task = ProofTask { block_hash: *block_hash.0, block_number, entries };
+                let task = ProofTask {
+                    block_hash: *block_hash.0,
+                    block_number,
+                    entries,
+                };
                 self.proof_backlog.lock().push(task);
-                debug!(block = block_number, n_entries = n, "H4: Pushed proof task for standalone prover");
+                debug!(
+                    block = block_number,
+                    n_entries = n,
+                    "H4: Pushed proof task for standalone prover"
+                );
             }
         }
 
@@ -2480,7 +2484,9 @@ mod tests {
             max_fee_per_blob_gas: None,
             blob_versioned_hashes: None,
         };
-        let sig0 = tx_signer.sign(tx0.hash().0.as_slice()).expect("sign failed");
+        let sig0 = tx_signer
+            .sign(tx0.hash().0.as_slice())
+            .expect("sign failed");
         let signed0 =
             SignedTransaction::with_pubkey(sender, tx0, sig0, tx_signer.public_key().to_vec());
 
@@ -2499,7 +2505,9 @@ mod tests {
             max_fee_per_blob_gas: None,
             blob_versioned_hashes: None,
         };
-        let sig1 = tx_signer.sign(tx1.hash().0.as_slice()).expect("sign failed");
+        let sig1 = tx_signer
+            .sign(tx1.hash().0.as_slice())
+            .expect("sign failed");
         let signed1 = SignedTransaction::new(sender, tx1, sig1);
 
         let mut ws = leader.world_state.write();
@@ -2590,7 +2598,9 @@ mod tests {
             blob_versioned_hashes: None,
         };
         // Sign tx0 properly so sig is structurally valid (error occurs before sig verify)
-        let sig0 = tx_signer.sign(tx0.hash().0.as_slice()).expect("sign failed");
+        let sig0 = tx_signer
+            .sign(tx0.hash().0.as_slice())
+            .expect("sign failed");
         let signed0 = SignedTransaction::new(sender, tx0, sig0); // Reference mode
 
         // TX₁: Embedded — has the key, but comes too late
@@ -2608,12 +2618,18 @@ mod tests {
             max_fee_per_blob_gas: None,
             blob_versioned_hashes: None,
         };
-        let sig1 = tx_signer.sign(tx1.hash().0.as_slice()).expect("sign failed");
+        let sig1 = tx_signer
+            .sign(tx1.hash().0.as_slice())
+            .expect("sign failed");
         let signed1 =
             SignedTransaction::with_pubkey(sender, tx1, sig1, tx_signer.public_key().to_vec());
 
         // Build a minimally valid block (proposer_seal=None is allowed in M1b)
-        let genesis_hash = node.chain_store.get_head_hash().unwrap().expect("genesis head");
+        let genesis_hash = node
+            .chain_store
+            .get_head_hash()
+            .unwrap()
+            .expect("genesis head");
         let bad_block = shell_core::Block {
             header: shell_core::BlockHeader {
                 parent_hash: genesis_hash,
@@ -2958,9 +2974,7 @@ mod tests {
         let signer = Arc::new(signer) as Arc<dyn Signer>;
 
         // Spawn the event loop in a background task.
-        let handle = tokio::spawn(async move {
-            node_clone.run(signer, &mut network).await
-        });
+        let handle = tokio::spawn(async move { node_clone.run(signer, &mut network).await });
 
         // Wait for at least 3 blocks to be produced (~3s with 1s block_time).
         tokio::time::sleep(Duration::from_secs(5)).await;
@@ -3741,9 +3755,17 @@ mod tests {
         store_genesis(&node);
 
         // Build a minimal bundle and compute its root.
-        let sig = PQSignature { sig_type: SignatureType::Dilithium3, data: vec![0xAA; 16] };
-        let witness = TxWitness { signature: sig, pubkey: None };
-        let bundle = WitnessBundle { witnesses: vec![witness] };
+        let sig = PQSignature {
+            sig_type: SignatureType::Dilithium3,
+            data: vec![0xAA; 16],
+        };
+        let witness = TxWitness {
+            signature: sig,
+            pubkey: None,
+        };
+        let bundle = WitnessBundle {
+            witnesses: vec![witness],
+        };
         let root = bundle.compute_root();
 
         // Store the bundle before the block hash exists — we need the future hash.
@@ -3770,9 +3792,17 @@ mod tests {
         let block_hash = block.hash();
 
         // Store a bundle whose root does NOT match wrong_root.
-        let sig = PQSignature { sig_type: SignatureType::Dilithium3, data: vec![0xBB; 16] };
-        let witness = TxWitness { signature: sig, pubkey: None };
-        let bundle = WitnessBundle { witnesses: vec![witness] };
+        let sig = PQSignature {
+            sig_type: SignatureType::Dilithium3,
+            data: vec![0xBB; 16],
+        };
+        let witness = TxWitness {
+            signature: sig,
+            pubkey: None,
+        };
+        let bundle = WitnessBundle {
+            witnesses: vec![witness],
+        };
         // Verify the bundle root is not wrong_root.
         assert_ne!(bundle.compute_root(), wrong_root);
         node.witness_store.put_bundle(&block_hash, &bundle).unwrap();
@@ -3815,9 +3845,7 @@ mod tests {
 
     /// Create and fund a test account with a Dilithium key.
     /// Returns (signer, address, pubkey).
-    fn make_stark_account(
-        node: &Node<MemoryDb>,
-    ) -> (DilithiumSigner, Address, Vec<u8>) {
+    fn make_stark_account(node: &Node<MemoryDb>) -> (DilithiumSigner, Address, Vec<u8>) {
         let signer = DilithiumSigner::generate();
         let pubkey = signer.public_key().to_vec();
         let address = Address::from_public_key(&pubkey, signer.sig_type().as_u8());
@@ -3882,18 +3910,25 @@ mod tests {
 
         for block_idx in 0..NUM_BLOCKS {
             let start = block_idx * TXS_PER_BLOCK;
-            for (i, (signer, addr, pubkey)) in all_accounts[start..start + TXS_PER_BLOCK].iter().enumerate() {
+            for (i, (signer, addr, pubkey)) in all_accounts[start..start + TXS_PER_BLOCK]
+                .iter()
+                .enumerate()
+            {
                 // Use a unique value (global index) to avoid tx hash collisions
                 // since the hash is derived from tx fields, not from/pubkey.
                 let global_idx = (start + i + 1) as u64;
                 let tx = make_embedded_tx(signer, *addr, pubkey.clone(), 0, global_idx);
                 let verifier = MultiVerifier;
                 let mut ws = node.world_state.write();
-                node.tx_pool.insert(tx, &mut ws, node.chain_store.as_ref(), &verifier).unwrap();
+                node.tx_pool
+                    .insert(tx, &mut ws, node.chain_store.as_ref(), &verifier)
+                    .unwrap();
                 drop(ws);
             }
 
-            let block = node.produce_block(&proposer_signer, TXS_PER_BLOCK + 10).unwrap();
+            let block = node
+                .produce_block(&proposer_signer, TXS_PER_BLOCK + 10)
+                .unwrap();
             let block_num = block.number();
             let tx_count = block.transactions.len();
             let backlog_depth = node.proof_backlog.lock().len();
@@ -3941,14 +3976,31 @@ mod tests {
 
         println!("║");
         println!("║  ── Compression Analysis (batch={TXS_PER_BLOCK} txs) ──────────────────────");
-        println!("║  Raw block size (embedded): {} bytes ({:.1} KB)", raw_per_block, raw_per_block as f64 / 1024.0);
-        println!("║    ├─ pubkeys: {} bytes ({} × {} B)", pubkey_data_per_block, TXS_PER_BLOCK, DILITHIUM3_PUBKEY_LEN);
-        println!("║    └─ signatures: {} bytes ({} × {} B)", sig_data_per_block, TXS_PER_BLOCK, DILITHIUM3_SIG_LEN);
-        println!("║  STARK proof (estimated): {estimated_proof_size} bytes ({:.1} KB)", estimated_proof_size as f64 / 1024.0);
+        println!(
+            "║  Raw block size (embedded): {} bytes ({:.1} KB)",
+            raw_per_block,
+            raw_per_block as f64 / 1024.0
+        );
+        println!(
+            "║    ├─ pubkeys: {} bytes ({} × {} B)",
+            pubkey_data_per_block, TXS_PER_BLOCK, DILITHIUM3_PUBKEY_LEN
+        );
+        println!(
+            "║    └─ signatures: {} bytes ({} × {} B)",
+            sig_data_per_block, TXS_PER_BLOCK, DILITHIUM3_SIG_LEN
+        );
+        println!(
+            "║  STARK proof (estimated): {estimated_proof_size} bytes ({:.1} KB)",
+            estimated_proof_size as f64 / 1024.0
+        );
         println!("║  Compression ratio (sig+pubkey → proof): {compression_ratio:.1}×");
-        println!("║  Space saved per block: {} bytes ({:.1} KB)",
+        println!(
+            "║  Space saved per block: {} bytes ({:.1} KB)",
             (pubkey_data_per_block + sig_data_per_block).saturating_sub(estimated_proof_size),
-            (pubkey_data_per_block + sig_data_per_block).saturating_sub(estimated_proof_size) as f64 / 1024.0);
+            (pubkey_data_per_block + sig_data_per_block).saturating_sub(estimated_proof_size)
+                as f64
+                / 1024.0
+        );
         println!("╚═══════════════════════════════════════════════════════════════╝\n");
 
         // Sanity: compression should be significant for any realistic batch size.
@@ -3976,7 +4028,9 @@ mod tests {
             let tx = make_embedded_tx(signer, *addr, pubkey.clone(), 0, (i + 1) as u64);
             let verifier = MultiVerifier;
             let mut ws = node.world_state.write();
-            node.tx_pool.insert(tx, &mut ws, node.chain_store.as_ref(), &verifier).unwrap();
+            node.tx_pool
+                .insert(tx, &mut ws, node.chain_store.as_ref(), &verifier)
+                .unwrap();
             drop(ws);
         }
 
@@ -4037,9 +4091,18 @@ mod tests {
 
         println!("\n╔══ STARK ProverService Test ════════════════════════════════════╗");
         println!("║  Block #{block_num}: {TXS} embedded txs → proof generated & stored");
-        println!("║  Proof size: {proof_size} bytes ({:.1} KB)", proof_size as f64 / 1024.0);
-        println!("║  Raw sig+pubkey: {raw_sig_pubkey_size} bytes ({:.1} KB)", raw_sig_pubkey_size as f64 / 1024.0);
-        println!("║  Actual compression: {:.1}×", raw_sig_pubkey_size as f64 / proof_size as f64);
+        println!(
+            "║  Proof size: {proof_size} bytes ({:.1} KB)",
+            proof_size as f64 / 1024.0
+        );
+        println!(
+            "║  Raw sig+pubkey: {raw_sig_pubkey_size} bytes ({:.1} KB)",
+            raw_sig_pubkey_size as f64 / 1024.0
+        );
+        println!(
+            "║  Actual compression: {:.1}×",
+            raw_sig_pubkey_size as f64 / proof_size as f64
+        );
         println!("╚════════════════════════════════════════════════════════════════╝\n");
 
         assert!(proof_size > 0, "proof must be non-empty");
