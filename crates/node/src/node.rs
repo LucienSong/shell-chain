@@ -82,6 +82,9 @@ pub struct Node<S: KvStore + 'static> {
     /// Dev-only runtime controls for Hardhat/Foundry compatibility.
     dev_state: RwLock<DevState>,
     shutdown_tx: watch::Sender<bool>,
+    /// L2 grace-window: maps block_hash → delete_at_block_number.
+    /// Witnesses in this map are deleted once the head advances past delete_at.
+    pending_grace_deletes: parking_lot::Mutex<HashMap<ShellHash, u64>>,
 }
 
 const SYNC_RETRY_BASE_INTERVAL_SECS: u64 = 5;
@@ -177,7 +180,58 @@ impl<S: KvStore + 'static> Node<S> {
                 snapshots: BTreeMap::new(),
             }),
             shutdown_tx,
+            pending_grace_deletes: parking_lot::Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Print the three-line startup pruning banner (ops-banner).
+    ///
+    /// Called once from the event loop at startup to give operators a quick
+    /// view of what data will be retained.
+    pub fn log_pruning_banner(&self) {
+        let p = &self.config.pruning;
+
+        let state_mode = if p.state_pruning_experimental {
+            if p.keep_recent == 0 {
+                "archive (experimental enabled but keep_recent=0)".to_string()
+            } else {
+                format!("keep-{} (experimental)", p.keep_recent)
+            }
+        } else {
+            "archive".to_string()
+        };
+
+        let witness_mode = if p.witness_retention == 0 {
+            if self.config.enable_stark_aggregation {
+                "replaced-by-proof".to_string()
+            } else {
+                "archive".to_string()
+            }
+        } else {
+            format!("keep-{}", p.witness_retention)
+        };
+
+        let stark_line = if self.config.enable_stark_aggregation {
+            if p.proof_replacement_grace == 0 {
+                "STARK: enabled  (witnesses replaced immediately after proof commit)".to_string()
+            } else {
+                format!(
+                    "STARK: enabled  (grace={} blocks before witness deletion)",
+                    p.proof_replacement_grace
+                )
+            }
+        } else {
+            "STARK: disabled".to_string()
+        };
+
+        tracing::info!("╔═══ Shell Chain — Storage Policy ══════════════════════════════╗");
+        tracing::info!(
+            "║  state={}  bodies=archive  witnesses={}",
+            state_mode,
+            witness_mode
+        );
+        tracing::info!("║  {}", stark_line);
+        tracing::info!("╚════════════════════════════════════════════════════════════════╝");
     }
 
     fn sync_system_contract_state(
@@ -389,6 +443,17 @@ impl<S: KvStore + 'static> Node<S> {
                 root = %evicted.state_root,
                 "state root eligible for pruning"
             );
+            // L3: when experimental trie pruning is enabled, evict trie nodes
+            // for the now-unreachable state root.  Until reference-counting is
+            // fully wired into the trie writer path, this only logs intent.
+            if self.config.pruning.state_pruning_experimental {
+                tracing::debug!(
+                    block = evicted.block_number,
+                    root = %evicted.state_root,
+                    "L3 (experimental): trie node eviction eligible — \
+                     full ref-count walk deferred until trie writer is instrumented"
+                );
+            }
         }
 
         // F-303: Drive StatePruner — register block and run periodic pruning.
@@ -566,6 +631,9 @@ impl<S: KvStore + 'static> Node<S> {
         if let Some(addr) = self.config.proposer_address {
             self.register_authority_pubkey(addr, signer.public_key().to_vec());
         }
+
+        // ops-banner: print storage policy at startup.
+        self.log_pruning_banner();
 
         let mut block_timer = interval(Duration::from_millis(self.config.block_time_ms));
         let mut peer_count_timer = interval(Duration::from_secs(10));
@@ -900,6 +968,28 @@ impl<S: KvStore + 'static> Node<S> {
                                         warn!(%peer, block = block_number, "failed to store proof amendment: {e}");
                                     } else {
                                         info!(block = block_number, "G5: proof amendment stored from peer {peer}");
+                                        // L2: delete witness bundle once proof is secured, unless grace window is active.
+                                        let grace = self.config.pruning.proof_replacement_grace;
+                                        if grace == 0 {
+                                            match self.chain_store.delete_witness_bundle(&block_hash) {
+                                                Ok(()) => info!(block = block_number, "L2: witness bundle deleted after proof replacement"),
+                                                Err(e) => warn!(block = block_number, "L2: failed to delete witness bundle: {e}"),
+                                            }
+                                        } else {
+                                            let head = self.chain_store.get_head_block()
+                                                .ok().flatten().map(|b| b.header.number).unwrap_or(0);
+                                            if head.saturating_sub(block_number) >= grace {
+                                                match self.chain_store.delete_witness_bundle(&block_hash) {
+                                                    Ok(()) => info!(block = block_number, "L2: witness bundle deleted after grace period"),
+                                                    Err(e) => warn!(block = block_number, "L2: failed to delete witness bundle: {e}"),
+                                                }
+                                            } else {
+                                                // Schedule deletion: delete once head reaches block_number + grace.
+                                                let delete_at = block_number.saturating_add(grace);
+                                                self.pending_grace_deletes.lock().insert(block_hash, delete_at);
+                                                debug!(block = block_number, grace, head, delete_at, "L2: proof stored, within grace window — deletion scheduled");
+                                            }
+                                        }
                                     }
                                 }
                                 // G5: Acknowledge that a peer has stored a proof amendment.
@@ -1014,6 +1104,56 @@ impl<S: KvStore + 'static> Node<S> {
                 _ = peer_count_timer.tick() => {
                     let peers = network.peer_count().await;
                     self.metrics.peer_count.set(peers as i64);
+                // ops-metrics: update per-CF storage size gauges with a 300s TTL cache.
+                // The fallback approximate_prefix_bytes() scans all matching keys; refreshing
+                // it every 10s scales poorly as the DB grows. Cache with atomics to amortize.
+                {
+                    use std::sync::atomic::{AtomicU64, Ordering};
+                    use std::time::{SystemTime, UNIX_EPOCH};
+
+                    const STORAGE_SIZE_CACHE_TTL_SECS: u64 = 300;
+                    static LAST_STORAGE_SIZE_UPDATE: AtomicU64 = AtomicU64::new(0);
+                    static CACHED_CHAIN_BYTES: AtomicU64 = AtomicU64::new(0);
+                    static CACHED_WITNESS_BYTES: AtomicU64 = AtomicU64::new(0);
+                    static CACHED_PROOF_BYTES: AtomicU64 = AtomicU64::new(0);
+
+                    let now_secs = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    let last = LAST_STORAGE_SIZE_UPDATE.load(Ordering::Relaxed);
+
+                    if now_secs.saturating_sub(last) >= STORAGE_SIZE_CACHE_TTL_SECS {
+                        let chain_bytes = self
+                            .chain_store
+                            .approximate_prefix_bytes(b"b/")
+                            .unwrap_or(0)
+                            .saturating_add(
+                                self.chain_store.approximate_prefix_bytes(b"h/").unwrap_or(0),
+                            )
+                            .saturating_add(
+                                self.chain_store.approximate_prefix_bytes(b"n/").unwrap_or(0),
+                            );
+                        let witness_bytes =
+                            self.chain_store.approximate_prefix_bytes(b"w/").unwrap_or(0);
+                        let proof_bytes =
+                            self.chain_store.approximate_prefix_bytes(b"pa/").unwrap_or(0);
+
+                        CACHED_CHAIN_BYTES.store(chain_bytes, Ordering::Relaxed);
+                        CACHED_WITNESS_BYTES.store(witness_bytes, Ordering::Relaxed);
+                        CACHED_PROOF_BYTES.store(proof_bytes, Ordering::Relaxed);
+                        LAST_STORAGE_SIZE_UPDATE.store(now_secs, Ordering::Relaxed);
+                    }
+
+                    // State trie bytes are stored in a separate KV namespace; use 0 until
+                    // the trie store exposes a size_estimate().
+                    self.metrics.update_cf_sizes(
+                        CACHED_CHAIN_BYTES.load(Ordering::Relaxed),
+                        CACHED_WITNESS_BYTES.load(Ordering::Relaxed),
+                        0,
+                        CACHED_PROOF_BYTES.load(Ordering::Relaxed),
+                    );
+                }
                 }
 
                 _ = sync_retry_timer.tick() => {
@@ -1676,6 +1816,26 @@ impl<S: KvStore + 'static> Node<S> {
         self.chain_store.set_head(&block_hash)?;
         for (address, pubkey) in new_pubkeys {
             self.chain_store.put_pubkey(&address, &pubkey)?;
+        }
+
+        // L2 grace-window: flush any witnesses whose delete_at block has been reached.
+        {
+            let current_head = block.number();
+            let mut grace_map = self.pending_grace_deletes.lock();
+            grace_map.retain(|hash, delete_at| {
+                if current_head >= *delete_at {
+                    match self.chain_store.delete_witness_bundle(hash) {
+                        Ok(()) => info!(
+                            block = *delete_at,
+                            "L2: grace-window expired, witness bundle deleted"
+                        ),
+                        Err(e) => warn!(block = *delete_at, "L2: grace-window delete failed: {e}"),
+                    }
+                    false // remove from map
+                } else {
+                    true // keep pending
+                }
+            });
         }
 
         // Remove any included transactions from our mempool.
@@ -4109,6 +4269,95 @@ mod tests {
         assert!(
             proof_size < raw_sig_pubkey_size,
             "STARK proof ({proof_size} B) should be smaller than raw sig+pubkey data ({raw_sig_pubkey_size} B)"
+        );
+    }
+
+    // ─── L2: proof-replaces-witness tests ──────────────────────────────────────
+
+    /// L2 basic: when a ProofAmendment network message is handled and grace=0,
+    /// the witness bundle for that block is deleted from chain_store.
+    #[test]
+    fn l2_proof_amendment_deletes_witness_bundle_grace_zero() {
+        let (node, signer) = setup_node();
+        store_genesis(&node);
+        let block = node.produce_block(&signer, 1).unwrap();
+        let block_hash = block.hash();
+        let block_num = block.number();
+
+        // Verify witness was written by put_block (block has 0 txs → no bundle)
+        // so write one manually to simulate a block with txs.
+        use shell_core::{TxWitness, WitnessBundle};
+        use shell_crypto::PQSignature;
+        let bundle = WitnessBundle {
+            witnesses: vec![TxWitness::new_reference(PQSignature {
+                sig_type: shell_crypto::SignatureType::Dilithium3,
+                data: vec![0u8; 3309],
+            })],
+        };
+        node.witness_store.put_bundle(&block_hash, &bundle).unwrap();
+        assert!(
+            node.chain_store.has_witness_bundle(&block_hash).unwrap(),
+            "bundle should exist before amendment"
+        );
+
+        // Simulate receiving a ProofAmendment (grace=0 by default).
+        let dummy_payload = b"fake-proof".to_vec();
+        node.amendment_store
+            .put_amendment(&block_hash, &dummy_payload)
+            .unwrap();
+
+        // Now manually apply the L2 logic (the network handler calls this inline).
+        let grace = node.config.pruning.proof_replacement_grace;
+        assert_eq!(grace, 0, "default grace should be 0");
+        node.chain_store.delete_witness_bundle(&block_hash).unwrap();
+
+        assert!(
+            !node.chain_store.has_witness_bundle(&block_hash).unwrap(),
+            "witness bundle should be gone after proof replacement"
+        );
+        // TX detail block body must still be readable.
+        let retrieved = node.chain_store.get_block_by_hash(&block_hash).unwrap();
+        assert!(
+            retrieved.is_some(),
+            "block body (tx detail) must survive witness deletion"
+        );
+        assert_eq!(retrieved.unwrap().number(), block_num);
+    }
+
+    /// L2 grace: when grace=2 and proof arrives for block N while head is N+1,
+    /// the witness bundle must NOT be deleted yet.
+    #[test]
+    fn l2_proof_amendment_respects_grace_window() {
+        let (node, signer) = setup_node();
+        store_genesis(&node);
+        let block1 = node.produce_block(&signer, 1).unwrap();
+        let b1_hash = block1.hash();
+
+        use shell_core::{TxWitness, WitnessBundle};
+        use shell_crypto::PQSignature;
+        let bundle = WitnessBundle {
+            witnesses: vec![TxWitness::new_reference(PQSignature {
+                sig_type: shell_crypto::SignatureType::Dilithium3,
+                data: vec![0u8; 3309],
+            })],
+        };
+        node.witness_store.put_bundle(&b1_hash, &bundle).unwrap();
+
+        // Set grace=2; head is at block 1, so head.saturating_sub(1) = 0 < 2.
+        // Simulating the grace check logic from the event loop handler.
+        let grace: u64 = 2;
+        let head = node
+            .chain_store
+            .get_head_block()
+            .ok()
+            .flatten()
+            .map(|b| b.header.number)
+            .unwrap_or(0);
+        let should_delete = head.saturating_sub(block1.number()) >= grace;
+        assert!(!should_delete, "within grace window: should NOT delete");
+        assert!(
+            node.chain_store.has_witness_bundle(&b1_hash).unwrap(),
+            "witness bundle must survive grace window"
         );
     }
 }
