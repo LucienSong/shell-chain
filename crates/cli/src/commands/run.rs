@@ -17,7 +17,7 @@ use shell_keystore::{decrypt, EncryptedKey};
 use shell_mempool::MempoolConfig;
 use shell_network::{NetworkBus, NetworkConfig};
 use shell_node::config::NodeConfig;
-use shell_node::pruning::PruningConfig;
+use shell_node::pruning::StorageProfile;
 use shell_primitives::{Address, ShellHash};
 use shell_rpc::RpcConfig;
 use shell_storage::{ChainStore, KvStore, MemoryDb, WorldState};
@@ -65,10 +65,14 @@ pub struct RunArgs {
     pub parallel_evm: bool,
     /// Number of worker threads for the parallel-EVM scheduler (default: logical CPUs).
     pub parallel_evm_workers: Option<usize>,
-    /// Number of recent blocks whose witness bundles are retained (0 = archive, default: 128).
-    pub witness_retention: u64,
-    /// Number of recent blocks whose full bodies are retained (0 = archive, default: 512).
-    pub body_retention: u64,
+    /// Override witness bundle retention from the storage profile.
+    /// `0` = keep forever. Omit to use the storage profile default.
+    pub witness_retention: Option<u64>,
+    /// Override body (TX detail) retention from the storage profile.
+    /// `0` = keep forever. Omit to use the storage profile default.
+    pub body_retention: Option<u64>,
+    /// High-level storage profile: "archive", "full", or "light".
+    pub storage_profile: String,
     /// Enable STARK aggregate proof generation during block production (off by default).
     pub enable_stark_aggregation: bool,
 }
@@ -496,12 +500,26 @@ async fn run_with_store<S: KvStore + 'static>(
         proposer_address: Some(authority),
         block_time_ms: args.block_time,
         data_dir: args.datadir.to_string_lossy().into(),
-        pruning: PruningConfig {
-            keep_recent: args.pruning,
-            witness_retention: args.witness_retention,
-            body_retention: args.body_retention,
-            proof_replacement_grace: 100,
-            state_pruning_experimental: false,
+        pruning: {
+            let profile = args
+                .storage_profile
+                .parse::<StorageProfile>()
+                .unwrap_or_else(|e| {
+                    warn!("Invalid --storage-profile value: {e}. Falling back to 'full'.");
+                    StorageProfile::Full
+                });
+            profile.to_pruning_config(
+                args.body_retention,
+                args.witness_retention,
+                // Pass None when --pruning is at default (0) so storage profiles
+                // can apply their own keep_recent defaults (e.g. light = 4096).
+                // An explicit non-zero --pruning flag overrides the profile.
+                if args.pruning == 0 {
+                    None
+                } else {
+                    Some(args.pruning)
+                },
+            )
         },
         metrics: shell_node::config::MetricsConfig {
             enabled: true,
@@ -571,8 +589,9 @@ async fn run_with_store<S: KvStore + 'static>(
             } else {
                 eprintln!("   Pruning:     archive (keep all)");
             }
-            if args.body_retention > 0 {
-                eprintln!("   Bodies:      keep last {} blocks", args.body_retention);
+            let body_ret = args.body_retention.unwrap_or(0);
+            if body_ret > 0 {
+                eprintln!("   Bodies:      keep last {} blocks", body_ret);
             } else {
                 eprintln!("   Bodies:      archive (keep all)");
             }
@@ -633,8 +652,11 @@ async fn run_with_store<S: KvStore + 'static>(
         } else {
             eprintln!("   Pruning:     archive (keep all)");
         }
-        if args.body_retention > 0 {
-            eprintln!("   Bodies:      keep last {} blocks", args.body_retention);
+        if args.body_retention.is_some_and(|v| v > 0) {
+            eprintln!(
+                "   Bodies:      keep last {} blocks",
+                args.body_retention.unwrap()
+            );
         } else {
             eprintln!("   Bodies:      archive (keep all)");
         }
@@ -718,8 +740,9 @@ mod tests {
             state_cache_size_mb: None,
             parallel_evm: true,
             parallel_evm_workers: Some(4),
-            witness_retention: DEFAULT_WITNESS_RETENTION,
-            body_retention: DEFAULT_BODY_RETENTION,
+            witness_retention: Some(DEFAULT_WITNESS_RETENTION),
+            body_retention: Some(DEFAULT_BODY_RETENTION),
+            storage_profile: "full".into(),
             enable_stark_aggregation: false,
             network: "dev".into(),
         };

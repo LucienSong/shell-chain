@@ -28,7 +28,7 @@ use crate::config::{NodeConfig, NodeRole};
 use crate::error::NodeError;
 use crate::metrics::Metrics;
 use crate::prover_service::{ProverConfig, ProverService, ProverServiceHandle};
-use crate::pruning::StateRootTracker;
+use crate::pruning::{StateRootTracker, StorageProfile};
 
 use shell_stark_prover::{
     prover::{verify_sig_batch, SigBatchEntry},
@@ -81,6 +81,9 @@ pub struct Node<S: KvStore + 'static> {
     runtime_signer: RwLock<Option<Arc<dyn Signer>>>,
     /// Dev-only runtime controls for Hardhat/Foundry compatibility.
     dev_state: RwLock<DevState>,
+    /// L4: Peer storage capability tracker for historical body back-fill.
+    pub peer_caps: crate::historical_sync::PeerCapabilityTracker,
+    /// Shutdown signal sender; receivers can detect graceful shutdown.
     shutdown_tx: watch::Sender<bool>,
     /// L2 grace-window: maps block_hash → delete_at_block_number.
     /// Witnesses in this map are deleted once the head advances past delete_at.
@@ -180,6 +183,7 @@ impl<S: KvStore + 'static> Node<S> {
                 snapshots: BTreeMap::new(),
             }),
             shutdown_tx,
+            peer_caps: crate::historical_sync::PeerCapabilityTracker::new(),
             pending_grace_deletes: parking_lot::Mutex::new(HashMap::new()),
         }
     }
@@ -191,18 +195,31 @@ impl<S: KvStore + 'static> Node<S> {
     pub fn log_pruning_banner(&self) {
         let p = &self.config.pruning;
 
+        // Use the canonical classifier so banner + P2P capability stay consistent.
+        let profile_name = StorageProfile::from_pruning_config(p).as_str();
+
         let state_mode = if p.state_pruning_experimental {
             if p.keep_recent == 0 {
                 "archive (experimental enabled but keep_recent=0)".to_string()
             } else {
                 format!("keep-{} (experimental)", p.keep_recent)
             }
-        } else {
+        } else if p.keep_recent == 0 {
             "archive".to_string()
+        } else {
+            format!("keep-{}", p.keep_recent)
+        };
+
+        let body_mode = if p.body_retention == 0 {
+            "archive".to_string()
+        } else {
+            format!("keep-{}", p.body_retention)
         };
 
         let witness_mode = if p.witness_retention == 0 {
-            if self.config.enable_stark_aggregation {
+            if p.proof_replacement_grace == u64::MAX {
+                "archive (never replaced)".to_string()
+            } else if self.config.enable_stark_aggregation {
                 "replaced-by-proof".to_string()
             } else {
                 "archive".to_string()
@@ -212,7 +229,9 @@ impl<S: KvStore + 'static> Node<S> {
         };
 
         let stark_line = if self.config.enable_stark_aggregation {
-            if p.proof_replacement_grace == 0 {
+            if p.proof_replacement_grace == u64::MAX {
+                "STARK: enabled  (archive — witnesses kept after proof)".to_string()
+            } else if p.proof_replacement_grace == 0 {
                 "STARK: enabled  (witnesses replaced immediately after proof commit)".to_string()
             } else {
                 format!(
@@ -226,12 +245,61 @@ impl<S: KvStore + 'static> Node<S> {
 
         tracing::info!("╔═══ Shell Chain — Storage Policy ══════════════════════════════╗");
         tracing::info!(
-            "║  state={}  bodies=archive  witnesses={}",
+            "║  profile={}  state={}  bodies={}  witnesses={}",
+            profile_name,
             state_mode,
+            body_mode,
             witness_mode
         );
         tracing::info!("║  {}", stark_line);
         tracing::info!("╚════════════════════════════════════════════════════════════════╝");
+    }
+
+    /// Find the lowest block number whose body (`b/<hash>`) is still present.
+    ///
+    /// Used to populate the `oldest_body_block` field of `StorageCapability`.
+    /// Returns 0 if block 0 is available (or no blocks exist yet).
+    fn oldest_available_body_block(&self) -> u64 {
+        let head_number = self
+            .chain_store
+            .get_head_block()
+            .ok()
+            .flatten()
+            .map(|b| b.header.number)
+            .unwrap_or(0);
+
+        // Binary search for the first block that still has a body.
+        // Fall back to sequential scan if the range is small.
+        if head_number < 1024 {
+            for n in 0..=head_number {
+                if let Ok(Some(h)) = self.chain_store.get_block_hash_by_number(n) {
+                    if self.chain_store.has_body(&h).unwrap_or(false) {
+                        return n;
+                    }
+                }
+            }
+            return head_number;
+        }
+
+        // Binary search: find smallest n where has_body is true.
+        let mut lo = 0u64;
+        let mut hi = head_number;
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            let has = self
+                .chain_store
+                .get_block_hash_by_number(mid)
+                .ok()
+                .flatten()
+                .and_then(|h| self.chain_store.has_body(&h).ok())
+                .unwrap_or(false);
+            if has {
+                hi = mid;
+            } else {
+                lo = mid + 1;
+            }
+        }
+        lo
     }
 
     fn sync_system_contract_state(
@@ -674,6 +742,46 @@ impl<S: KvStore + 'static> Node<S> {
             );
         }
 
+        // L4: Advertise storage capability to the network so peers know what
+        // historical data this node holds.
+        {
+            let profile = StorageProfile::from_pruning_config(&self.config.pruning);
+            let oldest_body_block = self.oldest_available_body_block();
+            let cap_msg = NetworkMessage::StorageCapability {
+                profile: profile.as_str().to_string(),
+                oldest_body_block,
+            };
+            let _ = network.broadcast(cap_msg).await;
+            info!(
+                profile = profile.as_str(),
+                oldest_body_block, "L4: broadcasted storage capability"
+            );
+        }
+
+        // L4: After advertising capability, give peers a brief window to respond,
+        // then scan for missing bodies and issue the initial BodyRequest to kick
+        // off historical body back-fill on nodes that upgraded their storage profile.
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            if network.peer_count().await > 0 {
+                let oldest = self.oldest_available_body_block();
+                let head = self.head_number();
+                if oldest > 0 {
+                    // There are gaps — request bodies starting from the beginning.
+                    let _ = network
+                        .broadcast(NetworkMessage::BodyRequest {
+                            start_number: 0,
+                            count: 128,
+                        })
+                        .await;
+                    info!(
+                        oldest_available = oldest,
+                        head, "L4: kicked historical body back-fill startup scan"
+                    );
+                }
+            }
+        }
+
         loop {
             tokio::select! {
                 _ = block_timer.tick() => {
@@ -1050,6 +1158,100 @@ impl<S: KvStore + 'static> Node<S> {
                                         }
                                     }
                                 }
+                                // L4: Peer announces its storage capability.
+                                NetworkMessage::StorageCapability { profile, oldest_body_block } => {
+                                    debug!(%peer, profile, oldest_body_block, "L4: received StorageCapability");
+                                    self.peer_caps.record(peer.clone(), profile, oldest_body_block);
+                                }
+                                // L4: Peer requests block bodies for historical back-fill.
+                                NetworkMessage::BodyRequest { start_number, count } => {
+                                    debug!(%peer, start_number, count, "L4: received BodyRequest");
+                                    let end = start_number.saturating_add(count.min(128));
+                                    let mut blocks = Vec::new();
+                                    for n in start_number..end {
+                                        if let Ok(Some(block)) = self.chain_store.get_block_by_number(n) {
+                                            blocks.push(block);
+                                        } else {
+                                            break;
+                                        }
+                                    }
+                                    if !blocks.is_empty() {
+                                        // TODO(L4): BodyResponse should be unicast (peer-targeted).
+                                        // Broadcasting historical body data to all peers is wasteful
+                                        // and creates an amplification vector. Until the network layer
+                                        // exposes a send-to-peer API, we broadcast and rely on peers
+                                        // deduplicating via has_body() checks.
+                                        warn!(
+                                            %peer,
+                                            start_number,
+                                            count = blocks.len(),
+                                            "L4: serving BodyResponse via broadcast — unicast API needed to avoid amplification"
+                                        );
+                                        let _ = network.broadcast(NetworkMessage::BodyResponse { blocks }).await;
+                                    }
+                                }
+                                // L4: Receive block bodies from a peer as historical back-fill.
+                                NetworkMessage::BodyResponse { blocks } => {
+                                    debug!(%peer, count = blocks.len(), "L4: received BodyResponse");
+                                    let head_number = self.chain_store
+                                        .get_head_block()
+                                        .ok()
+                                        .flatten()
+                                        .map(|b| b.header.number)
+                                        .unwrap_or(0);
+                                    // Track the first block in this response so we can
+                                    // advance past a bad batch even if no block is stored.
+                                    let batch_start = blocks.first().map(|b| b.header.number);
+                                    let mut last_stored: Option<u64> = None;
+                                    // Track first gap (mismatch or storage failure) so we
+                                    // re-request from that point and don't silently skip blocks.
+                                    let mut first_gap: Option<u64> = None;
+                                    for block in &blocks {
+                                        let n = block.header.number;
+                                        // Validate block hash matches canonical chain before storing.
+                                        let expected_hash = self.chain_store
+                                            .get_block_hash_by_number(n)
+                                            .ok()
+                                            .flatten();
+                                        let actual_hash = block.hash();
+                                        if expected_hash.as_ref() != Some(&actual_hash) {
+                                            warn!(
+                                                block = n,
+                                                "L4: BodyResponse hash mismatch — skipping (peer may be malicious)"
+                                            );
+                                            first_gap.get_or_insert(n);
+                                            continue;
+                                        }
+                                        if self.chain_store.has_body(&actual_hash).unwrap_or(false) {
+                                            last_stored = Some(n);
+                                            continue;
+                                        }
+                                        if let Err(e) = self.chain_store.put_body_only(block) {
+                                            warn!(block = n, error = %e, "L4: failed to store backfill body");
+                                            first_gap.get_or_insert(n);
+                                        } else {
+                                            last_stored = Some(n);
+                                        }
+                                    }
+                                    // If any block failed (mismatch or store error), re-request from
+                                    // the first gap so missing blocks are never permanently skipped.
+                                    // If all succeeded, continue from last_stored + 1.
+                                    // If the entire batch was bad, skip it to avoid stalling.
+                                    let next_start = first_gap
+                                        .or_else(|| last_stored.map(|n| n + 1))
+                                        .or_else(|| batch_start.map(|s| s.saturating_add(128)));
+                                    if let Some(next) = next_start {
+                                        if next <= head_number {
+                                            // More blocks needed — request next batch.
+                                            let _ = network.broadcast(NetworkMessage::BodyRequest {
+                                                start_number: next,
+                                                count: 128,
+                                            }).await;
+                                        } else {
+                                            info!("L4: historical body back-fill complete");
+                                        }
+                                    }
+                                }
                             }
                         }
                         Some(NetworkEvent::PeerConnected(peer)) => {
@@ -1058,6 +1260,15 @@ impl<S: KvStore + 'static> Node<S> {
                             sync_retry_attempts_without_progress = 0;
                             sync_retry_timer
                                 .reset_after(Duration::from_secs(SYNC_RETRY_BASE_INTERVAL_SECS));
+                            // L4: re-advertise storage capability so newly connected peer knows.
+                            {
+                                let profile = StorageProfile::from_pruning_config(&self.config.pruning);
+                                let oldest = self.oldest_available_body_block();
+                                let _ = network.broadcast(NetworkMessage::StorageCapability {
+                                    profile: profile.as_str().to_string(),
+                                    oldest_body_block: oldest,
+                                }).await;
+                            }
                             self.request_missing_blocks(
                                 network,
                                 &mut sync_requested,
@@ -1067,6 +1278,7 @@ impl<S: KvStore + 'static> Node<S> {
                         }
                         Some(NetworkEvent::PeerDisconnected(peer)) => {
                             info!(%peer, "peer disconnected");
+                            self.peer_caps.remove(&peer);
                             sync_requested = false;
                             sync_retry_attempts_without_progress = 0;
                             sync_retry_timer

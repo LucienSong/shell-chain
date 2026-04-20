@@ -87,6 +87,50 @@ pub enum NetworkMessage {
     ProofChallenge(Box<ProofChallenge>),
     /// I2: Response to a `ProofChallenge` — provides raw proof bytes for re-verification.
     ProofChallengeResponse(Box<ChallengeResponse>),
+    /// Advertise this node's storage capability to a newly connected peer.
+    ///
+    /// Sent once after a peer connection is established.  Receivers use this
+    /// information to prefer archive/full peers when requesting historical data.
+    StorageCapability {
+        /// Human-readable profile name: "archive", "full", or "light".
+        profile: String,
+        /// Lowest block number whose body (`b/<hash>`) is still available locally.
+        /// `0` means all blocks from genesis are available.
+        oldest_body_block: u64,
+    },
+    /// Request missing block bodies (TX detail) for a range of block numbers.
+    ///
+    /// Used for historical body back-fill after a node upgrades its storage profile.
+    BodyRequest { start_number: u64, count: u64 },
+    /// Response carrying block bodies for a `BodyRequest`.
+    BodyResponse { blocks: Vec<Block> },
+}
+
+/// High-level topic classification for network message propagation.
+///
+/// Keeping this mapping alongside `NetworkMessage` makes it much harder for
+/// new variants to be silently unrouted by transport-specific code (e.g. libp2p).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetworkTopic {
+    /// Block and block-body propagation traffic.
+    Blocks,
+    /// Consensus and proof-related traffic.
+    Consensus,
+}
+
+impl NetworkMessage {
+    /// Returns the propagation topic for this message type.
+    ///
+    /// Returns `None` for messages that don't map to a specific topic
+    /// (handled by transport-specific routing logic).
+    pub const fn topic(&self) -> Option<NetworkTopic> {
+        match self {
+            Self::StorageCapability { .. }
+            | Self::BodyRequest { .. }
+            | Self::BodyResponse { .. } => Some(NetworkTopic::Blocks),
+            _ => None,
+        }
+    }
 }
 
 /// Events produced by the network layer for the node to process.
