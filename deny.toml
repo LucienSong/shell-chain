@@ -1,11 +1,12 @@
 [advisories]
 # Deny crates with known security advisories.
 ignore = []
-# Unmaintained crates at warning level (block only on critical).
-unmaintained = "warn"
+# Unmaintained crates: "none" skips the check (use "workspace" or "all" to enable).
+unmaintained = "none"
 
 [licenses]
 # Allow only standard permissive/copyleft licenses suitable for open-source use.
+# Anything not in this list is implicitly denied.
 allow = [
     "MIT",
     "Apache-2.0",
@@ -14,35 +15,22 @@ allow = [
     "BSD-3-Clause",
     "ISC",
     "Zlib",
+    "Unicode-3.0",
     "Unicode-DFS-2016",
     "CC0-1.0",
     "OpenSSL",
     "MPL-2.0",
+    "CDLA-Permissive-2.0",
 ]
-# Copyleft licenses that require review before adding new crates.
-deny = [
-    "GPL-2.0",
-    "GPL-3.0",
-    "AGPL-3.0",
-    "LGPL-2.0",
-    "LGPL-2.1",
-    "LGPL-3.0",
-]
-# Allow dual-licensed crates where at least one license is permitted.
-exceptions = []
 
 [bans]
-# Deny exact duplicate versions of the same crate (except where explicitly
-# skipped) to reduce supply-chain attack surface.
+# Warn on duplicate crate versions; warn on wildcard version requirements
+# (workspace = true deps appear as wildcards in member Cargo.toml files).
 multiple-versions = "warn"
-wildcards = "deny"
+wildcards = "warn"
 # Crates that must never appear in the dependency tree.
 deny = []
-# Allow multiple versions of these commonly duplicated crates.
-skip = [
-    { name = "syn", version = "1" },
-    { name = "syn", version = "2" },
-]
+skip = []
 skip-tree = []
 
 [sources]

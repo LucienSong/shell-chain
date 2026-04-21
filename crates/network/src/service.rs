@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 
 use crate::error::NetworkError;
-use crate::message::{NetworkEvent, NetworkMessage};
+use crate::message::{NetworkEvent, NetworkMessage, PeerId};
 
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
@@ -17,6 +17,21 @@ use std::sync::Arc;
 pub trait NetworkService: Send + Sync {
     /// Broadcast a message to all connected peers.
     async fn broadcast(&self, msg: NetworkMessage) -> Result<(), NetworkError>;
+
+    /// Send a message to a specific peer only (unicast).
+    ///
+    /// Default implementation falls back to broadcast when the transport does
+    /// not support addressing individual peers. Implementations that support
+    /// true unicast (e.g. libp2p request-response) should override this method
+    /// to avoid message amplification.
+    async fn send_to_peer(
+        &self,
+        _peer_id: &PeerId,
+        msg: NetworkMessage,
+    ) -> Result<(), NetworkError> {
+        // Fallback: broadcast to all peers when unicast is not implemented.
+        self.broadcast(msg).await
+    }
 
     /// Wait for the next network event.
     /// Returns `None` if the network has shut down.
