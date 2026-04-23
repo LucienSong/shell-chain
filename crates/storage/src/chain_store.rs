@@ -604,6 +604,34 @@ impl<S: KvStore> ChainStore<S> {
         Ok(tx_hashes)
     }
 
+    /// Count transactions involving a given address within the specified block range.
+    pub fn count_txs_by_address(
+        &self,
+        address: &Address,
+        from_block: u64,
+        to_block: u64,
+    ) -> Result<u64, StorageError> {
+        let prefix = Self::addr_tx_prefix(address);
+        let entries = self.store.scan_prefix(&prefix)?;
+
+        let total = entries
+            .iter()
+            .filter_map(|(key, value)| {
+                if key.len() < prefix.len().saturating_add(12) || value.len() != 32 {
+                    return None;
+                }
+                let block_bytes: [u8; 8] = key
+                    .get(prefix.len()..prefix.len().saturating_add(8))?
+                    .try_into()
+                    .ok()?;
+                let block_number = u64::from_be_bytes(block_bytes);
+                (block_number >= from_block && block_number <= to_block).then_some(1u64)
+            })
+            .sum();
+
+        Ok(total)
+    }
+
     // ── Chain config ───────────────────────────────────────────
 
     /// Persist the chain configuration (chain_id + genesis hash).
@@ -1384,6 +1412,26 @@ mod tests {
         assert!(matches!(result, Err(StorageError::InvalidInput(_))));
     }
 
+    #[test]
+    fn test_count_txs_by_address_respects_block_filter() {
+        let store = Arc::new(MemoryDb::new());
+        let cs = ChainStore::new(Arc::clone(&store));
+        let address = Address::from([0x33; 20]);
+
+        for (idx, block_number) in [1u64, 2, 3].into_iter().enumerate() {
+            let hash = ShellHash::from([(idx as u8) + 1; 32]);
+            store
+                .put(
+                    &ChainStore::<MemoryDb>::addr_tx_key(&address, block_number, idx as u32),
+                    hash.as_bytes(),
+                )
+                .unwrap();
+        }
+
+        assert_eq!(cs.count_txs_by_address(&address, 0, u64::MAX).unwrap(), 3);
+        assert_eq!(cs.count_txs_by_address(&address, 2, 3).unwrap(), 2);
+    }
+
     // ── Snapshot round-trip tests ──────────────────────────────────────
 
     #[test]
@@ -1769,7 +1817,7 @@ mod tests {
     // ── Phase B split / round-trip tests ──────────────────────────────────────
 
     fn make_block_with_txs(number: u64) -> Block {
-        use shell_core::{PubkeyMode as _, SignedTransaction, Transaction};
+        use shell_core::{SignedTransaction, Transaction};
         use shell_crypto::{DilithiumSigner, Signer};
         use shell_primitives::{Address, U256};
 

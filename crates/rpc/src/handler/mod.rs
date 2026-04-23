@@ -967,6 +967,141 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_transactions_by_address_total_counts_all_matches() {
+        let handler = setup();
+        let sender = DilithiumSigner::generate();
+        let from = signer_address(&sender);
+        let to = Address::from([0x44; 20]);
+
+        {
+            let mut ws = handler.world_state.write();
+            ws.add_balance(&from, U256::from(100_000_000_000_000u64))
+                .unwrap();
+        }
+        handler
+            .chain_store
+            .put_pubkey(&from, &sender.public_key().to_vec())
+            .unwrap();
+
+        let genesis = make_genesis_block();
+        let genesis_hash = genesis.hash();
+        handler.chain_store.put_block(&genesis).unwrap();
+        handler
+            .chain_store
+            .set_canonical(genesis.number(), &genesis_hash)
+            .unwrap();
+        handler.chain_store.set_head(&genesis_hash).unwrap();
+
+        let tx1 = SignedTransaction::new(
+            from,
+            Transaction {
+                chain_id: 42,
+                nonce: 0,
+                max_priority_fee_per_gas: 100_000_000,
+                max_fee_per_gas: 1_000_000_000,
+                gas_limit: 21_000,
+                to: Some(to),
+                value: U256::from(1u64),
+                data: Bytes::default(),
+                access_list: None,
+                tx_type: 2,
+                max_fee_per_blob_gas: None,
+                blob_versioned_hashes: None,
+            },
+            sender.sign(b"tx-1").unwrap(),
+        );
+        let block1 = Block {
+            header: BlockHeader {
+                parent_hash: genesis_hash,
+                state_root: ShellHash::default(),
+                transactions_root: ShellHash::default(),
+                receipts_root: ShellHash::default(),
+                logs_bloom: Bytes::default(),
+                number: 1,
+                gas_limit: 30_000_000,
+                gas_used: 21_000,
+                timestamp: 1_700_000_001,
+                extra_data: Bytes::default(),
+                proposer: test_address(b"proposer-1"),
+                sig_aggregate_proof: None,
+                base_fee_per_gas: 0,
+                withdrawals_root: ShellHash::ZERO,
+                parent_beacon_block_root: ShellHash::ZERO,
+                blob_gas_used: 0,
+                excess_blob_gas: 0,
+                witness_root: None,
+            },
+            transactions: vec![tx1],
+            proposer_seal: None,
+        };
+        let block1_hash = block1.hash();
+        handler.chain_store.put_block(&block1).unwrap();
+        handler.chain_store.set_canonical(1, &block1_hash).unwrap();
+        handler.chain_store.set_head(&block1_hash).unwrap();
+
+        let tx2 = SignedTransaction::new(
+            from,
+            Transaction {
+                chain_id: 42,
+                nonce: 1,
+                max_priority_fee_per_gas: 100_000_000,
+                max_fee_per_gas: 1_000_000_000,
+                gas_limit: 21_000,
+                to: Some(to),
+                value: U256::from(2u64),
+                data: Bytes::default(),
+                access_list: None,
+                tx_type: 2,
+                max_fee_per_blob_gas: None,
+                blob_versioned_hashes: None,
+            },
+            sender.sign(b"tx-2").unwrap(),
+        );
+        let block2 = Block {
+            header: BlockHeader {
+                parent_hash: block1_hash,
+                state_root: ShellHash::default(),
+                transactions_root: ShellHash::default(),
+                receipts_root: ShellHash::default(),
+                logs_bloom: Bytes::default(),
+                number: 2,
+                gas_limit: 30_000_000,
+                gas_used: 21_000,
+                timestamp: 1_700_000_002,
+                extra_data: Bytes::default(),
+                proposer: test_address(b"proposer-2"),
+                sig_aggregate_proof: None,
+                base_fee_per_gas: 0,
+                withdrawals_root: ShellHash::ZERO,
+                parent_beacon_block_root: ShellHash::ZERO,
+                blob_gas_used: 0,
+                excess_blob_gas: 0,
+                witness_root: None,
+            },
+            transactions: vec![tx2],
+            proposer_seal: None,
+        };
+        let block2_hash = block2.hash();
+        handler.chain_store.put_block(&block2).unwrap();
+        handler.chain_store.set_canonical(2, &block2_hash).unwrap();
+        handler.chain_store.set_head(&block2_hash).unwrap();
+
+        let result = ShellApiServer::get_transactions_by_address(
+            &handler,
+            from,
+            Some(0),
+            Some(2),
+            Some(0),
+            Some(1),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result["total"], 2);
+        assert_eq!(result["transactions"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
     async fn get_block_after_store() {
         let handler = setup();
         let block = make_genesis_block();
@@ -1180,6 +1315,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shell_get_witness_returns_null_without_store() {
+        let handler = setup();
+        let block = make_genesis_block();
+        let hash = block.hash();
+        handler.chain_store.put_block(&block).unwrap();
+        handler.chain_store.set_canonical(0, &hash).unwrap();
+        handler.chain_store.set_head(&hash).unwrap();
+
+        let result = ShellApiServer::get_witness(&handler, "latest".to_string())
+            .await
+            .unwrap();
+        assert!(result.is_null());
+    }
+
+    #[tokio::test]
     async fn shell_get_block_witnesses_with_bundle() {
         use shell_core::{TxWitness, WitnessBundle};
 
@@ -1218,6 +1368,51 @@ mod tests {
             .unwrap()
             .starts_with("0x"));
         assert!(witnesses[0]["pubkey"].as_str().unwrap().starts_with("0x"));
+    }
+
+    #[tokio::test]
+    async fn shell_get_witness_returns_sdk_shape() {
+        use shell_core::{TxWitness, WitnessBundle};
+
+        let handler = setup_with_witness();
+        let block = make_genesis_block();
+        let block_hash = block.hash();
+        handler.chain_store.put_block(&block).unwrap();
+        handler.chain_store.set_canonical(0, &block_hash).unwrap();
+        handler.chain_store.set_head(&block_hash).unwrap();
+
+        let signer = DilithiumSigner::generate();
+        let pk = signer.public_key().to_vec();
+        let sig = signer.sign(b"tx0").unwrap();
+        let bundle = WitnessBundle::new(vec![TxWitness::new_embedded(sig, pk)]);
+        handler
+            .witness_store
+            .as_ref()
+            .unwrap()
+            .put_bundle(&block_hash, &bundle)
+            .unwrap();
+
+        let result = ShellApiServer::get_witness(&handler, "latest".to_string())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result["block_hash"],
+            format!("0x{}", hex::encode(block_hash.as_bytes()))
+        );
+        assert_eq!(result["block_number"], 0);
+        assert_eq!(result["witness_count"], 1);
+        let witnesses = result["witnesses"].as_array().unwrap();
+        assert_eq!(witnesses[0]["tx_index"], 0);
+        assert_eq!(witnesses[0]["sig_type"], "Dilithium3");
+        assert!(witnesses[0]["signature"]
+            .as_str()
+            .unwrap()
+            .starts_with("0x"));
+        assert!(witnesses[0]["public_key"]
+            .as_str()
+            .unwrap()
+            .starts_with("0x"));
     }
 
     #[tokio::test]
@@ -2210,6 +2405,10 @@ mod tests {
             result["version"],
             format!("ShellChain/v{}/rust", env!("CARGO_PKG_VERSION"))
         );
+        assert_eq!(result["chain_id"], "42");
+        assert_eq!(result["block_height"], 0);
+        assert!(result["peer_id"].is_string());
+        assert_eq!(result["peer_count"], 0);
         assert_eq!(result["chainId"], 42);
         assert_eq!(result["blockHeight"], 0);
         assert_eq!(result["peerCount"], 0);
@@ -2229,6 +2428,8 @@ mod tests {
         handler.chain_store.set_head(&hash).unwrap();
 
         let result = ShellApiServer::get_node_info(&handler).await.unwrap();
+        assert_eq!(result["block_height"], 0);
+        assert_eq!(result["chain_id"], "42");
         assert_eq!(result["blockHeight"], 0);
         assert_eq!(result["chainId"], 42);
     }
@@ -3271,6 +3472,122 @@ mod tests {
             result.err()
         );
         assert_eq!(handler.tx_pool.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn m6b1_send_raw_transaction_json_sdk_sender_pubkey_first_tx() {
+        let handler = setup();
+        let signer = DilithiumSigner::generate();
+        let pubkey = signer.public_key().to_vec();
+        let addr = signer_address(&signer);
+        let gas_limit = shell_evm::compute_intrinsic_gas(&[], true, &None);
+
+        {
+            let mut ws = handler.world_state.write();
+            ws.add_balance(&addr, U256::from(100_000_000_000_000u64))
+                .unwrap();
+        }
+
+        let tx = Transaction {
+            chain_id: 42,
+            nonce: 0,
+            max_priority_fee_per_gas: 100_000_000,
+            max_fee_per_gas: 1_000_000_000,
+            gas_limit,
+            to: None,
+            value: U256::ZERO,
+            data: Bytes::default(),
+            access_list: None,
+            tx_type: 2,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
+        };
+
+        let signature = signer.sign(tx.hash().0.as_slice()).unwrap();
+        let payload = serde_json::json!({
+            "from": addr,
+            "tx": tx,
+            "signature": signature,
+            "sender_pubkey": pubkey,
+        });
+
+        let json_bytes = serde_json::to_vec(&payload).unwrap();
+        let hex_payload = format!("0x{}", hex::encode(&json_bytes));
+
+        let result = EthApiServer::send_raw_transaction(&handler, hex_payload).await;
+        assert!(
+            result.is_ok(),
+            "JSON send_raw_transaction with sender_pubkey failed: {:?}",
+            result.err()
+        );
+        assert_eq!(handler.tx_pool.len(), 1);
+        assert!(handler.chain_store.get_pubkey(&addr).unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn m6b2_send_raw_transaction_json_sdk_dilithium3_fixture_first_tx() {
+        let handler = setup();
+        let pubkey =
+            hex::decode(include_str!("../../tests/fixtures/sdk_dilithium3_tx_pubkey.hex").trim())
+                .unwrap();
+        let signature_bytes = hex::decode(
+            include_str!("../../tests/fixtures/sdk_dilithium3_tx_signature.hex").trim(),
+        )
+        .unwrap();
+        let expected_hash =
+            hex::decode(include_str!("../../tests/fixtures/sdk_dilithium3_tx_hash.hex").trim())
+                .unwrap();
+        let addr = Address::from_public_key(&pubkey, 0);
+
+        assert_eq!(
+            format!("0x{}", hex::encode(addr.0.as_slice())),
+            "0x5b72241d5d504c47cffd4a1e022c2725fb85a19b"
+        );
+
+        {
+            let mut ws = handler.world_state.write();
+            ws.add_balance(&addr, U256::from(100_000_000_000_000u64))
+                .unwrap();
+        }
+
+        let tx = Transaction {
+            chain_id: 42,
+            nonce: 0,
+            max_priority_fee_per_gas: 100_000_000,
+            max_fee_per_gas: 1_000_000_000,
+            gas_limit: 21_000,
+            to: Some(addr),
+            value: U256::from(1u64),
+            data: Bytes::default(),
+            access_list: None,
+            tx_type: 2,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
+        };
+        assert_eq!(tx.hash().0.as_slice(), expected_hash.as_slice());
+
+        let signature = shell_crypto::PQSignature::new(
+            shell_crypto::SignatureType::Dilithium3,
+            signature_bytes,
+        );
+        let payload = serde_json::json!({
+            "from": addr,
+            "tx": tx,
+            "signature": signature,
+            "sender_pubkey": pubkey,
+        });
+
+        let json_bytes = serde_json::to_vec(&payload).unwrap();
+        let hex_payload = format!("0x{}", hex::encode(&json_bytes));
+
+        let result = EthApiServer::send_raw_transaction(&handler, hex_payload).await;
+        assert!(
+            result.is_ok(),
+            "JSON send_raw_transaction with sdk Dilithium3 fixture failed: {:?}",
+            result.err()
+        );
+        assert_eq!(handler.tx_pool.len(), 1);
+        assert!(handler.chain_store.get_pubkey(&addr).unwrap().is_some());
     }
 
     #[tokio::test]
