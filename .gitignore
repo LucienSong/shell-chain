@@ -20,3 +20,14 @@ Thumbs.db
 *.log
 diff_m6b2.txt
 tools/tx-generator/target/
+
+# Local debug scratch
+/debug-*.mjs
+/test-*.mjs
+/plan_evm_test.md
+/package.json
+/package-lock.json
+/node_modules/
+/test-logs/
+/clippy_warnings.txt
+/warnings_output.txt

@@ -14,6 +14,7 @@ shell-primitives = { workspace = true }
 pqcrypto-dilithium = { workspace = true }
 pqcrypto-sphincsplus = { workspace = true }
 pqcrypto-traits = { workspace = true }
+fips204 = { workspace = true }
 zeroize = { workspace = true }
 alloy-rlp = { workspace = true }
 serde = { workspace = true }

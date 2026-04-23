@@ -119,12 +119,18 @@ impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
             Some(h) if h.header.base_fee_per_gas > 0 => h.header.base_fee_per_gas,
             _ => shell_core::INITIAL_BASE_FEE,
         };
+        let peer_count = self.peer_count.load(Ordering::Relaxed);
+        let version = format!("ShellChain/v{}/rust", env!("CARGO_PKG_VERSION"));
 
         Ok(serde_json::json!({
-            "version": format!("ShellChain/v{}/rust", env!("CARGO_PKG_VERSION")),
+            "version": version,
+            "chain_id": self.chain_id.to_string(),
+            "block_height": block_height,
+            "peer_id": self.admin_peer_id.clone(),
+            "peer_count": peer_count,
             "chainId": self.chain_id,
             "blockHeight": block_height,
-            "peerCount": 0,
+            "peerCount": peer_count,
             "txPoolSize": self.tx_pool.len(),
             "isMining": self.proposer_signer.is_some(),
             "uptime": self.start_time.elapsed().as_secs(),
@@ -264,6 +270,10 @@ impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
                 offset, MAX_ADDRESS_TX_HISTORY_OFFSET
             )));
         }
+        let total = self
+            .chain_store
+            .count_txs_by_address(&address, from, to)
+            .map_err(internal_err)?;
 
         let tx_hashes = self
             .chain_store
@@ -306,7 +316,7 @@ impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
             "toBlock": hex_u64(to),
             "page": page,
             "limit": limit,
-            "total": txs.len(),
+            "total": total,
             "transactions": txs,
         }))
     }
@@ -315,43 +325,10 @@ impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
         &self,
         block: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        // Resolve block hash from tag or hash string.
-        let block_hash = if block.starts_with("0x") && block.len() == 66 {
-            // 32-byte hex hash
-            let bytes = hex::decode(&block[2..])
-                .map_err(|e| internal_err(format!("invalid block hash hex: {e}")))?;
-            let arr: [u8; 32] = bytes
-                .try_into()
-                .map_err(|_| internal_err("block hash must be 32 bytes"))?;
-            ShellHash::from(arr)
-        } else {
-            // Block number / tag → look up canonical hash
-            let tag = parse_block_tag(&block)?;
-            let blk = match tag {
-                BlockTag::Latest | BlockTag::Finalized | BlockTag::Pending => {
-                    self.chain_store.get_head_block().map_err(internal_err)?
-                }
-                BlockTag::Number(n) => self
-                    .chain_store
-                    .get_block_by_number(n)
-                    .map_err(internal_err)?,
-            };
-            match blk {
-                None => return Ok(serde_json::Value::Null),
-                Some(b) => b.hash(),
-            }
+        let Some((block_hash, header)) = resolve_witness_block(self, &block)? else {
+            return Ok(serde_json::Value::Null);
         };
-
-        // Retrieve the block header for witness_root.
-        let header = self
-            .chain_store
-            .get_header_by_hash(&block_hash)
-            .map_err(internal_err)?;
-        let witness_root: serde_json::Value = header
-            .as_ref()
-            .and_then(|h| h.witness_root)
-            .map(|r| serde_json::Value::String(format!("0x{}", hex::encode(r.as_bytes()))))
-            .unwrap_or(serde_json::Value::Null);
+        let witness_root = witness_root_value(Some(&header));
 
         // Look up the witness bundle if a store is wired.
         let Some(ws) = &self.witness_store else {
@@ -399,4 +376,90 @@ impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
             "witnesses": witnesses,
         }))
     }
+
+    async fn get_witness(&self, block: String) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let Some((block_hash, header)) = resolve_witness_block(self, &block)? else {
+            return Ok(serde_json::Value::Null);
+        };
+        let Some(ws) = &self.witness_store else {
+            return Ok(serde_json::Value::Null);
+        };
+        let Some(bundle) = ws.get_bundle(&block_hash).map_err(internal_err)? else {
+            return Ok(serde_json::Value::Null);
+        };
+
+        let block_number = header.number;
+
+        let witnesses: Vec<serde_json::Value> = bundle
+            .witnesses
+            .iter()
+            .enumerate()
+            .map(|(i, w)| {
+                let sig_type = format!("{:?}", w.signature.sig_type);
+                let mut obj = serde_json::json!({
+                    "tx_index": i,
+                    "sig_type": sig_type,
+                    "signature": format!("0x{}", hex::encode(&w.signature.data)),
+                });
+                if let Some(pk) = &w.pubkey {
+                    obj["public_key"] = serde_json::Value::String(format!("0x{}", hex::encode(pk)));
+                }
+                obj
+            })
+            .collect();
+
+        Ok(serde_json::json!({
+            "block_hash": format!("0x{}", hex::encode(block_hash.as_bytes())),
+            "block_number": block_number,
+            "witness_root": witness_root_value(Some(&header)),
+            "witness_count": witnesses.len(),
+            "witnesses": witnesses,
+        }))
+    }
+}
+
+fn resolve_witness_block<S: KvStore + 'static>(
+    handler: &RpcHandler<S>,
+    block: &str,
+) -> Result<Option<(ShellHash, BlockHeader)>, ErrorObjectOwned> {
+    let block_hash = if block.starts_with("0x") && block.len() == 66 {
+        let bytes = hex::decode(&block[2..])
+            .map_err(|e| internal_err(format!("invalid block hash hex: {e}")))?;
+        let arr: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| internal_err("block hash must be 32 bytes"))?;
+        ShellHash::from(arr)
+    } else {
+        let tag = parse_block_tag(block)?;
+        let blk = match tag {
+            BlockTag::Latest | BlockTag::Finalized | BlockTag::Pending => {
+                handler.chain_store.get_head_block().map_err(internal_err)?
+            }
+            BlockTag::Number(n) => handler
+                .chain_store
+                .get_block_by_number(n)
+                .map_err(internal_err)?,
+        };
+        match blk {
+            None => return Ok(None),
+            Some(b) => b.hash(),
+        }
+    };
+
+    let Some(header) = handler
+        .chain_store
+        .get_header_by_hash(&block_hash)
+        .map_err(internal_err)?
+    else {
+        return Ok(None);
+    };
+
+    Ok(Some((block_hash, header)))
+}
+
+fn witness_root_value(header: Option<&BlockHeader>) -> serde_json::Value {
+    header
+        .and_then(|h| h.witness_root)
+        .map(|r| serde_json::Value::String(format!("0x{}", hex::encode(r.as_bytes()))))
+        .unwrap_or(serde_json::Value::Null)
 }

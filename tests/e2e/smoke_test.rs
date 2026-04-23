@@ -6,6 +6,7 @@
 
 use shell_e2e::*;
 
+use hex::FromHex;
 use shell_primitives::{Address, U256};
 use shell_rpc::api::{EthApiServer, NetApiServer, ShellApiServer, Web3ApiServer};
 
@@ -86,6 +87,81 @@ async fn submit_transaction_and_verify_receipt() {
         .await
         .unwrap();
     assert!(block.is_some(), "block should exist after mining");
+}
+
+#[tokio::test]
+async fn submit_sdk_dilithium3_fixture_and_verify_receipt() {
+    let env = setup();
+    let genesis = make_genesis_block();
+    store_block(&env, &genesis);
+
+    let pubkey = Vec::from_hex(
+        include_str!("../../crates/rpc/tests/fixtures/sdk_dilithium3_tx_pubkey.hex").trim(),
+    )
+    .expect("failed to decode sdk_dilithium3_tx_pubkey.hex fixture");
+    let signature_bytes = Vec::from_hex(
+        include_str!("../../crates/rpc/tests/fixtures/sdk_dilithium3_tx_signature.hex").trim(),
+    )
+    .expect("failed to decode sdk_dilithium3_tx_signature.hex fixture");
+    let from = Address::from_public_key(&pubkey, 0);
+
+    {
+        let mut ws = env.world_state.write();
+        ws.add_balance(&from, U256::from(FUNDED_BALANCE)).unwrap();
+    }
+
+    let tx = shell_core::Transaction {
+        chain_id: TEST_CHAIN_ID,
+        nonce: 0,
+        max_fee_per_gas: 1_000_000_000,
+        max_priority_fee_per_gas: 100_000_000,
+        gas_limit: 21_000,
+        to: Some(from),
+        value: U256::from(1u64),
+        data: shell_primitives::Bytes::default(),
+        access_list: None,
+        tx_type: 2,
+        max_fee_per_blob_gas: None,
+        blob_versioned_hashes: None,
+    };
+    let signature =
+        shell_crypto::PQSignature::new(shell_crypto::SignatureType::Dilithium3, signature_bytes);
+    let payload = serde_json::json!({
+        "from": from,
+        "tx": tx,
+        "signature": signature,
+        "sender_pubkey": pubkey,
+    });
+    let tx_hash = EthApiServer::send_raw_transaction(
+        &env.handler,
+        format!("0x{}", hex::encode(serde_json::to_vec(&payload).unwrap())),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        ShellApiServer::pending_count(&env.handler).await.unwrap(),
+        "0x1"
+    );
+
+    let signed = env
+        .tx_pool
+        .get(&tx_hash)
+        .expect("fixture transaction accepted into mempool");
+    let block_hash = mine_block(&env, 1, genesis.hash(), vec![signed]);
+
+    let receipt = EthApiServer::get_transaction_receipt(&env.handler, tx_hash)
+        .await
+        .unwrap()
+        .expect("fixture transaction receipt should exist after mining");
+    assert_eq!(receipt.block_number, "0x1");
+    assert_eq!(receipt.status, "0x1");
+
+    let block = EthApiServer::get_block_by_hash(&env.handler, block_hash, false)
+        .await
+        .unwrap()
+        .expect("mined block should be queryable");
+    assert_eq!(block.number, "0x1");
 }
 
 // ---------------------------------------------------------------------------

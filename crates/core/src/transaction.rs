@@ -1,5 +1,5 @@
 use alloy_rlp::{Decodable, Encodable};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use shell_crypto::{PQSignature, SignatureType};
 use shell_primitives::{Address, Bytes, ShellHash, U256};
 use std::sync::OnceLock;
@@ -389,7 +389,7 @@ impl PubkeyMode {
 /// intentionally prevented (`#[non_exhaustive]`) to ensure `pubkey_mode`
 /// defaults are not silently misapplied.
 #[non_exhaustive]
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
 pub struct SignedTransaction {
     /// The sender's address (derived from their PQ public key).
     /// Required because PQ signatures are not recoverable.
@@ -402,6 +402,53 @@ pub struct SignedTransaction {
     /// Lazily cached hash — computed from the unsigned tx on first access.
     #[serde(skip)]
     tx_hash: OnceLock<ShellHash>,
+}
+
+// Helper struct for deserialization with compatibility for sender_pubkey field
+#[derive(Deserialize)]
+struct SignedTransactionHelper {
+    from: Address,
+    tx: Transaction,
+    signature: PQSignature,
+    #[serde(default)]
+    pubkey_mode: Option<PubkeyMode>,
+    #[serde(default)]
+    sender_pubkey: Option<Vec<u8>>,
+}
+
+impl<'de> Deserialize<'de> for SignedTransaction {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let helper = SignedTransactionHelper::deserialize(deserializer)?;
+
+        if helper.pubkey_mode.is_some() && helper.sender_pubkey.is_some() {
+            return Err(serde::de::Error::custom(
+                "signed transaction must not specify both pubkey_mode and sender_pubkey",
+            ));
+        }
+
+        // Resolve pubkey_mode: prefer explicit pubkey_mode, fall back to sender_pubkey
+        let pubkey_mode = if let Some(mode) = helper.pubkey_mode {
+            mode
+        } else if let Some(pk) = helper.sender_pubkey {
+            if !pk.is_empty() {
+                PubkeyMode::Embedded(pk)
+            } else {
+                PubkeyMode::Reference
+            }
+        } else {
+            PubkeyMode::Reference
+        };
+        Ok(SignedTransaction {
+            from: helper.from,
+            tx: helper.tx,
+            signature: helper.signature,
+            pubkey_mode,
+            tx_hash: OnceLock::new(),
+        })
+    }
 }
 
 impl Clone for SignedTransaction {
@@ -822,6 +869,47 @@ mod tests {
     }
 
     #[test]
+    fn signed_tx_deserialize_accepts_legacy_sender_pubkey() {
+        let from = Address::from([0x42; 20]);
+        let tx = sample_tx();
+        let sig = PQSignature::new(SignatureType::Dilithium3, vec![0xAB; 64]);
+        let legacy = serde_json::json!({
+            "from": from,
+            "tx": tx,
+            "signature": sig,
+            "sender_pubkey": vec![0xCC; DILITHIUM3_PUBKEY_LEN],
+        });
+
+        let signed: SignedTransaction = serde_json::from_value(legacy).unwrap();
+        assert!(signed.pubkey_mode.is_embedded());
+        assert_eq!(
+            signed.pubkey_mode.pubkey_bytes().map(|pk| pk.len()),
+            Some(DILITHIUM3_PUBKEY_LEN)
+        );
+    }
+
+    #[test]
+    fn signed_tx_deserialize_rejects_pubkey_mode_and_sender_pubkey_together() {
+        let from = Address::from([0x42; 20]);
+        let tx = sample_tx();
+        let sig = PQSignature::new(SignatureType::Dilithium3, vec![0xAB; 64]);
+        let invalid = serde_json::json!({
+            "from": from,
+            "tx": tx,
+            "signature": sig,
+            "pubkey_mode": {
+                "mode": "reference"
+            },
+            "sender_pubkey": vec![0xCC; DILITHIUM3_PUBKEY_LEN],
+        });
+
+        let err = serde_json::from_value::<SignedTransaction>(invalid).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("must not specify both pubkey_mode and sender_pubkey"));
+    }
+
+    #[test]
     fn signed_tx_rlp_roundtrip() {
         let tx = sample_tx();
         let from = Address::from([0x42; 20]);
@@ -878,6 +966,37 @@ mod tests {
         signed.encode(&mut buf);
         let decoded = SignedTransaction::decode(&mut buf.as_slice()).unwrap();
         assert_eq!(signed, decoded);
+    }
+
+    #[test]
+    fn tx_hash_matches_sdk_golden_vector() {
+        let tx = Transaction {
+            chain_id: 1337,
+            nonce: 7,
+            to: Some(Address::from([0x11; 20])),
+            value: U256::from(0x1234u64),
+            data: Bytes::from(vec![0xde, 0xad, 0xbe, 0xef]),
+            gas_limit: 50_000,
+            max_fee_per_gas: 1_000_000_000,
+            max_priority_fee_per_gas: 250_000_000,
+            access_list: Some(vec![AccessListItem {
+                address: Address::from([0x22; 20]),
+                storage_keys: vec![ShellHash::from([0x33; 32]), ShellHash::from([0x44; 32])],
+            }]),
+            tx_type: 3,
+            max_fee_per_blob_gas: Some(0),
+            blob_versioned_hashes: Some(vec![ShellHash::from([0x55; 32])]),
+        };
+
+        // Generated by shell-sdk hashTransaction():
+        // 0xcc9b2cfd55bb83205daeb92128de039380fed2ae3ec36b07cfbecb80ade19f4c
+        let expected = ShellHash::from([
+            0xcc, 0x9b, 0x2c, 0xfd, 0x55, 0xbb, 0x83, 0x20, 0x5d, 0xae, 0xb9, 0x21, 0x28, 0xde,
+            0x03, 0x93, 0x80, 0xfe, 0xd2, 0xae, 0x3e, 0xc3, 0x6b, 0x07, 0xcf, 0xbe, 0xcb, 0x80,
+            0xad, 0xe1, 0x9f, 0x4c,
+        ]);
+
+        assert_eq!(tx.hash(), expected);
     }
 
     // ── EIP-4844 blob transaction tests ────────────────────────

@@ -49,6 +49,7 @@ shell-consensus = { path = "crates/consensus" }
 pqcrypto-dilithium = "0.5"
 pqcrypto-sphincsplus = "0.7"
 pqcrypto-traits = "0.3"
+fips204 = "0.4.6"
 zeroize = { version = "1", features = ["derive"] }
 
 # --- keystore ---

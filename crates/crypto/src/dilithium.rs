@@ -1,3 +1,5 @@
+use fips204::ml_dsa_65;
+use fips204::traits::{SerDes, Verifier as MlDsaVerifier};
 use pqcrypto_dilithium::dilithium3;
 use pqcrypto_traits::sign::{DetachedSignature, PublicKey, SecretKey};
 
@@ -99,6 +101,39 @@ impl Signer for DilithiumSigner {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DilithiumVerifier;
 
+const DILITHIUM3_PUBLIC_KEY_BYTES: usize = 1952;
+const DILITHIUM3_SIGNATURE_BYTES: usize = 3309;
+
+impl DilithiumVerifier {
+    fn verify_legacy_dilithium(&self, pubkey: &[u8], message: &[u8], signature: &[u8]) -> bool {
+        let Ok(pk) = dilithium3::PublicKey::from_bytes(pubkey) else {
+            return false;
+        };
+        let Ok(sig) = dilithium3::DetachedSignature::from_bytes(signature) else {
+            return false;
+        };
+
+        dilithium3::verify_detached_signature(&sig, message, &pk).is_ok()
+    }
+
+    fn verify_ml_dsa_compat(&self, pubkey: &[u8], message: &[u8], signature: &[u8]) -> bool {
+        let Ok(pubkey) = <[u8; DILITHIUM3_PUBLIC_KEY_BYTES]>::try_from(pubkey) else {
+            return false;
+        };
+        let Ok(signature) = <[u8; DILITHIUM3_SIGNATURE_BYTES]>::try_from(signature) else {
+            return false;
+        };
+        let Ok(pk) = ml_dsa_65::PublicKey::try_from_bytes(pubkey) else {
+            return false;
+        };
+
+        // shell-sdk signs "Dilithium3" payloads via noble's ML-DSA-65 adapter
+        // using the default empty context, so accept that encoding as a
+        // compatibility fallback without changing the on-chain algo tag.
+        pk.verify(message, &signature, &[])
+    }
+}
+
 impl Verifier for DilithiumVerifier {
     fn verify(
         &self,
@@ -110,22 +145,23 @@ impl Verifier for DilithiumVerifier {
             return Err(CryptoError::UnsupportedSignatureType(signature.sig_type));
         }
 
-        let pk = dilithium3::PublicKey::from_bytes(pubkey).map_err(|_| {
-            CryptoError::InvalidPublicKeyLength {
-                expected: dilithium3::public_key_bytes(),
+        if pubkey.len() != DILITHIUM3_PUBLIC_KEY_BYTES {
+            return Err(CryptoError::InvalidPublicKeyLength {
+                expected: DILITHIUM3_PUBLIC_KEY_BYTES,
                 got: pubkey.len(),
-            }
-        })?;
-
-        let sig = dilithium3::DetachedSignature::from_bytes(&signature.data).map_err(|_| {
-            CryptoError::InvalidSignatureLength {
-                expected: dilithium3::signature_bytes(),
+            });
+        }
+        if signature.data.len() != DILITHIUM3_SIGNATURE_BYTES {
+            return Err(CryptoError::InvalidSignatureLength {
+                expected: DILITHIUM3_SIGNATURE_BYTES,
                 got: signature.data.len(),
-            }
-        })?;
+            });
+        }
 
-        let valid = dilithium3::verify_detached_signature(&sig, message, &pk).is_ok();
-        Ok(valid)
+        Ok(
+            self.verify_legacy_dilithium(pubkey, message, &signature.data)
+                || self.verify_ml_dsa_compat(pubkey, message, &signature.data),
+        )
     }
 
     fn sig_type(&self) -> SignatureType {
@@ -370,5 +406,22 @@ mod tests {
             "100 sign+verify took {:.2}s, expected <1s",
             elapsed.as_secs_f64()
         );
+    }
+
+    #[test]
+    fn verifies_sdk_ml_dsa_compat_fixture() {
+        let verifier = DilithiumVerifier;
+        let pubkey =
+            hex::decode(include_str!("../tests/fixtures/sdk_dilithium3_pubkey.hex").trim())
+                .unwrap();
+        let message =
+            hex::decode(include_str!("../tests/fixtures/sdk_dilithium3_message.hex").trim())
+                .unwrap();
+        let signature =
+            hex::decode(include_str!("../tests/fixtures/sdk_dilithium3_signature.hex").trim())
+                .unwrap();
+        let sig = PQSignature::new(SignatureType::Dilithium3, signature);
+
+        assert!(verifier.verify(&pubkey, &message, &sig).unwrap());
     }
 }

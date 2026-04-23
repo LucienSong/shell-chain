@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Reliability
+
+- **SignedTransaction JSON compatibility guard**: compatibility deserialization for sdk-style
+  `sender_pubkey` now rejects ambiguous payloads that also specify `pubkey_mode`, while still
+  accepting legacy `sender_pubkey`-only requests.
+- **Dilithium3 sdk compatibility**: chain verification now accepts shell-sdk's current
+  ML-DSA-65-produced `"Dilithium3"` signatures as a compatibility fallback, with regression tests
+  covering both direct verification and `eth_sendRawTransaction` first-use JSON submission.
+- **SDK/wallet RPC contract alignment**: `shell_getNodeInfo` now exposes sdk-facing snake_case
+  fields alongside legacy camelCase ones, `shell_getWitness` is available as an alias with the
+  typed witness shape the sdk expects, and `shell_getTransactionsByAddress.total` now reports the
+  full match count instead of the current page size.
+
 ## [0.17.0] — 2026-04-21 — Security & Efficiency Hardening
 
 ### Security

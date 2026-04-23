@@ -470,4 +470,14 @@ pub trait ShellApi {
         &self,
         block: String,
     ) -> Result<serde_json::Value, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// SDK-facing witness endpoint.
+    ///
+    /// Returns `null` when the node does not expose a witness store or when the
+    /// requested block's raw witness bundle has been pruned.
+    #[method(name = "getWitness")]
+    async fn get_witness(
+        &self,
+        block: String,
+    ) -> Result<serde_json::Value, jsonrpsee::types::ErrorObjectOwned>;
 }
