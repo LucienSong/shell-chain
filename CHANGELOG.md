@@ -2,6 +2,38 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased — 0.20.0-dev]
+
+### Added
+
+- **wPoA consensus engine activation (W.1–W.7)** (`crates/consensus`, `crates/node`,
+  `crates/cli`): Weighted Proof of Authority consensus is now a first-class production
+  path. `NodeConfig.consensus: ConsensusEngineConfig` selects `Poa` or `WPoa` at startup.
+  The `ConsensusEngine` trait is fully dyn-safe with `sign_block`, `verify_seal`,
+  `validator_weights`, and `poa_config` methods. A complete `WPoaRound` state machine
+  (`propose → vote → commit + view-change`) implements weighted quorum `⌈2/3 × total_weight⌉`.
+  CLI flag `--consensus-engine poa|wpoa`; auto-detection from genesis `engine` field.
+  8 wPoA e2e tests covering 3-validator quorum, view-change, network split.
+
+- **`shell_consensusInfo` RPC (W.6)** (`crates/rpc`): New method returns current engine
+  type, epoch length, and the live validator set with weights.
+
+- **wPoA testnet genesis (T.1)**: Added `WPoA` variant to `ConsensusConfig` in the genesis
+  crate (`crates/genesis`). Genesis files with `"engine": "wpoa"` are now parsed and
+  initialized correctly. Helper methods (`authorities()`, `block_time_secs()`, etc.) replace
+  exhaustive match arms across the codebase. New example: `examples/genesis-testnet-wpoa.json`
+  (chain_id=10, 3 validators, weights=[2,1,1]).
+
+- **Peer scoring wired into wPoA (PS.1)** (`crates/node`, `crates/consensus`):
+  `Node` now holds a `peer_scorer: Mutex<PeerScorer>` field. `handle_wpoa_vote` drives the
+  scorer: `DuplicateVote → DuplicateMessage` penalty (-2), `WrongBlockHash → InvalidProofPayload`
+  penalty (-20), `BlockCommitted → ValidProofDelivered` reward (+5) for each quorum signer.
+  Elevates `PeerScorer` from `lib-only` to integrated status (Constitution §13.5).
+
+- **RPC doc autogen (R.1–R.3)** (`tools/rpc-docgen`): `cargo run -p rpc-docgen` generates
+  `docs/rpc-reference.md` (75 methods, 7 namespaces). CI step `rpc-docgen --check` prevents
+  drift. Version bumped to `0.20.0-dev`.
+
 ## [0.19.0] — 2026-04-26
 
 ### Added
