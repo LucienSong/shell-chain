@@ -96,6 +96,7 @@ impl<S: KvStore + 'static> Node<S> {
                     state_pruning_experimental: p.state_pruning_experimental,
                 }
             }),
+            Some(Arc::clone(&self.consensus) as Arc<parking_lot::RwLock<dyn shell_consensus::ConsensusEngine>>), // W.6: wire consensus engine for shell_consensusInfo
         )
         .await
         .map_err(|e| NodeError::Startup(format!("RPC: {e}")))?;

@@ -430,6 +430,22 @@ pub trait ShellApi {
         &self,
     ) -> Result<serde_json::Value, jsonrpsee::types::ErrorObjectOwned>;
 
+    /// Returns consensus engine information: engine type, validator set, weights,
+    /// current proposer for the next block, and epoch progress.
+    ///
+    /// Response fields:
+    /// - `engine`          — `"poa"` or `"wpoa"`
+    /// - `validators`      — array of `{ address, weight }` for active validators
+    /// - `current_proposer`— hex address of the validator expected to propose next
+    /// - `block_number`    — head block number (proposer is for `block_number + 1`)
+    /// - `epoch`           — current epoch index
+    /// - `epoch_length`    — blocks per epoch
+    /// - `epoch_progress`  — blocks elapsed in the current epoch
+    #[method(name = "consensusInfo")]
+    async fn consensus_info(
+        &self,
+    ) -> Result<serde_json::Value, jsonrpsee::types::ErrorObjectOwned>;
+
     /// Set the balance of an address directly (dev/testnet only).
     #[method(name = "setBalance")]
     async fn set_balance(

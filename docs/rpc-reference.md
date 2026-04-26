@@ -11,7 +11,7 @@ shell-chain exposes the following JSON-RPC namespaces:
 - **`debug_`** (2 methods)
 - **`trace_`** (2 methods)
 - **`evm_`** (5 methods)
-- **`shell_`** (27 methods)
+- **`shell_`** (28 methods)
 
 All methods use JSON-RPC 2.0. Hex quantities are `0x`-prefixed strings.
 
@@ -501,6 +501,23 @@ get_finality_info() → serde_json::Value
 ```
 
 Returns finality information: last finalized block, current head, and pending attestations.
+
+### shell_consensusInfo
+```
+consensus_info() → serde_json::Value
+```
+
+Returns consensus engine information: engine type, validator set, weights,
+current proposer for the next block, and epoch progress.
+
+Response fields:
+- `engine`          — `"poa"` or `"wpoa"`
+- `validators`      — array of `{ address, weight }` for active validators
+- `current_proposer`— hex address of the validator expected to propose next
+- `block_number`    — head block number (proposer is for `block_number + 1`)
+- `epoch`           — current epoch index
+- `epoch_length`    — blocks per epoch
+- `epoch_progress`  — blocks elapsed in the current epoch
 
 ### shell_setBalance
 ```
