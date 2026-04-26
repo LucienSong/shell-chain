@@ -7,9 +7,9 @@ use revm::handler::{ExecuteEvm, MainnetContext};
 use revm::primitives::hardfork::SpecId;
 use revm::primitives::TxKind;
 use revm::state::AccountInfo;
-use shell_core::SignedTransaction;
-use shell_crypto::{SignatureType, Verifier, ALLOWED_ALGORITHMS};
-use shell_primitives::{blake3_hash, keccak256, Address, ShellHash};
+use shell_core::{InnerCall, SessionAuth, SignedTransaction};
+use shell_crypto::{PQSignature, SignatureType, Verifier, ALLOWED_ALGORITHMS};
+use shell_primitives::{blake3_hash, keccak256, Address, ShellHash, U256};
 use shell_storage::{ChainStore, KvStore, StorageError, WorldState};
 
 use crate::precompiles::ShellPrecompiles;
@@ -17,6 +17,10 @@ use crate::state_db::{shell_hash_to_b256, ShellStateDb, StateDbError};
 use crate::tx_validation::verify_paymaster_signature;
 
 pub const VALIDATION_GAS_CAP: u64 = 500_000;
+/// Gas budget for `IPaymaster.validatePaymasterOp` staticcall (T-7).
+pub const PAYMASTER_VALIDATE_GAS_CAP: u64 = 50_000;
+
+const VALIDATE_PAYMASTER_OP_SIGNATURE: &[u8] = b"validatePaymasterOp(address,bytes,uint256,bytes)";
 
 const VALIDATE_TRANSACTION_SIGNATURE: &[u8] = b"validateTransaction(bytes32,bytes,bytes)";
 
@@ -67,6 +71,36 @@ pub enum AaValidationError {
 
     #[error("paymaster pubkey not found: {0}")]
     PaymasterPubkeyNotFound(Address),
+
+    #[error("contract paymaster rejected transaction (returned false)")]
+    PaymasterRejected,
+
+    #[error("contract paymaster validation failed: {0}")]
+    PaymasterValidationFailed(String),
+
+    #[error("session key expired at block {expiry_block} (current {current_block})")]
+    SessionKeyExpired {
+        expiry_block: u64,
+        current_block: u64,
+    },
+
+    #[error("session key value cap exceeded: sum {sum} > cap {cap}")]
+    SessionValueCapExceeded { sum: String, cap: String },
+
+    #[error("session key target mismatch: inner call to {got:?}, expected {expected:?}")]
+    SessionTargetMismatch {
+        expected: Address,
+        got: Option<Address>,
+    },
+
+    #[error("session key root authorization signature invalid")]
+    SessionRootSignatureInvalid,
+
+    #[error("session key tx signature invalid")]
+    SessionKeySignatureInvalid,
+
+    #[error("session key algorithm not allowed: {0}")]
+    SessionKeyDisallowedAlgorithm(u8),
 }
 
 pub fn validate_aa_tx<S: KvStore + 'static, V: Verifier>(
@@ -143,26 +177,65 @@ pub fn validate_aa_tx<S: KvStore + 'static, V: Verifier>(
     }
 
     let tx_hash = signed_tx.sender_signing_hash();
-    let valid = verifier.verify(&pubkey, tx_hash.as_bytes(), &signed_tx.signature)?;
-    if !valid {
-        return Err(AaValidationError::SignatureInvalid);
+
+    // Session key path: root_signature authorizes the session key; session key
+    // signs the tx. Root pubkey sig check is replaced by the two-step session
+    // verification. See AA Phase 2 spec §4.
+    if let Some(bundle) = signed_tx.aa_bundle() {
+        if let Some(session_auth) = &bundle.session_auth {
+            validate_session_auth(
+                signed_tx,
+                session_auth,
+                &pubkey,
+                bundle.inner_calls.as_slice(),
+                &tx_hash,
+                chain_store,
+                verifier,
+            )?;
+            // Paymaster validation runs after session auth.
+        } else {
+            // Normal path: root key signs the tx directly.
+            let valid = verifier.verify(&pubkey, tx_hash.as_bytes(), &signed_tx.signature)?;
+            if !valid {
+                return Err(AaValidationError::SignatureInvalid);
+            }
+        }
+    } else {
+        let valid = verifier.verify(&pubkey, tx_hash.as_bytes(), &signed_tx.signature)?;
+        if !valid {
+            return Err(AaValidationError::SignatureInvalid);
+        }
     }
 
-    // Verify paymaster signature. This is the SINGLE verification point —
-    // both mempool-admission (validate_tx) and import (validate_tx_for_import)
-    // delegate to this function, so no second pass is needed at either call
-    // site. Early rejection here prevents forged bundles from occupying
-    // mempool capacity.
-    if let Some(paymaster) = signed_tx.aa_bundle().and_then(|b| b.paymaster) {
-        if paymaster != signed_tx.from {
-            verify_paymaster_signature(signed_tx, &paymaster, chain_store, verifier).map_err(
-                |e| match e {
-                    crate::tx_validation::TxValidationError::PaymasterPubkeyNotFound(addr) => {
-                        AaValidationError::PaymasterPubkeyNotFound(addr)
-                    }
-                    other => AaValidationError::PaymasterSignatureInvalid(other.to_string()),
-                },
-            )?;
+    // Paymaster validation — dispatches on type:
+    //   Phase 1 (EOA paymaster): paymaster_signature present → verify PQ sig.
+    //   Phase 2 (contract paymaster): paymaster_context present → staticcall.
+    // Self-sponsored (no paymaster) → no paymaster check needed.
+    if let Some(bundle) = signed_tx.aa_bundle() {
+        if let Some(paymaster) = bundle.paymaster {
+            if paymaster != signed_tx.from {
+                if let Some(context) = bundle.paymaster_context.as_ref().map(|b| b.as_ref()) {
+                    // Phase 2: contract paymaster via staticcall sandbox.
+                    call_paymaster_validate(
+                        signed_tx,
+                        &paymaster,
+                        context,
+                        world_state,
+                        chain_store,
+                    )?;
+                } else {
+                    // Phase 1: EOA paymaster PQ signature.
+                    verify_paymaster_signature(signed_tx, &paymaster, chain_store, verifier)
+                        .map_err(|e| match e {
+                            crate::tx_validation::TxValidationError::PaymasterPubkeyNotFound(
+                                addr,
+                            ) => AaValidationError::PaymasterPubkeyNotFound(addr),
+                            other => {
+                                AaValidationError::PaymasterSignatureInvalid(other.to_string())
+                            }
+                        })?;
+                }
+            }
         }
     }
 
@@ -358,6 +431,291 @@ fn is_magic_valid(output: &[u8]) -> bool {
                         .get(1..)
                         .map(|s| s.iter().all(|b| *b == 0))
                         .unwrap_or(false))))
+}
+
+/// Validate `SessionAuth` in a session-key-signed AA bundle.
+///
+/// Steps (AA Phase 2 spec §4.2):
+/// 1. Expiry: `session_auth.expiry_block > current_block`
+/// 2. Value cap: Σ `inner_call.value ≤ session_auth.value_cap`
+/// 3. Target: if `session_auth.target` is Some, all inner calls must target it
+/// 4. Root authorization: verify `root_signature` over `session_auth.auth_hash(chain_id)`
+///    using the root pubkey. All `ALLOWED_ALGORITHMS` are tried (root key algo is not
+///    stored separately from the pubkey bytes).
+/// 5. Session sig: verify `session_auth.session_signature` (signed by `session_pubkey`)
+///    over the tx `sender_signing_hash()`. The outer `signed_tx.signature` MUST equal
+///    `session_auth.session_signature` (same bytes and algo) to prevent injection.
+fn validate_session_auth<S: KvStore + 'static, V: Verifier>(
+    signed_tx: &SignedTransaction,
+    session_auth: &SessionAuth,
+    root_pubkey: &[u8],
+    inner_calls: &[InnerCall],
+    tx_hash: &ShellHash,
+    chain_store: &ChainStore<S>,
+    verifier: &V,
+) -> Result<(), AaValidationError> {
+    // 1. Expiry check.
+    let current_block = chain_store
+        .get_head_block()?
+        .map(|b| b.header.number)
+        .unwrap_or(0);
+    if session_auth.expiry_block <= current_block {
+        return Err(AaValidationError::SessionKeyExpired {
+            expiry_block: session_auth.expiry_block,
+            current_block,
+        });
+    }
+
+    // 2. Value cap check: sum of all inner call values must not exceed cap.
+    let value_sum: U256 = inner_calls
+        .iter()
+        .fold(U256::ZERO, |acc, c| acc.saturating_add(c.value));
+    if value_sum > session_auth.value_cap {
+        return Err(AaValidationError::SessionValueCapExceeded {
+            sum: format!("{value_sum:?}"),
+            cap: format!("{:?}", session_auth.value_cap),
+        });
+    }
+
+    // 3. Target restriction: if set, every inner call must target it.
+    if let Some(required_target) = session_auth.target {
+        for call in inner_calls {
+            if call.to != Some(required_target) {
+                return Err(AaValidationError::SessionTargetMismatch {
+                    expected: required_target,
+                    got: call.to,
+                });
+            }
+        }
+    }
+
+    // 4. Root authorization: root_signature over session_auth.auth_hash(chain_id).
+    //
+    // The root key's algorithm is not stored separately from the pubkey bytes,
+    // so we try all ALLOWED_ALGORITHMS and accept if any succeeds. This handles
+    // the case where the root key and session key use different algorithms.
+    let auth_hash = session_auth.auth_hash(signed_tx.tx.chain_id);
+    let root_valid = ALLOWED_ALGORITHMS.iter().copied().any(|algo| {
+        let root_sig = PQSignature::new(algo, session_auth.root_signature.as_ref().to_vec());
+        verifier
+            .verify(root_pubkey, auth_hash.as_bytes(), &root_sig)
+            .unwrap_or(false)
+    });
+    if !root_valid {
+        return Err(AaValidationError::SessionRootSignatureInvalid);
+    }
+
+    // 5. Session signature: the outer tx signature IS the session signature —
+    //    both must agree on algo and bytes. This binds the session key to the
+    //    outer transaction envelope and prevents an attacker from injecting an
+    //    arbitrary outer sig while supplying a valid session_signature separately.
+    let session_algo = SignatureType::from_u8(session_auth.session_algo).ok_or(
+        AaValidationError::SessionKeyDisallowedAlgorithm(session_auth.session_algo),
+    )?;
+    if !ALLOWED_ALGORITHMS.contains(&session_algo) {
+        return Err(AaValidationError::SessionKeyDisallowedAlgorithm(
+            session_auth.session_algo,
+        ));
+    }
+    if signed_tx.signature.sig_type != session_algo
+        || signed_tx.signature.data.as_slice() != session_auth.session_signature.as_ref()
+    {
+        return Err(AaValidationError::SessionKeySignatureInvalid);
+    }
+    let session_sig = PQSignature::new(
+        session_algo,
+        session_auth.session_signature.as_ref().to_vec(),
+    );
+    let session_valid = verifier.verify(
+        session_auth.session_pubkey.as_ref(),
+        tx_hash.as_bytes(),
+        &session_sig,
+    )?;
+    if !session_valid {
+        return Err(AaValidationError::SessionKeySignatureInvalid);
+    }
+
+    Ok(())
+}
+
+///
+/// The call runs against a world-state snapshot; the snapshot is discarded
+/// afterward so no state mutations persist even if the paymaster contract
+/// internally writes storage.
+///
+/// `calldata` here is the outer transaction's `tx.data` (the AaBundle RLP).
+fn call_paymaster_validate<S: KvStore + 'static>(
+    signed_tx: &SignedTransaction,
+    paymaster: &Address,
+    context: &[u8],
+    world_state: &mut WorldState<S>,
+    chain_store: &ChainStore<S>,
+) -> Result<(), AaValidationError> {
+    let max_gas_cost = signed_tx
+        .tx
+        .gas_limit
+        .saturating_mul(signed_tx.tx.max_fee_per_gas);
+
+    let calldata = encode_validate_paymaster_op_calldata(
+        &signed_tx.from,
+        signed_tx.tx.data.as_ref(),
+        max_gas_cost,
+        context,
+    );
+
+    let snapshot = world_state.snapshot()?;
+    let paymaster_chain_store = ChainStore::new(chain_store.store().clone());
+    let state_db = ShellStateDb::new(snapshot, paymaster_chain_store);
+
+    let head = chain_store.get_head_block()?;
+    let (number, timestamp, gas_limit, excess_blob_gas) = match head {
+        Some(block) => (
+            block.header.number,
+            block.header.timestamp,
+            block.header.gas_limit,
+            block.header.excess_blob_gas,
+        ),
+        None => (0, 0, PAYMASTER_VALIDATE_GAS_CAP, 0),
+    };
+
+    let tx_env = TxEnv::builder()
+        .caller(Address::ZERO.into())
+        .gas_limit(PAYMASTER_VALIDATE_GAS_CAP)
+        .max_fee_per_gas(0)
+        .gas_priority_fee(Some(0))
+        .kind(TxKind::Call((*paymaster).into()))
+        .value(alloy_primitives::U256::ZERO)
+        .data(AlBytes::from(calldata))
+        .nonce(0)
+        .chain_id(Some(signed_tx.tx.chain_id))
+        .build_fill();
+
+    let mut block_env = BlockEnv {
+        number: alloy_primitives::U256::from(number),
+        beneficiary: Address::ZERO.into(),
+        timestamp: alloy_primitives::U256::from(timestamp),
+        gas_limit,
+        basefee: 0,
+        difficulty: alloy_primitives::U256::ZERO,
+        prevrandao: Some(alloy_primitives::B256::ZERO),
+        blob_excess_gas_and_price: None,
+        slot_num: 0,
+    };
+    block_env.set_blob_excess_gas_and_price(excess_blob_gas, 3_338_477);
+
+    let mut db = state_db;
+    let ctx: MainnetContext<&mut ShellStateDb<S>> = Context::new(&mut db, SpecId::CANCUN)
+        .modify_block_chained(|b| *b = block_env)
+        .modify_cfg_chained(|cfg: &mut CfgEnv| {
+            cfg.chain_id = signed_tx.tx.chain_id;
+            cfg.disable_nonce_check = true;
+            cfg.disable_base_fee = true;
+        });
+
+    let spec = SpecId::CANCUN;
+    let mut evm = Evm::new(
+        ctx,
+        EthInstructions::new_mainnet_with_spec(spec),
+        ShellPrecompiles::new(spec),
+    );
+
+    let exec_result = evm
+        .transact(tx_env)
+        .map_err(|e| AaValidationError::PaymasterValidationFailed(format!("{e:?}")))?
+        .result;
+
+    match exec_result {
+        ExecutionResult::Success { output, .. } => {
+            let bytes = match output {
+                revm::context::result::Output::Call(b) => b.to_vec(),
+                revm::context::result::Output::Create(b, _) => b.to_vec(),
+            };
+            // Return value is `bool accepted` ABI-encoded as a 32-byte word.
+            // The boolean true is represented as ...0001 (low byte = 1).
+            let accepted = bytes.last().copied().map(|b| b == 1).unwrap_or(false)
+                && bytes
+                    .get(..bytes.len().saturating_sub(1))
+                    .map(|s| s.iter().all(|b| *b == 0))
+                    .unwrap_or(true);
+            if accepted {
+                Ok(())
+            } else {
+                Err(AaValidationError::PaymasterRejected)
+            }
+        }
+        ExecutionResult::Revert { output, .. } => {
+            Err(AaValidationError::PaymasterValidationFailed(format!(
+                "reverted: 0x{}",
+                hex::encode(output)
+            )))
+        }
+        ExecutionResult::Halt { reason, .. } => Err(AaValidationError::PaymasterValidationFailed(
+            format!("halted: {reason:?}"),
+        )),
+    }
+}
+
+/// ABI-encode `validatePaymasterOp(address,bytes,uint256,bytes)` calldata.
+///
+/// Layout:
+/// ```text
+/// [0..4]   selector
+/// [4..36]  sender (address, left-padded to 32 bytes)
+/// [36..68] offset of callData (= 0x80 = 128)
+/// [68..100] maxGasCost (uint256)
+/// [100..132] offset of context (= 0x80 + 32 + padded(callData.len))
+/// [132..]  callData length + callData padded
+///          context length + context padded
+/// ```
+fn encode_validate_paymaster_op_calldata(
+    sender: &Address,
+    call_data: &[u8],
+    max_gas_cost: u64,
+    context: &[u8],
+) -> Vec<u8> {
+    let call_data_offset: usize = 128; // 4 static args × 32 bytes
+    let call_data_len_padded = padded_len(call_data.len());
+    let context_offset = call_data_offset
+        .saturating_add(32) // length word
+        .saturating_add(call_data_len_padded);
+
+    let capacity = 4
+        + 32 // sender
+        + 32 // callData offset
+        + 32 // maxGasCost
+        + 32 // context offset
+        + 32 + call_data_len_padded
+        + 32 + padded_len(context.len());
+    let mut out = Vec::with_capacity(capacity);
+
+    // selector
+    out.extend_from_slice(
+        keccak256(VALIDATE_PAYMASTER_OP_SIGNATURE)
+            .as_bytes()
+            .get(..4)
+            .unwrap_or_else(|| unreachable!("keccak256 is 32 bytes")),
+    );
+
+    // sender: address left-padded to 32 bytes
+    out.extend_from_slice(&[0u8; 12]);
+    out.extend_from_slice(sender.0.as_slice());
+
+    // callData offset
+    out.extend_from_slice(&abi_word(call_data_offset as u64));
+
+    // maxGasCost
+    out.extend_from_slice(&abi_word(max_gas_cost));
+
+    // context offset
+    out.extend_from_slice(&abi_word(context_offset as u64));
+
+    // callData bytes
+    encode_bytes(call_data, &mut out);
+
+    // context bytes
+    encode_bytes(context, &mut out);
+
+    out
 }
 
 struct ValidationStateDb<S: KvStore + 'static> {

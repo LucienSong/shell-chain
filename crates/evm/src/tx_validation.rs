@@ -71,6 +71,33 @@ pub enum TxValidationError {
         have: U256,
     },
 
+    #[error("contract paymaster rejected transaction (returned false)")]
+    PaymasterRejected,
+
+    #[error("contract paymaster validation failed: {0}")]
+    PaymasterValidationFailed(String),
+
+    #[error("session key expired at block {expiry_block} (current {current_block})")]
+    SessionKeyExpired {
+        expiry_block: u64,
+        current_block: u64,
+    },
+
+    #[error("session key value cap exceeded")]
+    SessionValueCapExceeded,
+
+    #[error("session key target mismatch")]
+    SessionTargetMismatch,
+
+    #[error("session key root authorization signature invalid")]
+    SessionRootSignatureInvalid,
+
+    #[error("session key tx signature invalid")]
+    SessionKeySignatureInvalid,
+
+    #[error("session key algorithm not allowed: {0}")]
+    SessionKeyDisallowedAlgorithm(u8),
+
     #[error("aa validation failed: {0}")]
     AaValidation(String),
 }
@@ -426,6 +453,53 @@ pub fn compute_intrinsic_gas(
         }
     }
     gas
+}
+
+impl From<AaValidationError> for TxValidationError {
+    fn from(value: AaValidationError) -> Self {
+        match value {
+            AaValidationError::PubkeyNotFound => Self::PubkeyNotFound,
+            AaValidationError::AddressMismatch { from, derived } => {
+                Self::AddressMismatch { from, derived }
+            }
+            AaValidationError::SignatureInvalid => Self::SignatureInvalid,
+            AaValidationError::PubkeyConflict => Self::PubkeyConflict,
+            AaValidationError::DisallowedAlgorithm(sig_type) => Self::DisallowedAlgorithm(sig_type),
+            AaValidationError::Crypto(
+                shell_crypto::CryptoError::VerificationFailed
+                | shell_crypto::CryptoError::InvalidPublicKeyLength { .. }
+                | shell_crypto::CryptoError::InvalidSignatureLength { .. },
+            ) => Self::SignatureInvalid,
+            AaValidationError::Crypto(err) => Self::Crypto(err),
+            AaValidationError::Storage(err) => Self::Storage(err),
+            AaValidationError::StateDb(err) => Self::AaValidation(err.to_string()),
+            AaValidationError::ValidationCodeMissing(hash) => {
+                Self::AaValidation(format!("validation code missing for hash {hash}"))
+            }
+            AaValidationError::ValidationContractRejected(msg)
+            | AaValidationError::ValidationContractExecution(msg) => Self::AaValidation(msg),
+            AaValidationError::PaymasterSignatureInvalid(_) => Self::PaymasterSignatureInvalid,
+            AaValidationError::PaymasterPubkeyNotFound(addr) => Self::PaymasterPubkeyNotFound(addr),
+            AaValidationError::PaymasterRejected => Self::PaymasterRejected,
+            AaValidationError::PaymasterValidationFailed(msg) => {
+                Self::PaymasterValidationFailed(msg)
+            }
+            AaValidationError::SessionKeyExpired {
+                expiry_block,
+                current_block,
+            } => Self::SessionKeyExpired {
+                expiry_block,
+                current_block,
+            },
+            AaValidationError::SessionValueCapExceeded { .. } => Self::SessionValueCapExceeded,
+            AaValidationError::SessionTargetMismatch { .. } => Self::SessionTargetMismatch,
+            AaValidationError::SessionRootSignatureInvalid => Self::SessionRootSignatureInvalid,
+            AaValidationError::SessionKeySignatureInvalid => Self::SessionKeySignatureInvalid,
+            AaValidationError::SessionKeyDisallowedAlgorithm(algo) => {
+                Self::SessionKeyDisallowedAlgorithm(algo)
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -925,6 +999,7 @@ mod tests {
             inner_calls: vec![inner(1, 50_000)],
             paymaster: None,
             paymaster_signature: None,
+            ..Default::default()
         };
         // tx_type = legacy but bundle attached → expect rejection.
         // Bypass with_aa_bundle()'s tx_type check by hand-constructing.
@@ -946,6 +1021,7 @@ mod tests {
             inner_calls: vec![inner(0, 100_000), inner(0, 100_000)],
             paymaster: None,
             paymaster_signature: None,
+            ..Default::default()
         };
         // with_aa_bundle() rejects this at construction; bypass via direct field.
         let from = signer_address(&signer);
@@ -967,6 +1043,7 @@ mod tests {
             inner_calls: calls,
             paymaster: None,
             paymaster_signature: None,
+            ..Default::default()
         };
         let from = signer_address(&signer);
         let sig = PQSignature::new(SignatureType::Dilithium3, vec![0u8; 1]);
@@ -990,6 +1067,7 @@ mod tests {
             inner_calls: vec![inner(2, 50_000), inner(3, 50_000)],
             paymaster: None,
             paymaster_signature: None,
+            ..Default::default()
         };
         let signed = sign_aa(&signer, tx, bundle, true);
         let verifier = DilithiumVerifier;
@@ -1010,6 +1088,7 @@ mod tests {
             inner_calls: vec![inner(1_000_000_000, 50_000)],
             paymaster: None,
             paymaster_signature: None,
+            ..Default::default()
         };
         let signed = sign_aa(&signer, tx, bundle, true);
         let verifier = DilithiumVerifier;
@@ -1040,6 +1119,7 @@ mod tests {
             inner_calls: vec![inner(7, 50_000)],
             paymaster: Some(paymaster),
             paymaster_signature: Some(ShellBytes::from(vec![0u8; 1])),
+            ..Default::default()
         };
         // Build placeholder signed_tx to derive paymaster_signing_hash.
         let placeholder = SignedTransaction::with_aa_bundle(
@@ -1057,6 +1137,7 @@ mod tests {
             inner_calls: initial_bundle.inner_calls.clone(),
             paymaster: Some(paymaster),
             paymaster_signature: Some(ShellBytes::from(pm_sig.data.clone())),
+            ..Default::default()
         };
         let signed = sign_aa(&sender_signer, tx, final_bundle, true);
         let verifier = DilithiumVerifier;
@@ -1084,6 +1165,7 @@ mod tests {
             inner_calls: vec![inner(0, 50_000)],
             paymaster: Some(paymaster),
             paymaster_signature: Some(ShellBytes::from(vec![0xAB; 64])),
+            ..Default::default()
         };
         let signed = sign_aa(&sender_signer, tx, bundle, true);
         let verifier = DilithiumVerifier;
@@ -1112,6 +1194,7 @@ mod tests {
             inner_calls: vec![inner(0, 50_000)],
             paymaster: Some(paymaster),
             paymaster_signature: Some(ShellBytes::from(bogus_sig.data.clone())),
+            ..Default::default()
         };
         let signed = sign_aa(&sender_signer, tx, bundle, true);
         let verifier = DilithiumVerifier;
@@ -1139,6 +1222,7 @@ mod tests {
             inner_calls: vec![inner(0, 50_000)],
             paymaster: Some(paymaster),
             paymaster_signature: Some(ShellBytes::from(vec![0u8; 1])),
+            ..Default::default()
         };
         let placeholder = SignedTransaction::with_aa_bundle(
             sender,
@@ -1155,6 +1239,7 @@ mod tests {
             inner_calls: initial_bundle.inner_calls.clone(),
             paymaster: Some(paymaster),
             paymaster_signature: Some(ShellBytes::from(pm_sig.data.clone())),
+            ..Default::default()
         };
         let signed = sign_aa(&sender_signer, tx, final_bundle, true);
         let verifier = DilithiumVerifier;
@@ -1179,6 +1264,7 @@ mod tests {
             inner_calls: vec![inner(0, 50_000)],
             paymaster: None,
             paymaster_signature: None,
+            ..Default::default()
         };
         let placeholder = SignedTransaction::with_aa_bundle(
             from,
@@ -1201,34 +1287,5 @@ mod tests {
         let verifier = DilithiumVerifier;
         let res = validate_tx(&signed, &mut ws, &cs, &verifier, test_chain_id());
         assert!(matches!(res, Err(TxValidationError::SignatureInvalid)));
-    }
-}
-
-impl From<AaValidationError> for TxValidationError {
-    fn from(value: AaValidationError) -> Self {
-        match value {
-            AaValidationError::PubkeyNotFound => Self::PubkeyNotFound,
-            AaValidationError::AddressMismatch { from, derived } => {
-                Self::AddressMismatch { from, derived }
-            }
-            AaValidationError::SignatureInvalid => Self::SignatureInvalid,
-            AaValidationError::PubkeyConflict => Self::PubkeyConflict,
-            AaValidationError::DisallowedAlgorithm(sig_type) => Self::DisallowedAlgorithm(sig_type),
-            AaValidationError::Crypto(
-                shell_crypto::CryptoError::VerificationFailed
-                | shell_crypto::CryptoError::InvalidPublicKeyLength { .. }
-                | shell_crypto::CryptoError::InvalidSignatureLength { .. },
-            ) => Self::SignatureInvalid,
-            AaValidationError::Crypto(err) => Self::Crypto(err),
-            AaValidationError::Storage(err) => Self::Storage(err),
-            AaValidationError::StateDb(err) => Self::AaValidation(err.to_string()),
-            AaValidationError::ValidationCodeMissing(hash) => {
-                Self::AaValidation(format!("validation code missing for hash {hash}"))
-            }
-            AaValidationError::ValidationContractRejected(msg)
-            | AaValidationError::ValidationContractExecution(msg) => Self::AaValidation(msg),
-            AaValidationError::PaymasterSignatureInvalid(_) => Self::PaymasterSignatureInvalid,
-            AaValidationError::PaymasterPubkeyNotFound(addr) => Self::PaymasterPubkeyNotFound(addr),
-        }
     }
 }
