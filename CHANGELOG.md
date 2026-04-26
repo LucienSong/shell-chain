@@ -24,7 +24,31 @@ All notable changes to this project will be documented in this file.
   exhaustive match arms across the codebase. New example: `examples/genesis-testnet-wpoa.json`
   (chain_id=10, 3 validators, weights=[2,1,1]).
 
-- **Peer scoring wired into wPoA (PS.1)** (`crates/node`, `crates/consensus`):
+- **Peer scoring bridged to network ban list (PS.2)** (`crates/node`):
+  `Node` now holds a `peer_ban_list: Mutex<PeerBanList>` field. After every wPoA vote,
+  `flush_scorer_bans()` propagates peers whose score has fallen below the disconnect threshold
+  into the network-layer `PeerBanList` (3 violations → 5-minute ban). The bridge converts
+  `ScoringPeerId → PeerId` between the consensus and network layers.
+
+- **wPoA testnet deploy manifests (T.2)** (`infra/testnet/`): New directory with
+  `docker-compose.yml` (3-validator cluster, chain_id=10), `prometheus.yml` scrape config,
+  and operator `README.md`.
+
+- **Faucet service (T.3)** (`agents/faucet/`): New standalone Node.js/TypeScript HTTP service
+  using Fastify + ethers.js. `POST /faucet` drips 1 SHELL per IP per 24h; `GET /health`
+  returns current block number. Rate limiting via `@fastify/rate-limit`.
+
+- **Testnet documentation (T.4)** (`shell-site`): New `content/docs/testnet.md` covering
+  network parameters (chain_id=10), MetaMask setup, faucet usage, smart contract deployment,
+  and read-only node operation.
+
+- **Explorer network update (T.5)** (`shell-explorer`): `networks.ts` default chain ID updated
+  from `1337` to `10`; network name updated to "Shell Testnet" for wPoA testnet.
+
+- **Wallet testnet preset update (T.6)** (`shella-chrome-wallet`): `KNOWN_NETWORKS.testnet`
+  chain ID updated from `12345` to `10` to match wPoA genesis.
+
+
   `Node` now holds a `peer_scorer: Mutex<PeerScorer>` field. `handle_wpoa_vote` drives the
   scorer: `DuplicateVote → DuplicateMessage` penalty (-2), `WrongBlockHash → InvalidProofPayload`
   penalty (-20), `BlockCommitted → ValidProofDelivered` reward (+5) for each quorum signer.

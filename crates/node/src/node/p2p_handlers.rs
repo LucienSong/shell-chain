@@ -205,6 +205,36 @@ impl<S: KvStore + 'static> Node<S> {
         }
     }
 
+    /// PS.2: Flush wPoA peer scorer to the network-level ban list.
+    ///
+    /// Any peer whose score has fallen below `disconnect_threshold` is
+    /// recorded as a violation in the `PeerBanList`. After `ban_threshold`
+    /// violations the network layer will refuse connections from that peer.
+    /// Called from the event loop after each wPoA vote round completes.
+    pub fn flush_scorer_bans(&self) {
+        let scorer = self.peer_scorer.lock();
+        let to_disconnect = scorer.peers_to_disconnect();
+        if to_disconnect.is_empty() {
+            return;
+        }
+        let mut ban_list = self.peer_ban_list.lock();
+        for scoring_peer in to_disconnect {
+            let net_peer = shell_network::PeerId(scoring_peer.0.clone());
+            let was_banned = ban_list.record_violation(&net_peer);
+            if was_banned {
+                tracing::warn!(
+                    peer = %scoring_peer.0,
+                    "PS.2: peer score below threshold — recorded ban violation (now banned)"
+                );
+            } else {
+                tracing::debug!(
+                    peer = %scoring_peer.0,
+                    "PS.2: peer score below threshold — recorded violation"
+                );
+            }
+        }
+    }
+
     /// W.5: Handle an incoming wPoA view-change vote from a peer.
     ///
     /// Records the vote and logs when quorum for the view change is reached.

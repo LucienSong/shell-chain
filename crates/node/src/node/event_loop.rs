@@ -725,6 +725,8 @@ impl<S: KvStore + 'static> Node<S> {
                                 NetworkMessage::WPoaVote { block_hash, block_number, voter, signature } => {
                                     debug!(%peer, block = block_number, %voter, "W.5: received WPoaVote");
                                     self.handle_wpoa_vote(voter, block_hash, block_number, signature);
+                                    // PS.2: after every vote, flush scored-below-threshold peers to ban list.
+                                    self.flush_scorer_bans();
                                 }
                                 // W.5: Receive a wPoA view-change vote from a peer validator.
                                 NetworkMessage::WPoaViewChange { new_view, block_number, voter } => {

@@ -106,6 +106,9 @@ pub struct Node<S: KvStore + 'static> {
     pub wpoa_round: parking_lot::Mutex<Option<shell_consensus::wpoa_state::WPoaRound>>,
     /// PS.1: Peer scorer for wPoA vote/proposal behavior (Constitution §13.5).
     pub peer_scorer: parking_lot::Mutex<shell_consensus::PeerScorer>,
+    /// PS.2: Ban list bridge — scored-below-threshold peers are fed into the
+    /// network-level ban list so libp2p disconnects them (Constitution §13.5).
+    pub peer_ban_list: parking_lot::Mutex<shell_network::PeerBanList>,
 }
 
 const SYNC_RETRY_BASE_INTERVAL_SECS: u64 = 5;
@@ -208,6 +211,10 @@ impl<S: KvStore + 'static> Node<S> {
             )),
             wpoa_round: parking_lot::Mutex::new(None),
             peer_scorer: parking_lot::Mutex::new(PeerScorer::new(PeerScoringConfig::default())),
+            peer_ban_list: parking_lot::Mutex::new(shell_network::PeerBanList::new(
+                3,
+                std::time::Duration::from_secs(300),
+            )),
         }
     }
 
