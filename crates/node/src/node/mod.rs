@@ -18,7 +18,7 @@ pub(crate) use tracing::{debug, info, warn};
 pub(crate) use shell_consensus::{
     detect_double_sign, Attestation, ConsensusEngine, EngineType, EquivocationProof, FinalityState,
     ForkChoice, PoaEngine, WPoaEngine, WPoaConfig, WPoaEvent, WPoaRound, ProofWindowManager,
-    WindowConfig,
+    WindowConfig, PeerScorer, PeerScoringConfig,
 };
 pub(crate) use shell_core::{calculate_base_fee, Account, Block, BlockHeader, SignedTransaction};
 pub(crate) use shell_crypto::{
@@ -104,6 +104,8 @@ pub struct Node<S: KvStore + 'static> {
     /// W.5: Active wPoA round state machine for the current block height.
     /// `None` when running plain PoA or no block is in-flight.
     pub wpoa_round: parking_lot::Mutex<Option<shell_consensus::wpoa_state::WPoaRound>>,
+    /// PS.1: Peer scorer for wPoA vote/proposal behavior (Constitution §13.5).
+    pub peer_scorer: parking_lot::Mutex<shell_consensus::PeerScorer>,
 }
 
 const SYNC_RETRY_BASE_INTERVAL_SECS: u64 = 5;
@@ -205,6 +207,7 @@ impl<S: KvStore + 'static> Node<S> {
                 WindowConfig::default(),
             )),
             wpoa_round: parking_lot::Mutex::new(None),
+            peer_scorer: parking_lot::Mutex::new(PeerScorer::new(PeerScoringConfig::default())),
         }
     }
 
@@ -2911,5 +2914,317 @@ mod tests {
             node.chain_store.has_witness_bundle(&b1_hash).unwrap(),
             "witness bundle must survive grace window"
         );
+    }
+
+    // ─── W.7: wPoA end-to-end test suite ──────────────────────────────────────
+
+    mod wpoa_e2e_tests {
+        use super::*;
+        use shell_consensus::{PoaConfig, WPoaConfig, WPoaEngine};
+        use shell_crypto::{DilithiumSigner, PQSignature, SignatureType};
+        use shell_mempool::MempoolConfig;
+        use shell_storage::MemoryDb;
+
+        fn hash(n: u8) -> ShellHash {
+            ShellHash::from([n; 32])
+        }
+
+        fn dummy_sig() -> PQSignature {
+            PQSignature::new(SignatureType::Dilithium3, vec![0u8; 32])
+        }
+
+        /// Build a Node backed by a WPoA engine.
+        ///
+        /// The engine has a single validator so the node is always the proposer.
+        fn setup_wpoa_node() -> (Node<MemoryDb>, DilithiumSigner) {
+            let signer = DilithiumSigner::generate();
+            let pubkey = signer.public_key().to_vec();
+            let authority = Address::from_public_key(&pubkey, signer.sig_type().as_u8());
+
+            let db = Arc::new(MemoryDb::new());
+            let chain_store = Arc::new(ChainStore::new(db.clone()));
+            let world_state = Arc::new(RwLock::new(WorldState::new(db.clone())));
+
+            let poa_cfg = PoaConfig::new(vec![authority], 1);
+            let wpoa_cfg = WPoaConfig::from_poa(poa_cfg);
+            let engine = WPoaEngine::new(wpoa_cfg, Arc::new(MultiVerifier));
+            let consensus: Arc<RwLock<dyn ConsensusEngine>> = Arc::new(RwLock::new(engine));
+
+            let tx_pool = Arc::new(TxPool::new(MempoolConfig {
+                chain_id: 1337,
+                ..MempoolConfig::default()
+            }));
+
+            let config = NodeConfig::dev(authority);
+            let node = Node::new(config, db, chain_store, world_state, tx_pool, consensus);
+            (node, signer)
+        }
+
+        fn store_genesis_wpoa(node: &Node<MemoryDb>) {
+            let proposer = node.config.proposer_address.unwrap();
+            let genesis = Block {
+                header: BlockHeader {
+                    parent_hash: ShellHash::default(),
+                    state_root: ShellHash::default(),
+                    transactions_root: ShellHash::default(),
+                    receipts_root: ShellHash::default(),
+                    logs_bloom: Bytes::default(),
+                    number: 0,
+                    gas_limit: 30_000_000,
+                    gas_used: 0,
+                    timestamp: 1_700_000_000,
+                    extra_data: Bytes::default(),
+                    proposer,
+                    sig_aggregate_proof: None,
+                    base_fee_per_gas: 0,
+                    withdrawals_root: ShellHash::ZERO,
+                    parent_beacon_block_root: ShellHash::ZERO,
+                    blob_gas_used: 0,
+                    excess_blob_gas: 0,
+                    witness_root: None,
+                },
+                transactions: vec![],
+                proposer_seal: None,
+            };
+            let h = genesis.hash();
+            node.chain_store.put_block(&genesis).unwrap();
+            node.chain_store.set_canonical(0, &h).unwrap();
+            node.chain_store.set_head(&h).unwrap();
+        }
+
+        // ── 1. State machine: propose → vote → commit ─────────────────────────
+
+        #[test]
+        fn wpoa_state_machine_propose_vote_commit() {
+            let weights = (1u8..=3).map(|i| (Address::from([i; 20]), 1u64)).collect();
+            let mut round = WPoaRound::new(1, 0, weights);
+            let bh = hash(1);
+
+            let events = round.on_block_proposed(bh, Address::from([1; 20]));
+            assert_eq!(events.len(), 2, "propose should emit ProposeAccepted + VoteNeeded");
+            assert!(matches!(&events[0], WPoaEvent::ProposeAccepted { .. }));
+            assert!(matches!(&events[1], WPoaEvent::VoteNeeded { .. }));
+
+            // First vote: not yet quorum (ceil(2/3 * 3) = 2 required)
+            let v1 = round.on_vote(Address::from([1; 20]), bh, dummy_sig());
+            assert!(v1.is_empty(), "first vote must not yet trigger commit");
+
+            // Second vote: reaches quorum
+            let v2 = round.on_vote(Address::from([2; 20]), bh, dummy_sig());
+            assert_eq!(v2.len(), 1, "second vote should emit BlockCommitted");
+            match &v2[0] {
+                WPoaEvent::BlockCommitted { block_hash, quorum_signatures } => {
+                    assert_eq!(*block_hash, bh);
+                    assert_eq!(quorum_signatures.len(), 2);
+                }
+                other => panic!("expected BlockCommitted, got {other:?}"),
+            }
+            assert_eq!(round.phase_name(), "Committed");
+        }
+
+        // ── 2. State machine: view-change quorum ──────────────────────────────
+
+        #[test]
+        fn wpoa_state_machine_view_change() {
+            let weights = (1u8..=3).map(|i| (Address::from([i; 20]), 1u64)).collect();
+            let mut round = WPoaRound::new(1, 0, weights);
+            round.start_view_change(1);
+            assert_eq!(round.phase_name(), "ViewChanging");
+
+            // First view-change vote: not yet quorum
+            let e1 = round.on_view_change_vote(Address::from([1; 20]), 1);
+            assert!(e1.is_empty(), "single view-change vote must not yet reach quorum");
+
+            // Second view-change vote: reaches quorum
+            let e2 = round.on_view_change_vote(Address::from([2; 20]), 1);
+            assert_eq!(e2.len(), 1);
+            assert!(
+                matches!(&e2[0], WPoaEvent::ViewChangeReady { new_view: 1 }),
+                "should emit ViewChangeReady(1)"
+            );
+        }
+
+        // ── 3. Node: produce block with WPoA engine ───────────────────────────
+
+        #[test]
+        fn wpoa_node_produces_block_with_wpoa_engine() {
+            let (node, signer) = setup_wpoa_node();
+            store_genesis_wpoa(&node);
+
+            let block = node.produce_block(&signer, 100).expect("produce_block failed");
+            assert_eq!(block.number(), 1);
+            assert!(block.proposer_seal.is_some(), "block must carry a proposer seal");
+            assert_eq!(
+                block.header.proposer,
+                node.config.proposer_address.unwrap(),
+                "proposer must match the node's authority address"
+            );
+        }
+
+        // ── 4. RPC: shell_consensusInfo returns engine="wpoa" ─────────────────
+
+        #[tokio::test]
+        async fn wpoa_consensus_info_returns_wpoa_engine() {
+            use shell_rpc::api::ShellApiServer;
+            use shell_rpc::RpcHandler;
+
+            let authority1 = Address::from([0x01; 20]);
+            let authority2 = Address::from([0x02; 20]);
+            let authority3 = Address::from([0x03; 20]);
+
+            let poa_cfg = PoaConfig::new(vec![authority1, authority2, authority3], 1)
+                .with_epoch_length(100);
+            let wpoa_cfg = WPoaConfig::from_poa(poa_cfg);
+            let engine = WPoaEngine::new(wpoa_cfg, Arc::new(MultiVerifier));
+            let engine_arc: Arc<RwLock<dyn ConsensusEngine>> = Arc::new(RwLock::new(engine));
+
+            let db = Arc::new(MemoryDb::new());
+            let chain_store = Arc::new(ChainStore::new(db.clone()));
+            let world_state = Arc::new(RwLock::new(WorldState::new(db)));
+            let tx_pool = Arc::new(TxPool::new(MempoolConfig {
+                chain_id: 1337,
+                ..MempoolConfig::default()
+            }));
+            let (block_events, _) = tokio::sync::broadcast::channel(16);
+            let finalized = Arc::new(RwLock::new(0u64));
+            let finality = Arc::new(RwLock::new(FinalityState::new()));
+
+            let handler = RpcHandler::new(
+                chain_store,
+                world_state,
+                tx_pool,
+                1337,
+                None,
+                block_events,
+                finalized,
+                finality,
+            )
+            .with_consensus_engine(engine_arc);
+
+            let info = ShellApiServer::consensus_info(&handler).await.unwrap();
+            assert_eq!(info["engine"], "wpoa", "engine field must be 'wpoa'");
+            let validators = info["validators"].as_array().expect("validators must be an array");
+            assert_eq!(validators.len(), 3, "must report all 3 validators");
+        }
+
+        // ── 5. Node: handle_wpoa_vote reaches quorum ──────────────────────────
+
+        #[test]
+        fn wpoa_handle_vote_reaches_quorum() {
+            let signer1 = DilithiumSigner::generate();
+            let addr1 =
+                Address::from_public_key(signer1.public_key(), signer1.sig_type().as_u8());
+            let addr2 = Address::from([0xaa; 20]);
+            let addr3 = Address::from([0xbb; 20]);
+
+            let db = Arc::new(MemoryDb::new());
+            let chain_store = Arc::new(ChainStore::new(db.clone()));
+            let world_state = Arc::new(RwLock::new(WorldState::new(db.clone())));
+
+            let poa_cfg = PoaConfig::new(vec![addr1, addr2, addr3], 1);
+            let wpoa_cfg = WPoaConfig::from_poa(poa_cfg);
+            let engine = WPoaEngine::new(wpoa_cfg, Arc::new(MultiVerifier));
+            let consensus: Arc<RwLock<dyn ConsensusEngine>> = Arc::new(RwLock::new(engine));
+
+            let tx_pool = Arc::new(TxPool::new(MempoolConfig {
+                chain_id: 1337,
+                ..MempoolConfig::default()
+            }));
+
+            let config = NodeConfig::dev(addr1);
+            let node = Node::new(config, db, chain_store, world_state, tx_pool, consensus);
+            store_genesis_wpoa(&node);
+
+            // Manually initialise the wPoA round (the event loop does this after
+            // block production; here we skip that to keep the test synchronous).
+            let block_hash = hash(42);
+            let block_number = 1u64;
+            {
+                let weights = node.consensus.read().validator_weights();
+                let mut round = WPoaRound::new(block_number, 0, weights);
+                let _ = round.on_block_proposed(block_hash, addr1);
+                *node.wpoa_round.lock() = Some(round);
+            }
+
+            // addr2 votes first — still below quorum
+            node.handle_wpoa_vote(addr2, block_hash, block_number, vec![0u8; 32]);
+            let phase1 = node
+                .wpoa_round
+                .lock()
+                .as_ref()
+                .map(|r| r.phase_name().to_string());
+            assert_eq!(phase1.as_deref(), Some("Voting"), "should still be Voting after 1 vote");
+
+            // addr3 votes — quorum (2 of 3) reached
+            node.handle_wpoa_vote(addr3, block_hash, block_number, vec![0u8; 32]);
+            let phase2 = node
+                .wpoa_round
+                .lock()
+                .as_ref()
+                .map(|r| r.phase_name().to_string());
+            assert_eq!(
+                phase2.as_deref(),
+                Some("Committed"),
+                "should be Committed after quorum is reached"
+            );
+        }
+
+        // ── 6. Serde: NetworkMessage::WPoaVote roundtrip ──────────────────────
+
+        #[test]
+        fn wpoa_network_message_wpoavote_serde() {
+            let voter = Address::from([0xde; 20]);
+            let block_hash = hash(7);
+            let msg = NetworkMessage::WPoaVote {
+                block_hash,
+                block_number: 42,
+                voter,
+                signature: vec![1, 2, 3, 4],
+            };
+            let json = serde_json::to_string(&msg).expect("serialize failed");
+            let decoded: NetworkMessage =
+                serde_json::from_str(&json).expect("deserialize failed");
+            match decoded {
+                NetworkMessage::WPoaVote {
+                    block_hash: bh,
+                    block_number: bn,
+                    voter: v,
+                    signature: sig,
+                } => {
+                    assert_eq!(bh, block_hash);
+                    assert_eq!(bn, 42);
+                    assert_eq!(v, voter);
+                    assert_eq!(sig, vec![1, 2, 3, 4]);
+                }
+                _ => panic!("expected WPoaVote after deserialization"),
+            }
+        }
+
+        // ── 7. Serde: NetworkMessage::WPoaViewChange roundtrip ────────────────
+
+        #[test]
+        fn wpoa_network_message_wpoa_view_change_serde() {
+            let voter = Address::from([0xef; 20]);
+            let msg = NetworkMessage::WPoaViewChange {
+                new_view: 3,
+                block_number: 10,
+                voter,
+            };
+            let json = serde_json::to_string(&msg).expect("serialize failed");
+            let decoded: NetworkMessage =
+                serde_json::from_str(&json).expect("deserialize failed");
+            match decoded {
+                NetworkMessage::WPoaViewChange {
+                    new_view: nv,
+                    block_number: bn,
+                    voter: v,
+                } => {
+                    assert_eq!(nv, 3);
+                    assert_eq!(bn, 10);
+                    assert_eq!(v, voter);
+                }
+                _ => panic!("expected WPoaViewChange after deserialization"),
+            }
+        }
     }
 }

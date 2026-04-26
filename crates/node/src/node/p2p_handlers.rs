@@ -160,6 +160,7 @@ impl<S: KvStore + 'static> Node<S> {
                 );
                 return;
             }
+            let peer_id = shell_consensus::ScoringPeerId::from(format!("{voter:?}"));
             let events = round.on_vote(voter, block_hash, sig);
             for event in events {
                 match event {
@@ -172,12 +173,31 @@ impl<S: KvStore + 'static> Node<S> {
                             signers = quorum_signatures.len(),
                             "W.5: block committed with quorum"
                         );
+                        // PS.1: reward all quorum signers.
+                        let mut scorer = self.peer_scorer.lock();
+                        for (signer, _) in &quorum_signatures {
+                            let signer_id = shell_consensus::ScoringPeerId::from(format!("{signer:?}"));
+                            scorer.record_event(
+                                &signer_id,
+                                shell_consensus::PeerEvent::ValidProofDelivered,
+                            );
+                        }
                     }
                     WPoaEvent::DuplicateVote { voter } => {
                         tracing::warn!(%voter, "W.5: duplicate vote rejected");
+                        // PS.1: penalise duplicate voter.
+                        self.peer_scorer.lock().record_event(
+                            &peer_id,
+                            shell_consensus::PeerEvent::DuplicateMessage,
+                        );
                     }
                     WPoaEvent::WrongBlockHash { expected, got } => {
                         tracing::warn!(%expected, %got, "W.5: vote for wrong block hash rejected");
+                        // PS.1: penalise invalid payload.
+                        self.peer_scorer.lock().record_event(
+                            &peer_id,
+                            shell_consensus::PeerEvent::InvalidProofPayload,
+                        );
                     }
                     _ => {}
                 }

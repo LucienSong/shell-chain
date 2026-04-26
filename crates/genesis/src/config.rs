@@ -196,6 +196,76 @@ pub enum ConsensusConfig {
         #[serde(default)]
         epoch_length: u64,
     },
+    /// Weighted Proof of Authority consensus (Phase 1.5).
+    ///
+    /// Identical to PoA but adds per-validator weights for proportional proposer
+    /// selection. `weights[i]` corresponds to `authorities[i]`. Missing weights
+    /// default to 1.
+    #[serde(rename = "wpoa")]
+    WPoA {
+        /// Ordered list of authority addresses.
+        authorities: Vec<Address>,
+        /// Ordered authority PQ public keys encoded as hex strings.
+        #[serde(default)]
+        authority_pubkeys: Vec<String>,
+        /// Minimum seconds between blocks.
+        block_time_secs: u64,
+        /// Maximum seconds a block timestamp may be ahead of wall-clock time.
+        #[serde(default = "default_poa_max_future_secs")]
+        max_future_secs: u64,
+        /// Number of blocks per epoch. Defaults to 0 (no epochs).
+        #[serde(default)]
+        epoch_length: u64,
+        /// Per-validator weights (aligned with `authorities`). Defaults to all-1.
+        #[serde(default)]
+        weights: Vec<u64>,
+    },
+}
+
+impl ConsensusConfig {
+    /// Return the ordered authority addresses (PoA or wPoA).
+    pub fn authorities(&self) -> &[Address] {
+        match self {
+            Self::PoA { authorities, .. } | Self::WPoA { authorities, .. } => authorities,
+        }
+    }
+
+    /// Return the authority PQ public keys.
+    pub fn authority_pubkeys(&self) -> &[String] {
+        match self {
+            Self::PoA {
+                authority_pubkeys, ..
+            }
+            | Self::WPoA {
+                authority_pubkeys, ..
+            } => authority_pubkeys,
+        }
+    }
+
+    /// Return the block time in seconds.
+    pub fn block_time_secs(&self) -> u64 {
+        match self {
+            Self::PoA { block_time_secs, .. } | Self::WPoA { block_time_secs, .. } => {
+                *block_time_secs
+            }
+        }
+    }
+
+    /// Return the max future seconds.
+    pub fn max_future_secs(&self) -> u64 {
+        match self {
+            Self::PoA { max_future_secs, .. } | Self::WPoA { max_future_secs, .. } => {
+                *max_future_secs
+            }
+        }
+    }
+
+    /// Return the epoch length.
+    pub fn epoch_length(&self) -> u64 {
+        match self {
+            Self::PoA { epoch_length, .. } | Self::WPoA { epoch_length, .. } => *epoch_length,
+        }
+    }
 }
 
 /// An entry in the genesis allocation table.
@@ -238,11 +308,7 @@ impl GenesisConfig {
     /// falls back to the [`NetworkType`] default so that a genesis file only
     /// needs to set `network_type` without repeating the block time.
     pub fn effective_block_time_secs(&self) -> u64 {
-        let explicit = match &self.consensus {
-            ConsensusConfig::PoA {
-                block_time_secs, ..
-            } => *block_time_secs,
-        };
+        let explicit = self.consensus.block_time_secs();
         if explicit > 0 {
             explicit
         } else {
@@ -260,11 +326,7 @@ impl GenesisConfig {
     /// than 50% — this catches accidental mismatches while still allowing
     /// intentional operator customization with a small tolerance.
     pub fn validate_network_consistency(&self) -> Result<(), GenesisError> {
-        let explicit = match &self.consensus {
-            ConsensusConfig::PoA {
-                block_time_secs, ..
-            } => *block_time_secs,
-        };
+        let explicit = self.consensus.block_time_secs();
         // Zero means "use network default" — always valid.
         if explicit == 0 {
             return Ok(());
@@ -365,6 +427,7 @@ mod tests {
                 assert_eq!(*block_time_secs, 2);
                 assert_eq!(*max_future_secs, 45);
             }
+            _ => panic!("expected PoA consensus"),
         }
     }
 
@@ -417,6 +480,7 @@ mod tests {
             ConsensusConfig::PoA {
                 max_future_secs, ..
             } => assert_eq!(max_future_secs, 60),
+            _ => panic!("expected PoA consensus"),
         }
     }
 
@@ -668,5 +732,38 @@ mod tests {
         }"#;
         let config = GenesisConfig::from_json(json).unwrap();
         assert!(config.validate_network_consistency().is_ok());
+    }
+
+    #[test]
+    fn wpoa_consensus_config_roundtrip() {
+        let json = r#"{
+            "chain_id": 10,
+            "chain_name": "shell-testnet-wpoa",
+            "network_type": "Testnet",
+            "timestamp": 1700000000,
+            "consensus": {
+                "engine": "wpoa",
+                "authorities": [],
+                "weights": [2, 1, 1],
+                "block_time_secs": 2,
+                "max_future_secs": 60,
+                "epoch_length": 0
+            },
+            "alloc": {}
+        }"#;
+        let config = GenesisConfig::from_json(json).unwrap();
+        match &config.consensus {
+            ConsensusConfig::WPoA { weights, block_time_secs, max_future_secs, .. } => {
+                assert_eq!(weights, &[2u64, 1, 1]);
+                assert_eq!(*block_time_secs, 2);
+                assert_eq!(*max_future_secs, 60);
+            }
+            _ => panic!("expected WPoA consensus"),
+        }
+        // roundtrip
+        let serialized = config.to_json_pretty().unwrap();
+        let config2 = GenesisConfig::from_json(&serialized).unwrap();
+        assert!(matches!(config2.consensus, ConsensusConfig::WPoA { .. }));
+        assert_eq!(config2.consensus.block_time_secs(), 2);
     }
 }

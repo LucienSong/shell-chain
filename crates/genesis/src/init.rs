@@ -2,7 +2,7 @@ use shell_core::{Account, Block, BlockHeader};
 use shell_primitives::{keccak256, Address, Bytes, ShellHash};
 use shell_storage::{ChainConfig, ChainStore, KvStore, StorageError, WorldState};
 
-use crate::{AllocEntry, ConsensusConfig, GenesisConfig, GenesisError};
+use crate::{AllocEntry, GenesisConfig, GenesisError};
 
 /// Initialize world state from genesis allocations and produce the genesis block.
 ///
@@ -21,9 +21,7 @@ pub fn initialize_genesis<S: KvStore + 'static>(
     }
 
     // Write initial validator set to the validator registry in world state.
-    let authorities = match &config.consensus {
-        ConsensusConfig::PoA { authorities, .. } => authorities.clone(),
-    };
+    let authorities = config.consensus.authorities().to_vec();
     if !authorities.is_empty() {
         world_state
             .set_validators(&authorities)
@@ -40,11 +38,12 @@ pub fn initialize_genesis<S: KvStore + 'static>(
         .map_err(|e| GenesisError::StateInit(e.to_string()))?;
 
     // Build genesis header
-    let proposer = match &config.consensus {
-        ConsensusConfig::PoA { authorities, .. } => {
-            authorities.first().copied().unwrap_or(Address::ZERO)
-        }
-    };
+    let proposer = config
+        .consensus
+        .authorities()
+        .first()
+        .copied()
+        .unwrap_or(Address::ZERO);
 
     let header = BlockHeader {
         parent_hash: ShellHash::ZERO,
@@ -101,13 +100,10 @@ pub fn initialize_authority_pubkeys<S: KvStore + 'static>(
     config: &GenesisConfig,
     chain_store: &ChainStore<S>,
 ) -> Result<(), GenesisError> {
-    let (authorities, authority_pubkeys) = match &config.consensus {
-        ConsensusConfig::PoA {
-            authorities,
-            authority_pubkeys,
-            ..
-        } => (authorities, authority_pubkeys),
-    };
+    let (authorities, authority_pubkeys) = (
+        config.consensus.authorities(),
+        config.consensus.authority_pubkeys(),
+    );
 
     if authority_pubkeys.is_empty() {
         return Ok(());
@@ -174,6 +170,7 @@ fn mark_system_contract<S: KvStore + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ConsensusConfig;
     use shell_primitives::U256;
     use shell_storage::{ChainStore, MemoryDb};
     use std::collections::HashMap;
@@ -363,9 +360,36 @@ mod tests {
         let ws = WorldState::at_root(store, &block.header.state_root).unwrap();
         let validators = ws.get_validators().unwrap();
 
-        let expected = match &config.consensus {
-            ConsensusConfig::PoA { authorities, .. } => authorities.clone(),
-        };
+        let expected = config.consensus.authorities().to_vec();
         assert_eq!(validators, expected);
+    }
+
+    #[test]
+    fn wpoa_genesis_parses_and_initializes() {
+        let json = r#"{
+            "chain_id": 10,
+            "chain_name": "shell-testnet-wpoa",
+            "network_type": "Testnet",
+            "timestamp": 1700000000,
+            "gas_limit": 30000000,
+            "extra_data": "",
+            "consensus": {
+                "engine": "wpoa",
+                "authorities": [],
+                "weights": [2, 1, 1],
+                "block_time_secs": 2,
+                "max_future_secs": 60,
+                "epoch_length": 0
+            },
+            "alloc": {}
+        }"#;
+        let config = crate::GenesisConfig::from_json(json).unwrap();
+        assert_eq!(config.chain_id, 10);
+        assert!(matches!(config.consensus, ConsensusConfig::WPoA { .. }));
+        assert_eq!(config.consensus.block_time_secs(), 2);
+
+        let store = Arc::new(MemoryDb::new());
+        let block = initialize_genesis(&config, store).unwrap();
+        assert_eq!(block.number(), 0);
     }
 }

@@ -453,21 +453,10 @@ async fn run_with_store<S: KvStore + 'static>(
     }
 
     // Extract authorities and epoch_length from genesis.
-    let (authorities, authority_pubkeys, max_future_secs, epoch_length) =
-        match &genesis_config.consensus {
-            ConsensusConfig::PoA {
-                authorities,
-                authority_pubkeys,
-                max_future_secs,
-                epoch_length,
-                ..
-            } => (
-                authorities.clone(),
-                authority_pubkeys.clone(),
-                *max_future_secs,
-                *epoch_length,
-            ),
-        };
+    let authorities = genesis_config.consensus.authorities().to_vec();
+    let authority_pubkeys = genesis_config.consensus.authority_pubkeys().to_vec();
+    let max_future_secs = genesis_config.consensus.max_future_secs();
+    let epoch_length = genesis_config.consensus.epoch_length();
 
     // F4: validate network_type vs block_time_secs consistency, warn on mismatch.
     if let Err(e) = genesis_config.validate_network_consistency() {
@@ -495,11 +484,27 @@ async fn run_with_store<S: KvStore + 'static>(
                 );
                 ConsensusEngineConfig::WPoa(wpoa_config)
             }
-            _ => ConsensusEngineConfig::Poa(
+            Some("poa") => ConsensusEngineConfig::Poa(
                 PoaConfig::new(authorities.clone(), block_time_secs)
                     .with_max_future_secs(max_future_secs)
                     .with_epoch_length(epoch_length),
             ),
+            // Auto-detect from genesis when no explicit flag is given.
+            _ => match &genesis_config.consensus {
+                ConsensusConfig::WPoA { .. } => {
+                    let wpoa_config = WPoaConfig::from_poa(
+                        PoaConfig::new(authorities.clone(), block_time_secs)
+                            .with_max_future_secs(max_future_secs)
+                            .with_epoch_length(epoch_length),
+                    );
+                    ConsensusEngineConfig::WPoa(wpoa_config)
+                }
+                _ => ConsensusEngineConfig::Poa(
+                    PoaConfig::new(authorities.clone(), block_time_secs)
+                        .with_max_future_secs(max_future_secs)
+                        .with_epoch_length(epoch_length),
+                ),
+            },
         },
         mempool: MempoolConfig {
             chain_id: genesis_config.chain_id,
