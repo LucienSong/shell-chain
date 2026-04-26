@@ -48,11 +48,9 @@ All notable changes to this project will be documented in this file.
 - **Wallet testnet preset update (T.6)** (`shella-chrome-wallet`): `KNOWN_NETWORKS.testnet`
   chain ID updated from `12345` to `10` to match wPoA genesis.
 
-
-  `Node` now holds a `peer_scorer: Mutex<PeerScorer>` field. `handle_wpoa_vote` drives the
-  scorer: `DuplicateVote → DuplicateMessage` penalty (-2), `WrongBlockHash → InvalidProofPayload`
-  penalty (-20), `BlockCommitted → ValidProofDelivered` reward (+5) for each quorum signer.
-  Elevates `PeerScorer` from `lib-only` to integrated status (Constitution §13.5).
+- **CONSTITUTION v1.4** (`projects/shell-chain/CONSTITUTION.md`): wPoA engine and
+  consensus PeerScoring promoted from lib-only to production (PS.3). §13.2 cleaned up;
+  §13.4 updated; §13.5 fully rewritten to document the two-layer peer scoring bridge.
 
 - **RPC doc autogen (R.1–R.3)** (`tools/rpc-docgen`): `cargo run -p rpc-docgen` generates
   `docs/rpc-reference.md` (75 methods, 7 namespaces). CI step `rpc-docgen --check` prevents
