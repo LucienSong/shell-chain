@@ -1,0 +1,9 @@
+[package]
+name = "rpc-docgen"
+version = "0.20.0-dev"
+edition = "2021"
+description = "Generate docs/rpc-reference.md from crates/rpc/src/api.rs"
+
+[[bin]]
+name = "rpc-docgen"
+path = "src/main.rs"
