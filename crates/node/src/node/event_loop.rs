@@ -218,15 +218,15 @@ impl<S: KvStore + 'static> Node<S> {
                                 // F-046: Use scope blocks to manage lock lifetimes.
                                 {
                                     let consensus = self.consensus.read();
-                                    if consensus.config().is_epoch_boundary(number) {
-                                        let epoch = consensus.config().epoch_of(number);
+                                    if consensus.poa_config().is_epoch_boundary(number) {
+                                        let epoch = consensus.poa_config().epoch_of(number);
                                         info!(epoch, block = number, "new epoch started");
                                     }
                                 }
                                 // Reload validators at epoch boundaries (F-041: handle errors).
                                 // F-061: Scope read lock explicitly to prevent deadlock.
                                 let is_epoch = {
-                                    self.consensus.read().config().is_epoch_boundary(number)
+                                    self.consensus.read().poa_config().is_epoch_boundary(number)
                                 };
                                 if is_epoch {
                                     let validators = {
@@ -235,7 +235,7 @@ impl<S: KvStore + 'static> Node<S> {
                                     };
                                     match validators {
                                         Ok(v) if !v.is_empty() => {
-                                            self.consensus.write().config_mut().set_authorities(v);
+                                            self.consensus.write().poa_config_mut().set_authorities(v);
                                         }
                                         Ok(_) => {
                                             // Empty validator set in world state — keep current authorities.

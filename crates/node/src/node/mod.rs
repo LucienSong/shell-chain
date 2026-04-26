@@ -14,9 +14,10 @@ pub(crate) use parking_lot::RwLock;
 pub(crate) use tokio::sync::watch;
 pub(crate) use tracing::{debug, info, warn};
 
+#[allow(unused_imports)]
 pub(crate) use shell_consensus::{
     detect_double_sign, Attestation, ConsensusEngine, EquivocationProof, FinalityState, ForkChoice,
-    PoaEngine, ProofWindowManager, WindowConfig,
+    PoaEngine, WPoaEngine, WPoaConfig, ProofWindowManager, WindowConfig,
 };
 pub(crate) use shell_core::{calculate_base_fee, Account, Block, BlockHeader, SignedTransaction};
 pub(crate) use shell_crypto::{
@@ -53,7 +54,7 @@ pub struct Node<S: KvStore + 'static> {
     pub chain_store: Arc<ChainStore<S>>,
     pub world_state: Arc<RwLock<WorldState<S>>>,
     pub tx_pool: Arc<TxPool>,
-    pub consensus: Arc<RwLock<PoaEngine>>,
+    pub consensus: Arc<RwLock<dyn ConsensusEngine>>,
     /// Known authority public keys for seal verification (Address → PQ pubkey).
     pub known_authorities: Arc<RwLock<HashMap<Address, Vec<u8>>>>,
     /// Tracks recent state roots for pruning decisions.
@@ -129,7 +130,7 @@ impl<S: KvStore + 'static> Node<S> {
         chain_store: Arc<ChainStore<S>>,
         world_state: Arc<RwLock<WorldState<S>>>,
         tx_pool: Arc<TxPool>,
-        consensus: Arc<RwLock<PoaEngine>>,
+        consensus: Arc<RwLock<dyn ConsensusEngine>>,
     ) -> Self {
         let (shutdown_tx, _) = watch::channel(false);
         let tracker = StateRootTracker::new(config.pruning.clone());
@@ -643,7 +644,7 @@ mod tests {
         let db = Arc::new(MemoryDb::new());
         let chain_store = Arc::new(ChainStore::new(db.clone()));
         let world_state = Arc::new(RwLock::new(WorldState::new(db.clone())));
-        let consensus = Arc::new(RwLock::new(PoaEngine::new(PoaConfig::new(
+        let consensus: Arc<RwLock<dyn ConsensusEngine>> = Arc::new(RwLock::new(PoaEngine::new(PoaConfig::new(
             vec![authority],
             1,
         ))));
@@ -1007,7 +1008,7 @@ mod tests {
         let node2_db = Arc::new(MemoryDb::new());
         let node2_cs = Arc::new(ChainStore::new(node2_db.clone()));
         let node2_ws = Arc::new(RwLock::new(WorldState::new(node2_db.clone())));
-        let consensus = Arc::new(RwLock::new(PoaEngine::new(PoaConfig::new(
+        let consensus: Arc<RwLock<dyn ConsensusEngine>> = Arc::new(RwLock::new(PoaEngine::new(PoaConfig::new(
             vec![proposer],
             1,
         ))));
@@ -1081,7 +1082,7 @@ mod tests {
         let follower_db = Arc::new(MemoryDb::new());
         let follower_cs = Arc::new(ChainStore::new(follower_db.clone()));
         let follower_ws = Arc::new(RwLock::new(WorldState::new(follower_db.clone())));
-        let consensus = Arc::new(RwLock::new(PoaEngine::new(PoaConfig::new(
+        let consensus: Arc<RwLock<dyn ConsensusEngine>> = Arc::new(RwLock::new(PoaEngine::new(PoaConfig::new(
             vec![proposer],
             1,
         ))));
@@ -1231,7 +1232,7 @@ mod tests {
         let follower_db = Arc::new(MemoryDb::new());
         let follower_cs = Arc::new(ChainStore::new(follower_db.clone()));
         let follower_ws = Arc::new(RwLock::new(WorldState::new(follower_db.clone())));
-        let consensus = Arc::new(RwLock::new(PoaEngine::new(PoaConfig::new(
+        let consensus: Arc<RwLock<dyn ConsensusEngine>> = Arc::new(RwLock::new(PoaEngine::new(PoaConfig::new(
             vec![proposer],
             1,
         ))));
@@ -1424,7 +1425,7 @@ mod tests {
         let follower_db = Arc::new(MemoryDb::new());
         let follower_cs = Arc::new(ChainStore::new(follower_db.clone()));
         let follower_ws = Arc::new(RwLock::new(WorldState::new(follower_db.clone())));
-        let consensus = Arc::new(RwLock::new(PoaEngine::new(PoaConfig::new(
+        let consensus: Arc<RwLock<dyn ConsensusEngine>> = Arc::new(RwLock::new(PoaEngine::new(PoaConfig::new(
             vec![proposer],
             1,
         ))));
@@ -1508,7 +1509,7 @@ mod tests {
         let follower_db = Arc::new(MemoryDb::new());
         let follower_cs = Arc::new(ChainStore::new(follower_db.clone()));
         let follower_ws = Arc::new(RwLock::new(WorldState::new(follower_db.clone())));
-        let consensus = Arc::new(RwLock::new(PoaEngine::new(PoaConfig::new(
+        let consensus: Arc<RwLock<dyn ConsensusEngine>> = Arc::new(RwLock::new(PoaEngine::new(PoaConfig::new(
             vec![proposer],
             1,
         ))));
@@ -1571,7 +1572,7 @@ mod tests {
         let node2_db = Arc::new(MemoryDb::new());
         let node2_cs = Arc::new(ChainStore::new(node2_db.clone()));
         let node2_ws = Arc::new(RwLock::new(WorldState::new(node2_db.clone())));
-        let consensus = Arc::new(RwLock::new(PoaEngine::new(PoaConfig::new(
+        let consensus: Arc<RwLock<dyn ConsensusEngine>> = Arc::new(RwLock::new(PoaEngine::new(PoaConfig::new(
             vec![proposer],
             1,
         ))));
@@ -1707,7 +1708,7 @@ mod tests {
         let db = Arc::new(MemoryDb::new());
         let chain_store = Arc::new(ChainStore::new(db.clone()));
         let world_state = Arc::new(RwLock::new(WorldState::new(db.clone())));
-        let consensus = Arc::new(RwLock::new(PoaEngine::new(
+        let consensus: Arc<RwLock<dyn ConsensusEngine>> = Arc::new(RwLock::new(PoaEngine::new(
             PoaConfig::new(vec![authority], 1).with_epoch_length(3),
         )));
         let tx_pool = Arc::new(TxPool::new(MempoolConfig {
@@ -1727,7 +1728,7 @@ mod tests {
         }
 
         // Before epoch boundary, consensus has 1 authority.
-        assert_eq!(node.consensus.read().config().authorities.len(), 1);
+        assert_eq!(node.consensus.read().poa_config().authorities.len(), 1);
 
         // Produce blocks until we hit the epoch boundary (block 3).
         for _ in 0..3 {
@@ -1738,7 +1739,7 @@ mod tests {
         // Simulate the epoch boundary sync that the event loop would do.
         {
             let consensus = node.consensus.read();
-            if consensus.config().is_epoch_boundary(3) {
+            if consensus.poa_config().is_epoch_boundary(3) {
                 drop(consensus);
                 let ws = node.world_state.read();
                 let validators = ws.get_validators().unwrap();
@@ -1746,7 +1747,7 @@ mod tests {
                 if !validators.is_empty() {
                     node.consensus
                         .write()
-                        .config_mut()
+                        .poa_config_mut()
                         .set_authorities(validators);
                 }
             }
@@ -1754,7 +1755,7 @@ mod tests {
 
         // After epoch boundary reload, consensus should have 2 authorities.
         let consensus_guard = node.consensus.read();
-        let authorities = &consensus_guard.config().authorities;
+        let authorities = &consensus_guard.poa_config().authorities;
         assert_eq!(authorities.len(), 2);
         assert!(authorities.contains(&authority));
         assert!(authorities.contains(&new_validator));
@@ -1768,7 +1769,7 @@ mod tests {
         let db = Arc::new(MemoryDb::new());
         let chain_store = Arc::new(ChainStore::new(db.clone()));
         let world_state = Arc::new(RwLock::new(WorldState::new(db.clone())));
-        let consensus = Arc::new(RwLock::new(PoaEngine::new(
+        let consensus: Arc<RwLock<dyn ConsensusEngine>> = Arc::new(RwLock::new(PoaEngine::new(
             PoaConfig::new(vec![authority], 1).with_epoch_length(2),
         )));
         let tx_pool = Arc::new(TxPool::new(MempoolConfig {
@@ -1782,7 +1783,7 @@ mod tests {
 
         // Produce block 1 — not an epoch boundary.
         node.produce_block(&signer, 0).unwrap();
-        assert_eq!(node.consensus.read().config().authorities.len(), 1);
+        assert_eq!(node.consensus.read().poa_config().authorities.len(), 1);
 
         // Write validators mid-epoch.
         let new_val = Address::from([0xCC; 20]);
@@ -1792,7 +1793,7 @@ mod tests {
         }
 
         // Still not reloaded until epoch boundary.
-        assert_eq!(node.consensus.read().config().authorities.len(), 1);
+        assert_eq!(node.consensus.read().poa_config().authorities.len(), 1);
 
         // Produce block 2 — epoch boundary (epoch_length=2).
         node.produce_block(&signer, 0).unwrap();
@@ -1800,7 +1801,7 @@ mod tests {
         // Simulate epoch boundary sync.
         {
             let consensus = node.consensus.read();
-            if consensus.config().is_epoch_boundary(2) {
+            if consensus.poa_config().is_epoch_boundary(2) {
                 drop(consensus);
                 let ws = node.world_state.read();
                 let validators = ws.get_validators().unwrap();
@@ -1808,14 +1809,14 @@ mod tests {
                 if !validators.is_empty() {
                     node.consensus
                         .write()
-                        .config_mut()
+                        .poa_config_mut()
                         .set_authorities(validators);
                 }
             }
         }
 
         // Now the validator set should be updated.
-        assert_eq!(node.consensus.read().config().authorities.len(), 2);
+        assert_eq!(node.consensus.read().poa_config().authorities.len(), 2);
     }
 
     // ── Pruning integration tests ──────────────────────────────────────
@@ -1828,7 +1829,7 @@ mod tests {
         let db = Arc::new(MemoryDb::new());
         let chain_store = Arc::new(ChainStore::new(db.clone()));
         let world_state = Arc::new(RwLock::new(WorldState::new(db.clone())));
-        let consensus = Arc::new(RwLock::new(PoaEngine::new(PoaConfig::new(
+        let consensus: Arc<RwLock<dyn ConsensusEngine>> = Arc::new(RwLock::new(PoaEngine::new(PoaConfig::new(
             vec![authority],
             1,
         ))));
@@ -2091,7 +2092,7 @@ mod tests {
         let db2 = Arc::new(MemoryDb::new());
         let cs2 = Arc::new(ChainStore::new(db2.clone()));
         let ws2 = Arc::new(RwLock::new(WorldState::new(db2.clone())));
-        let consensus = Arc::new(RwLock::new(PoaEngine::new(PoaConfig::new(
+        let consensus: Arc<RwLock<dyn ConsensusEngine>> = Arc::new(RwLock::new(PoaEngine::new(PoaConfig::new(
             vec![proposer],
             1,
         ))));
@@ -2534,7 +2535,7 @@ mod tests {
         let db = Arc::new(MemoryDb::new());
         let chain_store = Arc::new(ChainStore::new(db.clone()));
         let world_state = Arc::new(RwLock::new(WorldState::new(db.clone())));
-        let consensus = Arc::new(RwLock::new(PoaEngine::new(PoaConfig::new(
+        let consensus: Arc<RwLock<dyn ConsensusEngine>> = Arc::new(RwLock::new(PoaEngine::new(PoaConfig::new(
             vec![authority],
             1,
         ))));

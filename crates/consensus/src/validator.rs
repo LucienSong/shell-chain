@@ -105,7 +105,7 @@ impl Default for ValidatorSetConfig {
 ///
 /// Ordering is preserved so that deterministic weighted round-robin proposer
 /// selection is consistent across all nodes.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ValidatorSet {
     /// Validators keyed by address; insertion order preserved in `order`.
     validators: HashMap<Address, ValidatorInfo>,

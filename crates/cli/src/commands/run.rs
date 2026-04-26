@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use shell_consensus::PoaConfig;
+use shell_consensus::{PoaConfig, WPoaConfig};
+use shell_node::config::ConsensusEngineConfig;
 use shell_core::Block;
 use shell_crypto::{DilithiumSigner, Signer};
 use shell_genesis::{
@@ -75,6 +76,8 @@ pub struct RunArgs {
     pub storage_profile: String,
     /// Enable STARK aggregate proof generation during block production (off by default).
     pub enable_stark_aggregation: bool,
+    /// Consensus engine: "poa" (default) or "wpoa".
+    pub consensus_engine: Option<String>,
 }
 
 /// Maximum genesis file size: 10 MB (F-082).
@@ -483,9 +486,21 @@ async fn run_with_store<S: KvStore + 'static>(
     let node_config = NodeConfig {
         chain_id: genesis_config.chain_id,
         network_type,
-        consensus: PoaConfig::new(authorities.clone(), block_time_secs)
-            .with_max_future_secs(max_future_secs)
-            .with_epoch_length(epoch_length),
+        consensus: match args.consensus_engine.as_deref() {
+            Some("wpoa") => {
+                let wpoa_config = WPoaConfig::from_poa(
+                    PoaConfig::new(authorities.clone(), block_time_secs)
+                        .with_max_future_secs(max_future_secs)
+                        .with_epoch_length(epoch_length),
+                );
+                ConsensusEngineConfig::WPoa(wpoa_config)
+            }
+            _ => ConsensusEngineConfig::Poa(
+                PoaConfig::new(authorities.clone(), block_time_secs)
+                    .with_max_future_secs(max_future_secs)
+                    .with_epoch_length(epoch_length),
+            ),
+        },
         mempool: MempoolConfig {
             chain_id: genesis_config.chain_id,
             max_pool_size: args.mempool_max_size.unwrap_or(4096),

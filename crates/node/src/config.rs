@@ -2,7 +2,7 @@
 
 use std::net::SocketAddr;
 
-use shell_consensus::PoaConfig;
+use shell_consensus::{PoaConfig, WPoaConfig};
 pub use shell_evm::ParallelEvmConfig;
 use shell_genesis::NetworkType;
 use shell_mempool::MempoolConfig;
@@ -84,6 +84,36 @@ impl Default for MetricsConfig {
 }
 
 /// Top-level configuration for a shell-chain node.
+/// Which consensus engine the node should use.
+///
+/// The config variant determines which engine is instantiated at startup.
+#[derive(Debug, Clone)]
+pub enum ConsensusEngineConfig {
+    /// Proof-of-Authority (default, Phase 1).
+    Poa(PoaConfig),
+    /// Weighted Proof-of-Authority (Phase 1.5).
+    WPoa(WPoaConfig),
+}
+
+impl ConsensusEngineConfig {
+    /// Return the underlying PoaConfig (present in both variants).
+    pub fn poa_config(&self) -> &PoaConfig {
+        match self {
+            Self::Poa(c) => c,
+            Self::WPoa(c) => &c.poa,
+        }
+    }
+
+    /// Return the engine type identifier string.
+    pub fn engine_kind(&self) -> &'static str {
+        match self {
+            Self::Poa(_) => "poa",
+            Self::WPoa(_) => "wpoa",
+        }
+    }
+}
+
+/// Top-level configuration for a shell-chain node.
 #[derive(Debug, Clone)]
 pub struct NodeConfig {
     /// Chain identifier.
@@ -93,8 +123,8 @@ pub struct NodeConfig {
     /// Drives sensible defaults: Dev/Testnet use 30 s blocks to save
     /// resources; Mainnet uses 2 s blocks.
     pub network_type: NetworkType,
-    /// PoA consensus configuration.
-    pub consensus: PoaConfig,
+    /// Consensus engine configuration.
+    pub consensus: ConsensusEngineConfig,
     /// Transaction pool configuration.
     pub mempool: MempoolConfig,
     /// JSON-RPC server configuration.
@@ -165,7 +195,7 @@ impl NodeConfig {
         Self {
             chain_id: 1337,
             network_type,
-            consensus: PoaConfig::new(vec![authority], params.block_time_ms / 1_000),
+            consensus: ConsensusEngineConfig::Poa(PoaConfig::new(vec![authority], params.block_time_ms / 1_000)),
             mempool: MempoolConfig {
                 chain_id: 1337,
                 ..MempoolConfig::default()
@@ -248,8 +278,8 @@ mod tests {
     fn dev_config_consensus_has_authority() {
         let addr = Address::from_slice(&[0xCD; 20]);
         let cfg = NodeConfig::dev(addr);
-        assert_eq!(cfg.consensus.authorities.len(), 1);
-        assert_eq!(cfg.consensus.authorities[0], addr);
+        assert_eq!(cfg.consensus.poa_config().authorities.len(), 1);
+        assert_eq!(cfg.consensus.poa_config().authorities[0], addr);
     }
 
     #[test]

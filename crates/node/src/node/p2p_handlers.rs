@@ -96,7 +96,7 @@ impl<S: KvStore + 'static> Node<S> {
         }
 
         // Check if this block reached finality.
-        let total_validators = self.consensus.read().config().authorities.len();
+        let total_validators = self.consensus.read().poa_config().authorities.len();
         if finality.check_finality(&block_hash, block_number, total_validators) {
             tracing::info!(
                 block = block_number,

@@ -1,8 +1,10 @@
 use async_trait::async_trait;
 use shell_core::{Block, BlockHeader};
+use shell_crypto::{PQSignature, Signer, Verifier};
 use shell_primitives::Address;
 
 use crate::ConsensusError;
+use crate::PoaConfig;
 
 /// Consensus engine type identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,6 +42,27 @@ pub trait ConsensusEngine: Send + Sync {
 
     /// Return the engine type identifier.
     fn engine_type(&self) -> EngineType;
+
+    /// Return the underlying PoA configuration.
+    fn poa_config(&self) -> &PoaConfig;
+
+    /// Return a mutable reference to the underlying PoA configuration.
+    fn poa_config_mut(&mut self) -> &mut PoaConfig;
+
+    /// Sign a block header with the proposer's key.
+    fn sign_block(&self, block: &mut Block, signer: &dyn Signer) -> Result<(), ConsensusError>;
+
+    /// Verify a proposer seal (PQ signature over header hash).
+    fn verify_seal(
+        &self,
+        header: &BlockHeader,
+        seal: &PQSignature,
+        proposer_pubkey: &[u8],
+        verifier: &dyn Verifier,
+    ) -> Result<(), ConsensusError>;
+
+    /// Slash a misbehaving authority, removing it from the active set.
+    fn slash_authority(&mut self, offender: &Address);
 }
 
 #[cfg(test)]
