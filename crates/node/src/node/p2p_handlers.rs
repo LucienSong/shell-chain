@@ -134,4 +134,81 @@ impl<S: KvStore + 'static> Node<S> {
             sig.data,
         ))
     }
+
+    /// W.5: Handle an incoming wPoA vote from a peer.
+    ///
+    /// Reconstructs the PQ signature, validates the voter, records the vote,
+    /// and logs when quorum is reached.
+    pub fn handle_wpoa_vote(
+        &self,
+        voter: Address,
+        block_hash: ShellHash,
+        block_number: u64,
+        signature: Vec<u8>,
+    ) {
+        let sig = shell_crypto::PQSignature::new(
+            shell_crypto::SignatureType::Dilithium3,
+            signature,
+        );
+        let mut guard = self.wpoa_round.lock();
+        if let Some(ref mut round) = *guard {
+            if round.block_number != block_number {
+                tracing::debug!(
+                    block_number,
+                    expected = round.block_number,
+                    "W.5: WPoaVote for unexpected block number, ignoring"
+                );
+                return;
+            }
+            let events = round.on_vote(voter, block_hash, sig);
+            for event in events {
+                match event {
+                    WPoaEvent::BlockCommitted {
+                        block_hash,
+                        quorum_signatures,
+                    } => {
+                        tracing::info!(
+                            %block_hash,
+                            signers = quorum_signatures.len(),
+                            "W.5: block committed with quorum"
+                        );
+                    }
+                    WPoaEvent::DuplicateVote { voter } => {
+                        tracing::warn!(%voter, "W.5: duplicate vote rejected");
+                    }
+                    WPoaEvent::WrongBlockHash { expected, got } => {
+                        tracing::warn!(%expected, %got, "W.5: vote for wrong block hash rejected");
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// W.5: Handle an incoming wPoA view-change vote from a peer.
+    ///
+    /// Records the vote and logs when quorum for the view change is reached.
+    pub fn handle_wpoa_view_change(
+        &self,
+        voter: Address,
+        new_view: u64,
+        block_number: u64,
+    ) {
+        let mut guard = self.wpoa_round.lock();
+        if let Some(ref mut round) = *guard {
+            if round.block_number != block_number {
+                return;
+            }
+            let events = round.on_view_change_vote(voter, new_view);
+            for event in events {
+                match event {
+                    WPoaEvent::ViewChangeReady { new_view } => {
+                        tracing::info!(new_view, "W.5: view change ready — advancing round");
+                        round.round = new_view;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
 }

@@ -11,6 +11,7 @@ pub mod slashing;
 pub mod validator;
 pub mod window;
 pub mod wpoa;
+pub mod wpoa_state;
 
 pub use challenge::{ChallengeReason, ChallengeResponse, ProofChallenge};
 pub use engine::{ConsensusEngine, EngineType};
@@ -28,3 +29,4 @@ pub use slashing::{
 pub use validator::{ValidatorInfo, ValidatorSet, ValidatorSetConfig, ValidatorStatus};
 pub use window::{ProofWindowManager, WindowConfig, WindowError, WindowState};
 pub use wpoa::{WPoaConfig, WPoaEngine};
+pub use wpoa_state::{WPoaEvent, WPoaRound};

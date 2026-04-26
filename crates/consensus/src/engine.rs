@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use async_trait::async_trait;
 use shell_core::{Block, BlockHeader};
 use shell_crypto::{PQSignature, Signer, Verifier};
@@ -63,6 +65,11 @@ pub trait ConsensusEngine: Send + Sync {
 
     /// Slash a misbehaving authority, removing it from the active set.
     fn slash_authority(&mut self, offender: &Address);
+
+    /// Return the active validator set with per-validator weights.
+    ///
+    /// Used by the wPoA state machine to initialize quorum tracking.
+    fn validator_weights(&self) -> HashMap<Address, u64>;
 }
 
 #[cfg(test)]

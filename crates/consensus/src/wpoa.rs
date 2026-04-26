@@ -223,11 +223,18 @@ impl ConsensusEngine for WPoaEngine {
     fn slash_authority(&mut self, offender: &Address) {
         self.inner.config_mut().slash_authority(offender);
     }
+
+    fn validator_weights(&self) -> std::collections::HashMap<Address, u64> {
+        self.validator_set
+            .active_validators()
+            .into_iter()
+            .map(|v| (v.address, v.weight))
+            .collect()
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

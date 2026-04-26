@@ -16,8 +16,9 @@ pub(crate) use tracing::{debug, info, warn};
 
 #[allow(unused_imports)]
 pub(crate) use shell_consensus::{
-    detect_double_sign, Attestation, ConsensusEngine, EquivocationProof, FinalityState, ForkChoice,
-    PoaEngine, WPoaEngine, WPoaConfig, ProofWindowManager, WindowConfig,
+    detect_double_sign, Attestation, ConsensusEngine, EngineType, EquivocationProof, FinalityState,
+    ForkChoice, PoaEngine, WPoaEngine, WPoaConfig, WPoaEvent, WPoaRound, ProofWindowManager,
+    WindowConfig,
 };
 pub(crate) use shell_core::{calculate_base_fee, Account, Block, BlockHeader, SignedTransaction};
 pub(crate) use shell_crypto::{
@@ -100,6 +101,9 @@ pub struct Node<S: KvStore + 'static> {
     /// I4: Proof window manager — tracks claim/squatting per block.
     /// Advances on each block import; drives prover reliability scoring in wPoA era.
     pub proof_window_manager: parking_lot::Mutex<ProofWindowManager>,
+    /// W.5: Active wPoA round state machine for the current block height.
+    /// `None` when running plain PoA or no block is in-flight.
+    pub wpoa_round: parking_lot::Mutex<Option<shell_consensus::wpoa_state::WPoaRound>>,
 }
 
 const SYNC_RETRY_BASE_INTERVAL_SECS: u64 = 5;
@@ -200,6 +204,7 @@ impl<S: KvStore + 'static> Node<S> {
             proof_window_manager: parking_lot::Mutex::new(ProofWindowManager::new(
                 WindowConfig::default(),
             )),
+            wpoa_round: parking_lot::Mutex::new(None),
         }
     }
 

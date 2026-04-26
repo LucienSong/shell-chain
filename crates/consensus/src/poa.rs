@@ -356,6 +356,15 @@ impl ConsensusEngine for PoaEngine {
     fn slash_authority(&mut self, offender: &Address) {
         self.config.slash_authority(offender);
     }
+
+    fn validator_weights(&self) -> std::collections::HashMap<Address, u64> {
+        self.config
+            .authorities
+            .iter()
+            .filter(|a| !self.config.slashed.contains(a))
+            .map(|a| (*a, 1u64))
+            .collect()
+    }
 }
 
 impl PoaEngine {

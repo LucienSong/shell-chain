@@ -269,6 +269,27 @@ impl<S: KvStore + 'static> Node<S> {
                                     tracing::warn!("no active subscribers for block events");
                                 }
 
+                                // W.5: When using wPoA, initialize the round state machine
+                                // for the block we just produced and broadcast our vote.
+                                if self.consensus.read().engine_type() == EngineType::WPoA {
+                                    let weights = self.consensus.read().validator_weights();
+                                    let mut round = WPoaRound::new(number, 0, weights);
+                                    let proposer = block.header.proposer;
+                                    let _ = round.on_block_proposed(block_hash, proposer);
+                                    *self.wpoa_round.lock() = Some(round);
+                                    if let Some(voter) = self.config.proposer_address {
+                                        if let Ok(pq_sig) = signer.sign(block_hash.as_bytes()) {
+                                            let vote_msg = NetworkMessage::WPoaVote {
+                                                block_hash,
+                                                block_number: number,
+                                                voter,
+                                                signature: pq_sig.data,
+                                            };
+                                            let _ = network.broadcast(vote_msg).await;
+                                        }
+                                    }
+                                }
+
                                 let msg = NetworkMessage::NewBlock(Box::new(block));
                                 let _ = network.broadcast(msg).await;
                             }
@@ -277,6 +298,40 @@ impl<S: KvStore + 'static> Node<S> {
                             }
                             Err(e) => {
                                 eprintln!("⚠  Block production error: {e}");
+                            }
+                        }
+                    }
+
+                    // W.5: Tick wPoA round state machine to detect proposal/vote timeouts.
+                    {
+                        let now = std::time::Instant::now();
+                        let events = if let Some(ref round) = *self.wpoa_round.lock() {
+                            round.tick(now)
+                        } else {
+                            vec![]
+                        };
+                        for event in events {
+                            match event {
+                                WPoaEvent::VoteTimeout { current_round }
+                                | WPoaEvent::ProposeTimeout { current_round } => {
+                                    warn!(
+                                        current_round,
+                                        "W.5: wPoA round timeout — initiating view change"
+                                    );
+                                    let new_view = current_round + 1;
+                                    if let Some(ref mut r) = *self.wpoa_round.lock() {
+                                        r.start_view_change(new_view);
+                                    }
+                                    if let Some(voter) = self.config.proposer_address {
+                                        let vc_msg = NetworkMessage::WPoaViewChange {
+                                            new_view,
+                                            block_number: self.head_number() + 1,
+                                            voter,
+                                        };
+                                        let _ = network.broadcast(vc_msg).await;
+                                    }
+                                }
+                                _ => {}
                             }
                         }
                     }
@@ -664,6 +719,16 @@ impl<S: KvStore + 'static> Node<S> {
                                             info!("L4: historical body back-fill complete");
                                         }
                                     }
+                                }
+                                // W.5: Receive a wPoA vote from a peer validator.
+                                NetworkMessage::WPoaVote { block_hash, block_number, voter, signature } => {
+                                    debug!(%peer, block = block_number, %voter, "W.5: received WPoaVote");
+                                    self.handle_wpoa_vote(voter, block_hash, block_number, signature);
+                                }
+                                // W.5: Receive a wPoA view-change vote from a peer validator.
+                                NetworkMessage::WPoaViewChange { new_view, block_number, voter } => {
+                                    debug!(%peer, new_view, block = block_number, %voter, "W.5: received WPoaViewChange");
+                                    self.handle_wpoa_view_change(voter, new_view, block_number);
                                 }
                             }
                         }
