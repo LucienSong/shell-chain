@@ -2,9 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased — 0.19.0-dev]
-
-_Tracking work toward v0.19.0._
+## [0.19.0] — 2026-04-26
 
 ### Added
 
