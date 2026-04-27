@@ -96,7 +96,7 @@ impl WPoaRound {
 
     /// Compute the quorum threshold: ceiling of 2/3 * total_weight.
     fn quorum_weight(&self) -> u64 {
-        (2 * self.total_weight + 2) / 3
+        (2 * self.total_weight).div_ceil(3)
     }
 
     /// Handle a block proposal. Transitions Idle → Voting.
