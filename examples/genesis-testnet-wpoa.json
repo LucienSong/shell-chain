@@ -1,0 +1,47 @@
+{
+  "chain_id": 10,
+  "chain_name": "shell-testnet-wpoa",
+  "network_type": "Testnet",
+  "timestamp": 1700000000,
+  "gas_limit": 30000000,
+  "extra_data": "shell-testnet-wpoa-genesis",
+  "consensus": {
+    "engine": "wpoa",
+    "authorities": [
+      "pq1qyqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqy0vusna",
+      "pq1qyqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqg7j66z6",
+      "pq1qyqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqv3ccudq"
+    ],
+    "weights": [2, 1, 1],
+    "block_time_secs": 2,
+    "max_future_secs": 60,
+    "epoch_length": 0
+  },
+  "alloc": {
+    "pq1qyqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqy0vusna": {
+      "balance": "0x3635c9adc5dea00000",
+      "nonce": 0
+    },
+    "pq1qyqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqg7j66z6": {
+      "balance": "0x3635c9adc5dea00000",
+      "nonce": 0
+    },
+    "pq1qyqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqv3ccudq": {
+      "balance": "0x3635c9adc5dea00000",
+      "nonce": 0
+    },
+    "pq1q8eel4h9r2kc3ah5ee4t3qnj088llwfzvc2lgdcq": {
+      "balance": "0x3635c9adc5dea00000",
+      "nonce": 0
+    },
+    "pq1q9cfj7tsc5vp9hp6qyx86qd4pcx30hreeqdqsp8a": {
+      "balance": "0xde0b6b3a7640000",
+      "nonce": 0
+    }
+  },
+  "boot_nodes": [
+    "/dns4/node1.shell-testnet.example.com/tcp/30303/p2p/REPLACE_WITH_NODE1_PEER_ID",
+    "/dns4/node2.shell-testnet.example.com/tcp/30303/p2p/REPLACE_WITH_NODE2_PEER_ID",
+    "/dns4/node3.shell-testnet.example.com/tcp/30303/p2p/REPLACE_WITH_NODE3_PEER_ID"
+  ]
+}

@@ -1,0 +1,150 @@
+version: '3.8'
+
+# Shell-Chain wPoA Public Testnet — 3-node validator cluster
+# chain_id=10  engine=wpoa  block_time=2s  weights=[2,1,1]
+#
+# Usage:
+#   docker compose -f infra/testnet/docker-compose.yml up -d
+#
+# Environment variables (set in .env or export before running):
+#   SHELL_IMAGE      — Docker image tag, e.g. ghcr.io/shelldao/shell-chain:0.20.0
+#   NODE1_KEY_PATH   — host path to validator-1 encrypted keystore JSON
+#   NODE2_KEY_PATH   — validator-2 keystore
+#   NODE3_KEY_PATH   — validator-3 keystore
+#   KEY_PASSWORD     — shared keystore decryption password (use Docker secrets in prod)
+#   EXTERNAL_IP      — public IP for P2P multiaddr advertisements
+
+x-node-defaults: &node-defaults
+  image: ${SHELL_IMAGE:-ghcr.io/shelldao/shell-chain:latest}
+  restart: unless-stopped
+  environment:
+    RUST_LOG: info,shell_node=debug
+  volumes:
+    - ./genesis-testnet-wpoa.json:/genesis.json:ro
+  logging:
+    driver: json-file
+    options:
+      max-size: 100m
+      max-file: "5"
+
+services:
+  node1:
+    <<: *node-defaults
+    container_name: shell-testnet-node1
+    volumes:
+      - ./genesis-testnet-wpoa.json:/genesis.json:ro
+      - ${NODE1_KEY_PATH:-./keys/node1.key}:/keystore.json:ro
+      - node1-data:/data
+    ports:
+      - "30303:30303"   # P2P
+      - "8545:8545"     # RPC
+      - "8546:8546"     # WebSocket
+      - "9090:9090"     # Prometheus metrics
+    command: >
+      run
+      --genesis /genesis.json
+      --datadir /data
+      --rpc-addr 0.0.0.0:8545
+      --ws
+      --ws-port 8546
+      --p2p-port 30303
+      --keystore /keystore.json
+      --network testnet
+      --metrics-addr 0.0.0.0:9090
+      --storage-profile full
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8545", "-d", '{"jsonrpc":"2.0","method":"shell_blockNumber","params":[],"id":1}', "-H", "Content-Type: application/json"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  node2:
+    <<: *node-defaults
+    container_name: shell-testnet-node2
+    volumes:
+      - ./genesis-testnet-wpoa.json:/genesis.json:ro
+      - ${NODE2_KEY_PATH:-./keys/node2.key}:/keystore.json:ro
+      - node2-data:/data
+    ports:
+      - "30304:30303"
+      - "8547:8545"
+      - "8548:8546"
+      - "9091:9090"
+    command: >
+      run
+      --genesis /genesis.json
+      --datadir /data
+      --rpc-addr 0.0.0.0:8545
+      --ws
+      --ws-port 8546
+      --p2p-port 30303
+      --keystore /keystore.json
+      --network testnet
+      --metrics-addr 0.0.0.0:9090
+      --storage-profile full
+      --boot-nodes /ip4/${EXTERNAL_IP:-127.0.0.1}/tcp/30303/p2p/REPLACE_WITH_NODE1_PEER_ID
+
+  node3:
+    <<: *node-defaults
+    container_name: shell-testnet-node3
+    volumes:
+      - ./genesis-testnet-wpoa.json:/genesis.json:ro
+      - ${NODE3_KEY_PATH:-./keys/node3.key}:/keystore.json:ro
+      - node3-data:/data
+    ports:
+      - "30305:30303"
+      - "8549:8545"
+      - "8550:8546"
+      - "9092:9090"
+    command: >
+      run
+      --genesis /genesis.json
+      --datadir /data
+      --rpc-addr 0.0.0.0:8545
+      --ws
+      --ws-port 8546
+      --p2p-port 30303
+      --keystore /keystore.json
+      --network testnet
+      --metrics-addr 0.0.0.0:9090
+      --storage-profile full
+      --boot-nodes /ip4/${EXTERNAL_IP:-127.0.0.1}/tcp/30303/p2p/REPLACE_WITH_NODE1_PEER_ID
+
+  prometheus:
+    image: prom/prometheus:v2.52.0
+    container_name: shell-testnet-prometheus
+    restart: unless-stopped
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9100:9090"
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=30d'
+
+  grafana:
+    image: grafana/grafana:10.4.3
+    container_name: shell-testnet-grafana
+    restart: unless-stopped
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+    volumes:
+      - ./grafana/provisioning-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
+      - ./grafana/provisioning-dashboards.yml:/etc/grafana/provisioning/dashboards/dashboards.yml:ro
+      - ./grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+
+volumes:
+  node1-data:
+  node2-data:
+  node3-data:
+  prometheus-data:
+  grafana-data:

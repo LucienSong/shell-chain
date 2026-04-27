@@ -10,7 +10,7 @@ use tracing::{info, warn};
 use crate::middleware::{ApiKeyLayer, RateLimitLayer};
 use crate::tls_proxy::{start_tls_proxy, TlsProxyHandle};
 
-use shell_consensus::FinalityState;
+use shell_consensus::{ConsensusEngine, FinalityState};
 use shell_core::SignedTransaction;
 use shell_crypto::Signer;
 use shell_mempool::TxPool;
@@ -162,6 +162,7 @@ pub async fn start_rpc_server<S: KvStore + 'static>(
     admin_p2p_context: Option<(String, String)>,
     witness_store: Option<Arc<WitnessStore<S>>>,
     storage_profile_info: Option<crate::types::StorageProfileInfo>,
+    consensus_engine: Option<Arc<parking_lot::RwLock<dyn ConsensusEngine>>>,
 ) -> Result<RpcServerHandle, Box<dyn std::error::Error + Send + Sync>> {
     // Load and validate TLS configuration.
     // When cert+key are provided, we start jsonrpsee on an internal loopback
@@ -217,6 +218,9 @@ pub async fn start_rpc_server<S: KvStore + 'static>(
     }
     if let Some(info) = storage_profile_info {
         handler = handler.with_storage_profile(info);
+    }
+    if let Some(engine) = consensus_engine {
+        handler = handler.with_consensus_engine(engine);
     }
     // Populate the RPC listen address from the configured public address.
     // (The actual bound port may differ when using ephemeral port 0, but for

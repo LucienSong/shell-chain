@@ -5315,6 +5315,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "rpc-docgen"
+version = "0.20.0"
+
+[[package]]
 name = "rtnetlink"
 version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5839,7 +5843,7 @@ dependencies = [
 
 [[package]]
 name = "shell-bench"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "alloy-rlp",
  "criterion",
@@ -5853,7 +5857,7 @@ dependencies = [
 
 [[package]]
 name = "shell-cli"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "alloy-rlp",
  "clap",
@@ -5882,7 +5886,7 @@ dependencies = [
 
 [[package]]
 name = "shell-consensus"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "async-trait",
  "serde",
@@ -5895,7 +5899,7 @@ dependencies = [
 
 [[package]]
 name = "shell-core"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "alloy-rlp",
  "criterion",
@@ -5909,7 +5913,7 @@ dependencies = [
 
 [[package]]
 name = "shell-crypto"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "alloy-rlp",
  "criterion",
@@ -5929,7 +5933,7 @@ dependencies = [
 
 [[package]]
 name = "shell-e2e-tests"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "hex",
  "parking_lot",
@@ -5946,7 +5950,7 @@ dependencies = [
 
 [[package]]
 name = "shell-evm"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "alloy-primitives",
  "alloy-rlp",
@@ -5966,7 +5970,7 @@ dependencies = [
 
 [[package]]
 name = "shell-genesis"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "hex",
  "serde",
@@ -5980,7 +5984,7 @@ dependencies = [
 
 [[package]]
 name = "shell-keystore"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "argon2",
  "chacha20poly1305",
@@ -5996,7 +6000,7 @@ dependencies = [
 
 [[package]]
 name = "shell-load-test"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "alloy-rlp",
  "anyhow",
@@ -6019,7 +6023,7 @@ dependencies = [
 
 [[package]]
 name = "shell-mempool"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "parking_lot",
  "serde_json",
@@ -6033,7 +6037,7 @@ dependencies = [
 
 [[package]]
 name = "shell-multi-prover"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -6052,7 +6056,7 @@ dependencies = [
 
 [[package]]
 name = "shell-network"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "async-trait",
  "blake3",
@@ -6070,7 +6074,7 @@ dependencies = [
 
 [[package]]
 name = "shell-node"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "alloy-rlp",
  "http-body-util",
@@ -6098,7 +6102,7 @@ dependencies = [
 
 [[package]]
 name = "shell-primitives"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "alloy-primitives",
  "alloy-rlp",
@@ -6113,7 +6117,7 @@ dependencies = [
 
 [[package]]
 name = "shell-rpc"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "alloy-primitives",
  "alloy-rlp",
@@ -6146,7 +6150,7 @@ dependencies = [
 
 [[package]]
 name = "shell-stark-bench"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -6164,7 +6168,7 @@ dependencies = [
 
 [[package]]
 name = "shell-stark-prover"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "criterion",
  "serde",
@@ -6179,7 +6183,7 @@ dependencies = [
 
 [[package]]
 name = "shell-storage"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "alloy-rlp",
  "base64 0.22.1",

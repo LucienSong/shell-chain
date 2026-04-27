@@ -96,6 +96,10 @@ impl<S: KvStore + 'static> Node<S> {
                     state_pruning_experimental: p.state_pruning_experimental,
                 }
             }),
+            Some(Arc::clone(&self.consensus)
+                as Arc<
+                    parking_lot::RwLock<dyn shell_consensus::ConsensusEngine>,
+                >), // W.6: wire consensus engine for shell_consensusInfo
         )
         .await
         .map_err(|e| NodeError::Startup(format!("RPC: {e}")))?;
@@ -218,15 +222,15 @@ impl<S: KvStore + 'static> Node<S> {
                                 // F-046: Use scope blocks to manage lock lifetimes.
                                 {
                                     let consensus = self.consensus.read();
-                                    if consensus.config().is_epoch_boundary(number) {
-                                        let epoch = consensus.config().epoch_of(number);
+                                    if consensus.poa_config().is_epoch_boundary(number) {
+                                        let epoch = consensus.poa_config().epoch_of(number);
                                         info!(epoch, block = number, "new epoch started");
                                     }
                                 }
                                 // Reload validators at epoch boundaries (F-041: handle errors).
                                 // F-061: Scope read lock explicitly to prevent deadlock.
                                 let is_epoch = {
-                                    self.consensus.read().config().is_epoch_boundary(number)
+                                    self.consensus.read().poa_config().is_epoch_boundary(number)
                                 };
                                 if is_epoch {
                                     let validators = {
@@ -235,7 +239,7 @@ impl<S: KvStore + 'static> Node<S> {
                                     };
                                     match validators {
                                         Ok(v) if !v.is_empty() => {
-                                            self.consensus.write().config_mut().set_authorities(v);
+                                            self.consensus.write().poa_config_mut().set_authorities(v);
                                         }
                                         Ok(_) => {
                                             // Empty validator set in world state — keep current authorities.
@@ -269,6 +273,27 @@ impl<S: KvStore + 'static> Node<S> {
                                     tracing::warn!("no active subscribers for block events");
                                 }
 
+                                // W.5: When using wPoA, initialize the round state machine
+                                // for the block we just produced and broadcast our vote.
+                                if self.consensus.read().engine_type() == EngineType::WPoA {
+                                    let weights = self.consensus.read().validator_weights();
+                                    let mut round = WPoaRound::new(number, 0, weights);
+                                    let proposer = block.header.proposer;
+                                    let _ = round.on_block_proposed(block_hash, proposer);
+                                    *self.wpoa_round.lock() = Some(round);
+                                    if let Some(voter) = self.config.proposer_address {
+                                        if let Ok(pq_sig) = signer.sign(block_hash.as_bytes()) {
+                                            let vote_msg = NetworkMessage::WPoaVote {
+                                                block_hash,
+                                                block_number: number,
+                                                voter,
+                                                signature: pq_sig.data,
+                                            };
+                                            let _ = network.broadcast(vote_msg).await;
+                                        }
+                                    }
+                                }
+
                                 let msg = NetworkMessage::NewBlock(Box::new(block));
                                 let _ = network.broadcast(msg).await;
                             }
@@ -277,6 +302,46 @@ impl<S: KvStore + 'static> Node<S> {
                             }
                             Err(e) => {
                                 eprintln!("⚠  Block production error: {e}");
+                            }
+                        }
+                    }
+
+                    // W.5: Tick wPoA round state machine to detect proposal/vote timeouts.
+                    {
+                        let now = std::time::Instant::now();
+                        let events = if let Some(ref round) = *self.wpoa_round.lock() {
+                            round.tick(now)
+                        } else {
+                            vec![]
+                        };
+                        for event in events {
+                            match event {
+                                WPoaEvent::VoteTimeout { current_round }
+                                | WPoaEvent::ProposeTimeout { current_round } => {
+                                    warn!(
+                                        current_round,
+                                        "W.5: wPoA round timeout — initiating view change"
+                                    );
+                                    let new_view = current_round + 1;
+                                    if let Some(ref mut r) = *self.wpoa_round.lock() {
+                                        r.start_view_change(new_view);
+                                    }
+                                    if let Some(voter) = self.config.proposer_address {
+                                        let block_number = self
+                                            .wpoa_round
+                                            .lock()
+                                            .as_ref()
+                                            .map(|r| r.block_number)
+                                            .unwrap_or_else(|| self.head_number() + 1);
+                                        let vc_msg = NetworkMessage::WPoaViewChange {
+                                            new_view,
+                                            block_number,
+                                            voter,
+                                        };
+                                        let _ = network.broadcast(vc_msg).await;
+                                    }
+                                }
+                                _ => {}
                             }
                         }
                     }
@@ -664,6 +729,18 @@ impl<S: KvStore + 'static> Node<S> {
                                             info!("L4: historical body back-fill complete");
                                         }
                                     }
+                                }
+                                // W.5: Receive a wPoA vote from a peer validator.
+                                NetworkMessage::WPoaVote { block_hash, block_number, voter, signature } => {
+                                    debug!(%peer, block = block_number, %voter, "W.5: received WPoaVote");
+                                    self.handle_wpoa_vote(voter, block_hash, block_number, signature);
+                                    // PS.2: after every vote, flush scored-below-threshold peers to ban list.
+                                    self.flush_scorer_bans();
+                                }
+                                // W.5: Receive a wPoA view-change vote from a peer validator.
+                                NetworkMessage::WPoaViewChange { new_view, block_number, voter } => {
+                                    debug!(%peer, new_view, block = block_number, %voter, "W.5: received WPoaViewChange");
+                                    self.handle_wpoa_view_change(voter, new_view, block_number);
                                 }
                             }
                         }

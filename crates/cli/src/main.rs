@@ -210,6 +210,10 @@ enum Commands {
         /// WARNING: expensive (~150ms per block). Off by default.
         #[arg(long, default_value = "false")]
         enable_stark_aggregation: bool,
+
+        /// Consensus engine: "poa" (default) or "wpoa".
+        #[arg(long)]
+        consensus_engine: Option<String>,
     },
 
     /// Initialize genesis block and data directory.
@@ -393,6 +397,7 @@ async fn main() {
             witness_retention,
             body_retention,
             enable_stark_aggregation,
+            consensus_engine,
         } => {
             // Load config file if specified (CLI args override file values).
             let file_config = match &config_path {
@@ -545,6 +550,7 @@ async fn main() {
                 witness_retention,
                 body_retention,
                 enable_stark_aggregation,
+                consensus_engine,
             })
             .await
         }

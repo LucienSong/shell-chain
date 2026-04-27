@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use shell_core::{Block, BlockHeader};
-use shell_crypto::{Signer, Verifier};
+use shell_crypto::{PQSignature, Signer, Verifier};
 use shell_primitives::Address;
 
 use crate::poa::PoaEngine;
@@ -178,11 +178,63 @@ impl ConsensusEngine for WPoaEngine {
     fn engine_type(&self) -> EngineType {
         EngineType::WPoA
     }
+
+    fn poa_config(&self) -> &crate::PoaConfig {
+        self.inner.config()
+    }
+
+    fn poa_config_mut(&mut self) -> &mut crate::PoaConfig {
+        self.inner.config_mut()
+    }
+
+    fn sign_block(&self, block: &mut Block, signer: &dyn Signer) -> Result<(), ConsensusError> {
+        let expected = self.proposer_for_block(block.header.number);
+        if block.header.proposer != expected {
+            return Err(ConsensusError::InvalidProposer {
+                expected,
+                got: block.header.proposer,
+            });
+        }
+        let header_hash = block.header.hash();
+        let sig = signer
+            .sign(header_hash.as_bytes())
+            .map_err(|e| ConsensusError::SealingFailed(e.to_string()))?;
+        block.proposer_seal = Some(sig);
+        Ok(())
+    }
+
+    fn verify_seal(
+        &self,
+        header: &BlockHeader,
+        seal: &PQSignature,
+        proposer_pubkey: &[u8],
+        verifier: &dyn Verifier,
+    ) -> Result<(), ConsensusError> {
+        let header_hash = header.hash();
+        let valid = verifier
+            .verify(proposer_pubkey, header_hash.as_bytes(), seal)
+            .map_err(|_| ConsensusError::InvalidSignature)?;
+        if !valid {
+            return Err(ConsensusError::InvalidSignature);
+        }
+        Ok(())
+    }
+
+    fn slash_authority(&mut self, offender: &Address) {
+        self.inner.config_mut().slash_authority(offender);
+    }
+
+    fn validator_weights(&self) -> std::collections::HashMap<Address, u64> {
+        self.validator_set
+            .active_validators()
+            .into_iter()
+            .map(|v| (v.address, v.weight))
+            .collect()
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

@@ -104,6 +104,32 @@ pub enum NetworkMessage {
     BodyRequest { start_number: u64, count: u64 },
     /// Response carrying block bodies for a `BodyRequest`.
     BodyResponse { blocks: Vec<Block> },
+    /// W.5: wPoA consensus vote for a proposed block.
+    ///
+    /// Broadcast by each validator after receiving a proposed block.
+    /// Quorum (⌈2/3 × total_weight⌉) of votes commits the block.
+    WPoaVote {
+        /// Hash of the block being voted on.
+        block_hash: ShellHash,
+        /// Block number (for routing/filtering).
+        block_number: u64,
+        /// Address of the voting validator.
+        voter: shell_primitives::Address,
+        /// Raw PQ signature bytes over the block hash.
+        signature: Vec<u8>,
+    },
+    /// W.5: wPoA view-change vote when the current round times out.
+    ///
+    /// Broadcast by a validator to propose advancing to a new view number.
+    /// Quorum of view-change votes triggers a view transition.
+    WPoaViewChange {
+        /// The new view number being proposed.
+        new_view: u64,
+        /// Block number this view-change targets.
+        block_number: u64,
+        /// Address of the validator casting this view-change vote.
+        voter: shell_primitives::Address,
+    },
 }
 
 /// High-level topic classification for network message propagation.
@@ -123,11 +149,12 @@ impl NetworkMessage {
     ///
     /// Returns `None` for messages that don't map to a specific topic
     /// (handled by transport-specific routing logic).
-    pub const fn topic(&self) -> Option<NetworkTopic> {
+    pub fn topic(&self) -> Option<NetworkTopic> {
         match self {
             Self::StorageCapability { .. }
             | Self::BodyRequest { .. }
             | Self::BodyResponse { .. } => Some(NetworkTopic::Blocks),
+            Self::WPoaVote { .. } | Self::WPoaViewChange { .. } => Some(NetworkTopic::Consensus),
             _ => None,
         }
     }
@@ -438,5 +465,50 @@ mod tests {
     #[test]
     fn max_message_size_constant() {
         assert_eq!(MAX_MESSAGE_SIZE, 4 * 1024 * 1024);
+    }
+
+    #[test]
+    fn serde_roundtrip_wpoa_vote() {
+        let msg = NetworkMessage::WPoaVote {
+            block_hash: ShellHash::default(),
+            block_number: 7,
+            voter: Address::from_public_key(b"voter-key", 0),
+            signature: vec![0xde, 0xad, 0xbe, 0xef],
+        };
+        let json = serde_json::to_vec(&msg).unwrap();
+        let decoded: NetworkMessage = serde_json::from_slice(&json).unwrap();
+        match decoded {
+            NetworkMessage::WPoaVote {
+                block_number,
+                signature,
+                ..
+            } => {
+                assert_eq!(block_number, 7);
+                assert_eq!(signature, vec![0xde, 0xad, 0xbe, 0xef]);
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn serde_roundtrip_wpoa_view_change() {
+        let msg = NetworkMessage::WPoaViewChange {
+            new_view: 3,
+            block_number: 42,
+            voter: Address::from_public_key(b"voter-key", 0),
+        };
+        let json = serde_json::to_vec(&msg).unwrap();
+        let decoded: NetworkMessage = serde_json::from_slice(&json).unwrap();
+        match decoded {
+            NetworkMessage::WPoaViewChange {
+                new_view,
+                block_number,
+                ..
+            } => {
+                assert_eq!(new_view, 3);
+                assert_eq!(block_number, 42);
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
     }
 }

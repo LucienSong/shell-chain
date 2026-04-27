@@ -1,0 +1,24 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    network: shell-testnet
+
+scrape_configs:
+  - job_name: shell-testnet-node1
+    static_configs:
+      - targets: ['node1:9090']
+        labels:
+          validator: node1
+
+  - job_name: shell-testnet-node2
+    static_configs:
+      - targets: ['node2:9090']
+        labels:
+          validator: node2
+
+  - job_name: shell-testnet-node3
+    static_configs:
+      - targets: ['node3:9090']
+        labels:
+          validator: node3

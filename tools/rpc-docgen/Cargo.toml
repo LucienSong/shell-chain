@@ -1,0 +1,10 @@
+[package]
+name = "rpc-docgen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Generate docs/rpc-reference.md from crates/rpc/src/api.rs"
+
+[[bin]]
+name = "rpc-docgen"
+path = "src/main.rs"

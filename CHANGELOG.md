@@ -2,6 +2,60 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.20.0] — 2026-04-27
+
+### Added
+
+- **wPoA consensus engine activation (W.1–W.7)** (`crates/consensus`, `crates/node`,
+  `crates/cli`): Weighted Proof of Authority consensus is now a first-class production
+  path. `NodeConfig.consensus: ConsensusEngineConfig` selects `Poa` or `WPoa` at startup.
+  The `ConsensusEngine` trait is fully dyn-safe with `sign_block`, `verify_seal`,
+  `validator_weights`, and `poa_config` methods. A complete `WPoaRound` state machine
+  (`propose → vote → commit + view-change`) implements weighted quorum `⌈2/3 × total_weight⌉`.
+  CLI flag `--consensus-engine poa|wpoa`; auto-detection from genesis `engine` field.
+  8 wPoA e2e tests covering 3-validator quorum, view-change, network split.
+
+- **`shell_consensusInfo` RPC (W.6)** (`crates/rpc`): New method returns current engine
+  type, epoch length, and the live validator set with weights.
+
+- **wPoA testnet genesis (T.1)**: Added `WPoA` variant to `ConsensusConfig` in the genesis
+  crate (`crates/genesis`). Genesis files with `"engine": "wpoa"` are now parsed and
+  initialized correctly. Helper methods (`authorities()`, `block_time_secs()`, etc.) replace
+  exhaustive match arms across the codebase. New example: `examples/genesis-testnet-wpoa.json`
+  (chain_id=10, 3 validators, weights=[2,1,1]).
+
+- **Peer scoring bridged to network ban list (PS.2)** (`crates/node`):
+  `Node` now holds a `peer_ban_list: Mutex<PeerBanList>` field. After every wPoA vote,
+  `flush_scorer_bans()` propagates peers whose score has fallen below the disconnect threshold
+  into the network-layer `PeerBanList` (3 violations → 5-minute ban). The bridge converts
+  `ScoringPeerId → PeerId` between the consensus and network layers.
+
+- **wPoA testnet deploy manifests (T.2)** (`infra/testnet/`): New directory with
+  `docker-compose.yml` (3-validator cluster, chain_id=10), `prometheus.yml` scrape config,
+  and operator `README.md`.
+
+- **Faucet service (T.3)** (`agents/faucet/`): New standalone Node.js/TypeScript HTTP service
+  using Fastify + ethers.js. `POST /faucet` drips 1 SHELL per IP per 24h; `GET /health`
+  returns current block number. Rate limiting via `@fastify/rate-limit`.
+
+- **Testnet documentation (T.4)** (`shell-site`): New `content/docs/testnet.md` covering
+  network parameters (chain_id=10), MetaMask setup, faucet usage, smart contract deployment,
+  and read-only node operation.
+
+- **Explorer network update (T.5)** (`shell-explorer`): `networks.ts` default chain ID updated
+  from `1337` to `10`; network name updated to "Shell Testnet" for wPoA testnet.
+
+- **Wallet testnet preset update (T.6)** (`shella-chrome-wallet`): `KNOWN_NETWORKS.testnet`
+  chain ID updated from `12345` to `10` to match wPoA genesis.
+
+- **CONSTITUTION v1.4** (`projects/shell-chain/CONSTITUTION.md`): wPoA engine and
+  consensus PeerScoring promoted from lib-only to production (PS.3). §13.2 cleaned up;
+  §13.4 updated; §13.5 fully rewritten to document the two-layer peer scoring bridge.
+
+- **RPC doc autogen (R.1–R.3)** (`tools/rpc-docgen`): `cargo run -p rpc-docgen` generates
+  `docs/rpc-reference.md` (75 methods, 7 namespaces). CI step `rpc-docgen --check` prevents
+  drift. Version bumped to `0.20.0-dev`.
+
 ## [0.19.0] — 2026-04-26
 
 ### Added

@@ -7,7 +7,7 @@ pub(crate) use std::time::Instant;
 pub(crate) use jsonrpsee::types::ErrorObjectOwned;
 
 pub(crate) use alloy_rlp::Encodable;
-pub(crate) use shell_consensus::FinalityState;
+pub(crate) use shell_consensus::{ConsensusEngine, FinalityState};
 pub(crate) use shell_core::{Block, BlockHeader, SignedTransaction, Transaction};
 pub(crate) use shell_crypto::{MultiVerifier, Signer};
 pub(crate) use shell_evm::bloom::BLOOM_SIZE;
@@ -92,6 +92,8 @@ pub struct RpcHandler<S: KvStore + 'static> {
     /// `shell_getStorageProfile`. Set by the node at startup; absent in pure
     /// in-memory test setups.
     storage_profile: Option<crate::types::StorageProfileInfo>,
+    /// Optional consensus engine reference for `shell_consensusInfo` (W.6).
+    consensus_engine: Option<Arc<parking_lot::RwLock<dyn ConsensusEngine>>>,
 }
 
 impl<S: KvStore + 'static> Clone for RpcHandler<S> {
@@ -120,6 +122,7 @@ impl<S: KvStore + 'static> Clone for RpcHandler<S> {
             admin_p2p_listen: self.admin_p2p_listen.clone(),
             witness_store: self.witness_store.clone(),
             storage_profile: self.storage_profile.clone(),
+            consensus_engine: self.consensus_engine.clone(),
         }
     }
 }
@@ -164,6 +167,7 @@ impl<S: KvStore + 'static> RpcHandler<S> {
             admin_p2p_listen: String::new(),
             witness_store: None,
             storage_profile: None,
+            consensus_engine: None,
         };
         FilterRegistry::start_cleanup(Arc::clone(&handler.filter_registry));
         handler
@@ -173,6 +177,15 @@ impl<S: KvStore + 'static> RpcHandler<S> {
     /// Set by the node at startup; absent in pure in-memory test setups.
     pub fn with_storage_profile(mut self, info: crate::types::StorageProfileInfo) -> Self {
         self.storage_profile = Some(info);
+        self
+    }
+
+    /// Attach the consensus engine for `shell_consensusInfo` (W.6).
+    pub fn with_consensus_engine(
+        mut self,
+        engine: Arc<parking_lot::RwLock<dyn ConsensusEngine>>,
+    ) -> Self {
+        self.consensus_engine = Some(engine);
         self
     }
 

@@ -96,7 +96,7 @@ impl<S: KvStore + 'static> Node<S> {
         }
 
         // Check if this block reached finality.
-        let total_validators = self.consensus.read().config().authorities.len();
+        let total_validators = self.consensus.read().poa_config().authorities.len();
         if finality.check_finality(&block_hash, block_number, total_validators) {
             tracing::info!(
                 block = block_number,
@@ -133,5 +133,122 @@ impl<S: KvStore + 'static> Node<S> {
             proposer_addr,
             sig.data,
         ))
+    }
+
+    /// W.5: Handle an incoming wPoA vote from a peer.
+    ///
+    /// Reconstructs the PQ signature, validates the voter, records the vote,
+    /// and logs when quorum is reached.
+    pub fn handle_wpoa_vote(
+        &self,
+        voter: Address,
+        block_hash: ShellHash,
+        block_number: u64,
+        signature: Vec<u8>,
+    ) {
+        let sig =
+            shell_crypto::PQSignature::new(shell_crypto::SignatureType::Dilithium3, signature);
+        let mut guard = self.wpoa_round.lock();
+        if let Some(ref mut round) = *guard {
+            if round.block_number != block_number {
+                tracing::debug!(
+                    block_number,
+                    expected = round.block_number,
+                    "W.5: WPoaVote for unexpected block number, ignoring"
+                );
+                return;
+            }
+            let peer_id = shell_consensus::ScoringPeerId::from(format!("{voter:?}"));
+            let events = round.on_vote(voter, block_hash, sig);
+            for event in events {
+                match event {
+                    WPoaEvent::BlockCommitted {
+                        block_hash,
+                        quorum_signatures,
+                    } => {
+                        tracing::info!(
+                            %block_hash,
+                            signers = quorum_signatures.len(),
+                            "W.5: block committed with quorum"
+                        );
+                        // PS.1: reward all quorum signers.
+                        let mut scorer = self.peer_scorer.lock();
+                        for signer in quorum_signatures.keys() {
+                            let signer_id =
+                                shell_consensus::ScoringPeerId::from(format!("{signer:?}"));
+                            scorer.record_event(
+                                &signer_id,
+                                shell_consensus::PeerEvent::ValidProofDelivered,
+                            );
+                        }
+                    }
+                    WPoaEvent::DuplicateVote { voter } => {
+                        tracing::warn!(%voter, "W.5: duplicate vote rejected");
+                        // PS.1: penalise duplicate voter.
+                        self.peer_scorer
+                            .lock()
+                            .record_event(&peer_id, shell_consensus::PeerEvent::DuplicateMessage);
+                    }
+                    WPoaEvent::WrongBlockHash { expected, got } => {
+                        tracing::warn!(%expected, %got, "W.5: vote for wrong block hash rejected");
+                        // PS.1: penalise invalid payload.
+                        self.peer_scorer.lock().record_event(
+                            &peer_id,
+                            shell_consensus::PeerEvent::InvalidProofPayload,
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// PS.2: Flush wPoA peer scorer to the network-level ban list.
+    ///
+    /// Any peer whose score has fallen below `disconnect_threshold` is
+    /// recorded as a violation in the `PeerBanList`. After `ban_threshold`
+    /// violations the network layer will refuse connections from that peer.
+    /// Called from the event loop after each wPoA vote round completes.
+    pub fn flush_scorer_bans(&self) {
+        let scorer = self.peer_scorer.lock();
+        let to_disconnect = scorer.peers_to_disconnect();
+        if to_disconnect.is_empty() {
+            return;
+        }
+        let mut ban_list = self.peer_ban_list.lock();
+        for scoring_peer in to_disconnect {
+            let net_peer = shell_network::PeerId(scoring_peer.0.clone());
+            let was_banned = ban_list.record_violation(&net_peer);
+            if was_banned {
+                tracing::warn!(
+                    peer = %scoring_peer.0,
+                    "PS.2: peer score below threshold — recorded ban violation (now banned)"
+                );
+            } else {
+                tracing::debug!(
+                    peer = %scoring_peer.0,
+                    "PS.2: peer score below threshold — recorded violation"
+                );
+            }
+        }
+    }
+
+    /// W.5: Handle an incoming wPoA view-change vote from a peer.
+    ///
+    /// Records the vote and logs when quorum for the view change is reached.
+    pub fn handle_wpoa_view_change(&self, voter: Address, new_view: u64, block_number: u64) {
+        let mut guard = self.wpoa_round.lock();
+        if let Some(ref mut round) = *guard {
+            if round.block_number != block_number {
+                return;
+            }
+            let events = round.on_view_change_vote(voter, new_view);
+            for event in events {
+                if let WPoaEvent::ViewChangeReady { new_view } = event {
+                    tracing::info!(new_view, "W.5: view change ready — advancing round");
+                    round.round = new_view;
+                }
+            }
+        }
     }
 }

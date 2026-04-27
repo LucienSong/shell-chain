@@ -311,6 +311,64 @@ impl ConsensusEngine for PoaEngine {
     fn engine_type(&self) -> EngineType {
         EngineType::PoA
     }
+
+    fn poa_config(&self) -> &PoaConfig {
+        self.config()
+    }
+
+    fn poa_config_mut(&mut self) -> &mut PoaConfig {
+        self.config_mut()
+    }
+
+    fn sign_block(
+        &self,
+        block: &mut Block,
+        signer: &dyn shell_crypto::Signer,
+    ) -> Result<(), ConsensusError> {
+        let expected = self.config.proposer_for_block(block.header.number);
+        if block.header.proposer != expected {
+            return Err(ConsensusError::InvalidProposer {
+                expected,
+                got: block.header.proposer,
+            });
+        }
+        let header_hash = block.header.hash();
+        let sig = signer
+            .sign(header_hash.as_bytes())
+            .map_err(|e| ConsensusError::SealingFailed(e.to_string()))?;
+        block.proposer_seal = Some(sig);
+        Ok(())
+    }
+
+    fn verify_seal(
+        &self,
+        header: &BlockHeader,
+        seal: &shell_crypto::PQSignature,
+        proposer_pubkey: &[u8],
+        verifier: &dyn shell_crypto::Verifier,
+    ) -> Result<(), ConsensusError> {
+        let header_hash = header.hash();
+        let valid = verifier
+            .verify(proposer_pubkey, header_hash.as_bytes(), seal)
+            .map_err(|_| ConsensusError::InvalidSignature)?;
+        if !valid {
+            return Err(ConsensusError::InvalidSignature);
+        }
+        Ok(())
+    }
+
+    fn slash_authority(&mut self, offender: &Address) {
+        self.config.slash_authority(offender);
+    }
+
+    fn validator_weights(&self) -> std::collections::HashMap<Address, u64> {
+        self.config
+            .authorities
+            .iter()
+            .filter(|a| !self.config.slashed.contains(a))
+            .map(|a| (*a, 1u64))
+            .collect()
+    }
 }
 
 impl PoaEngine {

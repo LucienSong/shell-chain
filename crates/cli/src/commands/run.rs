@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use shell_consensus::PoaConfig;
+use shell_consensus::{PoaConfig, WPoaConfig};
 use shell_core::Block;
 use shell_crypto::{DilithiumSigner, Signer};
 use shell_genesis::{
@@ -16,6 +16,7 @@ use shell_genesis::{
 use shell_keystore::{decrypt, EncryptedKey};
 use shell_mempool::MempoolConfig;
 use shell_network::{NetworkBus, NetworkConfig};
+use shell_node::config::ConsensusEngineConfig;
 use shell_node::config::NodeConfig;
 use shell_node::pruning::StorageProfile;
 use shell_primitives::{Address, ShellHash};
@@ -75,6 +76,8 @@ pub struct RunArgs {
     pub storage_profile: String,
     /// Enable STARK aggregate proof generation during block production (off by default).
     pub enable_stark_aggregation: bool,
+    /// Consensus engine: "poa" (default) or "wpoa".
+    pub consensus_engine: Option<String>,
 }
 
 /// Maximum genesis file size: 10 MB (F-082).
@@ -450,21 +453,10 @@ async fn run_with_store<S: KvStore + 'static>(
     }
 
     // Extract authorities and epoch_length from genesis.
-    let (authorities, authority_pubkeys, max_future_secs, epoch_length) =
-        match &genesis_config.consensus {
-            ConsensusConfig::PoA {
-                authorities,
-                authority_pubkeys,
-                max_future_secs,
-                epoch_length,
-                ..
-            } => (
-                authorities.clone(),
-                authority_pubkeys.clone(),
-                *max_future_secs,
-                *epoch_length,
-            ),
-        };
+    let authorities = genesis_config.consensus.authorities().to_vec();
+    let authority_pubkeys = genesis_config.consensus.authority_pubkeys().to_vec();
+    let max_future_secs = genesis_config.consensus.max_future_secs();
+    let epoch_length = genesis_config.consensus.epoch_length();
 
     // F4: validate network_type vs block_time_secs consistency, warn on mismatch.
     if let Err(e) = genesis_config.validate_network_consistency() {
@@ -483,9 +475,34 @@ async fn run_with_store<S: KvStore + 'static>(
     let node_config = NodeConfig {
         chain_id: genesis_config.chain_id,
         network_type,
-        consensus: PoaConfig::new(authorities.clone(), block_time_secs)
-            .with_max_future_secs(max_future_secs)
-            .with_epoch_length(epoch_length),
+        consensus: {
+            let build_poa = || {
+                PoaConfig::new(authorities.clone(), block_time_secs)
+                    .with_max_future_secs(max_future_secs)
+                    .with_epoch_length(epoch_length)
+            };
+            let build_wpoa = || -> WPoaConfig {
+                let poa = match &genesis_config.consensus {
+                    ConsensusConfig::WPoA { weights, .. } => {
+                        if weights.len() == authorities.len() {
+                            build_poa().with_weights(weights.clone())
+                        } else {
+                            build_poa()
+                        }
+                    }
+                    _ => build_poa(),
+                };
+                WPoaConfig::from_poa(poa)
+            };
+            match args.consensus_engine.as_deref() {
+                Some("wpoa") => ConsensusEngineConfig::WPoa(build_wpoa()),
+                Some("poa") => ConsensusEngineConfig::Poa(build_poa()),
+                _ => match &genesis_config.consensus {
+                    ConsensusConfig::WPoA { .. } => ConsensusEngineConfig::WPoa(build_wpoa()),
+                    _ => ConsensusEngineConfig::Poa(build_poa()),
+                },
+            }
+        },
         mempool: MempoolConfig {
             chain_id: genesis_config.chain_id,
             max_pool_size: args.mempool_max_size.unwrap_or(4096),
@@ -771,6 +788,7 @@ mod tests {
             storage_profile: "full".into(),
             enable_stark_aggregation: false,
             network: "dev".into(),
+            consensus_engine: None,
         };
 
         let expected = ParallelEvmConfig {

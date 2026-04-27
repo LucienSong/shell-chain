@@ -1,12 +1,17 @@
 # RPC Reference
 
-shell-chain exposes five JSON-RPC namespaces:
+> **Auto-generated** by `tools/rpc-docgen` from `crates/rpc/src/api.rs`.
+> Run `cargo run -p rpc-docgen` to regenerate.
 
-- **`eth_`** — Ethereum-compatible methods
-- **`shell_`** — shell-chain extension methods (PQ, AA, governance, ops)
-- **`net_`** / **`web3_`** — standard net/web3 info methods
-- **`admin_`** — node administration (authenticated)
-- **`debug_`** / **`trace_`** — debugging (dev nodes only)
+shell-chain exposes the following JSON-RPC namespaces:
+
+- **`web3_`** (2 methods)
+- **`net_`** (3 methods)
+- **`eth_`** (33 methods)
+- **`debug_`** (2 methods)
+- **`trace_`** (2 methods)
+- **`evm_`** (5 methods)
+- **`shell_`** (28 methods)
 
 All methods use JSON-RPC 2.0. Hex quantities are `0x`-prefixed strings.
 
@@ -25,459 +30,651 @@ Error codes are defined in `crates/rpc/src/error.rs`:
 
 ---
 
-## eth_ namespace
-
-### eth_blockNumber
-Returns the current chain tip block number.
-```
-→ "0x1a4"    (hex-encoded block number)
-```
-
-### eth_chainId
-Returns the chain ID.
-```
-→ "0x1"
-```
-
-### eth_getBlockByNumber(blockNumber, fullTxs)
-Returns a block by number or tag (`"latest"`, `"earliest"`, `"pending"`).
-- `fullTxs`: if `true`, returns full transaction objects; otherwise tx hashes.
-```
-→ RpcBlock | null
-```
-
-### eth_getBlockByHash(blockHash, fullTxs)
-Returns a block by hash.
-```
-→ RpcBlock | null
-```
-
-### eth_getTransactionByHash(txHash)
-Returns a transaction by hash.
-```
-→ RpcTransaction | null
-```
-
-### eth_getTransactionReceipt(txHash)
-Returns a receipt by transaction hash.
-```
-→ RpcReceipt | null
-```
-
-### eth_getBlockReceipts(blockNumber)
-Returns all receipts for a block.
-```
-→ RpcReceipt[]
-```
-
-### eth_getBalance(address, blockTag)
-Returns the account balance in wei (hex).
-```
-→ "0xde0b6b3a7640000"
-```
-
-### eth_getTransactionCount(address, blockTag)
-Returns the account nonce.
-```
-→ "0x5"
-```
-
-### eth_getCode(address, blockTag)
-Returns the contract bytecode at address.
-```
-→ "0x608060..."
-```
-
-### eth_call(callObject, blockTag)
-Executes a message call without creating a transaction.
-```
-callObject: { from?, to, data?, value?, gas? }
-→ "0x..."    (return data hex)
-```
-
-### eth_estimateGas(callObject)
-Estimates gas for a call.
-```
-→ "0x5208"
-```
-
-### eth_sendRawTransaction(rawTx)
-Submits a signed, RLP-encoded transaction.
-```
-→ txHash
-```
-
-### eth_gasPrice
-Returns the current base gas price in wei.
-```
-→ "0x3b9aca00"
-```
-
-### eth_maxPriorityFeePerGas
-Returns the suggested miner tip in wei.
-```
-→ "0x3b9aca00"
-```
-
-### eth_feeHistory(blockCount, newestBlock, rewardPercentiles)
-Returns fee history for EIP-1559 fee estimation.
-```
-→ { oldestBlock, baseFeePerGas[], gasUsedRatio[], reward[][] }
-```
-
-### eth_getLogs(filter)
-Returns logs matching filter. Capped at `MAX_BLOCK_RANGE` blocks.
-```
-filter: { fromBlock?, toBlock?, address?, topics? }
-→ RpcLogWithMeta[]
-errors: -32005 if range > MAX_BLOCK_RANGE
-```
-
-### eth_newFilter(filter) / eth_newBlockFilter() / eth_newPendingTransactionFilter()
-Creates a log / block / pending-tx filter. Returns a filter ID hex string.
-
-### eth_getFilterChanges(filterId) / eth_getFilterLogs(filterId)
-Polls or fetches accumulated filter results.
-```
-errors: -32001 if filter not found
-```
-
-### eth_uninstallFilter(filterId)
-Removes a filter. Returns `true` if found and removed.
-
-### eth_syncing
-Returns `false` (shell-chain has no sync protocol yet).
-
-### eth_blobBaseFee
-Returns `"0x0"` (EIP-4844 placeholder).
-
----
-
-## shell_ namespace
-
-### shell_getPqPubkey(address)
-Returns the stored ML-DSA-65 public key for an address (hex-encoded).
-```
-→ "0x..." | null
-```
-
-### shell_getNodeInfo()
-Returns comprehensive node metadata.
-```json
-{
-  "nodeId": "0x...",
-  "version": "0.18.0",
-  "chainId": 1,
-  "blockHeight": 12345,
-  "peerCount": 4,
-  "validatorCount": 3,
-  "isSyncing": false,
-  "uptime": 3600
-}
-```
-
-### shell_getNetworkStats()
-Returns network-level statistics (peer topology, message rates).
-
-### shell_getChainStats()
-Returns chain-level statistics (TPS, block times, mempool depth).
-
-### shell_getFinalityInfo()
-Returns current finality state (epoch, finalized height, validator set hash).
-
-### shell_transactionCount()
-Returns the total number of transactions processed (hex).
-
-### shell_pendingCount()
-Returns the number of pending mempool transactions (hex).
-
-### shell_sendTransaction(signedTx)
-Submits a decoded `SignedTransaction` object.
-```
-→ txHash
-```
-
-### shell_getTransactionsByAddress(address, options)
-Returns paginated transaction history for an address.
-```
-options: { page?, pageSize?, direction? }
-→ { txs: RpcTransaction[], total: number, page: number }
-```
-
-### shell_getValidators()
-Returns the current active validator set (array of addresses).
-
-### shell_addValidator(address) / shell_removeValidator(address)
-**Disabled** — use `shell_proposeAddValidator` / `shell_proposeRemoveValidator`.
-```
-errors: -32601
-```
-
-### shell_proposeAddValidator(address) / shell_proposeRemoveValidator(address)
-Submits a governance transaction to add/remove a validator.
-```
-→ txHash
-```
-
-### shell_getValidatorStatus(address)
-Returns validator status for an address.
-
-### shell_getGovernanceInfo()
-Returns current governance parameters and pending proposals.
-
-### shell_estimateGovernanceGas(operation)
-Estimates gas for a governance operation.
-```
-operation: "addValidator" | "removeValidator" | "getValidators" | "isValidator"
-→ "0x..." (gas estimate hex)
-errors: -32602 for unknown operation
-```
-
-### shell_encodeAddValidator(address) / shell_encodeRemoveValidator(address)
-Returns ABI-encoded calldata for governance system calls.
-```
-→ "0x..."
-```
-
----
-
-## shell_ — Witness & Verification (OPS-2)
-
-### shell_getBlockWitnesses(blockHash)
-Returns the PQ witness bundle for a block.
-```json
-{
-  "blockHash": "0x...",
-  "witnesses": [...],
-  "count": 3,
-  "witnessRootVerified": true    // null if header has no witness_root
-}
-```
-
-### shell_getWitness(blockHash, txIndex)
-Returns the PQ witness for a specific transaction.
-```json
-{
-  "blockHash": "0x...",
-  "txIndex": 0,
-  "publicKey": "0x...",
-  "signature": "0x...",
-  "state_root": "0x...",
-  "timestamp": 1700000000,
-  "witness_root": "0x...",
-  "witness_root_verified": true
-}
-→ null if block/witness not found
-```
-
-### shell_verifyWitnessRoot(block)
-Light-client verifier — recomputes the Merkle root over stored witnesses and
-compares against the block header's `witness_root` field.
-```
-block: hex block number | "latest" | "earliest" | block hash
-```
-```json
-{
-  "blockHash": "0x...",
-  "expectedRoot": "0x...",
-  "computedRoot": "0x...",
-  "verified": true
-}
-```
-When information is unavailable:
-```json
-{ "verified": null, "reason": "block header has no witness_root (pre-B2 block or genesis)" }
-```
-Possible `reason` values:
-- `"block not found"`
-- `"block header has no witness_root (pre-B2 block or genesis)"`
-- `"witness store not available on this node"`
-- `"witness bundle not stored (pruned or never written)"`
-
----
-
-## shell_ — Account Abstraction (v0.18.0)
-
-### shell_estimateBatch(request)
-Estimates gas for a batch (AA) transaction.
-```json
-{
-  "from": "0x...",           // optional
-  "inner_calls": [
-    { "to": "0x...", "value": "0x0", "data": "0x", "gas_limit": "0x5208" }
-  ],
-  "paymaster": "0x..."       // optional, informational only
-}
-```
-```json
-{
-  "total_gas": "0x...",
-  "outer_intrinsic": "0x...",
-  "inner_sum": "0x...",
-  "intrinsic_surcharge": "0x...",
-  "per_inner": [
-    { "gas_limit": "0x5208", "simulated": true },
-    { "gas_limit": "0x7530", "simulated": false }
-  ],
-  "paymaster": "0x..."       // echoed from request; null if absent
-}
-```
-Errors:
-- `-32602` if `inner_calls` is empty or exceeds `MAX_INNER_CALLS` (16)
-- `-32602` if any `inner[n].gas_limit` is 0
-- `-32000` if EVM simulation fails
-
-### shell_getPaymasterPolicy(address)
-Returns the paymaster policy for an address. Always returns a policy object
-(never `null`); unregistered addresses receive the default `"eoa-open"` policy.
-```json
-{
-  "address": "0x...",
-  "has_pq_pubkey": false,
-  "pubkey_bytes": null,
-  "balance": "0x...",
-  "policy": "eoa-open",
-  "max_gas_sponsorship": null
-}
-```
-
-### shell_isSponsored(txHash)
-Returns whether a transaction was sponsored by a paymaster.
-For unknown transactions, returns a normal object with `found: false` (no error).
-```json
-{
-  "found": true,
-  "location": "chain",
-  "is_aa_bundle": true,
-  "sponsored": true,
-  "paymaster": "0x...",
-  "sender": "0x...",
-  "inner_call_count": 2
-}
-```
-When not found:
-```json
-{
-  "found": false,
-  "location": null,
-  "is_aa_bundle": false,
-  "sponsored": false,
-  "paymaster": null,
-  "sender": null,
-  "inner_call_count": null
-}
-```
-
----
-
-## shell_ — Ops (v0.18.0)
-
-### shell_getStorageProfile()
-Returns the node's current storage profile configuration.
-
-Full node example:
-```json
-{
-  "profile": "full",
-  "body_retention": 0,
-  "witness_retention": 128,
-  "keep_recent": 0,
-  "proof_replacement_grace": 0,
-  "state_pruning_experimental": false
-}
-```
-
-Archive node example (`proof_replacement_grace = u64::MAX` = never prune witness after proof):
-```json
-{
-  "profile": "archive",
-  "body_retention": 0,
-  "witness_retention": 0,
-  "keep_recent": 0,
-  "proof_replacement_grace": 18446744073709551615,
-  "state_pruning_experimental": false
-}
-```
-Errors: `-32003` if storage profile is not configured.
-
----
-
-## net_ namespace
-
-### net_version
-Returns the network ID string.
-
-### net_listening
-Returns `true` if the node is accepting P2P connections.
-
-### net_peerCount
-Returns the number of connected peers (hex).
-
----
-
-## web3_ namespace
+## web3_  namespace
 
 ### web3_clientVersion
-Returns the node client version string (e.g. `"shell-chain/0.18.0"`).
-
-### web3_sha3(data)
-Returns `keccak256(data)`.
-
----
-
-## admin_ namespace
-
-> Requires authentication. Connect to the admin RPC port (default `:8546`).
-
-### admin_nodeInfo
-Returns the full node identity: enode URL, protocol versions, ports.
-
-### admin_peers
-Returns connected peer details: enode, network, protocols.
-
-### admin_addPeer(multiaddr)
-**Stub** — not yet implemented. Use `--bootnodes` at startup.
 ```
-errors: -32601
+client_version() → String
 ```
 
----
+Returns the current client version string.
 
-## debug_ namespace (dev mode)
-
-### debug_traceTransaction(txHash, options)
-Returns an execution trace for a transaction.
-
-### debug_traceBlockByNumber(blockNumber, options)
-Returns traces for all transactions in a block.
-
----
-
-## evm_ namespace (dev mode)
-
-> Only available when node is started with `--dev`.
-
-### evm_mine(options)
-Forces production of a new block.
-
-### evm_setNextBlockTimestamp(timestamp)
-Sets the timestamp for the next block.
-
-### evm_increaseTime(seconds)
-Advances the chain clock by N seconds.
-
-### evm_snapshot()
-Takes a chain snapshot. Returns a snapshot ID.
-
-### evm_revert(snapshotId)
-Reverts to a snapshot.
-
----
-
-## shell_ — Dev only
-
-### shell_setBalance(address, balance)
-Sets the balance for an address. Dev mode required.
+### web3_sha3
 ```
-errors: -32002 if not in dev mode
+sha3(data: String) → String
 ```
+
+Returns the Keccak-256 hash of the given data.
+
+
+## net_  namespace
+
+### net_version
+```
+version() → String
+```
+
+Returns the chain ID as a decimal string.
+
+### net_listening
+```
+listening() → bool
+```
+
+Returns true if the node is listening for connections.
+
+### net_peerCount
+```
+peer_count() → String
+```
+
+Returns the number of connected peers as a hex string.
+
+
+## eth_  namespace
+
+### eth_blockNumber
+```
+block_number() → String
+```
+
+Returns the current block number.
+
+### eth_chainId
+```
+chain_id() → String
+```
+
+Returns the chain ID.
+
+### eth_syncing
+```
+syncing() → serde_json::Value
+```
+
+Returns false when not syncing; will return sync status object later.
+
+### eth_mining
+```
+mining() → bool
+```
+
+Returns true if the node is actively mining (validating).
+
+### eth_hashrate
+```
+hashrate() → String
+```
+
+Returns the current hashrate (always 0 for PoA).
+
+### eth_accounts
+```
+accounts() → Vec<Address>
+```
+
+Returns a list of accounts owned by the node (always empty).
+
+### eth_sign
+```
+sign(address: Address, data: String, ) → String
+```
+
+Signs data with a local account (unsupported — node holds no private keys).
+
+### eth_signTransaction
+```
+sign_transaction(tx: serde_json::Value, ) → String
+```
+
+Signs a transaction with a local account (unsupported).
+
+### eth_getCompilers
+```
+get_compilers() → Vec<String>
+```
+
+Returns a list of available compilers (deprecated, always empty).
+
+### eth_protocolVersion
+```
+protocol_version() → String
+```
+
+Returns the current Ethereum protocol version.
+
+### eth_getBlockByNumber
+```
+get_block_by_number(number: String, full_txs: bool, ) → Option<RpcBlock>
+```
+
+Returns a block by number (hex-encoded or "latest").
+
+### eth_getBlockByHash
+```
+get_block_by_hash(hash: ShellHash, full_txs: bool, ) → Option<RpcBlock>
+```
+
+Returns a block by hash.
+
+### eth_getTransactionByHash
+```
+get_transaction_by_hash(hash: ShellHash, ) → Option<RpcTransaction>
+```
+
+Returns a transaction by hash.
+
+### eth_getTransactionReceipt
+```
+get_transaction_receipt(hash: ShellHash, ) → Option<RpcReceipt>
+```
+
+Returns the receipt of a transaction by hash.
+
+### eth_getBlockReceipts
+```
+get_block_receipts(block: String, ) → Vec<RpcReceipt>
+```
+
+Returns all receipts for a given block by number or hash.
+
+### eth_getBalance
+```
+get_balance(address: Address, block: Option<String>, ) → String
+```
+
+Returns the balance of an address.
+
+### eth_getTransactionCount
+```
+get_transaction_count(address: Address, block: Option<String>, ) → String
+```
+
+Returns the nonce (transaction count) of an address.
+
+### eth_gasPrice
+```
+gas_price() → String
+```
+
+Returns the current gas price suggestion.
+
+### eth_maxPriorityFeePerGas
+```
+max_priority_fee_per_gas() → String
+```
+
+Returns a suggested max priority fee per gas (EIP-1559).
+
+### eth_feeHistory
+```
+fee_history(block_count: String, newest_block: String, reward_percentiles: Option<Vec<f64>>, ) → serde_json::Value
+```
+
+Returns base fee history for a range of blocks (EIP-1559).
+
+### eth_sendRawTransaction
+```
+send_raw_transaction(data: String, ) → ShellHash
+```
+
+Submits a signed transaction to the mempool.
+
+### eth_call
+```
+call(tx: CallRequest, block: Option<String>, ) → String
+```
+
+Executes a call without creating a transaction (read-only).
+
+### eth_estimateGas
+```
+estimate_gas(tx: CallRequest, ) → String
+```
+
+Estimates gas needed for a transaction.
+
+### eth_createAccessList
+```
+create_access_list(tx: CallRequest, block: Option<String>, ) → serde_json::Value
+```
+
+Creates an EIP-2930 access list for a transaction.
+
+### eth_getCode
+```
+get_code(address: Address, block: Option<String>, ) → String
+```
+
+Returns the bytecode at a given address.
+
+### eth_getStorageAt
+```
+get_storage_at(address: Address, position: String, block: Option<String>, ) → String
+```
+
+Returns the value from a storage position at a given address.
+
+### eth_getLogs
+```
+get_logs(filter: RawLogFilter, ) → Vec<RpcLogWithMeta>
+```
+
+Returns logs matching the given filter object.
+
+### eth_newFilter
+```
+new_filter(filter: RawLogFilter, ) → String
+```
+
+Creates a log filter, returning a filter ID for polling via `eth_getFilterChanges`.
+
+### eth_newBlockFilter
+```
+new_block_filter() → String
+```
+
+Creates a block filter that tracks new block hashes.
+
+### eth_getFilterChanges
+```
+get_filter_changes(id: String, ) → serde_json::Value
+```
+
+Returns changes since the last poll for the given filter.
+
+### eth_getFilterLogs
+```
+get_filter_logs(id: String, ) → Vec<RpcLogWithMeta>
+```
+
+Returns all logs matching the filter criteria (for log filters only).
+
+### eth_uninstallFilter
+```
+uninstall_filter(id: String, ) → bool
+```
+
+Removes a filter. Returns `true` if the filter existed.
+
+### eth_blobBaseFee
+```
+blob_base_fee() → String
+```
+
+Returns the current blob base fee per gas (EIP-4844).
+
+
+## debug_  namespace
+
+### debug_traceTransaction
+```
+trace_transaction(tx_hash: String, opts: Option<serde_json::Value>, ) → serde_json::Value
+```
+
+Traces the execution of a transaction, returning call frames.
+
+### debug_traceBlockByNumber
+```
+trace_block_by_number(block_number: String, opts: Option<serde_json::Value>, ) → serde_json::Value
+```
+
+Traces all transactions in a block by number, returning an array of call traces.
+
+
+## trace_  namespace
+
+### trace_block
+```
+trace_block(block_number: String, ) → serde_json::Value
+```
+
+Returns traces for all transactions in a block (OpenEthereum format).
+
+### trace_transaction
+```
+trace_oe_transaction(tx_hash: String, ) → serde_json::Value
+```
+
+Returns traces for a single transaction (OpenEthereum format).
+
+
+## evm_  namespace
+
+### evm_mine
+```
+mine(blocks: Option<u64>, ) → serde_json::Value
+```
+
+Mine one or more blocks immediately.
+
+### evm_setNextBlockTimestamp
+```
+set_next_block_timestamp(timestamp: u64, ) → serde_json::Value
+```
+
+Set the timestamp for the next block to be produced.
+
+### evm_increaseTime
+```
+increase_time(seconds: u64, ) → serde_json::Value
+```
+
+Increase the virtual clock used for future blocks.
+
+### evm_snapshot
+```
+snapshot() → String
+```
+
+Capture a snapshot of the current execution state.
+
+### evm_revert
+```
+revert(snapshot_id: String) → bool
+```
+
+Revert to a previously captured snapshot.
+
+
+## shell_  namespace
+
+### shell_getPqPubkey
+```
+get_pq_pubkey(address: Address, ) → Option<String>
+```
+
+Returns the registered PQ public key for an address.
+
+### shell_pendingCount
+```
+pending_count() → String
+```
+
+Returns the number of pending transactions in the mempool.
+
+### shell_sendTransaction
+```
+send_transaction(tx: shell_core::SignedTransaction, ) → ShellHash
+```
+
+Submit a signed transaction as structured JSON (developer-friendly).
+
+### shell_getValidators
+```
+get_validators() → Vec<Address>
+```
+
+Returns the current validator set from world state.
+
+### shell_addValidator
+```
+add_validator(address: String, ) → bool
+```
+
+Add a validator to the active set. Unauthenticated until M3.
+
+### shell_removeValidator
+```
+remove_validator(address: String, ) → bool
+```
+
+Remove a validator from the active set. Unauthenticated until M3.
+
+### shell_encodeAddValidator
+```
+encode_add_validator(address: String, ) → String
+```
+
+Encode calldata for `addValidator(address)` system contract call.
+
+### shell_encodeRemoveValidator
+```
+encode_remove_validator(address: String, ) → String
+```
+
+Encode calldata for `removeValidator(address)` system contract call.
+
+### shell_proposeAddValidator
+```
+propose_add_validator(address: String, ) → String
+```
+
+Propose adding a validator via system contract transaction.
+Requires the node to be configured as a validator.
+Returns the transaction hash on success.
+
+### shell_proposeRemoveValidator
+```
+propose_remove_validator(address: String, ) → String
+```
+
+Propose removing a validator via system contract transaction.
+Requires the node to be configured as a validator.
+Returns the transaction hash on success.
+
+### shell_getValidatorStatus
+```
+get_validator_status(address: Address, ) → serde_json::Value
+```
+
+Returns whether an address is currently a validator.
+
+### shell_getGovernanceInfo
+```
+get_governance_info() → serde_json::Value
+```
+
+Returns governance-related information (validator count, list, system contract address, gas limit).
+
+### shell_estimateGovernanceGas
+```
+estimate_governance_gas(operation: String, ) → String
+```
+
+Returns estimated gas for a governance operation ("addValidator" or "removeValidator").
+
+### shell_getNodeInfo
+```
+get_node_info() → serde_json::Value
+```
+
+Returns comprehensive node status information for the performance dashboard.
+
+### shell_getNetworkStats
+```
+get_network_stats() → serde_json::Value
+```
+
+Returns network statistics for the performance dashboard.
+
+### shell_getChainStats
+```
+get_chain_stats() → serde_json::Value
+```
+
+Returns chain performance statistics for the performance dashboard.
+
+### shell_getFinalityInfo
+```
+get_finality_info() → serde_json::Value
+```
+
+Returns finality information: last finalized block, current head, and pending attestations.
+
+### shell_consensusInfo
+```
+consensus_info() → serde_json::Value
+```
+
+Returns consensus engine information: engine type, validator set, weights,
+current proposer for the next block, and epoch progress.
+
+Response fields:
+- `engine`          — `"poa"` or `"wpoa"`
+- `validators`      — array of `{ address, weight }` for active validators
+- `current_proposer`— hex address of the validator expected to propose next
+- `block_number`    — head block number (proposer is for `block_number + 1`)
+- `epoch`           — current epoch index
+- `epoch_length`    — blocks per epoch
+- `epoch_progress`  — blocks elapsed in the current epoch
+
+### shell_setBalance
+```
+set_balance(address: Address, balance: String, ) → bool
+```
+
+Set the balance of an address directly (dev/testnet only).
+
+### shell_transactionCount
+```
+transaction_count() → String
+```
+
+Returns the total number of transactions across all blocks.
+
+### shell_getTransactionsByAddress
+```
+get_transactions_by_address(address: Address, from_block: Option<u64>, to_block: Option<u64>, page: Option<u64>, limit: Option<u64>, ) → serde_json::Value
+```
+
+Returns transactions involving a given address (sender or recipient).
+Supports pagination: `from_block`, `to_block`, `page` (0-based), `limit` (default 20).
+
+### shell_getBlockWitnesses
+```
+get_block_witnesses(block: String, ) → serde_json::Value
+```
+
+Returns the witness bundle for a block (PQ signatures separated from tx bodies).
+
+`block` can be a block hash (0x-prefixed 32-byte hex) or a block tag
+("latest", "0x<number>").  Returns `null` when no witness bundle has
+been stored for the block (pre-B3 blocks or pruned witnesses).
+
+Response fields:
+- `blockHash`    — canonical block hash
+- `witnessRoot`  — `witness_root` field from the block header
+- `witnessCount` — number of witnesses in the bundle
+- `witnesses`    — array of `{ txIndex, sigType, signature, pubkey? }`
+
+### shell_getWitness
+```
+get_witness(block: String, ) → serde_json::Value
+```
+
+SDK-facing witness endpoint.
+
+Returns `null` when the node does not expose a witness store or when the
+requested block's raw witness bundle has been pruned.
+
+Response fields (OPS-2 enriched):
+- `block_hash`     — `"0x..."` canonical block hash
+- `block_number`   — u64 block height
+- `state_root`     — `"0x..."` state root from the block header
+- `timestamp`      — u64 block timestamp (Unix seconds)
+- `witness_root`   — `"0x..."` expected witness Merkle root from header
+- `witness_root_verified` — `bool`: `true` when the computed bundle root
+  matches the header's `witness_root`; `false` on mismatch (tampered or
+  corrupt bundle); `null` when the header carries no witness_root.
+- `witness_count`  — number of witnesses
+- `witnesses`      — array of `{ tx_index, sig_type, signature, public_key? }`
+
+### shell_verifyWitnessRoot
+```
+verify_witness_root(block: String, ) → serde_json::Value
+```
+
+Verify that a stored witness bundle's Merkle root matches the block
+header's `witness_root` field.
+
+This is the primary light-client verifier: after downloading a
+`shell_getWitness` response, the client can call this to confirm the
+bundle has not been tampered with.
+
+Returns:
+- `{ blockHash, expectedRoot, computedRoot, verified: true }`  on match.
+- `{ blockHash, expectedRoot, computedRoot, verified: false }` on mismatch.
+- `{ blockHash, verified: null, reason: "..." }` when the block is
+  unknown, the header has no `witness_root`, or no bundle is stored.
+
+### shell_estimateBatch
+```
+estimate_batch(req: crate::types::BatchEstimateRequest, ) → serde_json::Value
+```
+
+Estimates gas for a Native-AA bundle (tx_type = `0x7E`).
+
+Returns a JSON object:
+- `total_gas` — hex: `outer_intrinsic + inner_sum + intrinsic_surcharge`
+- `outer_intrinsic` — hex: 21,000 (standard tx base cost; access list
+  is not supported in the admission AA path yet)
+- `inner_sum` — hex: Σ per-inner gas (explicit or simulated)
+- `intrinsic_surcharge` — hex: `(n - 1) × AA_INNER_CALL_INTRINSIC_GAS`
+- `per_inner` — array of `{ gas_limit, simulated }` where `simulated`
+  is `true` iff the request omitted `gas_limit` and the server filled it
+  in via `eth_call`-style simulation (+ 20% buffer, min 21,000).
+
+Does NOT require signatures; is a pure estimator. Errors
+(`-32602`) if the bundle is structurally invalid (empty inner_calls,
+> 16 inner calls, zero-gas inners); (`-32000`) if EVM simulation fails.
+
+### shell_getPaymasterPolicy
+```
+get_paymaster_policy(address: Address, ) → serde_json::Value
+```
+
+Returns Native-AA paymaster policy for an address.
+
+In v0.18.0 Phase 1, paymasters are plain EOAs; the "policy" is
+"sponsor any bundle that carries a valid paymaster signature over the
+bundle's signing hash, as long as balance covers `gas_used × max_fee`".
+
+Response:
+- `address` — queried address
+- `hasPqPubkey` — whether a PQ public key is registered (prerequisite
+  to act as a paymaster on Native AA)
+- `balance` — hex wei balance (available to sponsor gas)
+- `policy` — constant string `"eoa-open"` (Phase 1)
+- `maxGasSponsorship` — `null` (no per-tx cap in Phase 1; bounded only
+  by balance)
+- `pubkeyBytes` — hex length of the registered pubkey (sanity only),
+  or `null`
+
+### shell_isSponsored
+```
+is_sponsored(tx_hash: ShellHash, ) → serde_json::Value
+```
+
+Returns whether a transaction is (or would be) sponsored by a
+paymaster.
+
+Looks the transaction up first in the mempool, then in on-chain
+storage. Response:
+- `found` — whether the tx was located
+- `location` — `"mempool"` | `"chain"` | `null`
+- `is_aa_bundle` — whether tx_type is `0x7E` with a valid bundle
+- `sponsored` — `true` iff `is_aa_bundle` and `paymaster` is set to a
+  non-sender address
+- `paymaster` — paymaster address (or `null`)
+- `sender` — tx sender (or `null` when not found)
+- `inner_call_count` — number of inner calls in the bundle (or `null`)
+
+### shell_getStorageProfile
+```
+get_storage_profile() → serde_json::Value
+```
+
+Returns the active storage profile and the effective pruning parameters.
+
+Profile is one of `"archive" | "full" | "light"`. The numeric fields
+reflect the resolved `PruningConfig` (after applying any per-field
+overrides such as `--body-retention` / `--witness-retention`).
+A value of `0` means "keep forever" for retention/keep_recent;
+`proof_replacement_grace = u64::MAX` means "never delete witness even
+after STARK proof arrives" (archive mode behavior).
+
+Returns an error when the node has not been configured with a profile
+(e.g. legacy startup paths). Stable consumers should treat such an
+error as `"profile: unknown"`.
+
