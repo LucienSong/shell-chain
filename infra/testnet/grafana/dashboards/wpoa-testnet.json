@@ -1,0 +1,93 @@
+{
+  "__inputs": [{ "name": "DS_PROMETHEUS", "label": "Prometheus", "type": "datasource", "pluginId": "prometheus" }],
+  "__requires": [{ "type": "grafana", "id": "grafana", "name": "Grafana", "version": "10.0.0" }],
+  "title": "Shell-Chain wPoA Testnet",
+  "uid": "shell-testnet-wpoa",
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "15s",
+  "time": { "from": "now-1h", "to": "now" },
+  "templating": {
+    "list": [{
+      "name": "validator",
+      "label": "Validator",
+      "type": "query",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "query": "label_values(shell_block_number, validator)",
+      "refresh": 2
+    }]
+  },
+  "panels": [
+    {
+      "id": 1, "type": "stat", "title": "Block Number",
+      "gridPos": { "x": 0, "y": 0, "w": 6, "h": 4 },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area" },
+      "targets": [{ "expr": "max(shell_block_number)", "legendFormat": "head", "datasource": { "uid": "${DS_PROMETHEUS}" } }]
+    },
+    {
+      "id": 2, "type": "stat", "title": "Peer Count",
+      "gridPos": { "x": 6, "y": 0, "w": 6, "h": 4 },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value" },
+      "targets": [{ "expr": "sum(shell_peer_count)", "legendFormat": "peers", "datasource": { "uid": "${DS_PROMETHEUS}" } }]
+    },
+    {
+      "id": 3, "type": "stat", "title": "Finalized Block",
+      "gridPos": { "x": 12, "y": 0, "w": 6, "h": 4 },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value" },
+      "targets": [{ "expr": "max(shell_finalized_number)", "legendFormat": "finalized", "datasource": { "uid": "${DS_PROMETHEUS}" } }]
+    },
+    {
+      "id": 4, "type": "stat", "title": "wPoA Rounds/min",
+      "gridPos": { "x": 18, "y": 0, "w": 6, "h": 4 },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value" },
+      "targets": [{ "expr": "rate(shell_wpoa_rounds_total[1m]) * 60", "legendFormat": "rounds/min", "datasource": { "uid": "${DS_PROMETHEUS}" } }]
+    },
+    {
+      "id": 5, "type": "timeseries", "title": "Block Production Rate (blocks/min)",
+      "gridPos": { "x": 0, "y": 4, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "palette-classic" } } },
+      "targets": [
+        { "expr": "rate(shell_block_number[1m]) * 60", "legendFormat": "{{validator}}", "datasource": { "uid": "${DS_PROMETHEUS}" } }
+      ]
+    },
+    {
+      "id": 6, "type": "timeseries", "title": "wPoA Vote Latency (ms)",
+      "gridPos": { "x": 12, "y": 4, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "ms" } },
+      "targets": [
+        { "expr": "histogram_quantile(0.99, rate(shell_wpoa_vote_latency_ms_bucket[5m]))", "legendFormat": "p99", "datasource": { "uid": "${DS_PROMETHEUS}" } },
+        { "expr": "histogram_quantile(0.50, rate(shell_wpoa_vote_latency_ms_bucket[5m]))", "legendFormat": "p50", "datasource": { "uid": "${DS_PROMETHEUS}" } }
+      ]
+    },
+    {
+      "id": 7, "type": "timeseries", "title": "Peer Count by Validator",
+      "gridPos": { "x": 0, "y": 12, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "shell_peer_count", "legendFormat": "{{validator}}", "datasource": { "uid": "${DS_PROMETHEUS}" } }
+      ]
+    },
+    {
+      "id": 8, "type": "timeseries", "title": "Banned Peers",
+      "gridPos": { "x": 12, "y": 12, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "shell_banned_peer_count", "legendFormat": "{{validator}}", "datasource": { "uid": "${DS_PROMETHEUS}" } }
+      ]
+    },
+    {
+      "id": 9, "type": "timeseries", "title": "Storage Size (bytes)",
+      "gridPos": { "x": 0, "y": 20, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "bytes" } },
+      "targets": [
+        { "expr": "shell_chain_storage_bytes", "legendFormat": "chain/{{validator}}", "datasource": { "uid": "${DS_PROMETHEUS}" } },
+        { "expr": "shell_witness_storage_bytes", "legendFormat": "witness/{{validator}}", "datasource": { "uid": "${DS_PROMETHEUS}" } }
+      ]
+    },
+    {
+      "id": 10, "type": "timeseries", "title": "Transaction Pool Size",
+      "gridPos": { "x": 12, "y": 20, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "shell_txpool_size", "legendFormat": "{{validator}}", "datasource": { "uid": "${DS_PROMETHEUS}" } }
+      ]
+    }
+  ]
+}
