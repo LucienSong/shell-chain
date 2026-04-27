@@ -129,7 +129,7 @@ fn parse_api(src: &str) -> Vec<Namespace> {
 }
 
 fn flush_method(
-    namespaces: &mut Vec<Namespace>,
+    namespaces: &mut [Namespace],
     current_ns: &Option<String>,
     pending_docs: &mut Vec<String>,
     pending_method_name: &mut Option<String>,
@@ -178,13 +178,11 @@ fn build_signature(lines: &[String]) -> String {
     let joined = simplify_return_type(&joined);
 
     // Remove &self, prefix
-    let joined = joined
+    joined
         .replacen("(&self, ", "(", 1)
         .replacen("(&self)", "()", 1)
         .replacen("( &self, ", "(", 1)
-        .replacen("( &self )", "()", 1);
-
-    joined
+        .replacen("( &self )", "()", 1)
 }
 
 fn simplify_return_type(sig: &str) -> String {
