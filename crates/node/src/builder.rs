@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 
-use shell_consensus::{ConsensusEngine, PoaEngine, WPoaEngine};
 use crate::config::ConsensusEngineConfig;
+use shell_consensus::{ConsensusEngine, PoaEngine, WPoaEngine};
 use shell_mempool::TxPool;
 use shell_storage::{ChainStore, KvStore, MemoryDb, WorldState};
 
@@ -96,12 +96,10 @@ impl<S: KvStore + 'static> NodeBuilder<S> {
             ConsensusEngineConfig::Poa(poa_cfg) => {
                 Arc::new(RwLock::new(PoaEngine::new(poa_cfg.clone())))
             }
-            ConsensusEngineConfig::WPoa(wpoa_cfg) => {
-                Arc::new(RwLock::new(WPoaEngine::new(
-                    wpoa_cfg.clone(),
-                    Arc::new(shell_crypto::MultiVerifier),
-                )))
-            }
+            ConsensusEngineConfig::WPoa(wpoa_cfg) => Arc::new(RwLock::new(WPoaEngine::new(
+                wpoa_cfg.clone(),
+                Arc::new(shell_crypto::MultiVerifier),
+            ))),
         };
         let tx_pool = Arc::new(TxPool::new(self.config.mempool.clone()));
 

@@ -146,10 +146,8 @@ impl<S: KvStore + 'static> Node<S> {
         block_number: u64,
         signature: Vec<u8>,
     ) {
-        let sig = shell_crypto::PQSignature::new(
-            shell_crypto::SignatureType::Dilithium3,
-            signature,
-        );
+        let sig =
+            shell_crypto::PQSignature::new(shell_crypto::SignatureType::Dilithium3, signature);
         let mut guard = self.wpoa_round.lock();
         if let Some(ref mut round) = *guard {
             if round.block_number != block_number {
@@ -176,7 +174,8 @@ impl<S: KvStore + 'static> Node<S> {
                         // PS.1: reward all quorum signers.
                         let mut scorer = self.peer_scorer.lock();
                         for (signer, _) in &quorum_signatures {
-                            let signer_id = shell_consensus::ScoringPeerId::from(format!("{signer:?}"));
+                            let signer_id =
+                                shell_consensus::ScoringPeerId::from(format!("{signer:?}"));
                             scorer.record_event(
                                 &signer_id,
                                 shell_consensus::PeerEvent::ValidProofDelivered,
@@ -186,10 +185,9 @@ impl<S: KvStore + 'static> Node<S> {
                     WPoaEvent::DuplicateVote { voter } => {
                         tracing::warn!(%voter, "W.5: duplicate vote rejected");
                         // PS.1: penalise duplicate voter.
-                        self.peer_scorer.lock().record_event(
-                            &peer_id,
-                            shell_consensus::PeerEvent::DuplicateMessage,
-                        );
+                        self.peer_scorer
+                            .lock()
+                            .record_event(&peer_id, shell_consensus::PeerEvent::DuplicateMessage);
                     }
                     WPoaEvent::WrongBlockHash { expected, got } => {
                         tracing::warn!(%expected, %got, "W.5: vote for wrong block hash rejected");
@@ -238,12 +236,7 @@ impl<S: KvStore + 'static> Node<S> {
     /// W.5: Handle an incoming wPoA view-change vote from a peer.
     ///
     /// Records the vote and logs when quorum for the view change is reached.
-    pub fn handle_wpoa_view_change(
-        &self,
-        voter: Address,
-        new_view: u64,
-        block_number: u64,
-    ) {
+    pub fn handle_wpoa_view_change(&self, voter: Address, new_view: u64, block_number: u64) {
         let mut guard = self.wpoa_round.lock();
         if let Some(ref mut round) = *guard {
             if round.block_number != block_number {

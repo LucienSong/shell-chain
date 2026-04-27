@@ -14,11 +14,10 @@ pub(crate) use parking_lot::RwLock;
 pub(crate) use tokio::sync::watch;
 pub(crate) use tracing::{debug, info, warn};
 
-#[allow(unused_imports)]
 pub(crate) use shell_consensus::{
     detect_double_sign, Attestation, ConsensusEngine, EngineType, EquivocationProof, FinalityState,
-    ForkChoice, PoaEngine, WPoaEngine, WPoaConfig, WPoaEvent, WPoaRound, ProofWindowManager,
-    WindowConfig, PeerScorer, PeerScoringConfig,
+    ForkChoice, PeerScorer, PeerScoringConfig, PoaEngine, ProofWindowManager, WPoaConfig,
+    WPoaEngine, WPoaEvent, WPoaRound, WindowConfig,
 };
 pub(crate) use shell_core::{calculate_base_fee, Account, Block, BlockHeader, SignedTransaction};
 pub(crate) use shell_crypto::{
@@ -659,10 +658,9 @@ mod tests {
         let db = Arc::new(MemoryDb::new());
         let chain_store = Arc::new(ChainStore::new(db.clone()));
         let world_state = Arc::new(RwLock::new(WorldState::new(db.clone())));
-        let consensus: Arc<RwLock<dyn ConsensusEngine>> = Arc::new(RwLock::new(PoaEngine::new(PoaConfig::new(
-            vec![authority],
-            1,
-        ))));
+        let consensus: Arc<RwLock<dyn ConsensusEngine>> = Arc::new(RwLock::new(PoaEngine::new(
+            PoaConfig::new(vec![authority], 1),
+        )));
         let tx_pool = Arc::new(TxPool::new(MempoolConfig {
             chain_id: 1337,
             ..MempoolConfig::default()
@@ -1023,10 +1021,9 @@ mod tests {
         let node2_db = Arc::new(MemoryDb::new());
         let node2_cs = Arc::new(ChainStore::new(node2_db.clone()));
         let node2_ws = Arc::new(RwLock::new(WorldState::new(node2_db.clone())));
-        let consensus: Arc<RwLock<dyn ConsensusEngine>> = Arc::new(RwLock::new(PoaEngine::new(PoaConfig::new(
-            vec![proposer],
-            1,
-        ))));
+        let consensus: Arc<RwLock<dyn ConsensusEngine>> = Arc::new(RwLock::new(PoaEngine::new(
+            PoaConfig::new(vec![proposer], 1),
+        )));
         let tx_pool = Arc::new(TxPool::new(MempoolConfig {
             chain_id: 1337,
             ..MempoolConfig::default()
@@ -1097,10 +1094,9 @@ mod tests {
         let follower_db = Arc::new(MemoryDb::new());
         let follower_cs = Arc::new(ChainStore::new(follower_db.clone()));
         let follower_ws = Arc::new(RwLock::new(WorldState::new(follower_db.clone())));
-        let consensus: Arc<RwLock<dyn ConsensusEngine>> = Arc::new(RwLock::new(PoaEngine::new(PoaConfig::new(
-            vec![proposer],
-            1,
-        ))));
+        let consensus: Arc<RwLock<dyn ConsensusEngine>> = Arc::new(RwLock::new(PoaEngine::new(
+            PoaConfig::new(vec![proposer], 1),
+        )));
         let tx_pool = Arc::new(TxPool::new(MempoolConfig {
             chain_id: 1337,
             ..MempoolConfig::default()
@@ -1247,10 +1243,9 @@ mod tests {
         let follower_db = Arc::new(MemoryDb::new());
         let follower_cs = Arc::new(ChainStore::new(follower_db.clone()));
         let follower_ws = Arc::new(RwLock::new(WorldState::new(follower_db.clone())));
-        let consensus: Arc<RwLock<dyn ConsensusEngine>> = Arc::new(RwLock::new(PoaEngine::new(PoaConfig::new(
-            vec![proposer],
-            1,
-        ))));
+        let consensus: Arc<RwLock<dyn ConsensusEngine>> = Arc::new(RwLock::new(PoaEngine::new(
+            PoaConfig::new(vec![proposer], 1),
+        )));
         let tx_pool = Arc::new(TxPool::new(MempoolConfig {
             chain_id: 1337,
             ..MempoolConfig::default()
@@ -1440,10 +1435,9 @@ mod tests {
         let follower_db = Arc::new(MemoryDb::new());
         let follower_cs = Arc::new(ChainStore::new(follower_db.clone()));
         let follower_ws = Arc::new(RwLock::new(WorldState::new(follower_db.clone())));
-        let consensus: Arc<RwLock<dyn ConsensusEngine>> = Arc::new(RwLock::new(PoaEngine::new(PoaConfig::new(
-            vec![proposer],
-            1,
-        ))));
+        let consensus: Arc<RwLock<dyn ConsensusEngine>> = Arc::new(RwLock::new(PoaEngine::new(
+            PoaConfig::new(vec![proposer], 1),
+        )));
         let tx_pool = Arc::new(TxPool::new(MempoolConfig {
             chain_id: 1337,
             ..MempoolConfig::default()
@@ -1524,10 +1518,9 @@ mod tests {
         let follower_db = Arc::new(MemoryDb::new());
         let follower_cs = Arc::new(ChainStore::new(follower_db.clone()));
         let follower_ws = Arc::new(RwLock::new(WorldState::new(follower_db.clone())));
-        let consensus: Arc<RwLock<dyn ConsensusEngine>> = Arc::new(RwLock::new(PoaEngine::new(PoaConfig::new(
-            vec![proposer],
-            1,
-        ))));
+        let consensus: Arc<RwLock<dyn ConsensusEngine>> = Arc::new(RwLock::new(PoaEngine::new(
+            PoaConfig::new(vec![proposer], 1),
+        )));
         let tx_pool = Arc::new(TxPool::new(MempoolConfig {
             chain_id: 1337,
             ..MempoolConfig::default()
@@ -1587,10 +1580,9 @@ mod tests {
         let node2_db = Arc::new(MemoryDb::new());
         let node2_cs = Arc::new(ChainStore::new(node2_db.clone()));
         let node2_ws = Arc::new(RwLock::new(WorldState::new(node2_db.clone())));
-        let consensus: Arc<RwLock<dyn ConsensusEngine>> = Arc::new(RwLock::new(PoaEngine::new(PoaConfig::new(
-            vec![proposer],
-            1,
-        ))));
+        let consensus: Arc<RwLock<dyn ConsensusEngine>> = Arc::new(RwLock::new(PoaEngine::new(
+            PoaConfig::new(vec![proposer], 1),
+        )));
         let tx_pool = Arc::new(TxPool::new(MempoolConfig {
             chain_id: 1337,
             ..MempoolConfig::default()
@@ -1844,10 +1836,9 @@ mod tests {
         let db = Arc::new(MemoryDb::new());
         let chain_store = Arc::new(ChainStore::new(db.clone()));
         let world_state = Arc::new(RwLock::new(WorldState::new(db.clone())));
-        let consensus: Arc<RwLock<dyn ConsensusEngine>> = Arc::new(RwLock::new(PoaEngine::new(PoaConfig::new(
-            vec![authority],
-            1,
-        ))));
+        let consensus: Arc<RwLock<dyn ConsensusEngine>> = Arc::new(RwLock::new(PoaEngine::new(
+            PoaConfig::new(vec![authority], 1),
+        )));
         let tx_pool = Arc::new(TxPool::new(MempoolConfig {
             chain_id: 1337,
             ..MempoolConfig::default()
@@ -2107,10 +2098,9 @@ mod tests {
         let db2 = Arc::new(MemoryDb::new());
         let cs2 = Arc::new(ChainStore::new(db2.clone()));
         let ws2 = Arc::new(RwLock::new(WorldState::new(db2.clone())));
-        let consensus: Arc<RwLock<dyn ConsensusEngine>> = Arc::new(RwLock::new(PoaEngine::new(PoaConfig::new(
-            vec![proposer],
-            1,
-        ))));
+        let consensus: Arc<RwLock<dyn ConsensusEngine>> = Arc::new(RwLock::new(PoaEngine::new(
+            PoaConfig::new(vec![proposer], 1),
+        )));
         let tx_pool = Arc::new(TxPool::new(MempoolConfig {
             chain_id: 1337,
             ..MempoolConfig::default()
@@ -2550,10 +2540,9 @@ mod tests {
         let db = Arc::new(MemoryDb::new());
         let chain_store = Arc::new(ChainStore::new(db.clone()));
         let world_state = Arc::new(RwLock::new(WorldState::new(db.clone())));
-        let consensus: Arc<RwLock<dyn ConsensusEngine>> = Arc::new(RwLock::new(PoaEngine::new(PoaConfig::new(
-            vec![authority],
-            1,
-        ))));
+        let consensus: Arc<RwLock<dyn ConsensusEngine>> = Arc::new(RwLock::new(PoaEngine::new(
+            PoaConfig::new(vec![authority], 1),
+        )));
         let tx_pool = Arc::new(TxPool::new(MempoolConfig {
             chain_id: 1337,
             ..MempoolConfig::default()
@@ -3008,7 +2997,11 @@ mod tests {
             let bh = hash(1);
 
             let events = round.on_block_proposed(bh, Address::from([1; 20]));
-            assert_eq!(events.len(), 2, "propose should emit ProposeAccepted + VoteNeeded");
+            assert_eq!(
+                events.len(),
+                2,
+                "propose should emit ProposeAccepted + VoteNeeded"
+            );
             assert!(matches!(&events[0], WPoaEvent::ProposeAccepted { .. }));
             assert!(matches!(&events[1], WPoaEvent::VoteNeeded { .. }));
 
@@ -3020,7 +3013,10 @@ mod tests {
             let v2 = round.on_vote(Address::from([2; 20]), bh, dummy_sig());
             assert_eq!(v2.len(), 1, "second vote should emit BlockCommitted");
             match &v2[0] {
-                WPoaEvent::BlockCommitted { block_hash, quorum_signatures } => {
+                WPoaEvent::BlockCommitted {
+                    block_hash,
+                    quorum_signatures,
+                } => {
                     assert_eq!(*block_hash, bh);
                     assert_eq!(quorum_signatures.len(), 2);
                 }
@@ -3040,7 +3036,10 @@ mod tests {
 
             // First view-change vote: not yet quorum
             let e1 = round.on_view_change_vote(Address::from([1; 20]), 1);
-            assert!(e1.is_empty(), "single view-change vote must not yet reach quorum");
+            assert!(
+                e1.is_empty(),
+                "single view-change vote must not yet reach quorum"
+            );
 
             // Second view-change vote: reaches quorum
             let e2 = round.on_view_change_vote(Address::from([2; 20]), 1);
@@ -3058,9 +3057,14 @@ mod tests {
             let (node, signer) = setup_wpoa_node();
             store_genesis_wpoa(&node);
 
-            let block = node.produce_block(&signer, 100).expect("produce_block failed");
+            let block = node
+                .produce_block(&signer, 100)
+                .expect("produce_block failed");
             assert_eq!(block.number(), 1);
-            assert!(block.proposer_seal.is_some(), "block must carry a proposer seal");
+            assert!(
+                block.proposer_seal.is_some(),
+                "block must carry a proposer seal"
+            );
             assert_eq!(
                 block.header.proposer,
                 node.config.proposer_address.unwrap(),
@@ -3079,8 +3083,8 @@ mod tests {
             let authority2 = Address::from([0x02; 20]);
             let authority3 = Address::from([0x03; 20]);
 
-            let poa_cfg = PoaConfig::new(vec![authority1, authority2, authority3], 1)
-                .with_epoch_length(100);
+            let poa_cfg =
+                PoaConfig::new(vec![authority1, authority2, authority3], 1).with_epoch_length(100);
             let wpoa_cfg = WPoaConfig::from_poa(poa_cfg);
             let engine = WPoaEngine::new(wpoa_cfg, Arc::new(MultiVerifier));
             let engine_arc: Arc<RwLock<dyn ConsensusEngine>> = Arc::new(RwLock::new(engine));
@@ -3110,7 +3114,9 @@ mod tests {
 
             let info = ShellApiServer::consensus_info(&handler).await.unwrap();
             assert_eq!(info["engine"], "wpoa", "engine field must be 'wpoa'");
-            let validators = info["validators"].as_array().expect("validators must be an array");
+            let validators = info["validators"]
+                .as_array()
+                .expect("validators must be an array");
             assert_eq!(validators.len(), 3, "must report all 3 validators");
         }
 
@@ -3119,8 +3125,7 @@ mod tests {
         #[test]
         fn wpoa_handle_vote_reaches_quorum() {
             let signer1 = DilithiumSigner::generate();
-            let addr1 =
-                Address::from_public_key(signer1.public_key(), signer1.sig_type().as_u8());
+            let addr1 = Address::from_public_key(signer1.public_key(), signer1.sig_type().as_u8());
             let addr2 = Address::from([0xaa; 20]);
             let addr3 = Address::from([0xbb; 20]);
 
@@ -3160,7 +3165,11 @@ mod tests {
                 .lock()
                 .as_ref()
                 .map(|r| r.phase_name().to_string());
-            assert_eq!(phase1.as_deref(), Some("Voting"), "should still be Voting after 1 vote");
+            assert_eq!(
+                phase1.as_deref(),
+                Some("Voting"),
+                "should still be Voting after 1 vote"
+            );
 
             // addr3 votes — quorum (2 of 3) reached
             node.handle_wpoa_vote(addr3, block_hash, block_number, vec![0u8; 32]);
@@ -3189,8 +3198,7 @@ mod tests {
                 signature: vec![1, 2, 3, 4],
             };
             let json = serde_json::to_string(&msg).expect("serialize failed");
-            let decoded: NetworkMessage =
-                serde_json::from_str(&json).expect("deserialize failed");
+            let decoded: NetworkMessage = serde_json::from_str(&json).expect("deserialize failed");
             match decoded {
                 NetworkMessage::WPoaVote {
                     block_hash: bh,
@@ -3218,8 +3226,7 @@ mod tests {
                 voter,
             };
             let json = serde_json::to_string(&msg).expect("serialize failed");
-            let decoded: NetworkMessage =
-                serde_json::from_str(&json).expect("deserialize failed");
+            let decoded: NetworkMessage = serde_json::from_str(&json).expect("deserialize failed");
             match decoded {
                 NetworkMessage::WPoaViewChange {
                     new_view: nv,

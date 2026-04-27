@@ -33,17 +33,32 @@ pub enum RoundPhase {
 /// Events emitted by the wPoA round state machine.
 #[derive(Debug, Clone)]
 pub enum WPoaEvent {
-    ProposeAccepted { block_hash: ShellHash },
-    VoteNeeded { block_hash: ShellHash },
+    ProposeAccepted {
+        block_hash: ShellHash,
+    },
+    VoteNeeded {
+        block_hash: ShellHash,
+    },
     BlockCommitted {
         block_hash: ShellHash,
         quorum_signatures: HashMap<Address, PQSignature>,
     },
-    ProposeTimeout { current_round: u64 },
-    VoteTimeout { current_round: u64 },
-    ViewChangeReady { new_view: u64 },
-    DuplicateVote { voter: Address },
-    WrongBlockHash { expected: ShellHash, got: ShellHash },
+    ProposeTimeout {
+        current_round: u64,
+    },
+    VoteTimeout {
+        current_round: u64,
+    },
+    ViewChangeReady {
+        new_view: u64,
+    },
+    DuplicateVote {
+        voter: Address,
+    },
+    WrongBlockHash {
+        expected: ShellHash,
+        got: ShellHash,
+    },
 }
 
 /// wPoA round state machine for a single block height.
@@ -66,11 +81,7 @@ pub struct WPoaRound {
 
 impl WPoaRound {
     /// Create a new round in Idle state.
-    pub fn new(
-        block_number: u64,
-        round: u64,
-        validator_weights: HashMap<Address, u64>,
-    ) -> Self {
+    pub fn new(block_number: u64, round: u64, validator_weights: HashMap<Address, u64>) -> Self {
         let total_weight = validator_weights.values().sum();
         Self {
             round,
@@ -164,7 +175,9 @@ impl WPoaRound {
                 if vote_weight >= self.quorum_weight() {
                     // Quorum reached!
                     let quorum_signatures = votes.clone();
-                    self.phase = RoundPhase::Committed { block_hash: expected_hash };
+                    self.phase = RoundPhase::Committed {
+                        block_hash: expected_hash,
+                    };
                     vec![WPoaEvent::BlockCommitted {
                         block_hash: expected_hash,
                         quorum_signatures,
@@ -238,14 +251,18 @@ impl WPoaRound {
         match &self.phase {
             RoundPhase::Proposing { proposed_at, .. } => {
                 if now.duration_since(*proposed_at).as_millis() as u64 > self.propose_timeout_ms {
-                    vec![WPoaEvent::ProposeTimeout { current_round: self.round }]
+                    vec![WPoaEvent::ProposeTimeout {
+                        current_round: self.round,
+                    }]
                 } else {
                     vec![]
                 }
             }
             RoundPhase::Voting { started_at, .. } => {
                 if now.duration_since(*started_at).as_millis() as u64 > self.vote_timeout_ms {
-                    vec![WPoaEvent::VoteTimeout { current_round: self.round }]
+                    vec![WPoaEvent::VoteTimeout {
+                        current_round: self.round,
+                    }]
                 } else {
                     vec![]
                 }
@@ -346,7 +363,10 @@ mod tests {
         let e2 = round.on_vote(addr(2), hash(1), sig());
         assert_eq!(e2.len(), 1);
         assert!(matches!(e2[0], WPoaEvent::BlockCommitted { .. }));
-        if let WPoaEvent::BlockCommitted { quorum_signatures, .. } = &e2[0] {
+        if let WPoaEvent::BlockCommitted {
+            quorum_signatures, ..
+        } = &e2[0]
+        {
             assert_eq!(quorum_signatures.len(), 2);
         }
         assert_eq!(round.phase_name(), "Committed");
@@ -386,8 +406,10 @@ mod tests {
         round.on_block_proposed(hash(1), addr(1));
 
         let events = round.on_vote(addr(1), hash(99), sig());
-        assert!(matches!(events[0], WPoaEvent::WrongBlockHash { expected, got }
-            if expected == hash(1) && got == hash(99)));
+        assert!(
+            matches!(events[0], WPoaEvent::WrongBlockHash { expected, got }
+            if expected == hash(1) && got == hash(99))
+        );
         assert_eq!(round.phase_name(), "Voting");
     }
 
@@ -410,7 +432,10 @@ mod tests {
 
         round.on_view_change_vote(addr(1), 1);
         let events = round.on_view_change_vote(addr(2), 1);
-        assert!(matches!(events[0], WPoaEvent::ViewChangeReady { new_view: 1 }));
+        assert!(matches!(
+            events[0],
+            WPoaEvent::ViewChangeReady { new_view: 1 }
+        ));
     }
 
     #[test]
@@ -436,7 +461,10 @@ mod tests {
         };
 
         let events = round.tick(Instant::now());
-        assert!(matches!(events[0], WPoaEvent::ProposeTimeout { current_round: 0 }));
+        assert!(matches!(
+            events[0],
+            WPoaEvent::ProposeTimeout { current_round: 0 }
+        ));
     }
 
     #[test]
@@ -446,12 +474,18 @@ mod tests {
         let mut round = WPoaRound::new(1, 0, weights);
         round.vote_timeout_ms = 0;
         round.on_block_proposed(hash(1), addr(1));
-        if let RoundPhase::Voting { ref mut started_at, .. } = round.phase {
+        if let RoundPhase::Voting {
+            ref mut started_at, ..
+        } = round.phase
+        {
             *started_at = Instant::now() - Duration::from_millis(100);
         }
 
         let events = round.tick(Instant::now());
-        assert!(matches!(events[0], WPoaEvent::VoteTimeout { current_round: 0 }));
+        assert!(matches!(
+            events[0],
+            WPoaEvent::VoteTimeout { current_round: 0 }
+        ));
     }
 
     #[test]
@@ -475,7 +509,10 @@ mod tests {
         let v2 = round.on_vote(addr(2), hash(42), sig());
         assert_eq!(v2.len(), 1);
         let committed_hash = match &v2[0] {
-            WPoaEvent::BlockCommitted { block_hash, quorum_signatures } => {
+            WPoaEvent::BlockCommitted {
+                block_hash,
+                quorum_signatures,
+            } => {
                 assert_eq!(quorum_signatures.len(), 2);
                 *block_hash
             }

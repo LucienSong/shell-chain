@@ -17,8 +17,8 @@ pub trait ValidatorStoreExt {
 
 impl<S: KvStore> ValidatorStoreExt for ChainStore<S> {
     fn put_validator_set(&self, vs: &ValidatorSet) -> Result<(), StorageError> {
-        let encoded = serde_json::to_vec(vs)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        let encoded =
+            serde_json::to_vec(vs).map_err(|e| StorageError::Serialization(e.to_string()))?;
         self.store().put(VALIDATOR_SET_KEY, &encoded)
     }
 

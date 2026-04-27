@@ -110,14 +110,6 @@ services:
       --storage-profile full
       --boot-nodes /ip4/${EXTERNAL_IP:-127.0.0.1}/tcp/30303/p2p/REPLACE_WITH_NODE1_PEER_ID
 
-volumes:
-  node1-data:
-  node2-data:
-  node3-data:
-  prometheus-data:
-  grafana-data:
-
-services:
   prometheus:
     image: prom/prometheus:v2.52.0
     container_name: shell-testnet-prometheus
@@ -150,3 +142,9 @@ services:
     depends_on:
       - prometheus
 
+volumes:
+  node1-data:
+  node2-data:
+  node3-data:
+  prometheus-data:
+  grafana-data:

@@ -239,24 +239,26 @@ impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
         let weights = engine.validator_weights();
         let mut validators: Vec<serde_json::Value> = weights
             .iter()
-            .map(|(addr, w)| serde_json::json!({ "address": format!("{addr:?}"), "weight": w }))
+            .map(|(addr, w)| serde_json::json!({ "address": format!("{addr}"), "weight": w }))
             .collect();
         validators.sort_by_key(|v| v["address"].as_str().unwrap_or("").to_string());
 
         // Current proposer for the next block.
         let next_number = head_number + 1;
-        let proposer = engine.is_proposer(next_number, &shell_primitives::Address::default());
-        let _ = proposer; // unused; we call poa_config instead
         let poa_cfg = engine.poa_config();
         let current_proposer = poa_cfg.proposer_for_block(next_number);
         let epoch = poa_cfg.epoch_of(next_number);
         let epoch_length = poa_cfg.epoch_length;
-        let epoch_progress = next_number % epoch_length;
+        let epoch_progress = if epoch_length == 0 {
+            serde_json::Value::Null
+        } else {
+            serde_json::json!(next_number % epoch_length)
+        };
 
         Ok(serde_json::json!({
             "engine": engine_name,
             "validators": validators,
-            "current_proposer": format!("{current_proposer:?}"),
+            "current_proposer": format!("{current_proposer}"),
             "block_number": head_number,
             "epoch": epoch,
             "epoch_length": epoch_length,

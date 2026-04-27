@@ -195,7 +195,10 @@ impl NodeConfig {
         Self {
             chain_id: 1337,
             network_type,
-            consensus: ConsensusEngineConfig::Poa(PoaConfig::new(vec![authority], params.block_time_ms / 1_000)),
+            consensus: ConsensusEngineConfig::Poa(PoaConfig::new(
+                vec![authority],
+                params.block_time_ms / 1_000,
+            )),
             mempool: MempoolConfig {
                 chain_id: 1337,
                 ..MempoolConfig::default()

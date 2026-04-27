@@ -96,7 +96,10 @@ impl<S: KvStore + 'static> Node<S> {
                     state_pruning_experimental: p.state_pruning_experimental,
                 }
             }),
-            Some(Arc::clone(&self.consensus) as Arc<parking_lot::RwLock<dyn shell_consensus::ConsensusEngine>>), // W.6: wire consensus engine for shell_consensusInfo
+            Some(Arc::clone(&self.consensus)
+                as Arc<
+                    parking_lot::RwLock<dyn shell_consensus::ConsensusEngine>,
+                >), // W.6: wire consensus engine for shell_consensusInfo
         )
         .await
         .map_err(|e| NodeError::Startup(format!("RPC: {e}")))?;
@@ -324,9 +327,15 @@ impl<S: KvStore + 'static> Node<S> {
                                         r.start_view_change(new_view);
                                     }
                                     if let Some(voter) = self.config.proposer_address {
+                                        let block_number = self
+                                            .wpoa_round
+                                            .lock()
+                                            .as_ref()
+                                            .map(|r| r.block_number)
+                                            .unwrap_or_else(|| self.head_number() + 1);
                                         let vc_msg = NetworkMessage::WPoaViewChange {
                                             new_view,
-                                            block_number: self.head_number() + 1,
+                                            block_number,
                                             voter,
                                         };
                                         let _ = network.broadcast(vc_msg).await;

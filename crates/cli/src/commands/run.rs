@@ -7,7 +7,6 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use shell_consensus::{PoaConfig, WPoaConfig};
-use shell_node::config::ConsensusEngineConfig;
 use shell_core::Block;
 use shell_crypto::{DilithiumSigner, Signer};
 use shell_genesis::{
@@ -17,6 +16,7 @@ use shell_genesis::{
 use shell_keystore::{decrypt, EncryptedKey};
 use shell_mempool::MempoolConfig;
 use shell_network::{NetworkBus, NetworkConfig};
+use shell_node::config::ConsensusEngineConfig;
 use shell_node::config::NodeConfig;
 use shell_node::pruning::StorageProfile;
 use shell_primitives::{Address, ShellHash};
@@ -475,36 +475,33 @@ async fn run_with_store<S: KvStore + 'static>(
     let node_config = NodeConfig {
         chain_id: genesis_config.chain_id,
         network_type,
-        consensus: match args.consensus_engine.as_deref() {
-            Some("wpoa") => {
-                let wpoa_config = WPoaConfig::from_poa(
-                    PoaConfig::new(authorities.clone(), block_time_secs)
-                        .with_max_future_secs(max_future_secs)
-                        .with_epoch_length(epoch_length),
-                );
-                ConsensusEngineConfig::WPoa(wpoa_config)
-            }
-            Some("poa") => ConsensusEngineConfig::Poa(
+        consensus: {
+            let build_poa = || {
                 PoaConfig::new(authorities.clone(), block_time_secs)
                     .with_max_future_secs(max_future_secs)
-                    .with_epoch_length(epoch_length),
-            ),
-            // Auto-detect from genesis when no explicit flag is given.
-            _ => match &genesis_config.consensus {
-                ConsensusConfig::WPoA { .. } => {
-                    let wpoa_config = WPoaConfig::from_poa(
-                        PoaConfig::new(authorities.clone(), block_time_secs)
-                            .with_max_future_secs(max_future_secs)
-                            .with_epoch_length(epoch_length),
-                    );
-                    ConsensusEngineConfig::WPoa(wpoa_config)
-                }
-                _ => ConsensusEngineConfig::Poa(
-                    PoaConfig::new(authorities.clone(), block_time_secs)
-                        .with_max_future_secs(max_future_secs)
-                        .with_epoch_length(epoch_length),
-                ),
-            },
+                    .with_epoch_length(epoch_length)
+            };
+            let build_wpoa = || -> WPoaConfig {
+                let poa = match &genesis_config.consensus {
+                    ConsensusConfig::WPoA { weights, .. } => {
+                        if weights.len() == authorities.len() {
+                            build_poa().with_weights(weights.clone())
+                        } else {
+                            build_poa()
+                        }
+                    }
+                    _ => build_poa(),
+                };
+                WPoaConfig::from_poa(poa)
+            };
+            match args.consensus_engine.as_deref() {
+                Some("wpoa") => ConsensusEngineConfig::WPoa(build_wpoa()),
+                Some("poa") => ConsensusEngineConfig::Poa(build_poa()),
+                _ => match &genesis_config.consensus {
+                    ConsensusConfig::WPoA { .. } => ConsensusEngineConfig::WPoa(build_wpoa()),
+                    _ => ConsensusEngineConfig::Poa(build_poa()),
+                },
+            }
         },
         mempool: MempoolConfig {
             chain_id: genesis_config.chain_id,
@@ -791,6 +788,7 @@ mod tests {
             storage_profile: "full".into(),
             enable_stark_aggregation: false,
             network: "dev".into(),
+            consensus_engine: None,
         };
 
         let expected = ParallelEvmConfig {

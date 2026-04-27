@@ -245,18 +245,24 @@ impl ConsensusConfig {
     /// Return the block time in seconds.
     pub fn block_time_secs(&self) -> u64 {
         match self {
-            Self::PoA { block_time_secs, .. } | Self::WPoA { block_time_secs, .. } => {
-                *block_time_secs
+            Self::PoA {
+                block_time_secs, ..
             }
+            | Self::WPoA {
+                block_time_secs, ..
+            } => *block_time_secs,
         }
     }
 
     /// Return the max future seconds.
     pub fn max_future_secs(&self) -> u64 {
         match self {
-            Self::PoA { max_future_secs, .. } | Self::WPoA { max_future_secs, .. } => {
-                *max_future_secs
+            Self::PoA {
+                max_future_secs, ..
             }
+            | Self::WPoA {
+                max_future_secs, ..
+            } => *max_future_secs,
         }
     }
 
@@ -753,7 +759,12 @@ mod tests {
         }"#;
         let config = GenesisConfig::from_json(json).unwrap();
         match &config.consensus {
-            ConsensusConfig::WPoA { weights, block_time_secs, max_future_secs, .. } => {
+            ConsensusConfig::WPoA {
+                weights,
+                block_time_secs,
+                max_future_secs,
+                ..
+            } => {
                 assert_eq!(weights, &[2u64, 1, 1]);
                 assert_eq!(*block_time_secs, 2);
                 assert_eq!(*max_future_secs, 60);

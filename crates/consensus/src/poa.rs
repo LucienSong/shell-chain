@@ -320,7 +320,11 @@ impl ConsensusEngine for PoaEngine {
         self.config_mut()
     }
 
-    fn sign_block(&self, block: &mut Block, signer: &dyn shell_crypto::Signer) -> Result<(), ConsensusError> {
+    fn sign_block(
+        &self,
+        block: &mut Block,
+        signer: &dyn shell_crypto::Signer,
+    ) -> Result<(), ConsensusError> {
         let expected = self.config.proposer_for_block(block.header.number);
         if block.header.proposer != expected {
             return Err(ConsensusError::InvalidProposer {

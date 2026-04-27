@@ -229,21 +229,45 @@ fn render(namespaces: &[Namespace]) -> String {
     out.push_str("shell-chain exposes the following JSON-RPC namespaces:\n\n");
 
     for ns in namespaces {
-        out.push_str(&format!("- **`{}_`** ({} methods)\n", ns.name, ns.methods.len()));
+        out.push_str(&format!(
+            "- **`{}_`** ({} methods)\n",
+            ns.name,
+            ns.methods.len()
+        ));
     }
     out.push('\n');
     out.push_str("All methods use JSON-RPC 2.0. Hex quantities are `0x`-prefixed strings.\n\n");
     out.push_str("Error codes are defined in `crates/rpc/src/error.rs`:\n\n");
-    out.push_str("| Code    | Constant            | Meaning                                     |\n");
-    out.push_str("|---------|---------------------|---------------------------------------------|\n");
-    out.push_str("| `-32601`| `METHOD_NOT_FOUND`  | Method not found or not enabled             |\n");
-    out.push_str("| `-32602`| `INVALID_PARAMS`    | Invalid parameters                          |\n");
-    out.push_str("| `-32603`| `INTERNAL_ERROR`    | Internal server error                       |\n");
-    out.push_str("| `-32000`| `SERVER_ERROR`      | Generic server / precondition failure       |\n");
-    out.push_str("| `-32001`| `NOT_FOUND`         | Resource (block, filter, tx) not found      |\n");
-    out.push_str("| `-32002`| `DEV_MODE_REQUIRED` | Operation requires dev mode                 |\n");
-    out.push_str("| `-32003`| `FEATURE_NOT_ENABLED`| Feature not enabled on this node           |\n");
-    out.push_str("| `-32005`| `LIMIT_EXCEEDED`    | Result limit exceeded (eth_getLogs)         |\n");
+    out.push_str(
+        "| Code    | Constant            | Meaning                                     |\n",
+    );
+    out.push_str(
+        "|---------|---------------------|---------------------------------------------|\n",
+    );
+    out.push_str(
+        "| `-32601`| `METHOD_NOT_FOUND`  | Method not found or not enabled             |\n",
+    );
+    out.push_str(
+        "| `-32602`| `INVALID_PARAMS`    | Invalid parameters                          |\n",
+    );
+    out.push_str(
+        "| `-32603`| `INTERNAL_ERROR`    | Internal server error                       |\n",
+    );
+    out.push_str(
+        "| `-32000`| `SERVER_ERROR`      | Generic server / precondition failure       |\n",
+    );
+    out.push_str(
+        "| `-32001`| `NOT_FOUND`         | Resource (block, filter, tx) not found      |\n",
+    );
+    out.push_str(
+        "| `-32002`| `DEV_MODE_REQUIRED` | Operation requires dev mode                 |\n",
+    );
+    out.push_str(
+        "| `-32003`| `FEATURE_NOT_ENABLED`| Feature not enabled on this node           |\n",
+    );
+    out.push_str(
+        "| `-32005`| `LIMIT_EXCEEDED`    | Result limit exceeded (eth_getLogs)         |\n",
+    );
     out.push_str("\n---\n");
 
     for ns in namespaces {

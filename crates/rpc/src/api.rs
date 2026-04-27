@@ -442,9 +442,8 @@ pub trait ShellApi {
     /// - `epoch_length`    — blocks per epoch
     /// - `epoch_progress`  — blocks elapsed in the current epoch
     #[method(name = "consensusInfo")]
-    async fn consensus_info(
-        &self,
-    ) -> Result<serde_json::Value, jsonrpsee::types::ErrorObjectOwned>;
+    async fn consensus_info(&self)
+        -> Result<serde_json::Value, jsonrpsee::types::ErrorObjectOwned>;
 
     /// Set the balance of an address directly (dev/testnet only).
     #[method(name = "setBalance")]

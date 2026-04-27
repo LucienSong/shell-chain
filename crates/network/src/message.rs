@@ -154,9 +154,7 @@ impl NetworkMessage {
             Self::StorageCapability { .. }
             | Self::BodyRequest { .. }
             | Self::BodyResponse { .. } => Some(NetworkTopic::Blocks),
-            Self::WPoaVote { .. } | Self::WPoaViewChange { .. } => {
-                Some(NetworkTopic::Consensus)
-            }
+            Self::WPoaVote { .. } | Self::WPoaViewChange { .. } => Some(NetworkTopic::Consensus),
             _ => None,
         }
     }
