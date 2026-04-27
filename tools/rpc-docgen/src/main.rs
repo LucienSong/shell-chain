@@ -118,10 +118,10 @@ fn parse_api(src: &str) -> Vec<Namespace> {
         }
 
         // ── Reset pending docs on blank lines or non-doc content before a method
-        if trimmed.is_empty() || (!trimmed.starts_with("//") && !trimmed.starts_with('#')) {
-            if pending_method_name.is_none() {
-                pending_docs.clear();
-            }
+        if (trimmed.is_empty() || (!trimmed.starts_with("//") && !trimmed.starts_with('#')))
+            && pending_method_name.is_none()
+        {
+            pending_docs.clear();
         }
     }
 
