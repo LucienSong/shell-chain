@@ -16,8 +16,8 @@ pub(crate) use tracing::{debug, info, warn};
 
 pub(crate) use shell_consensus::{
     detect_double_sign, Attestation, ConsensusEngine, EngineType, EquivocationProof, FinalityState,
-    ForkChoice, PeerScorer, PeerScoringConfig, PoaEngine, ProofWindowManager, WPoaConfig,
-    WPoaEngine, WPoaEvent, WPoaRound, WindowConfig,
+    ForkChoice, PeerScorer, PeerScoringConfig, ProofWindowManager, WPoaEvent, WPoaRound,
+    WindowConfig,
 };
 pub(crate) use shell_core::{calculate_base_fee, Account, Block, BlockHeader, SignedTransaction};
 pub(crate) use shell_crypto::{
@@ -642,7 +642,7 @@ impl<S: KvStore + 'static> Node<S> {
 mod tests {
     use super::*;
     use crate::pruning::PruningConfig;
-    use shell_consensus::PoaConfig;
+    use shell_consensus::{PoaConfig, PoaEngine};
     use shell_core::Transaction;
     use shell_crypto::{DilithiumSigner, Signer};
     use shell_mempool::MempoolConfig;

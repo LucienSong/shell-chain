@@ -173,7 +173,7 @@ impl<S: KvStore + 'static> Node<S> {
                         );
                         // PS.1: reward all quorum signers.
                         let mut scorer = self.peer_scorer.lock();
-                        for (signer, _) in &quorum_signatures {
+                        for signer in quorum_signatures.keys() {
                             let signer_id =
                                 shell_consensus::ScoringPeerId::from(format!("{signer:?}"));
                             scorer.record_event(
@@ -244,12 +244,9 @@ impl<S: KvStore + 'static> Node<S> {
             }
             let events = round.on_view_change_vote(voter, new_view);
             for event in events {
-                match event {
-                    WPoaEvent::ViewChangeReady { new_view } => {
-                        tracing::info!(new_view, "W.5: view change ready — advancing round");
-                        round.round = new_view;
-                    }
-                    _ => {}
+                if let WPoaEvent::ViewChangeReady { new_view } = event {
+                    tracing::info!(new_view, "W.5: view change ready — advancing round");
+                    round.round = new_view;
                 }
             }
         }
