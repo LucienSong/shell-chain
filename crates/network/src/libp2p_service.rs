@@ -970,6 +970,9 @@ impl NetworkService for Libp2pNetwork {
             | NetworkMessage::EquivocationEvidence(_)
             | NetworkMessage::ProofChallenge(_)
             | NetworkMessage::ProofChallengeResponse(_) => TopicKind::Blocks,
+            NetworkMessage::StorageCapability { .. }
+            | NetworkMessage::WPoaVote { .. }
+            | NetworkMessage::WPoaViewChange { .. } => TopicKind::Attestation,
         };
 
         let data =
