@@ -46,7 +46,7 @@ pub fn encrypt(signer: &DilithiumSigner, password: &[u8]) -> Result<EncryptedKey
 
     Ok(EncryptedKey {
         version: 1,
-        address: hex::encode(address.as_bytes()),
+        address: format!("0x{}", hex::encode(address.as_bytes())),
         key_type: "dilithium3".into(),
         kdf: "argon2id".into(),
         kdf_params,
@@ -155,7 +155,7 @@ pub fn encrypt_sphincs(
 
     Ok(EncryptedKey {
         version: 1,
-        address: hex::encode(address.as_bytes()),
+        address: format!("0x{}", hex::encode(address.as_bytes())),
         key_type: "sphincs-sha2-256f".into(),
         kdf: "argon2id".into(),
         kdf_params,

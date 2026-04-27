@@ -25,6 +25,8 @@ use shell_storage::{ChainStore, KvStore, MemoryDb, WorldState};
 
 use tracing::{error, info, warn};
 
+use crate::password::{resolve_password, PasswordArgs};
+
 /// Aggregated CLI arguments for the `run` subcommand.
 #[allow(dead_code)]
 pub struct RunArgs {
@@ -78,6 +80,8 @@ pub struct RunArgs {
     pub enable_stark_aggregation: bool,
     /// Consensus engine: "poa" (default) or "wpoa".
     pub consensus_engine: Option<String>,
+    /// Password source for keystore decryption.
+    pub password_args: PasswordArgs,
 }
 
 /// Maximum genesis file size: 10 MB (F-082).
@@ -318,9 +322,7 @@ async fn run_with_store<S: KvStore + 'static>(
             let unlocked_address = Address::parse(&encrypted.address)
                 .map_err(|e| format!("invalid keystore address '{}': {e}", encrypted.address))?;
 
-            eprint!("Enter keystore password: ");
-            let password = rpassword::read_password()?;
-
+            let password = resolve_password("Enter keystore password: ", &args.password_args)?;
             let signer = decrypt(&encrypted, password.as_bytes())?;
             info!("Keystore unlocked: {unlocked_address}");
             Arc::new(signer)
@@ -789,6 +791,7 @@ mod tests {
             enable_stark_aggregation: false,
             network: "dev".into(),
             consensus_engine: None,
+            password_args: crate::password::PasswordArgs { password_file: None, password_stdin: false },
         };
 
         let expected = ParallelEvmConfig {

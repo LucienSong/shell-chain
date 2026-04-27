@@ -20,8 +20,10 @@ use tracing_subscriber::EnvFilter;
 
 mod commands;
 mod config;
+mod password;
 
 use config::ShellConfig;
+use password::PasswordArgs;
 
 #[derive(Parser)]
 #[command(
@@ -41,6 +43,16 @@ struct Cli {
     /// Log level filter (RUST_LOG style, e.g. "debug", "shell_node=trace").
     #[arg(long, global = true)]
     log_level: Option<String>,
+
+    /// Read keystore password from this file (first non-empty line).
+    /// Avoids interactive prompt; useful for CI and automation.
+    #[arg(long, global = true)]
+    password_file: Option<PathBuf>,
+
+    /// Read keystore password from stdin (one line, no echo).
+    /// Pipe the password: `echo "pw" | shell-node key generate --password-stdin`.
+    #[arg(long, global = true, default_value = "false")]
+    password_stdin: bool,
 
     #[command(subcommand)]
     command: Commands,
@@ -325,6 +337,12 @@ enum KeyCommands {
 async fn main() {
     let cli = Cli::parse();
 
+    // Build password args from global flags (used by key/run/tx subcommands).
+    let password_args = PasswordArgs {
+        password_file: cli.password_file,
+        password_stdin: cli.password_stdin,
+    };
+
     // Build env filter: --log-level flag > RUST_LOG env var > "info" default.
     let filter = match &cli.log_level {
         Some(level) => EnvFilter::new(level),
@@ -551,6 +569,7 @@ async fn main() {
                 body_retention,
                 enable_stark_aggregation,
                 consensus_engine,
+                password_args: password_args.clone(),
             })
             .await
         }
@@ -560,7 +579,7 @@ async fn main() {
             network,
         } => commands::init(cli.datadir, genesis, chain_id, network),
         Commands::Key { action } => match action {
-            KeyCommands::Generate { output } => commands::key_generate(output),
+            KeyCommands::Generate { output } => commands::key_generate(output, password_args),
             KeyCommands::Inspect { path } => commands::key_inspect(path),
         },
         Commands::ExportState { block, output } => {
@@ -569,9 +588,9 @@ async fn main() {
         Commands::ImportState { snapshot } => commands::import_state(cli.datadir, snapshot),
         Commands::Removedb { force } => commands::removedb(cli.datadir, force),
         Commands::Version => commands::version(),
-        Commands::Tx { command } => commands::tx::execute(command),
+        Commands::Tx { command } => commands::tx::execute(command, password_args),
         Commands::Account { command } => commands::account::execute(command),
-        Commands::Wallet { command } => commands::wallet::execute(command),
+        Commands::Wallet { command } => commands::wallet::execute(command, password_args),
         Commands::Backup { command } => match command {
             BackupCommands::Create { output } => commands::create_backup(cli.datadir, output),
             BackupCommands::Restore { backup_path } => {

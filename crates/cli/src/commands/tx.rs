@@ -11,6 +11,8 @@ use shell_crypto::Signer;
 use shell_keystore::{decrypt, EncryptedKey};
 use shell_primitives::{Address, Bytes, U256};
 
+use crate::password::{resolve_password, PasswordArgs};
+
 #[derive(Subcommand)]
 pub enum TxCommand {
     /// Send a value transfer transaction.
@@ -84,7 +86,7 @@ pub enum TxCommand {
 }
 
 /// Execute a transaction subcommand.
-pub fn execute(cmd: TxCommand) -> Result<(), Box<dyn std::error::Error>> {
+pub fn execute(cmd: TxCommand, password_args: PasswordArgs) -> Result<(), Box<dyn std::error::Error>> {
     match cmd {
         TxCommand::Send {
             to,
@@ -94,14 +96,14 @@ pub fn execute(cmd: TxCommand) -> Result<(), Box<dyn std::error::Error>> {
             chain_id,
             nonce,
             gas_limit,
-        } => cmd_send(to, value, keystore, rpc_url, chain_id, nonce, gas_limit),
+        } => cmd_send(to, value, keystore, rpc_url, chain_id, nonce, gas_limit, &password_args),
         TxCommand::Deploy {
             code,
             keystore,
             rpc_url,
             chain_id,
             value,
-        } => cmd_deploy(code, keystore, rpc_url, chain_id, value),
+        } => cmd_deploy(code, keystore, rpc_url, chain_id, value, &password_args),
         TxCommand::Call { to, data, rpc_url } => cmd_call(to, data, rpc_url),
     }
 }
@@ -118,8 +120,9 @@ fn cmd_send(
     chain_id: Option<u64>,
     nonce: Option<u64>,
     gas_limit: Option<u64>,
+    password_args: &PasswordArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let signer = load_keystore(&keystore)?;
+    let signer = load_keystore(&keystore, password_args)?;
     let from = Address::from_public_key(signer.public_key(), signer.sig_type().as_u8());
     let to_addr = parse_address(&to)?;
 
@@ -178,8 +181,9 @@ fn cmd_deploy(
     rpc_url: String,
     chain_id: Option<u64>,
     value: Option<String>,
+    password_args: &PasswordArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let signer = load_keystore(&keystore)?;
+    let signer = load_keystore(&keystore, password_args)?;
     let from = Address::from_public_key(signer.public_key(), signer.sig_type().as_u8());
 
     let chain_id = match chain_id {
@@ -262,15 +266,14 @@ fn cmd_call(
 // ---------------------------------------------------------------------------
 
 /// Load a keystore file and decrypt the signer.
-fn load_keystore(path: &PathBuf) -> Result<Box<dyn Signer>, Box<dyn std::error::Error>> {
+fn load_keystore(path: &PathBuf, password_args: &PasswordArgs) -> Result<Box<dyn Signer>, Box<dyn std::error::Error>> {
     if !path.exists() {
         return Err(format!("keystore file not found: {}", path.display()).into());
     }
     let json = std::fs::read_to_string(path)?;
     let encrypted: EncryptedKey = serde_json::from_str(&json)?;
 
-    eprint!("Enter keystore password: ");
-    let password = rpassword::read_password()?;
+    let password = resolve_password("Enter keystore password: ", password_args)?;
     let signer = decrypt(&encrypted, password.as_bytes());
     // Zeroize password from memory immediately after use.
     let mut pw_bytes = password.into_bytes();

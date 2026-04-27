@@ -9,15 +9,11 @@ use shell_primitives::Address;
 
 use tracing::info;
 
-/// Generate a new Dilithium3 keypair and encrypt it to a keystore file.
-pub fn key_generate(output: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
-    // Prompt for password.
-    let password = prompt_password("Enter password for new keystore: ")?;
-    let confirm = prompt_password("Confirm password: ")?;
+use crate::password::{resolve_new_password, PasswordArgs};
 
-    if password != confirm {
-        return Err("Passwords do not match".into());
-    }
+/// Generate a new Dilithium3 keypair and encrypt it to a keystore file.
+pub fn key_generate(output: PathBuf, password_args: PasswordArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let password = resolve_new_password(&password_args)?;
 
     info!("Generating Dilithium3 keypair...");
     let signer = DilithiumSigner::generate();
@@ -59,11 +55,4 @@ pub fn key_inspect(path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     );
 
     Ok(())
-}
-
-/// Secure password prompt (no terminal echo).
-fn prompt_password(prompt: &str) -> Result<String, Box<dyn std::error::Error>> {
-    eprint!("{prompt}");
-    let password = rpassword::read_password()?;
-    Ok(password)
 }
