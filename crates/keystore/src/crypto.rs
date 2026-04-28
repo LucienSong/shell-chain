@@ -1,4 +1,4 @@
-//! Encryption and decryption of Dilithium3 secret keys.
+//! Encryption and decryption of post-quantum secret keys.
 
 use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::aead::{Aead, KeyInit};
@@ -6,7 +6,7 @@ use chacha20poly1305::XChaCha20Poly1305;
 use rand::RngCore;
 use zeroize::Zeroize;
 
-use shell_crypto::{DilithiumSigner, Signer, SphincsSigner};
+use shell_crypto::{DilithiumSigner, MlDsaSigner, Signer, SphincsSigner};
 use shell_primitives::Address;
 
 use crate::types::{CipherParams, EncryptedKey, KdfParams, KeystoreError};
@@ -67,6 +67,101 @@ pub fn decrypt(
     encrypted: &EncryptedKey,
     password: &[u8],
 ) -> Result<DilithiumSigner, KeystoreError> {
+    let (mut secret_key, public_key) = raw_decrypt(encrypted, password)?;
+    let signer = DilithiumSigner::from_bytes(&public_key, &secret_key)?;
+    secret_key.zeroize();
+    Ok(signer)
+}
+
+/// Encrypt an ML-DSA-65 signer with a password.
+///
+/// Stores `key_type = "mldsa65"` so [`decrypt_any`] can reconstruct the
+/// correct signer.
+pub fn encrypt_mldsa(
+    signer: &MlDsaSigner,
+    password: &[u8],
+) -> Result<EncryptedKey, KeystoreError> {
+    let mut salt = [0u8; 32];
+    let mut nonce = [0u8; 24];
+    rand::rng().fill_bytes(&mut salt);
+    rand::rng().fill_bytes(&mut nonce);
+
+    let kdf_params = KdfParams {
+        m_cost: 65536,
+        t_cost: 3,
+        p_cost: 4,
+        salt: hex::encode(salt),
+    };
+
+    let mut derived_key = derive_key(password, &salt, &kdf_params)?;
+
+    let cipher = XChaCha20Poly1305::new((&derived_key).into());
+    let plaintext: &[u8] = signer.secret_key_bytes();
+
+    let ciphertext = cipher
+        .encrypt((&nonce).into(), plaintext)
+        .map_err(|e| KeystoreError::Encryption(e.to_string()))?;
+
+    derived_key.zeroize();
+
+    let address = Address::from_public_key(signer.public_key(), signer.sig_type().as_u8());
+
+    Ok(EncryptedKey {
+        version: 1,
+        address: format!("0x{}", hex::encode(address.as_bytes())),
+        key_type: "mldsa65".into(),
+        kdf: "argon2id".into(),
+        kdf_params,
+        cipher: "xchacha20-poly1305".into(),
+        cipher_params: CipherParams {
+            nonce: hex::encode(nonce),
+        },
+        ciphertext: hex::encode(&ciphertext),
+        public_key: hex::encode(signer.public_key()),
+    })
+}
+
+/// Decrypt an ML-DSA-65 encrypted key with a password.
+pub fn decrypt_mldsa(
+    encrypted: &EncryptedKey,
+    password: &[u8],
+) -> Result<MlDsaSigner, KeystoreError> {
+    if encrypted.key_type != "mldsa65" {
+        return Err(KeystoreError::InvalidKey(format!(
+            "expected key_type mldsa65, got {}",
+            encrypted.key_type
+        )));
+    }
+
+    let (mut secret_key, public_key) = raw_decrypt(encrypted, password)?;
+    let signer = MlDsaSigner::from_bytes(&public_key, &secret_key)?;
+    secret_key.zeroize();
+    Ok(signer)
+}
+
+/// Decrypt any supported key type, returning a type-erased [`Signer`].
+///
+/// Dispatches to [`decrypt`], [`decrypt_sphincs`], or [`decrypt_mldsa`]
+/// based on the `key_type` field in the keystore.
+pub fn decrypt_any(
+    encrypted: &EncryptedKey,
+    password: &[u8],
+) -> Result<Box<dyn Signer>, KeystoreError> {
+    match encrypted.key_type.as_str() {
+        "dilithium3" | "" => Ok(Box::new(decrypt(encrypted, password)?)),
+        "sphincs-sha2-256f" => Ok(Box::new(decrypt_sphincs(encrypted, password)?)),
+        "mldsa65" => Ok(Box::new(decrypt_mldsa(encrypted, password)?)),
+        other => Err(KeystoreError::InvalidKey(format!(
+            "unsupported key_type: {other}"
+        ))),
+    }
+}
+
+/// Internal helper: derive key + decrypt ciphertext, returning (secret_key, public_key).
+fn raw_decrypt(
+    encrypted: &EncryptedKey,
+    password: &[u8],
+) -> Result<(Vec<u8>, Vec<u8>), KeystoreError> {
     let salt = hex::decode(&encrypted.kdf_params.salt)
         .map_err(|e| KeystoreError::InvalidKey(format!("bad salt hex: {e}")))?;
     let nonce_bytes = hex::decode(&encrypted.cipher_params.nonce)
@@ -83,28 +178,21 @@ pub fn decrypt(
         )));
     }
 
-    // Derive decryption key.
     let mut derived_key = derive_key(password, &salt, &encrypted.kdf_params)?;
-
     let cipher = XChaCha20Poly1305::new((&derived_key).into());
     let nonce: [u8; 24] = nonce_bytes
         .try_into()
         .map_err(|_| KeystoreError::Decryption)?;
 
-    let mut secret_key = cipher
+    let secret_key = cipher
         .decrypt((&nonce).into(), ciphertext.as_ref())
         .map_err(|_| KeystoreError::Decryption)?;
 
     derived_key.zeroize();
-
-    let signer = DilithiumSigner::from_bytes(&public_key, &secret_key)?;
-
-    secret_key.zeroize();
-
-    Ok(signer)
+    Ok((secret_key, public_key))
 }
 
-/// Derive a 32-byte key from password + salt using argon2id.
+
 fn derive_key(password: &[u8], salt: &[u8], params: &KdfParams) -> Result<[u8; 32], KeystoreError> {
     let argon2_params = Params::new(params.m_cost, params.t_cost, params.p_cost, Some(32))
         .map_err(|e| KeystoreError::Encryption(format!("argon2 params: {e}")))?;
@@ -182,39 +270,9 @@ pub fn decrypt_sphincs(
         )));
     }
 
-    let salt = hex::decode(&encrypted.kdf_params.salt)
-        .map_err(|e| KeystoreError::InvalidKey(format!("bad salt hex: {e}")))?;
-    let nonce_bytes = hex::decode(&encrypted.cipher_params.nonce)
-        .map_err(|e| KeystoreError::InvalidKey(format!("bad nonce hex: {e}")))?;
-    let ciphertext = hex::decode(&encrypted.ciphertext)
-        .map_err(|e| KeystoreError::InvalidKey(format!("bad ciphertext hex: {e}")))?;
-    let public_key = hex::decode(&encrypted.public_key)
-        .map_err(|e| KeystoreError::InvalidKey(format!("bad pubkey hex: {e}")))?;
-
-    if nonce_bytes.len() != 24 {
-        return Err(KeystoreError::InvalidKey(format!(
-            "nonce must be 24 bytes, got {}",
-            nonce_bytes.len()
-        )));
-    }
-
-    let mut derived_key = derive_key(password, &salt, &encrypted.kdf_params)?;
-
-    let cipher = XChaCha20Poly1305::new((&derived_key).into());
-    let nonce: [u8; 24] = nonce_bytes
-        .try_into()
-        .map_err(|_| KeystoreError::Decryption)?;
-
-    let mut secret_key = cipher
-        .decrypt((&nonce).into(), ciphertext.as_ref())
-        .map_err(|_| KeystoreError::Decryption)?;
-
-    derived_key.zeroize();
-
+    let (mut secret_key, public_key) = raw_decrypt(encrypted, password)?;
     let signer = SphincsSigner::from_bytes(&public_key, &secret_key)?;
-
     secret_key.zeroize();
-
     Ok(signer)
 }
 
@@ -289,7 +347,7 @@ mod tests {
         let expected = Address::from_public_key(signer.public_key(), signer.sig_type().as_u8());
         let encrypted = encrypt(&signer, b"addr-test").unwrap();
 
-        assert_eq!(encrypted.address, hex::encode(expected.as_bytes()));
+        assert_eq!(encrypted.address, format!("0x{}", hex::encode(expected.as_bytes())));
     }
 
     // ── B. Extended keystore tests ──────────────────────────────

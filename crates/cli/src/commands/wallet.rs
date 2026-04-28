@@ -72,7 +72,7 @@ pub enum WalletCommand {
 
 pub fn execute(cmd: WalletCommand, password_args: PasswordArgs) -> Result<(), Box<dyn std::error::Error>> {
     match cmd {
-        WalletCommand::Create { output } => key::key_generate(output, password_args),
+        WalletCommand::Create { output } => key::key_generate(output, password_args, "dilithium3".into()),
         WalletCommand::Balance { address, rpc_url } => {
             account::execute(account::AccountCommand::Balance { address, rpc_url })
         }

@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use clap::Subcommand;
 use shell_core::{SignedTransaction, Transaction};
 use shell_crypto::Signer;
-use shell_keystore::{decrypt, EncryptedKey};
+use shell_keystore::{decrypt_any, EncryptedKey};
 use shell_primitives::{Address, Bytes, U256};
 
 use crate::password::{resolve_password, PasswordArgs};
@@ -274,14 +274,14 @@ fn load_keystore(path: &PathBuf, password_args: &PasswordArgs) -> Result<Box<dyn
     let encrypted: EncryptedKey = serde_json::from_str(&json)?;
 
     let password = resolve_password("Enter keystore password: ", password_args)?;
-    let signer = decrypt(&encrypted, password.as_bytes());
+    let signer = decrypt_any(&encrypted, password.as_bytes());
     // Zeroize password from memory immediately after use.
     let mut pw_bytes = password.into_bytes();
     pw_bytes.fill(0);
     drop(pw_bytes);
     let signer = signer?;
 
-    Ok(Box::new(signer))
+    Ok(signer)
 }
 
 /// Parse a user-facing address string (`pq1...` or legacy hex).

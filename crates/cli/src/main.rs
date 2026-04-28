@@ -319,11 +319,15 @@ enum BackupCommands {
 
 #[derive(Subcommand)]
 enum KeyCommands {
-    /// Generate a new Dilithium3 keypair and save as encrypted keystore.
+    /// Generate a new PQ keypair and save as encrypted keystore.
     Generate {
         /// Output path for the keystore file.
         #[arg(long, default_value = "keystore.json")]
         output: PathBuf,
+
+        /// PQ algorithm to use: `dilithium3` (default) or `mldsa65` (FIPS 204).
+        #[arg(long, default_value = "dilithium3")]
+        algorithm: String,
     },
 
     /// Display the address of a keystore file.
@@ -579,7 +583,7 @@ async fn main() {
             network,
         } => commands::init(cli.datadir, genesis, chain_id, network),
         Commands::Key { action } => match action {
-            KeyCommands::Generate { output } => commands::key_generate(output, password_args),
+            KeyCommands::Generate { output, algorithm } => commands::key_generate(output, password_args, algorithm),
             KeyCommands::Inspect { path } => commands::key_inspect(path),
         },
         Commands::ExportState { block, output } => {

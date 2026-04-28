@@ -5877,6 +5877,7 @@ dependencies = [
  "shell-primitives",
  "shell-rpc",
  "shell-storage",
+ "tempfile",
  "tokio",
  "toml",
  "tracing",

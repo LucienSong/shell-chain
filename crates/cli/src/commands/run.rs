@@ -13,7 +13,7 @@ use shell_genesis::{
     initialize_authority_pubkeys, initialize_genesis, AllocEntry, ConsensusConfig, GenesisConfig,
     NetworkType,
 };
-use shell_keystore::{decrypt, EncryptedKey};
+use shell_keystore::{decrypt_any, EncryptedKey};
 use shell_mempool::MempoolConfig;
 use shell_network::{NetworkBus, NetworkConfig};
 use shell_node::config::ConsensusEngineConfig;
@@ -323,9 +323,9 @@ async fn run_with_store<S: KvStore + 'static>(
                 .map_err(|e| format!("invalid keystore address '{}': {e}", encrypted.address))?;
 
             let password = resolve_password("Enter keystore password: ", &args.password_args)?;
-            let signer = decrypt(&encrypted, password.as_bytes())?;
+            let signer = decrypt_any(&encrypted, password.as_bytes())?;
             info!("Keystore unlocked: {unlocked_address}");
-            Arc::new(signer)
+            Arc::from(signer)
         }
         None => {
             let path = args.datadir.join(DEV_AUTHORITY_KEY_FILE);
