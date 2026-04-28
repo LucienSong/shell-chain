@@ -21,12 +21,17 @@ serde = { workspace = true }
 hex = { workspace = true }
 thiserror = { workspace = true }
 rayon = { workspace = true, optional = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
-serde_json = { workspace = true }
 criterion = { workspace = true }
 sha3 = { workspace = true }
 
 [[bench]]
 name = "crypto_bench"
 harness = false
+
+[[bin]]
+name = "gen_mldsa_vectors"
+path = "src/bin/gen_mldsa_vectors.rs"
+required-features = []
