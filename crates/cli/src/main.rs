@@ -54,6 +54,12 @@ struct Cli {
     #[arg(long, global = true, default_value = "false")]
     password_stdin: bool,
 
+    /// Allow reading the keystore password from the SHELL_KEYSTORE_PASSWORD
+    /// environment variable. Must be opted-in explicitly; never active by default.
+    /// Example: `SHELL_KEYSTORE_PASSWORD=pw shell-node --allow-env-password key generate`.
+    #[arg(long, global = true, default_value = "false")]
+    allow_env_password: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -345,6 +351,7 @@ async fn main() {
     let password_args = PasswordArgs {
         password_file: cli.password_file,
         password_stdin: cli.password_stdin,
+        allow_env_password: cli.allow_env_password,
     };
 
     // Build env filter: --log-level flag > RUST_LOG env var > "info" default.

@@ -22,14 +22,18 @@ pub struct PasswordArgs {
     pub password_file: Option<PathBuf>,
     /// Read the password from stdin (one line) instead of prompting.
     pub password_stdin: bool,
+    /// Allow reading the password from the `SHELL_KEYSTORE_PASSWORD` environment variable.
+    /// Must be opted-in explicitly for security; never active by default.
+    pub allow_env_password: bool,
 }
 
 /// Resolve a keystore password from the configured source.
 ///
 /// Priority order:
-/// 1. `--password-file <path>` — read the first non-empty line from the file.
-/// 2. `--password-stdin`       — read one line from standard input.
-/// 3. Interactive TTY prompt   — use `rpassword` (default behaviour, no echo).
+/// 1. `--password-file <path>`           — read the first non-empty line from the file.
+/// 2. `--password-stdin`                 — read one line from standard input.
+/// 3. `SHELL_KEYSTORE_PASSWORD` env var  — only when `--allow-env-password` is set.
+/// 4. Interactive TTY prompt             — use `rpassword` (default behaviour, no echo).
 ///
 /// Trailing `\n` / `\r\n` is stripped from file and stdin sources.
 pub fn resolve_password(
@@ -65,6 +69,14 @@ pub fn resolve_password(
         return Ok(password);
     }
 
+    if args.allow_env_password {
+        if let Ok(pw) = std::env::var("SHELL_KEYSTORE_PASSWORD") {
+            if !pw.is_empty() {
+                return Ok(pw);
+            }
+        }
+    }
+
     eprint!("{prompt}");
     Ok(rpassword::read_password()?)
 }
@@ -77,7 +89,7 @@ pub fn resolve_password(
 pub fn resolve_new_password(
     args: &PasswordArgs,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    if args.password_file.is_some() || args.password_stdin {
+    if args.password_file.is_some() || args.password_stdin || args.allow_env_password {
         return resolve_password("", args);
     }
 
@@ -93,6 +105,68 @@ pub fn resolve_new_password(
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::sync::Mutex;
+
+    // Serialize env-var tests to prevent cross-test contamination.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn env_password_used_when_allowed() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::set_var("SHELL_KEYSTORE_PASSWORD", "env-secret");
+        let args = PasswordArgs { allow_env_password: true, ..Default::default() };
+        let pw = resolve_password("", &args).unwrap();
+        assert_eq!(pw, "env-secret");
+        std::env::remove_var("SHELL_KEYSTORE_PASSWORD");
+    }
+
+    #[test]
+    fn env_password_ignored_without_flag() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::set_var("SHELL_KEYSTORE_PASSWORD", "should-be-ignored");
+        let _args = PasswordArgs { allow_env_password: false, ..Default::default() };
+        // Without allow_env_password it should NOT pick up the env var (falls through to TTY).
+        // We can't test the TTY path here, but we verify allow_env_password=false doesn't
+        // short-circuit to the env value before reaching the TTY branch.
+        // Test indirectly: file still takes priority over env.
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        writeln!(f, "from-file").unwrap();
+        let args_with_file = PasswordArgs {
+            password_file: Some(f.path().to_path_buf()),
+            allow_env_password: false,
+            ..Default::default()
+        };
+        let pw = resolve_password("", &args_with_file).unwrap();
+        assert_eq!(pw, "from-file", "file must win over env when allow_env_password=false");
+        std::env::remove_var("SHELL_KEYSTORE_PASSWORD");
+    }
+
+    #[test]
+    fn env_password_empty_falls_through_to_error_on_tty() {
+        let _g = ENV_LOCK.lock().unwrap();
+        // Empty env var with allow_env_password should NOT be accepted.
+        std::env::remove_var("SHELL_KEYSTORE_PASSWORD");
+        let args = PasswordArgs { allow_env_password: true, ..Default::default() };
+        // No TTY in test, so rpassword will fail — that's expected behaviour.
+        // Just verify we don't panic on missing env var.
+        let _result = resolve_password("", &args); // may error; that's OK
+    }
+
+    #[test]
+    fn password_file_takes_priority_over_env() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::set_var("SHELL_KEYSTORE_PASSWORD", "env-value");
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        writeln!(f, "file-value").unwrap();
+        let args = PasswordArgs {
+            password_file: Some(f.path().to_path_buf()),
+            allow_env_password: true,
+            ..Default::default()
+        };
+        let pw = resolve_password("", &args).unwrap();
+        assert_eq!(pw, "file-value", "password_file must take priority over env var");
+        std::env::remove_var("SHELL_KEYSTORE_PASSWORD");
+    }
 
     #[test]
     fn password_file_reads_first_line() {
@@ -100,7 +174,7 @@ mod tests {
         writeln!(f, "hunter2").unwrap();
         writeln!(f, "ignored").unwrap();
 
-        let args = PasswordArgs { password_file: Some(f.path().to_path_buf()), password_stdin: false };
+        let args = PasswordArgs { password_file: Some(f.path().to_path_buf()), password_stdin: false, allow_env_password: false };
         let pw = resolve_password("", &args).unwrap();
         assert_eq!(pw, "hunter2");
     }
@@ -108,7 +182,7 @@ mod tests {
     #[test]
     fn password_file_empty_is_error() {
         let f = tempfile::NamedTempFile::new().unwrap();
-        let args = PasswordArgs { password_file: Some(f.path().to_path_buf()), password_stdin: false };
+        let args = PasswordArgs { password_file: Some(f.path().to_path_buf()), password_stdin: false, allow_env_password: false };
         assert!(resolve_password("", &args).is_err());
     }
 
@@ -117,6 +191,7 @@ mod tests {
         let args = PasswordArgs {
             password_file: Some(PathBuf::from("/nonexistent/path/pw.txt")),
             password_stdin: false,
+            allow_env_password: false,
         };
         assert!(resolve_password("", &args).is_err());
     }

@@ -791,7 +791,7 @@ mod tests {
             enable_stark_aggregation: false,
             network: "dev".into(),
             consensus_engine: None,
-            password_args: crate::password::PasswordArgs { password_file: None, password_stdin: false },
+            password_args: crate::password::PasswordArgs { password_file: None, password_stdin: false, allow_env_password: false },
         };
 
         let expected = ParallelEvmConfig {
