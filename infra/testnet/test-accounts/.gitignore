@@ -1,0 +1,5 @@
+# Ignore encrypted keystore files — never commit key material
+*.json
+
+# Generated account manifest (contains addresses)
+accounts.md

@@ -5,6 +5,9 @@
 //! - `run`           — start the node (block production + RPC + network)
 //! - `init`          — initialize genesis and data directory
 //! - `key generate`  — create a new encrypted keystore file
+//! - `key inspect`   — display keystore address (no password required)
+//! - `key migrate`   — migrate keystore to current v1 sk-only format
+//! - `genesis add-alloc` — add allocation entry to a genesis JSON file
 //! - `tx send|deploy|call` — transaction operations
 //! - `account list|balance|nonce` — account management
 //! - `wallet create|balance|send|export` — lightweight wallet UX
@@ -255,6 +258,12 @@ enum Commands {
         action: KeyCommands,
     },
 
+    /// Genesis file management utilities.
+    Genesis {
+        #[command(subcommand)]
+        action: GenesisCommands,
+    },
+
     /// Export chain state to a snapshot file.
     ExportState {
         /// Block number to export state at (default: latest).
@@ -336,10 +345,49 @@ enum KeyCommands {
         algorithm: String,
     },
 
-    /// Display the address of a keystore file.
+    /// Inspect the address of a keystore file (no password required).
     Inspect {
         /// Path to the keystore file.
         path: PathBuf,
+    },
+
+    /// Migrate a keystore to the current v1 sk-only format.
+    ///
+    /// Use this if you have keystores produced by shell-sdk < 0.6.0 (sk‖pk ciphertext).
+    /// Decrypts with the current password and re-encrypts using the v1 sk-only format.
+    Migrate {
+        /// Input keystore path (source).
+        #[arg(long)]
+        input: PathBuf,
+
+        /// Output keystore path (destination).
+        #[arg(long)]
+        output: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum GenesisCommands {
+    /// Add an allocation entry to a genesis JSON file.
+    ///
+    /// Reads the genesis file, inserts (or updates) the `alloc` entry for the
+    /// given address with the specified balance, and writes the file back.
+    AddAlloc {
+        /// Path to genesis.json to modify (modified in-place unless --output is set).
+        #[arg(long)]
+        genesis: PathBuf,
+
+        /// Shell-chain address to add (hex or pq1… bech32).
+        #[arg(long)]
+        address: String,
+
+        /// Balance in wei (e.g. 1000000000000000000 for 1 SHELL).
+        #[arg(long)]
+        balance: String,
+
+        /// Write output to this file instead of modifying genesis in-place.
+        #[arg(long)]
+        output: Option<PathBuf>,
     },
 }
 
@@ -592,6 +640,14 @@ async fn main() {
         Commands::Key { action } => match action {
             KeyCommands::Generate { output, algorithm } => commands::key_generate(output, password_args, algorithm),
             KeyCommands::Inspect { path } => commands::key_inspect(path),
+            KeyCommands::Migrate { input, output } => {
+                commands::key_migrate(input, output, &password_args)
+            }
+        },
+        Commands::Genesis { action } => match action {
+            GenesisCommands::AddAlloc { genesis, address, balance, output } => {
+                commands::genesis_add_alloc(genesis, address, balance, output)
+            }
         },
         Commands::ExportState { block, output } => {
             commands::export_state(cli.datadir, output, block)

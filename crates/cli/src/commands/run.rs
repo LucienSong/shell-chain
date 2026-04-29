@@ -460,9 +460,9 @@ async fn run_with_store<S: KvStore + 'static>(
     let max_future_secs = genesis_config.consensus.max_future_secs();
     let epoch_length = genesis_config.consensus.epoch_length();
 
-    // F4: validate network_type vs block_time_secs consistency, warn on mismatch.
+    // F4: validate network_type vs block_time_secs consistency, log at info on mismatch.
     if let Err(e) = genesis_config.validate_network_consistency() {
-        eprintln!("⚠️  Genesis warning: {e}");
+        info!("Block-time override: {e}");
     }
     // F4: use effective block time (explicit consensus value or network-type default).
     let block_time_secs = genesis_config.effective_block_time_secs();

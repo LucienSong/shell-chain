@@ -3,12 +3,12 @@
 use std::path::PathBuf;
 
 use shell_crypto::{DilithiumSigner, MlDsaSigner, Signer};
-use shell_keystore::{encrypt, encrypt_mldsa, EncryptedKey};
+use shell_keystore::{decrypt, decrypt_mldsa, encrypt, encrypt_mldsa, EncryptedKey};
 use shell_primitives::Address;
 
 use tracing::info;
 
-use crate::password::{resolve_new_password, PasswordArgs};
+use crate::password::{resolve_new_password, resolve_password, PasswordArgs};
 
 /// Generate a new keypair and encrypt it to a keystore file.
 ///
@@ -81,3 +81,50 @@ pub fn key_inspect(path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+
+/// Migrate a keystore to the current v1 sk-only format.
+///
+/// Useful if you have keystores produced by `shell-sdk < 0.6.0` where the ciphertext
+/// stored both sk and pk (sk‖pk). The migration decrypts and re-encrypts using the
+/// standard v1 format (sk-only ciphertext).
+pub fn key_migrate(
+    input: PathBuf,
+    output: PathBuf,
+    password_args: &PasswordArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let password = resolve_password(password_args)?;
+
+    eprintln!("Reading keystore: {}", input.display());
+    let json = std::fs::read_to_string(&input)?;
+    let encrypted: EncryptedKey = serde_json::from_str(&json)?;
+    let key_type = encrypted.key_type.clone();
+
+    info!("Decrypting keystore (algorithm: {key_type})...");
+
+    // Re-encrypt using the canonical v1 sk-only format (same password).
+    info!("Re-encrypting in v1 sk-only format...");
+    let new_encrypted = match key_type.as_str() {
+        "mldsa65" => {
+            let signer = decrypt_mldsa(&encrypted, password.as_bytes())
+                .map_err(|e| format!("decryption failed: {e}"))?;
+            encrypt_mldsa(&signer, password.as_bytes())?
+        }
+        _ => {
+            let signer = decrypt(&encrypted, password.as_bytes())
+                .map_err(|e| format!("decryption failed: {e}"))?;
+            encrypt(&signer, password.as_bytes())?
+        }
+    };
+
+    let new_json = serde_json::to_string_pretty(&new_encrypted)?;
+    std::fs::write(&output, &new_json)?;
+
+    let address = Address::parse(&new_encrypted.address)
+        .map_err(|e| format!("invalid address in re-encrypted keystore: {e}"))?;
+    eprintln!("✓ Migrated keystore written to {}", output.display());
+    eprintln!("  Address:   {address}");
+    eprintln!("  Algorithm: {}", new_encrypted.key_type);
+    eprintln!("  Version:   {}", new_encrypted.version);
+
+    Ok(())
+}
