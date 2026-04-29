@@ -92,7 +92,7 @@ pub fn key_migrate(
     output: PathBuf,
     password_args: &PasswordArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let password = resolve_password(password_args)?;
+    let password = resolve_password("Enter keystore password", password_args)?;
 
     eprintln!("Reading keystore: {}", input.display());
     let json = std::fs::read_to_string(&input)?;
