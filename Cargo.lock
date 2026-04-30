@@ -6139,6 +6139,7 @@ dependencies = [
  "shell-evm",
  "shell-mempool",
  "shell-primitives",
+ "shell-stark-prover",
  "shell-storage",
  "tempfile",
  "thiserror 2.0.18",
