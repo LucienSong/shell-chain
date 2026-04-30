@@ -181,12 +181,9 @@ impl<S: KvStore + 'static> Node<S> {
             proposer_seal: None,
         };
 
-        // C3: If STARK aggregation is enabled, generate a batch commitment proof
-        // over ALL transactions in the block (not just Embedded-pubkey ones).
-        // G4: Collect signature entries and push to the proof backlog for async proving.
-        // Block production is no longer blocked waiting for a STARK proof.
-        // The background ProverService will generate the proof and store a ProofAmendment.
-        if self.stark_aggregation {
+        // C3: If STARK aggregation is enabled, collect sig batch entries now.
+        // G4: ProofTask pushed to backlog AFTER signing so we have the real block hash.
+        let stark_entries: Option<Vec<SigBatchEntry>> = if self.stark_aggregation {
             let entries: Vec<SigBatchEntry> = included_txs
                 .iter()
                 .map(|tx| {
@@ -209,21 +206,10 @@ impl<S: KvStore + 'static> Node<S> {
                     SigBatchEntry { msg_hash, pk_hash }
                 })
                 .collect();
-
-            if !entries.is_empty() {
-                let block_num = block.header.number;
-                let mut hash_bytes = [0u8; 32];
-                // Use a placeholder hash — real hash assigned after signing below.
-                // The backlog task is updated by the ProverService on pop.
-                hash_bytes[..8].copy_from_slice(&block_num.to_be_bytes());
-                let mut backlog = self.proof_backlog.lock();
-                backlog.push(ProofTask::new(hash_bytes, block_num, entries));
-                debug!(
-                    block = block_num,
-                    "G4: proof task queued in backlog (async proving)"
-                );
-            }
-        }
+            if entries.is_empty() { None } else { Some(entries) }
+        } else {
+            None
+        };
 
         // Sign the block with the proposer's key.
         self.consensus.read().sign_block(&mut block, signer)?;
@@ -233,6 +219,18 @@ impl<S: KvStore + 'static> Node<S> {
 
         // Commit to storage.
         let block_hash = block.hash();
+
+        // G4: Push proof task with real block hash (now available after signing).
+        if let Some(entries) = stark_entries {
+            let block_num = block.header.number;
+            let hash_bytes: [u8; 32] = *block_hash.as_bytes();
+            let mut backlog = self.proof_backlog.lock();
+            backlog.push(ProofTask::new(hash_bytes, block_num, entries));
+            debug!(
+                block = block_num,
+                "G4: proof task queued in backlog (async proving)"
+            );
+        }
         self.chain_store.put_block(&block)?;
         self.chain_store.put_receipts(&block_hash, &receipts)?;
         self.chain_store
