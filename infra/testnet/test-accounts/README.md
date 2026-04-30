@@ -51,7 +51,7 @@ Or add accounts one-by-one:
 ```bash
 shell-node genesis add-alloc \
     --genesis infra/testnet-genesis.json \
-    --address 0x<account-address> \
+    --address pq1<account-address> \
     --balance 1000000000000000000
 ```
 

@@ -44,7 +44,7 @@ and the TypeScript SDK (`shell-sdk`).
 ```json
 {
   "version": 1,
-  "address": "0x<20-byte-hex>",
+  "address": "pq1<bech32m-encoded>",
   "key_type": "<algorithm>",
   "kdf": "argon2id",
   "kdf_params": {
@@ -69,7 +69,7 @@ and the TypeScript SDK (`shell-sdk`).
 | Field | Type | Description |
 |-------|------|-------------|
 | `version` | `u32` | Always `1`. Future breaking changes increment this. |
-| `address` | `string` | `0x`-prefixed 20-byte hex address derived from the public key (see §7). |
+| `address` | `string` | `pq1`-prefixed bech32m address derived from the public key (see §7). |
 | `key_type` | `string` | Algorithm identifier: `"dilithium3"` or `"mldsa65"` (see §4). |
 | `kdf` | `string` | Always `"argon2id"`. |
 | `kdf_params.m_cost` | `u32` | Argon2id memory cost in KiB (CLI default: `65536` = 64 MiB). |
@@ -153,8 +153,8 @@ corrupted data.
 ## 7. Address Derivation
 
 ```
-address_bytes = keccak256(public_key_bytes)[12..]   // last 20 bytes
-address_hex   = "0x" + hex(address_bytes)
+address_bytes = blake3(version || algo_id || public_key_bytes)[0..20]   // first 20 bytes
+address_pq1   = bech32m_encode("pq1", address_bytes)
 ```
 
 The `algo_id` used in the address derivation scheme:
@@ -164,8 +164,9 @@ The `algo_id` used in the address derivation scheme:
 | `dilithium3` | `0` |
 | `mldsa65` | `1` |
 
-Shell-chain addresses are also displayed in bech32 form (`pq1...`) in the CLI and explorer,
-but the keystore always stores the `0x`-prefixed raw hex form.
+Shell-chain addresses are encoded in bech32m form (`pq1...`) everywhere — in the CLI,
+explorer, RPC, and in the keystore `address` field. There is no longer a supported
+hex `0x` address format for user-facing addresses.
 
 ---
 
@@ -177,12 +178,15 @@ but the keystore always stores the `0x`-prefixed raw hex form.
 1. Generate random salt (32 bytes) and nonce (24 bytes)
 2. dk = argon2id(password, salt, m_cost, t_cost, p_cost, 32)
 3. derive public_key from secret_key
-4. address = keccak256(public_key)[12..]
-5. ciphertext = xchacha20_poly1305_seal(dk, nonce, b"", secret_key)
-6. Write JSON: version=1, address="0x"+hex(address), key_type, kdf_params+salt,
+4. address_bytes = blake3(version || algo_id || public_key)[0..20]
+5. address = bech32m_encode("pq1", address_bytes)
+6. Write JSON: version=1, address=pq1-encoded, key_type, kdf_params+salt,
               cipher_params+nonce, ciphertext=hex(ciphertext), public_key=hex(public_key)
 7. Zeroize dk
 ```
+
+> **Note (F-PQ1-ONLY):** Step 5 uses `xchacha20_poly1305_seal` on the secret key,
+> then the result is written in step 6. The step numbering above was condensed for clarity.
 
 ### Decrypt
 
@@ -206,7 +210,7 @@ but the keystore always stores the `0x`-prefixed raw hex form.
 ```json
 {
   "version": 1,
-  "address": "0xea119c03...",
+  "address": "pq1qsfd7hzggn7tqm3nkjl...",
   "key_type": "dilithium3",
   "kdf": "argon2id",
   "kdf_params": {

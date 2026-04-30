@@ -2,6 +2,62 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased] — F-PQ1-ONLY
+
+### Breaking Changes
+
+- **`0x` hex address format completely removed** (F-PQ1-ONLY): All user-facing addresses
+  (RPC responses, CLI output, genesis files, keystore `address` field, explorer) now use
+  canonical `pq1...` bech32m format exclusively. Legacy `0x` addresses are no longer
+  accepted by any input path. This affects:
+  - `shell-node` CLI (`key generate`, `key inspect`, `tx send`, `run`, `genesis add-alloc`)
+  - JSON-RPC: `eth_getBalance`, `eth_getTransactionCount`, `shell_getPqPubkey`, etc.
+  - `shell-sdk`: `getAddress()` returns `pq1...` (was `getHexAddress()`, now removed)
+  - Genesis files: `alloc` map keys must be `pq1...` addresses
+  - Keystores: `address` field uses `pq1...` (was `0x`-hex)
+
+### Added
+
+- **STARK aggregate proof infrastructure** (STK.1–STK.5):
+  - `--enable-stark-aggregation` now defaults to **`true`** (was `false`).
+  - `RpcHandler` gains a `proof_amendment_store` field; `block_to_rpc` fallback queries
+    the `ProofAmendmentStore` when `sig_aggregate_proof` is `None` in the block header.
+  - New RPC method `shell_getProofAmendment(blockHash)` — returns the STARK proof
+    amendment for a block if one has been generated asynchronously.
+  - Metric `stark_amendments_queried_total` incremented when amendment is returned.
+  - Explorer block detail page shows `sigAggregateProof` badge and STARK proof section.
+
+- **Faucet service rewritten with PQ signing** (`agents/faucet`):
+  - Replaced `ethers` + ECDSA private key with `shell-sdk` keystore + PQ signing.
+  - Faucet authenticates via `decryptKeystore` + `ShellSigner`.
+  - New `/drip` endpoint (was `/faucet`). Accepts `pq1...` address only.
+  - Local nonce management prevents concurrent-request corruption.
+
+- **New docs**:
+  - `docs/stark-aggregation.md` — STARK aggregate proof architecture and RPC reference.
+  - `docs/genesis-format.md` — Genesis JSON schema, field reference, and examples.
+
+### Fixed
+
+- **CLI tests**: `env_password_empty_falls_through_to_error_on_tty` marked `#[ignore]` to
+  prevent blocking on real TTY (and deadlocking `ENV_LOCK` mutex in test suite).
+- **Keystore `encrypt_sphincs`**: `address` field now uses `address.to_string()` (pq1 format)
+  instead of legacy `format!("0x{}", hex::encode(...))`.
+- **CLI `parse_valid_address`**: Test now asserts that `0x` hex addresses are **rejected**.
+- **Wallet test fixture**: Updated from `0x000...0001` to canonical pq1 address.
+
+### Migration Guide (F-PQ1-ONLY)
+
+1. **All `0x` addresses in genesis files** must be updated to `pq1...` format.
+   Use `shell-node key inspect <keystore.json>` to get the pq1 address.
+2. **SDK users**: Replace `signer.getHexAddress()` with `signer.getAddress()`.
+   Replace `0x...` address strings in all RPC calls with `pq1...`.
+3. **Keystores**: Re-generate or re-encrypt; `address` field is now stored as `pq1...`.
+   Old keystores with `0x` address field are still **readable** (backwards compat).
+4. **Faucet**: Replace `FAUCET_PRIVATE_KEY` with `FAUCET_KEYSTORE_FILE` + `FAUCET_KEYSTORE_PASSWORD`.
+
+---
+
 ## [Unreleased] — F-TESTNET-FIXES
 
 ### Added
