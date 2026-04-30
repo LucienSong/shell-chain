@@ -76,7 +76,7 @@ pub struct RunArgs {
     pub body_retention: Option<u64>,
     /// High-level storage profile: "archive", "full", or "light".
     pub storage_profile: String,
-    /// Enable STARK aggregate proof generation during block production (off by default).
+    /// Enable STARK aggregate proof generation during block production (on by default).
     pub enable_stark_aggregation: bool,
     /// Consensus engine: "poa" (default) or "wpoa".
     pub consensus_engine: Option<String>,

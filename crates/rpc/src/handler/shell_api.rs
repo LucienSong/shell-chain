@@ -690,6 +690,48 @@ impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
             )),
         }
     }
+
+    async fn get_proof_amendment(
+        &self,
+        block_hash: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let store = match &self.proof_amendment_store {
+            Some(s) => s,
+            None => return Ok(serde_json::Value::Null),
+        };
+
+        let hash = if block_hash.starts_with("0x") && block_hash.len() == 66 {
+            let bytes = hex::decode(&block_hash[2..])
+                .map_err(|e| invalid_params(format!("invalid block hash hex: {e}")))?;
+            let arr: [u8; 32] = bytes
+                .try_into()
+                .map_err(|_| invalid_params("block hash must be 32 bytes"))?;
+            ShellHash::from(arr)
+        } else {
+            return Err(invalid_params(
+                "block_hash must be a 0x-prefixed 32-byte hex string",
+            ));
+        };
+
+        let bytes = match store.get_amendment(&hash).map_err(internal_err)? {
+            Some(b) => b,
+            None => return Ok(serde_json::Value::Null),
+        };
+
+        let amendment = shell_stark_prover::ProofAmendment::from_json(&bytes)
+            .map_err(|e| server_error(format!("failed to decode proof amendment: {e}")))?;
+
+        self.stark_amendments_queried_total
+            .fetch_add(1, Ordering::Relaxed);
+
+        Ok(serde_json::json!({
+            "block_hash": format!("{:?}", amendment.block_hash),
+            "block_number": amendment.block_number,
+            "proof_version": amendment.version,
+            "prover": amendment.prover,
+            "proof": hex_bytes(&amendment.proof.proof_bytes),
+        }))
+    }
 }
 
 fn resolve_witness_block<S: KvStore + 'static>(

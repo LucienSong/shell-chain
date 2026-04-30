@@ -228,8 +228,8 @@ enum Commands {
         body_retention: Option<u64>,
 
         /// Enable STARK aggregate proof generation during block production.
-        /// WARNING: expensive (~150ms per block). Off by default.
-        #[arg(long, default_value = "false")]
+        /// WARNING: expensive (~150ms per block). On by default for testnet.
+        #[arg(long, default_value = "true")]
         enable_stark_aggregation: bool,
 
         /// Consensus engine: "poa" (default) or "wpoa".

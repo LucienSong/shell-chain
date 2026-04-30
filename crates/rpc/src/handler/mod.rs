@@ -94,6 +94,10 @@ pub struct RpcHandler<S: KvStore + 'static> {
     storage_profile: Option<crate::types::StorageProfileInfo>,
     /// Optional consensus engine reference for `shell_consensusInfo` (W.6).
     consensus_engine: Option<Arc<parking_lot::RwLock<dyn ConsensusEngine>>>,
+    /// Optional proof amendment store for STARK proof fallback (STK.2).
+    proof_amendment_store: Option<Arc<shell_storage::ProofAmendmentStore<S>>>,
+    /// STK.5: counter for STARK proof amendment queries.
+    stark_amendments_queried_total: Arc<AtomicU64>,
 }
 
 impl<S: KvStore + 'static> Clone for RpcHandler<S> {
@@ -123,6 +127,8 @@ impl<S: KvStore + 'static> Clone for RpcHandler<S> {
             witness_store: self.witness_store.clone(),
             storage_profile: self.storage_profile.clone(),
             consensus_engine: self.consensus_engine.clone(),
+            proof_amendment_store: self.proof_amendment_store.clone(),
+            stark_amendments_queried_total: Arc::clone(&self.stark_amendments_queried_total),
         }
     }
 }
@@ -168,6 +174,8 @@ impl<S: KvStore + 'static> RpcHandler<S> {
             witness_store: None,
             storage_profile: None,
             consensus_engine: None,
+            proof_amendment_store: None,
+            stark_amendments_queried_total: Arc::new(AtomicU64::new(0)),
         };
         FilterRegistry::start_cleanup(Arc::clone(&handler.filter_registry));
         handler
@@ -187,6 +195,43 @@ impl<S: KvStore + 'static> RpcHandler<S> {
     ) -> Self {
         self.consensus_engine = Some(engine);
         self
+    }
+
+    /// Attach a proof amendment store for STARK proof fallback (STK.2/STK.3).
+    pub fn with_proof_amendment_store(
+        mut self,
+        store: Arc<shell_storage::ProofAmendmentStore<S>>,
+    ) -> Self {
+        self.proof_amendment_store = Some(store);
+        self
+    }
+
+    /// STK.2: If the block's `sig_aggregate_proof` is None and a proof amendment
+    /// store is configured, attempt to fill it from stored async proofs.
+    pub(crate) fn fill_stark_proof(
+        &self,
+        block_hash: &ShellHash,
+        rpc_block: &mut RpcBlock,
+    ) {
+        if rpc_block.sig_aggregate_proof.is_some() {
+            return;
+        }
+        let store = match &self.proof_amendment_store {
+            Some(s) => s,
+            None => return,
+        };
+        let bytes = match store.get_amendment(block_hash) {
+            Ok(Some(b)) => b,
+            _ => return,
+        };
+        if let Ok(amendment) =
+            shell_stark_prover::ProofAmendment::from_json(&bytes)
+        {
+            rpc_block.sig_aggregate_proof_size =
+                Some(amendment.proof.proof_bytes.len() as u64);
+            rpc_block.sig_aggregate_proof =
+                Some(hex_bytes(&amendment.proof.proof_bytes));
+        }
     }
 
     /// Attach a witness store for `shell_getBlockWitnesses` (Phase B4).

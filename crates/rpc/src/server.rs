@@ -163,6 +163,7 @@ pub async fn start_rpc_server<S: KvStore + 'static>(
     witness_store: Option<Arc<WitnessStore<S>>>,
     storage_profile_info: Option<crate::types::StorageProfileInfo>,
     consensus_engine: Option<Arc<parking_lot::RwLock<dyn ConsensusEngine>>>,
+    proof_amendment_store: Option<Arc<shell_storage::ProofAmendmentStore<S>>>,
 ) -> Result<RpcServerHandle, Box<dyn std::error::Error + Send + Sync>> {
     // Load and validate TLS configuration.
     // When cert+key are provided, we start jsonrpsee on an internal loopback
@@ -221,6 +222,9 @@ pub async fn start_rpc_server<S: KvStore + 'static>(
     }
     if let Some(engine) = consensus_engine {
         handler = handler.with_consensus_engine(engine);
+    }
+    if let Some(pas) = proof_amendment_store {
+        handler = handler.with_proof_amendment_store(pas);
     }
     // Populate the RPC listen address from the configured public address.
     // (The actual bound port may differ when using ephemeral port 0, but for

@@ -100,6 +100,7 @@ impl<S: KvStore + 'static> Node<S> {
                 as Arc<
                     parking_lot::RwLock<dyn shell_consensus::ConsensusEngine>,
                 >), // W.6: wire consensus engine for shell_consensusInfo
+            Some(Arc::new(self.amendment_store.clone())), // STK.4: wire proof amendment store
         )
         .await
         .map_err(|e| NodeError::Startup(format!("RPC: {e}")))?;
