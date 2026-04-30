@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use shell_crypto::{DilithiumSigner, MlDsaSigner, Signer};
+use shell_crypto::{DilithiumSigner, MlDsaSigner, Signer, SignatureType};
 use shell_keystore::{decrypt, decrypt_mldsa, encrypt, encrypt_mldsa, EncryptedKey};
 use shell_primitives::Address;
 
@@ -63,13 +63,27 @@ pub fn key_generate(
 pub fn key_inspect(path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let json = std::fs::read_to_string(&path)?;
     let encrypted: EncryptedKey = serde_json::from_str(&json)?;
-    let address = Address::parse(&encrypted.address)
-        .map_err(|e| format!("invalid keystore address '{}': {e}", encrypted.address))?;
+
+    // Derive canonical pq1 address from the stored public key (works for both
+    // old hex-format keystores and new pq1-format keystores).
+    let sig_type = match encrypted.key_type.as_str() {
+        "mldsa65" => SignatureType::MlDsa65,
+        _ => SignatureType::Dilithium3,
+    };
+    let pubkey_bytes = hex::decode(&encrypted.public_key)
+        .map_err(|e| format!("invalid public_key in keystore: {e}"))?;
+    let address = Address::from_public_key(&pubkey_bytes, sig_type.as_u8());
 
     eprintln!("Keystore: {}", path.display());
     eprintln!("  Version:    {}", encrypted.version);
     eprintln!("  Algorithm:  {}", encrypted.key_type);
     eprintln!("  Address:    {address}");
+    if encrypted.address != address.to_string() {
+        eprintln!(
+            "  ⚠ Legacy address field: {} → run `key migrate` to update",
+            encrypted.address
+        );
+    }
     eprintln!("  KDF:        {}", encrypted.kdf);
     eprintln!("  Cipher:     {}", encrypted.cipher);
     eprintln!(
@@ -82,11 +96,13 @@ pub fn key_inspect(path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 
-/// Migrate a keystore to the current v1 sk-only format.
+/// Migrate a keystore to the current v1 sk-only format with pq1 address.
 ///
-/// Useful if you have keystores produced by `shell-sdk < 0.6.0` where the ciphertext
-/// stored both sk and pk (sk‖pk). The migration decrypts and re-encrypts using the
-/// standard v1 format (sk-only ciphertext).
+/// Handles two migration scenarios:
+/// 1. Old SDK < 0.6.0 keystores where the ciphertext stored both sk and pk (sk‖pk).
+/// 2. Old keystores where `address` is stored as `"0x..."` hex instead of `pq1...`.
+///
+/// The migrated keystore uses the canonical pq1 address format and sk-only ciphertext.
 pub fn key_migrate(
     input: PathBuf,
     output: PathBuf,
@@ -101,8 +117,8 @@ pub fn key_migrate(
 
     info!("Decrypting keystore (algorithm: {key_type})...");
 
-    // Re-encrypt using the canonical v1 sk-only format (same password).
-    info!("Re-encrypting in v1 sk-only format...");
+    // Re-encrypt using the canonical v1 sk-only format + pq1 address (same password).
+    info!("Re-encrypting in v1 sk-only format with pq1 address...");
     let new_encrypted = match key_type.as_str() {
         "mldsa65" => {
             let signer = decrypt_mldsa(&encrypted, password.as_bytes())

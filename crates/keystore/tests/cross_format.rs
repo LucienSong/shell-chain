@@ -29,8 +29,8 @@ fn ks4_sdk_fixture_parses() {
     assert_eq!(ek.kdf, "argon2id", "fixture kdf must be argon2id");
     assert_eq!(ek.cipher, "xchacha20-poly1305", "fixture cipher must be xchacha20-poly1305");
     assert!(
-        ek.address.starts_with("0x"),
-        "SDK keystore address must start with 0x",
+        ek.address.starts_with("pq1"),
+        "SDK keystore address must start with pq1 (F-PQ1-ONLY)",
     );
 }
 
@@ -72,10 +72,10 @@ fn ks4_decrypted_key_address_matches_fixture() {
 
     // Derive address from decrypted public key (ML-DSA-65 algo_id = 1)
     let derived = Address::from_public_key(signer.public_key(), 1);
-    let derived_hex = format!("0x{}", hex::encode(derived.as_bytes()));
+    let derived_pq1 = derived.to_string();
 
     assert_eq!(
-        derived_hex,
+        derived_pq1,
         ek.address,
         "address derived from decrypted pk must match SDK-stored address",
     );

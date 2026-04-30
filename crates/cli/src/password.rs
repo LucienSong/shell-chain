@@ -142,13 +142,13 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires interactive TTY; run manually with `cargo test -- --ignored`"]
     fn env_password_empty_falls_through_to_error_on_tty() {
         let _g = ENV_LOCK.lock().unwrap();
         // Empty env var with allow_env_password should NOT be accepted.
         std::env::remove_var("SHELL_KEYSTORE_PASSWORD");
         let args = PasswordArgs { allow_env_password: true, ..Default::default() };
-        // No TTY in test, so rpassword will fail — that's expected behaviour.
-        // Just verify we don't panic on missing env var.
+        // Verify we don't panic when env var is absent and there's no other source.
         let _result = resolve_password("", &args); // may error; that's OK
     }
 

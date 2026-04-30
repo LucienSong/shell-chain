@@ -17,7 +17,7 @@ use crate::password::{resolve_password, PasswordArgs};
 pub enum TxCommand {
     /// Send a value transfer transaction.
     Send {
-        /// Recipient address (`pq1...`; legacy `0x...` also accepted).
+        /// Recipient address (`pq1...` bech32m format).
         #[arg(long)]
         to: String,
 
@@ -71,7 +71,7 @@ pub enum TxCommand {
 
     /// Make a read-only call (eth_call).
     Call {
-        /// Contract address (`pq1...`; legacy `0x...` also accepted).
+        /// Contract address (`pq1...` bech32m format).
         #[arg(long)]
         to: String,
 
@@ -284,7 +284,7 @@ fn load_keystore(path: &PathBuf, password_args: &PasswordArgs) -> Result<Box<dyn
     Ok(signer)
 }
 
-/// Parse a user-facing address string (`pq1...` or legacy hex).
+/// Parse a user-facing address string. Only `pq1...` bech32m format is accepted.
 fn parse_address(s: &str) -> Result<Address, Box<dyn std::error::Error>> {
     Address::parse(s).map_err(|e| format!("invalid address '{s}': {e}").into())
 }
@@ -347,7 +347,7 @@ fn rpc_is_pubkey_registered(
     let body = serde_json::json!({
         "jsonrpc": "2.0",
         "method": "shell_getPqPubkey",
-        "params": [format!("0x{}", hex::encode(addr.as_ref()))],
+        "params": [addr.to_string()],
         "id": 1
     });
     let result = rpc_post(rpc_url, &body)?;
@@ -479,18 +479,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_decimal_address() {
-        let addr = parse_address("0x0000000000000000000000000000000000000001").unwrap();
-        assert_eq!(addr.as_bytes()[19], 1);
-    }
-
-    #[test]
-    fn parse_address_no_prefix() {
-        let addr = parse_address("0000000000000000000000000000000000000001").unwrap();
-        assert_eq!(addr.as_bytes()[19], 1);
-    }
-
-    #[test]
     fn parse_bech32m_address() {
         let raw = Address::from([0x11; 20]);
         let addr = parse_address(&raw.to_string()).unwrap();
@@ -498,7 +486,13 @@ mod tests {
     }
 
     #[test]
-    fn parse_address_invalid_length() {
+    fn parse_address_rejects_hex() {
+        assert!(parse_address("0x0000000000000000000000000000000000000001").is_err());
+        assert!(parse_address("0000000000000000000000000000000000000001").is_err());
+    }
+
+    #[test]
+    fn parse_address_invalid_format() {
         assert!(parse_address("0x1234").is_err());
     }
 

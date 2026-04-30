@@ -1061,6 +1061,21 @@ mod tests {
 
     #[test]
     fn log_filter_from_json_array_of_addresses() {
+        let addr_a = Address::from([0xAA; 20]);
+        let addr_b = Address::from([0xBB; 20]);
+        let json = serde_json::json!({
+            "address": [
+                addr_a.to_string(),
+                addr_b.to_string(),
+            ],
+            "topics": []
+        });
+        let filter = LogFilter::from_value(&json);
+        assert_eq!(filter.addresses.len(), 2);
+    }
+
+    #[test]
+    fn log_filter_rejects_hex_addresses() {
         let json = serde_json::json!({
             "address": [
                 Address::from([0xAA; 20]).to_string(),
@@ -1069,7 +1084,8 @@ mod tests {
             "topics": []
         });
         let filter = LogFilter::from_value(&json);
-        assert_eq!(filter.addresses.len(), 2);
+        // hex address is silently ignored; only the pq1 address is accepted
+        assert_eq!(filter.addresses.len(), 1);
     }
 
     #[test]

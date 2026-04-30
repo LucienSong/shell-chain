@@ -121,7 +121,7 @@ mod tests {
             &src,
             r#"{
   "version": 1,
-  "address": "0x0000000000000000000000000000000000000001",
+  "address": "pq1qyqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqy0vusna",
   "key_type": "dilithium3",
   "public_key": "deadbeef",
   "ciphertext": "00",

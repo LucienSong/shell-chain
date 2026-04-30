@@ -614,7 +614,8 @@ pub(crate) fn invalid_params_err(msg: impl std::fmt::Display) -> ErrorObjectOwne
     ErrorObjectOwned::owned(-32602, msg.to_string(), None::<()>)
 }
 
-/// Parse a user-facing address string (`pq1...` or legacy hex).
+/// Parse a user-facing address string. Only `pq1...` Bech32m format is accepted;
+/// legacy `0x` hex addresses are rejected with an error.
 pub(crate) fn parse_address(s: &str) -> Result<Address, ErrorObjectOwned> {
     Address::parse(s).map_err(|e| internal_err(format!("invalid address: {e}")))
 }
@@ -3714,10 +3715,7 @@ mod tests {
                 .unwrap();
         let addr = Address::from_public_key(&pubkey, 0);
 
-        assert_eq!(
-            format!("0x{}", hex::encode(addr.0.as_slice())),
-            "0x5b72241d5d504c47cffd4a1e022c2725fb85a19b"
-        );
+        assert_eq!(addr.to_string(), "pq1q9dhyfqat4gyc370l49puq3vyujlhpdpnv25dxkc");
 
         {
             let mut ws = handler.world_state.write();

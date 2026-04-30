@@ -46,7 +46,7 @@ pub fn encrypt(signer: &DilithiumSigner, password: &[u8]) -> Result<EncryptedKey
 
     Ok(EncryptedKey {
         version: 1,
-        address: format!("0x{}", hex::encode(address.as_bytes())),
+        address: address.to_string(),
         key_type: "dilithium3".into(),
         kdf: "argon2id".into(),
         kdf_params,
@@ -108,7 +108,7 @@ pub fn encrypt_mldsa(
 
     Ok(EncryptedKey {
         version: 1,
-        address: format!("0x{}", hex::encode(address.as_bytes())),
+        address: address.to_string(),
         key_type: "mldsa65".into(),
         kdf: "argon2id".into(),
         kdf_params,
@@ -243,7 +243,7 @@ pub fn encrypt_sphincs(
 
     Ok(EncryptedKey {
         version: 1,
-        address: format!("0x{}", hex::encode(address.as_bytes())),
+        address: address.to_string(),
         key_type: "sphincs-sha2-256f".into(),
         kdf: "argon2id".into(),
         kdf_params,
@@ -347,7 +347,7 @@ mod tests {
         let expected = Address::from_public_key(signer.public_key(), signer.sig_type().as_u8());
         let encrypted = encrypt(&signer, b"addr-test").unwrap();
 
-        assert_eq!(encrypted.address, format!("0x{}", hex::encode(expected.as_bytes())));
+        assert_eq!(encrypted.address, expected.to_string());
     }
 
     // ── B. Extended keystore tests ──────────────────────────────
