@@ -80,6 +80,8 @@ pub struct RunArgs {
     pub enable_stark_aggregation: bool,
     /// Consensus engine: "poa" (default) or "wpoa".
     pub consensus_engine: Option<String>,
+    /// Node role: "validator", "validator-prover", or "prover".
+    pub node_role: String,
     /// Password source for keystore decryption.
     pub password_args: PasswordArgs,
 }
@@ -581,7 +583,9 @@ async fn run_with_store<S: KvStore + 'static>(
             ..shell_node::config::ParallelEvmConfig::default()
         },
         enable_stark_aggregation: args.enable_stark_aggregation,
-        node_role: shell_node::config::NodeRole::default(),
+        node_role: args.node_role.parse::<shell_node::config::NodeRole>().map_err(|e| {
+            format!("invalid --node-role: {e}")
+        })?,
     };
 
     // Build the node (auto-detects existing state via NodeBuilder).
@@ -791,6 +795,7 @@ mod tests {
             enable_stark_aggregation: false,
             network: "dev".into(),
             consensus_engine: None,
+            node_role: "validator".into(),
             password_args: crate::password::PasswordArgs { password_file: None, password_stdin: false, allow_env_password: false },
         };
 

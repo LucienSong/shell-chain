@@ -235,6 +235,17 @@ enum Commands {
         /// Consensus engine: "poa" (default) or "wpoa".
         #[arg(long)]
         consensus_engine: Option<String>,
+
+        /// Node role: "validator" (default), "validator-prover", or "prover".
+        ///
+        ///   validator        — produces blocks only (no STARK proof work).
+        ///   validator-prover — produces blocks AND runs the background ProverService.
+        ///   prover           — no block production; dedicated proof work only.
+        ///
+        /// Use "validator-prover" when --enable-stark-aggregation is set to
+        /// actually generate and commit STARK proofs.
+        #[arg(long, default_value = "validator")]
+        node_role: String,
     },
 
     /// Initialize genesis block and data directory.
@@ -475,6 +486,7 @@ async fn main() {
             body_retention,
             enable_stark_aggregation,
             consensus_engine,
+            node_role,
         } => {
             // Load config file if specified (CLI args override file values).
             let file_config = match &config_path {
@@ -628,6 +640,7 @@ async fn main() {
                 body_retention,
                 enable_stark_aggregation,
                 consensus_engine,
+                node_role,
                 password_args: password_args.clone(),
             })
             .await
