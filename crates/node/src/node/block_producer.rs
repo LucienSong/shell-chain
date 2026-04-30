@@ -182,24 +182,31 @@ impl<S: KvStore + 'static> Node<S> {
         };
 
         // C3: If STARK aggregation is enabled, generate a batch commitment proof
-        // over all transactions that carry embedded pubkeys (the source of bloat).
+        // over ALL transactions in the block (not just Embedded-pubkey ones).
         // G4: Collect signature entries and push to the proof backlog for async proving.
         // Block production is no longer blocked waiting for a STARK proof.
         // The background ProverService will generate the proof and store a ProofAmendment.
         if self.stark_aggregation {
             let entries: Vec<SigBatchEntry> = included_txs
                 .iter()
-                .filter_map(|tx| {
-                    if let shell_core::PubkeyMode::Embedded(ref pk) = tx.pubkey_mode {
-                        let mut msg_hash = [0u8; 32];
-                        msg_hash.copy_from_slice(tx.hash().as_bytes());
-                        let mut pk_hash = [0u8; 32];
-                        let copy_len = pk.len().min(32);
-                        pk_hash[..copy_len].copy_from_slice(&pk[..copy_len]);
-                        Some(SigBatchEntry { msg_hash, pk_hash })
-                    } else {
-                        None
-                    }
+                .map(|tx| {
+                    let mut msg_hash = [0u8; 32];
+                    msg_hash.copy_from_slice(tx.hash().as_bytes());
+                    let pk_hash = match &tx.pubkey_mode {
+                        shell_core::PubkeyMode::Embedded(ref pk) => {
+                            let mut h = [0u8; 32];
+                            let copy_len = pk.len().min(32);
+                            h[..copy_len].copy_from_slice(&pk[..copy_len]);
+                            h
+                        }
+                        shell_core::PubkeyMode::Reference => {
+                            // Use sender address bytes as pk identifier for Reference-mode txs.
+                            let mut h = [0u8; 32];
+                            h[..20].copy_from_slice(tx.from.0.as_slice());
+                            h
+                        }
+                    };
+                    SigBatchEntry { msg_hash, pk_hash }
                 })
                 .collect();
 
