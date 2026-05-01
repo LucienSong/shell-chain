@@ -500,7 +500,14 @@ Returns chain performance statistics for the performance dashboard.
 get_finality_info() → serde_json::Value
 ```
 
-Returns finality information: last finalized block, current head, and pending attestations.
+Returns finality information: current head, latest finalized block/hash, finality lag, and pending attestations.
+
+### shell_finalityProof
+```
+finality_proof(block_hash: ShellHash) → serde_json::Value
+```
+
+Returns the commit certificate sidecar for a finalized block hash, or `null` if no certificate is stored locally.
 
 ### shell_consensusInfo
 ```
@@ -677,4 +684,3 @@ after STARK proof arrives" (archive mode behavior).
 Returns an error when the node has not been configured with a profile
 (e.g. legacy startup paths). Stable consumers should treat such an
 error as `"profile: unknown"`.
-

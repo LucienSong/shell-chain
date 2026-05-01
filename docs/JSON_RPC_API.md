@@ -1028,16 +1028,44 @@ Returns aggregate chain statistics (scans the last 1,000 blocks).
 
 ### shell_getFinalityInfo
 
-Returns finality status.
+Returns finality status for the connected node.
 
 **Parameters:** None
 
 **Returns:**
 ```json
 {
-  "lastFinalizedBlock": "0x18",
   "currentHead": "0x1a",
+  "finalityLag": 2,
+  "lastFinalizedBlock": "0x18",
+  "lastFinalizedHash": "0xabc...",
   "pendingAttestations": 2
+}
+```
+
+---
+
+### shell_finalityProof
+
+Returns the commit certificate sidecar for a finalized block hash. The
+certificate maps validator addresses to post-quantum signatures and is `null`
+when the local node has no certificate for the requested hash.
+
+**Parameters:**
+| # | Type | Required | Description |
+|---|------|----------|-------------|
+| 1 | `String` | Yes | Block hash |
+
+**Returns:**
+```json
+{
+  "blockHash": "0xabc...",
+  "certificate": {
+    "pq1...": {
+      "sig_type": "Dilithium3",
+      "data": [1, 2, 3]
+    }
+  }
 }
 ```
 

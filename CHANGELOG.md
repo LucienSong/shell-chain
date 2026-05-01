@@ -18,6 +18,19 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **BFT finality and fork protection** (F-FORK-FINALITY phase 1):
+  - wPoA quorum votes now advance `FinalityState` and persist the latest finalized
+    block number.
+  - Commit certificates are stored as block-hash sidecars containing validator
+    `PQSignature`s, preserving block hash compatibility.
+  - Block import, vote handling, and production reject conflicts with already
+    finalized heights.
+  - Sync responses carry commit-certificate sidecars so peers can fast-finalize
+    after verifying signer membership, PQ signatures, and weighted quorum.
+  - RPC/Explorer/metrics surfaces added: `shell_getFinalityInfo`,
+    `shell_finalityProof`, finalized block tag support, block finality badges,
+    `shell_last_finalized_number`, and `shell_finality_lag_blocks`.
+
 - **STARK aggregate proof infrastructure** (STK.1–STK.5):
   - `--enable-stark-aggregation` now defaults to **`true`** (was `false`).
   - `RpcHandler` gains a `proof_amendment_store` field; `block_to_rpc` fallback queries
