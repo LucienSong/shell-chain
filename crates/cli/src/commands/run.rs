@@ -486,17 +486,17 @@ async fn run_with_store<S: KvStore + 'static>(
                     .with_epoch_length(epoch_length)
             };
             let build_wpoa = || -> WPoaConfig {
-                let poa = match &genesis_config.consensus {
+                let base_poa = build_poa();
+                match &genesis_config.consensus {
                     ConsensusConfig::WPoA { weights, .. } => {
                         if weights.len() == authorities.len() {
-                            build_poa().with_weights(weights.clone())
+                            WPoaConfig::with_weights(base_poa, weights.clone())
                         } else {
-                            build_poa()
+                            WPoaConfig::from_poa(base_poa)
                         }
                     }
-                    _ => build_poa(),
-                };
-                WPoaConfig::from_poa(poa)
+                    _ => WPoaConfig::from_poa(base_poa),
+                }
             };
             match args.consensus_engine.as_deref() {
                 Some("wpoa") => ConsensusEngineConfig::WPoa(build_wpoa()),

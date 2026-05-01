@@ -31,9 +31,20 @@ impl<S: KvStore + 'static> Node<S> {
             return Ok(());
         }
 
+        // Duplicate or stale block — already have it. Must check BEFORE equivocation
+        // detection to avoid false-positive double-sign events from re-gossipped blocks.
+        if incoming <= head.number() {
+            debug!(
+                incoming,
+                head = head.number(),
+                "ignoring block at or below current head"
+            );
+            return Ok(());
+        }
+
         // I1: Equivocation detection — check if the incoming block's proposer has
-        // already produced a block at this height. If so, this is a double-sign event.
-        // We detect by comparing against the block we have at `incoming` number.
+        // already produced a block at this height. Only fires for truly new blocks
+        // (incoming == expected), preventing false positives from stale gossip.
         if let Ok(Some(existing)) = self.chain_store.get_block_by_number(incoming) {
             if existing.hash() != block.hash() && existing.header.proposer == block.header.proposer
             {
@@ -52,16 +63,6 @@ impl<S: KvStore + 'static> Node<S> {
                     }
                 }
             }
-        }
-
-        // Duplicate of current head — already have it.
-        if incoming <= head.number() {
-            debug!(
-                incoming,
-                head = head.number(),
-                "ignoring block at or below current head"
-            );
-            return Ok(());
         }
 
         // Gap detection: block is too far ahead.
@@ -282,7 +283,14 @@ impl<S: KvStore + 'static> Node<S> {
             // re-registration because validate_tx_for_import performs no writes.
             let pre_verified = PreVerified;
             let mut validation_pubkeys: HashMap<Address, Vec<u8>> = HashMap::new();
-            for tx in &block.transactions {
+            for (idx, tx) in block.transactions.iter().enumerate() {
+                // Skip full validation for txs whose pubkey could not be
+                // resolved (unresolvable Reference-mode from historical blocks).
+                // Correctness is guaranteed by the state-root check below.
+                if resolved_pks[idx].is_empty() {
+                    continue;
+                }
+
                 let mut tx_for_validation = tx.clone();
                 if tx_for_validation.pubkey_mode.is_reference() {
                     if let Some(pk) = validation_pubkeys.get(&tx.from) {

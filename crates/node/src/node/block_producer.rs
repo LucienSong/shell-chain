@@ -24,6 +24,18 @@ impl<S: KvStore + 'static> Node<S> {
             return Err(NodeError::NotProposer);
         }
 
+        // Guard against double-production: if we already have a canonical block at
+        // next_number (can happen if a peer's block arrived between timer tick and here),
+        // abort to avoid equivocation.
+        if self
+            .chain_store
+            .get_block_by_number(next_number)?
+            .is_some()
+        {
+            debug!(next_number, "canonical block already exists, skipping production");
+            return Err(NodeError::NotProposer);
+        }
+
         // Collect pending transactions from mempool.
         let candidates = self.tx_pool.pending(max_txs);
 

@@ -114,6 +114,10 @@ impl<S: KvStore + 'static> Node<S> {
         self.log_pruning_banner();
 
         let mut block_timer = interval(Duration::from_millis(self.config.block_time_ms));
+        // Use Skip so missed ticks are discarded rather than burst-fired; prevents
+        // simultaneous multi-block production by multiple validators when the event
+        // loop is briefly delayed (e.g. startup sync, block import latency).
+        block_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut peer_count_timer = interval(Duration::from_secs(10));
         let mut sync_retry_timer = interval(Duration::from_secs(SYNC_RETRY_BASE_INTERVAL_SECS));
         let mut shutdown_rx = self.shutdown_tx.subscribe();
@@ -579,22 +583,19 @@ impl<S: KvStore + 'static> Node<S> {
                                     debug!(%peer, ?holder, "received ProofAck for block {}", block_hash);
                                 }
                                 // I1: Received equivocation evidence from a peer.
-                                // Independently verify and apply slashing if valid.
+                                // Independently verify and log; slashing is deferred until
+                                // the proposer-schedule epoch-boundary design is complete,
+                                // to prevent mid-chain validator-set corruption causing
+                                // cascading false-equivocation (wPoA stability fix).
                                 NetworkMessage::EquivocationEvidence(equivocation) => {
                                     if equivocation.verify() {
                                         warn!(
                                             offender = %equivocation.offender,
                                             block_number = equivocation.header_a.number,
-                                            "I1: equivocation evidence verified, slashing {}",
-                                            equivocation.offender
+                                            "I1: equivocation evidence verified (slashing deferred — epoch-boundary not implemented)"
                                         );
-                                        self.consensus
-                                            .write()
-                                            .slash_authority(&equivocation.offender);
-                                        warn!(
-                                            offender = %equivocation.offender,
-                                            "I1: authority slashed — excluded from future block production"
-                                        );
+                                        // TODO: apply slash_authority only at epoch boundary
+                                        // once ValidatorSet epoch transitions are in place.
                                     } else {
                                         warn!(%peer, "I1: received invalid equivocation evidence, ignoring");
                                     }
