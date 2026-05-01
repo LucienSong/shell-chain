@@ -760,6 +760,74 @@ mod tests {
     }
 
     #[test]
+    fn import_rejects_replacing_finalized_block() {
+        let (node, signer) = setup_node();
+        store_genesis(&node);
+        let verifier = MultiVerifier;
+
+        let block = node.produce_block(&signer, 100).unwrap();
+        let finalized_hash = block.hash();
+        node.finality
+            .write()
+            .set_finalized_direct(block.number(), finalized_hash);
+        node.chain_store
+            .set_finalized_number(block.number())
+            .unwrap();
+
+        let mut conflicting = block.clone();
+        conflicting.header.extra_data = Bytes::from(vec![0xFF]);
+        assert_ne!(conflicting.hash(), finalized_hash);
+
+        let err = node.import_block(conflicting, &verifier).unwrap_err();
+        assert!(matches!(
+            err,
+            NodeError::ConflictsWithFinalized {
+                incoming: 1,
+                fin_number: 1
+            }
+        ));
+    }
+
+    #[test]
+    fn node_initializes_finality_metrics_from_persisted_chain_state() {
+        let (node, signer) = setup_node();
+        store_genesis(&node);
+        let block = node.produce_block(&signer, 100).unwrap();
+        let finalized_hash = block.hash();
+        node.finality
+            .write()
+            .set_finalized_direct(block.number(), finalized_hash);
+        node.chain_store
+            .set_finalized_number(block.number())
+            .unwrap();
+
+        let db = node.store.clone();
+        let chain_store = Arc::new(ChainStore::new(db.clone()));
+        let world_state = Arc::new(RwLock::new(WorldState::new(db.clone())));
+        let authority = node.config.proposer_address.unwrap();
+        let consensus: Arc<RwLock<dyn ConsensusEngine>> = Arc::new(RwLock::new(PoaEngine::new(
+            PoaConfig::new(vec![authority], 1),
+        )));
+        let tx_pool = Arc::new(TxPool::new(MempoolConfig {
+            chain_id: 1337,
+            ..MempoolConfig::default()
+        }));
+
+        let restarted = Node::new(
+            NodeConfig::dev(authority),
+            db,
+            chain_store,
+            world_state,
+            tx_pool,
+            consensus,
+        );
+
+        assert_eq!(restarted.metrics.block_height.get(), 1);
+        assert_eq!(restarted.metrics.last_finalized_number.get(), 1);
+        assert_eq!(restarted.metrics.finality_lag_blocks.get(), 0);
+    }
+
+    #[test]
     fn dev_rpc_mine_blocks_advances_head() {
         let (node, signer) = setup_node();
         store_genesis(&node);
