@@ -230,6 +230,14 @@ impl<S: KvStore + 'static> Node<S> {
                                 .write()
                                 .set_finalized_direct(block_number, block_hash);
                             if advanced {
+                                let current_head = self
+                                    .chain_store
+                                    .get_head_block()
+                                    .ok()
+                                    .flatten()
+                                    .map(|b| b.number())
+                                    .unwrap_or(block_number);
+                                self.metrics.update_finality(current_head, block_number);
                                 tracing::info!(
                                     block_number,
                                     %block_hash,
@@ -418,6 +426,14 @@ impl<S: KvStore + 'static> Node<S> {
                 warn!(block_number, %block_hash, error = %e, "FF.7: failed to persist finalized number");
                 return false;
             }
+            let current_head = self
+                .chain_store
+                .get_head_block()
+                .ok()
+                .flatten()
+                .map(|b| b.number())
+                .unwrap_or(block_number);
+            self.metrics.update_finality(current_head, block_number);
             info!(block_number, %block_hash, "FF.7: fast-finalized block via commit certificate");
         }
         true

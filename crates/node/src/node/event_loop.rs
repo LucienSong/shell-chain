@@ -219,6 +219,10 @@ impl<S: KvStore + 'static> Node<S> {
                                 self.metrics.block_production_ms.observe(elapsed);
                                 self.metrics.blocks_imported.inc();
                                 self.metrics.block_height.set(block.number() as i64);
+                                self.metrics.update_finality(
+                                    block.number(),
+                                    self.finality.read().last_finalized_number(),
+                                );
                                 self.metrics.tx_pool_size.set(self.tx_pool.len() as i64);
 
                                 let number = block.number();
@@ -377,6 +381,10 @@ impl<S: KvStore + 'static> Node<S> {
                                             ));
                                             self.metrics.blocks_imported.inc();
                                             self.metrics.block_height.set(imported_number as i64);
+                                            self.metrics.update_finality(
+                                                imported_number,
+                                                self.finality.read().last_finalized_number(),
+                                            );
                                             self.metrics.tx_pool_size.set(self.tx_pool.len() as i64);
 
                                             // Notify eth_subscribe listeners.
@@ -564,10 +572,18 @@ impl<S: KvStore + 'static> Node<S> {
                                                 last_ok = num;
                                                 self.metrics.blocks_imported.inc();
                                                 self.metrics.block_height.set(num as i64);
+                                                self.metrics.update_finality(
+                                                    num,
+                                                    self.finality.read().last_finalized_number(),
+                                                );
                                                 debug!(number = num, "synced block");
                                                 if let Some(cert) = certs.get(&bhash) {
                                                     self.fast_finalize_with_certificate(
                                                         num, bhash, cert,
+                                                    );
+                                                    self.metrics.update_finality(
+                                                        num,
+                                                        self.finality.read().last_finalized_number(),
                                                     );
                                                 }
 
