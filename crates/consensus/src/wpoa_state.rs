@@ -89,8 +89,10 @@ impl WPoaRound {
             phase: RoundPhase::Idle,
             total_weight,
             validator_weights,
-            vote_timeout_ms: 4000,
-            propose_timeout_ms: 2000,
+            // Timeouts must exceed block_time (10 s) so a view-change is not
+            // triggered on every round when there are fewer than 2/3 vote senders.
+            vote_timeout_ms: 25_000,
+            propose_timeout_ms: 25_000,
         }
     }
 

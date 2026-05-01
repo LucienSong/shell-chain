@@ -361,7 +361,9 @@ impl<S: KvStore + 'static> Node<S> {
                                     let saved_header = block.header.clone();
                                     let saved_hash = block.hash();
                                     let imported_number = block.number();
-                                    match self.import_block(*block, &verifier) {
+                                    // Use block_in_place so the CPU-heavy rayon batch-verify
+                                    // inside import_block doesn't starve other async tasks.
+                                    match tokio::task::block_in_place(|| self.import_block(*block, &verifier)) {
                                         Ok(()) => {
                                             sync_requested = false;
                                             sync_retry_attempts_without_progress = 0;
@@ -426,9 +428,15 @@ impl<S: KvStore + 'static> Node<S> {
                                             self.metrics.tx_pool_size.set(self.tx_pool.len() as i64);
                                         }
                                         Err(e) => {
-                                            // MempoolError::Duplicate is expected for re-broadcast; don't log it as error.
+                                            // MempoolError::Duplicate and nonce-gap errors are
+                                            // high-frequency under load; suppress them to avoid
+                                            // blocking the event loop with eprintln! syscalls.
                                             let msg = format!("{e}");
-                                            if !msg.contains("duplicate") && !msg.contains("Duplicate") {
+                                            if !msg.contains("duplicate")
+                                                && !msg.contains("Duplicate")
+                                                && !msg.contains("nonce gap")
+                                                && !msg.contains("nonce too low")
+                                            {
                                                 eprintln!("⚠  Tx handling error: {e}");
                                             }
                                         }
@@ -472,7 +480,7 @@ impl<S: KvStore + 'static> Node<S> {
                                         let num = block.number();
                                         let hdr = block.header.clone();
                                         let bhash = block.hash();
-                                        match self.import_block(block, &verifier) {
+                                        match tokio::task::block_in_place(|| self.import_block(block, &verifier)) {
                                             Ok(()) => {
                                                 last_ok = num;
                                                 self.metrics.blocks_imported.inc();
