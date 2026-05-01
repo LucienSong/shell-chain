@@ -430,6 +430,20 @@ pub trait ShellApi {
         &self,
     ) -> Result<serde_json::Value, jsonrpsee::types::ErrorObjectOwned>;
 
+    /// Returns the commit certificate (quorum signatures) for a finalized block.
+    ///
+    /// The certificate is a JSON object mapping validator address → signature hex.
+    /// Returns `null` if no certificate is stored for the given block hash.
+    ///
+    /// Response fields:
+    /// - `blockHash`   — the queried block hash
+    /// - `certificate` — `{ "<address>": "<sig_hex>", ... }` or `null`
+    #[method(name = "finalityProof")]
+    async fn finality_proof(
+        &self,
+        block_hash: ShellHash,
+    ) -> Result<serde_json::Value, jsonrpsee::types::ErrorObjectOwned>;
+
     /// Returns consensus engine information: engine type, validator set, weights,
     /// current proposer for the next block, and epoch progress.
     ///

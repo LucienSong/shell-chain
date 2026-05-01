@@ -191,6 +191,7 @@ impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
 
     async fn get_finality_info(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
         let finalized = *self.finalized_number.read();
+        let finalized_hash = self.finality.read().last_finalized_hash().to_string();
         let current_head = self
             .chain_store
             .get_head_block()
@@ -201,9 +202,36 @@ impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
 
         Ok(serde_json::json!({
             "lastFinalizedBlock": hex_u64(finalized),
+            "lastFinalizedHash": finalized_hash,
             "currentHead": hex_u64(current_head),
+            "finalityLag": current_head.saturating_sub(finalized),
             "pendingAttestations": pending,
         }))
+    }
+
+    async fn finality_proof(
+        &self,
+        block_hash: ShellHash,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let cert = self
+            .chain_store
+            .get_commit_certificate(&block_hash)
+            .map_err(internal_err)?;
+
+        match cert {
+            Some(bytes) => {
+                let decoded: serde_json::Value =
+                    serde_json::from_slice(&bytes).map_err(|e| internal_err(e.to_string()))?;
+                Ok(serde_json::json!({
+                    "blockHash": block_hash.to_string(),
+                    "certificate": decoded,
+                }))
+            }
+            None => Ok(serde_json::json!({
+                "blockHash": block_hash.to_string(),
+                "certificate": null,
+            })),
+        }
     }
 
     async fn consensus_info(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
