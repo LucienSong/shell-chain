@@ -280,6 +280,8 @@ impl<S: KvStore + 'static> Node<S> {
 
                                 // W.5: When using wPoA, initialize the round state machine
                                 // for the block we just produced and broadcast our vote.
+                                // Also record our own vote locally so the proposer can
+                                // reach quorum without waiting for an echo of its own message.
                                 if self.consensus.read().engine_type() == EngineType::WPoA {
                                     let weights = self.consensus.read().validator_weights();
                                     let mut round = WPoaRound::new(number, 0, weights);
@@ -292,9 +294,12 @@ impl<S: KvStore + 'static> Node<S> {
                                                 block_hash,
                                                 block_number: number,
                                                 voter,
-                                                signature: pq_sig.data,
+                                                signature: pq_sig.data.clone(),
                                             };
                                             let _ = network.broadcast(vote_msg).await;
+                                            // Record own vote locally so proposer can reach
+                                            // quorum without waiting for its message to echo.
+                                            self.handle_wpoa_vote(voter, block_hash, number, pq_sig.data);
                                         }
                                     }
                                 }

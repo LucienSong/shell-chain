@@ -190,8 +190,13 @@ impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
     }
 
     async fn get_finality_info(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let finalized = *self.finalized_number.read();
-        let finalized_hash = self.finality.read().last_finalized_hash().to_string();
+        let (finalized, finalized_hash) = {
+            let f = self.finality.read();
+            (
+                f.last_finalized_number(),
+                f.last_finalized_hash().to_string(),
+            )
+        };
         let current_head = self
             .chain_store
             .get_head_block()
