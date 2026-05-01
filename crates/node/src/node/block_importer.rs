@@ -441,10 +441,11 @@ impl<S: KvStore + 'static> Node<S> {
             }
         }
 
-        // H4: Standalone Prover node — extract sig batch entries from imported block
-        // and push them to the proof backlog for async proving.
-        // Validators handle this in produce_block (G4); Prover nodes do it here.
-        if self.config.node_role == NodeRole::Prover {
+        // H4: Any node that runs the ProverService (ValidatorProver or Prover) queues
+        // proof tasks for imported peer blocks.  ValidatorProver nodes also queue tasks
+        // in produce_block (G4) for the blocks they propose; here they cover the
+        // remaining 2/3 of blocks produced by the other validators in the committee.
+        if self.config.node_role.runs_prover() {
             let block_number = block.number();
             let block_hash = block.hash();
             let entries: Vec<shell_stark_prover::prover::SigBatchEntry> = block
