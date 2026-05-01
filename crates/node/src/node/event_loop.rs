@@ -432,9 +432,17 @@ impl<S: KvStore + 'static> Node<S> {
                                                             block_hash: saved_hash,
                                                             block_number: imported_number,
                                                             voter,
-                                                            signature: pq_sig.data,
+                                                            signature: pq_sig.data.clone(),
                                                         };
                                                         let _ = network.broadcast(vote_msg).await;
+                                                        // Record own vote locally; validators should not
+                                                        // depend on receiving an echo of their own broadcast.
+                                                        self.handle_wpoa_vote(
+                                                            voter,
+                                                            saved_hash,
+                                                            imported_number,
+                                                            pq_sig.data,
+                                                        );
                                                         tracing::debug!(
                                                             block_number = imported_number,
                                                             %saved_hash,
