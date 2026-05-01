@@ -174,6 +174,14 @@ impl<S: KvStore + 'static> Node<S> {
         } else {
             FinalityState::new()
         };
+        let current_head = chain_store
+            .get_head_block()
+            .ok()
+            .flatten()
+            .map(|b| b.number())
+            .unwrap_or(0);
+        metrics.block_height.set(current_head as i64);
+        metrics.update_finality(current_head, finality_state.last_finalized_number());
 
         Self {
             config,
