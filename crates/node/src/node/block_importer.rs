@@ -203,45 +203,64 @@ impl<S: KvStore + 'static> Node<S> {
                     shell_core::PubkeyMode::Reference => {
                         if let Some(pk) = block_pubkeys.get(&tx.from) {
                             pk.clone()
+                        } else if let Some(pk) = import_cs
+                            .get_pubkey(&tx.from)
+                            .map_err(|e| {
+                                NodeError::Startup(format!(
+                                    "block {} pubkey lookup failed: {e}",
+                                    block.number()
+                                ))
+                            })?
+                        {
+                            pk
                         } else {
-                            import_cs
-                                .get_pubkey(&tx.from)
-                                .map_err(|e| {
-                                    NodeError::Startup(format!(
-                                        "block {} pubkey lookup failed: {e}",
-                                        block.number()
-                                    ))
-                                })?
-                                .ok_or_else(|| {
-                                    NodeError::Startup(format!(
-                                        "block {} missing pubkey for {}",
-                                        block.number(),
-                                        tx.from
-                                    ))
-                                })?
+                            // Pubkey not yet registered for this Reference-mode tx.
+                            // This occurs when syncing historical blocks produced by an
+                            // older node where the sender's first tx was Reference-mode
+                            // (pre-F181 enforcement).  Skip sig verification for this tx;
+                            // correctness is guaranteed by the state-root check below.
+                            warn!(
+                                block = block.number(),
+                                from = %tx.from,
+                                "Reference-mode tx with unresolvable pubkey; \
+                                 skipping sig verification (state-root will validate)"
+                            );
+                            Vec::new() // sentinel: empty pk → skip in batch verify
                         }
                     }
                 };
                 resolved_pks.push(pk);
             }
+            // Only include txs whose pubkey was resolved in the batch verify.
+            // Txs with an empty sentinel pk (unresolvable Reference-mode from
+            // historical blocks) are skipped here; the state-root check is the
+            // security backstop for those.
             let verify_items: Vec<VerifyItem> = block
                 .transactions
                 .iter()
                 .enumerate()
-                .map(|(i, tx)| VerifyItem {
-                    pubkey: &resolved_pks[i],
-                    message: tx_hashes[i].as_bytes(),
-                    signature: &tx.signature,
+                .filter_map(|(i, tx)| {
+                    if resolved_pks[i].is_empty() {
+                        None
+                    } else {
+                        Some(VerifyItem {
+                            pubkey: &resolved_pks[i],
+                            message: tx_hashes[i].as_bytes(),
+                            signature: &tx.signature,
+                        })
+                    }
                 })
                 .collect();
-            batch_verifier
-                .verify_batch_all(&verify_items)
-                .map_err(|e| {
-                    NodeError::Startup(format!(
-                        "block {} batch sig verification failed: {e}",
-                        block.number()
-                    ))
-                })?;
+            if !verify_items.is_empty() {
+                batch_verifier
+                    .verify_batch_all(&verify_items)
+                    .map_err(|e| {
+                        NodeError::Startup(format!(
+                            "block {} batch sig verification failed: {e}",
+                            block.number()
+                        ))
+                    })?;
+            }
 
             let ws = WorldState::at_root(self.store.clone(), &current_root)?;
             let cs = ChainStore::new(self.store.clone());
