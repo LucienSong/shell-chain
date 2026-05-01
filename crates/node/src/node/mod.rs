@@ -3164,7 +3164,15 @@ mod tests {
             }
 
             // addr2 votes first — still below quorum
-            node.handle_wpoa_vote(addr2, block_hash, block_number, vec![0u8; 32]);
+            node.handle_wpoa_vote(
+                addr2,
+                block_hash,
+                block_number,
+                shell_crypto::PQSignature::new(
+                    shell_crypto::SignatureType::Dilithium3,
+                    vec![0u8; 32],
+                ),
+            );
             let phase1 = node
                 .wpoa_round
                 .lock()
@@ -3177,7 +3185,15 @@ mod tests {
             );
 
             // addr3 votes — quorum (2 of 3) reached
-            node.handle_wpoa_vote(addr3, block_hash, block_number, vec![0u8; 32]);
+            node.handle_wpoa_vote(
+                addr3,
+                block_hash,
+                block_number,
+                shell_crypto::PQSignature::new(
+                    shell_crypto::SignatureType::Dilithium3,
+                    vec![0u8; 32],
+                ),
+            );
             let phase2 = node
                 .wpoa_round
                 .lock()
@@ -3200,7 +3216,10 @@ mod tests {
                 block_hash,
                 block_number: 42,
                 voter,
-                signature: vec![1, 2, 3, 4],
+                signature: shell_crypto::PQSignature::new(
+                    shell_crypto::SignatureType::Dilithium3,
+                    vec![1, 2, 3, 4],
+                ),
             };
             let json = serde_json::to_string(&msg).expect("serialize failed");
             let decoded: NetworkMessage = serde_json::from_str(&json).expect("deserialize failed");
@@ -3214,7 +3233,7 @@ mod tests {
                     assert_eq!(bh, block_hash);
                     assert_eq!(bn, 42);
                     assert_eq!(v, voter);
-                    assert_eq!(sig, vec![1, 2, 3, 4]);
+                    assert_eq!(sig.data, vec![1, 2, 3, 4]);
                 }
                 _ => panic!("expected WPoaVote after deserialization"),
             }

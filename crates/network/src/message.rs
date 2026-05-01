@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use shell_consensus::{Attestation, ChallengeResponse, EquivocationProof, ProofChallenge};
 use shell_core::{Block, SignedTransaction};
+use shell_crypto::PQSignature;
 use shell_primitives::ShellHash;
 
 use crate::error::NetworkError;
@@ -50,13 +51,27 @@ pub enum NetworkMessage {
     /// content and therefore a unique GossipSub message_id, bypassing the
     /// seen-message deduplication cache that would otherwise drop identical
     /// retries.
-    BlockRequest { start_number: u64, count: u64, #[serde(default)] nonce: u64 },
+    BlockRequest {
+        start_number: u64,
+        count: u64,
+        #[serde(default)]
+        nonce: u64,
+    },
     /// Response to a block request. `nonce` mirrors the same anti-dedup
     /// strategy used in `BlockRequest`: the responder stamps current time in
     /// milliseconds so that repeated responses carrying the same blocks (due
     /// to multiple requesters or retries) get distinct GossipSub message_ids
     /// and are not silently dropped by the seen-message cache.
-    BlockResponse { blocks: Vec<Block>, #[serde(default)] nonce: u64 },
+    BlockResponse {
+        blocks: Vec<Block>,
+        /// Commit certificate sidecars keyed by block hash.
+        ///
+        /// Kept out of block headers so old block hashes remain stable.
+        #[serde(default)]
+        commit_certificates: Vec<(ShellHash, Vec<u8>)>,
+        #[serde(default)]
+        nonce: u64,
+    },
     /// Ping to check liveness.
     Ping,
     /// Pong response to ping.
@@ -124,8 +139,8 @@ pub enum NetworkMessage {
         block_number: u64,
         /// Address of the voting validator.
         voter: shell_primitives::Address,
-        /// Raw PQ signature bytes over the block hash.
-        signature: Vec<u8>,
+        /// PQ signature over the block hash.
+        signature: PQSignature,
     },
     /// W.5: wPoA view-change vote when the current round times out.
     ///
@@ -341,6 +356,7 @@ mod tests {
         let blocks = vec![test_block(1), test_block(2)];
         let msg = NetworkMessage::BlockResponse {
             blocks: blocks.clone(),
+            commit_certificates: vec![],
             nonce: 0,
         };
         let json = serde_json::to_vec(&msg).unwrap();
@@ -486,7 +502,10 @@ mod tests {
             block_hash: ShellHash::default(),
             block_number: 7,
             voter: Address::from_public_key(b"voter-key", 0),
-            signature: vec![0xde, 0xad, 0xbe, 0xef],
+            signature: PQSignature::new(
+                shell_crypto::SignatureType::Dilithium3,
+                vec![0xde, 0xad, 0xbe, 0xef],
+            ),
         };
         let json = serde_json::to_vec(&msg).unwrap();
         let decoded: NetworkMessage = serde_json::from_slice(&json).unwrap();
@@ -497,7 +516,7 @@ mod tests {
                 ..
             } => {
                 assert_eq!(block_number, 7);
-                assert_eq!(signature, vec![0xde, 0xad, 0xbe, 0xef]);
+                assert_eq!(signature.data, vec![0xde, 0xad, 0xbe, 0xef]);
             }
             other => panic!("unexpected variant: {other:?}"),
         }

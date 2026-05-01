@@ -294,12 +294,12 @@ impl<S: KvStore + 'static> Node<S> {
                                                 block_hash,
                                                 block_number: number,
                                                 voter,
-                                                signature: pq_sig.data.clone(),
+                                                signature: pq_sig.clone(),
                                             };
                                             let _ = network.broadcast(vote_msg).await;
                                             // Record own vote locally so proposer can reach
                                             // quorum without waiting for its message to echo.
-                                            self.handle_wpoa_vote(voter, block_hash, number, pq_sig.data);
+                                            self.handle_wpoa_vote(voter, block_hash, number, pq_sig);
                                         }
                                     }
                                 }
@@ -432,7 +432,7 @@ impl<S: KvStore + 'static> Node<S> {
                                                             block_hash: saved_hash,
                                                             block_number: imported_number,
                                                             voter,
-                                                            signature: pq_sig.data.clone(),
+                                                            signature: pq_sig.clone(),
                                                         };
                                                         let _ = network.broadcast(vote_msg).await;
                                                         // Record own vote locally; validators should not
@@ -441,7 +441,7 @@ impl<S: KvStore + 'static> Node<S> {
                                                             voter,
                                                             saved_hash,
                                                             imported_number,
-                                                            pq_sig.data,
+                                                            pq_sig,
                                                         );
                                                         tracing::debug!(
                                                             block_number = imported_number,
@@ -520,17 +520,41 @@ impl<S: KvStore + 'static> Node<S> {
                                             .duration_since(std::time::UNIX_EPOCH)
                                             .unwrap_or_default()
                                             .as_nanos() as u64;
-                                        let resp = NetworkMessage::BlockResponse { blocks, nonce };
+                                        let commit_certificates = blocks
+                                            .iter()
+                                            .filter_map(|block| {
+                                                let hash = block.hash();
+                                                match self.chain_store.get_commit_certificate(&hash) {
+                                                    Ok(Some(cert)) => Some((hash, cert)),
+                                                    Ok(None) => None,
+                                                    Err(e) => {
+                                                        warn!(
+                                                            %hash,
+                                                            error = %e,
+                                                            "FF.7: failed to load commit certificate for BlockResponse"
+                                                        );
+                                                        None
+                                                    }
+                                                }
+                                            })
+                                            .collect();
+                                        let resp = NetworkMessage::BlockResponse {
+                                            blocks,
+                                            commit_certificates,
+                                            nonce,
+                                        };
                                         let _ = network.broadcast(resp).await;
                                     }
                                 }
-                                NetworkMessage::BlockResponse { blocks, .. } => {
+                                NetworkMessage::BlockResponse { blocks, commit_certificates, .. } => {
                                     info!(
                                         count = blocks.len(),
                                         "received BlockResponse, importing blocks"
                                     );
                                     let verifier = MultiVerifier;
                                     let mut last_ok = 0u64;
+                                    let certs: HashMap<ShellHash, Vec<u8>> =
+                                        commit_certificates.into_iter().collect();
                                     for block in blocks {
                                         let num = block.number();
                                         let hdr = block.header.clone();
@@ -541,6 +565,11 @@ impl<S: KvStore + 'static> Node<S> {
                                                 self.metrics.blocks_imported.inc();
                                                 self.metrics.block_height.set(num as i64);
                                                 debug!(number = num, "synced block");
+                                                if let Some(cert) = certs.get(&bhash) {
+                                                    self.fast_finalize_with_certificate(
+                                                        num, bhash, cert,
+                                                    );
+                                                }
 
                                                 // Notify eth_subscribe listeners.
                                                 let receipts = self
