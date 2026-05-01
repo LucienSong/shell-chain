@@ -90,7 +90,7 @@ impl Default for NetworkConfig {
             max_established_per_peer: 3,
             max_inbound_bandwidth: 0,
             max_outbound_bandwidth: 0,
-            max_message_size: 4 * 1024 * 1024, // 4 MiB
+            max_message_size: 50 * 1024 * 1024, // 50 MiB — PQ sigs (ML-DSA-65 ~3.3 KB each) make blocks large
             ban_threshold: 5,
             ban_duration_secs: 600, // 10 minutes
             identity_key_path: None,
@@ -213,7 +213,7 @@ mod tests {
         assert_eq!(config.max_established_per_peer, 3);
         assert_eq!(config.max_inbound_bandwidth, 0);
         assert_eq!(config.max_outbound_bandwidth, 0);
-        assert_eq!(config.max_message_size, 4 * 1024 * 1024);
+        assert_eq!(config.max_message_size, 50 * 1024 * 1024);
         assert_eq!(config.ban_threshold, 5);
         assert_eq!(config.ban_duration_secs, 600);
     }

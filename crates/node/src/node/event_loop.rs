@@ -442,7 +442,7 @@ impl<S: KvStore + 'static> Node<S> {
                                         }
                                     }
                                 }
-                                NetworkMessage::BlockRequest { start_number, count } => {
+                                NetworkMessage::BlockRequest { start_number, count, .. } => {
                                     const MAX_BLOCK_RESPONSE: u64 = 128;
                                     let safe_count = count.min(MAX_BLOCK_RESPONSE);
                                     debug!(
@@ -465,11 +465,15 @@ impl<S: KvStore + 'static> Node<S> {
                                             from = start_number,
                                             "responding with blocks"
                                         );
-                                        let resp = NetworkMessage::BlockResponse { blocks };
+                                        let nonce = std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .unwrap_or_default()
+                                            .as_nanos() as u64;
+                                        let resp = NetworkMessage::BlockResponse { blocks, nonce };
                                         let _ = network.broadcast(resp).await;
                                     }
                                 }
-                                NetworkMessage::BlockResponse { blocks } => {
+                                NetworkMessage::BlockResponse { blocks, .. } => {
                                     info!(
                                         count = blocks.len(),
                                         "received BlockResponse, importing blocks"
@@ -514,9 +518,14 @@ impl<S: KvStore + 'static> Node<S> {
                                     // Request next batch if we imported blocks
                                     // (there may be more to catch up on).
                                     if last_ok > 0 {
+                                        let nonce = std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .unwrap_or_default()
+                                            .as_nanos() as u64;
                                         let req = NetworkMessage::BlockRequest {
                                             start_number: last_ok + 1,
-                                            count: 128,
+                                            count: 1, // 1 block at a time — PQ-signed blocks can be several MB
+                                            nonce,
                                         };
                                         let _ = network.broadcast(req).await;
                                         sync_requested = true;

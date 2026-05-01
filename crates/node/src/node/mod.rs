@@ -409,9 +409,14 @@ impl<S: KvStore + 'static> Node<S> {
     ) {
         let head_number = self.head_number();
         info!(head = head_number, reason, "requesting blocks from peers");
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
         let req = NetworkMessage::BlockRequest {
             start_number: head_number + 1,
-            count: 128,
+            count: 1, // request 1 block at a time — PQ-signed blocks can be several MB each
+            nonce,
         };
         let _ = network.broadcast(req).await;
         *sync_requested = true;

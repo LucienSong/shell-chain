@@ -11,7 +11,8 @@ use crate::error::NetworkError;
 ///
 /// This matches the GossipSub `max_transmit_size` and prevents memory
 /// exhaustion from oversized payloads before deserialization is attempted.
-pub const MAX_MESSAGE_SIZE: usize = 4 * 1024 * 1024;
+/// 50 MiB — PQ-signed blocks (ML-DSA-65 ~3.3 KB sig per tx) can exceed 4 MiB.
+pub const MAX_MESSAGE_SIZE: usize = 50 * 1024 * 1024;
 
 /// Unique identifier for a network peer.
 #[derive(Debug, Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]
@@ -45,9 +46,17 @@ pub enum NetworkMessage {
     /// Announce a block attestation (validator confirmation).
     NewAttestation(Box<Attestation>),
     /// Request a range of blocks by number.
-    BlockRequest { start_number: u64, count: u64 },
-    /// Response to a block request.
-    BlockResponse { blocks: Vec<Block> },
+    /// `nonce` is a millisecond timestamp added so that each retry has unique
+    /// content and therefore a unique GossipSub message_id, bypassing the
+    /// seen-message deduplication cache that would otherwise drop identical
+    /// retries.
+    BlockRequest { start_number: u64, count: u64, #[serde(default)] nonce: u64 },
+    /// Response to a block request. `nonce` mirrors the same anti-dedup
+    /// strategy used in `BlockRequest`: the responder stamps current time in
+    /// milliseconds so that repeated responses carrying the same blocks (due
+    /// to multiple requesters or retries) get distinct GossipSub message_ids
+    /// and are not silently dropped by the seen-message cache.
+    BlockResponse { blocks: Vec<Block>, #[serde(default)] nonce: u64 },
     /// Ping to check liveness.
     Ping,
     /// Pong response to ping.
@@ -310,6 +319,7 @@ mod tests {
         let msg = NetworkMessage::BlockRequest {
             start_number: 10,
             count: 5,
+            nonce: 0,
         };
         let json = serde_json::to_vec(&msg).unwrap();
         let decoded: NetworkMessage = serde_json::from_slice(&json).unwrap();
@@ -317,6 +327,7 @@ mod tests {
             NetworkMessage::BlockRequest {
                 start_number,
                 count,
+                ..
             } => {
                 assert_eq!(start_number, 10);
                 assert_eq!(count, 5);
@@ -330,12 +341,14 @@ mod tests {
         let blocks = vec![test_block(1), test_block(2)];
         let msg = NetworkMessage::BlockResponse {
             blocks: blocks.clone(),
+            nonce: 0,
         };
         let json = serde_json::to_vec(&msg).unwrap();
         let decoded: NetworkMessage = serde_json::from_slice(&json).unwrap();
         match decoded {
             NetworkMessage::BlockResponse {
                 blocks: decoded_blocks,
+                ..
             } => {
                 assert_eq!(decoded_blocks.len(), 2);
                 assert_eq!(decoded_blocks[0].header.number, 1);
@@ -464,7 +477,7 @@ mod tests {
 
     #[test]
     fn max_message_size_constant() {
-        assert_eq!(MAX_MESSAGE_SIZE, 4 * 1024 * 1024);
+        assert_eq!(MAX_MESSAGE_SIZE, 50 * 1024 * 1024);
     }
 
     #[test]
