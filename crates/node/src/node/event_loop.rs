@@ -513,7 +513,10 @@ impl<S: KvStore + 'static> Node<S> {
                                             SYNC_RETRY_BASE_INTERVAL_SECS,
                                         ));
                                     } else {
-                                        sync_requested = false;
+                                        // No blocks were imported (e.g. gap-rejected by a
+                                        // broadcast response intended for another peer).
+                                        // Do NOT clear sync_requested so the retry timer
+                                        // continues to fire and re-request the missing batch.
                                         sync_retry_attempts_without_progress = 0;
                                         sync_retry_timer.reset_after(Duration::from_secs(
                                             SYNC_RETRY_BASE_INTERVAL_SECS,
