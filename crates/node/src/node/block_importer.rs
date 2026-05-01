@@ -20,6 +20,28 @@ impl<S: KvStore + 'static> Node<S> {
         let expected = head.number() + 1;
         let incoming = block.number();
 
+        // FF.4: Reject blocks that conflict with the finalized chain.
+        // Once a block is finalized it can never be replaced.
+        {
+            let finality = self.finality.read();
+            let fin_number = finality.last_finalized_number();
+            if fin_number > 0 && incoming <= fin_number {
+                // A finalized block at this height exists in chain_store — check if incoming differs.
+                if let Ok(Some(canonical)) = self.chain_store.get_block_by_number(incoming) {
+                    if canonical.hash() != block.hash() {
+                        warn!(
+                            incoming,
+                            fin_number,
+                            canonical_hash = %canonical.hash(),
+                            incoming_hash = %block.hash(),
+                            "FF.4: block conflicts with finalized chain — rejecting"
+                        );
+                        return Err(NodeError::ConflictsWithFinalized { incoming, fin_number });
+                    }
+                }
+            }
+        }
+
         // Fork detection: same height, different hash.
         if incoming == head.number() && block.hash() != head.hash() {
             warn!(

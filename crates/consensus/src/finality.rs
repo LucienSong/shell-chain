@@ -233,6 +233,23 @@ impl FinalityState {
         verifier.verify_batch(&items)
     }
 
+    /// Directly mark a block as finalized.
+    ///
+    /// Used by the wPoA fast path: when `BlockCommitted` fires (quorum already
+    /// verified by the round state machine), we skip the attestation-collection
+    /// path and directly advance `last_finalized`.  Only advances finality —
+    /// never goes backwards.
+    pub fn set_finalized_direct(&mut self, block_number: u64, block_hash: ShellHash) -> bool {
+        if block_number > self.last_finalized_number {
+            self.last_finalized_number = block_number;
+            self.last_finalized_hash = block_hash;
+            self.prune_below(block_number);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Remove attestation data for blocks at or below the given number.
     fn prune_below(&mut self, finalized_number: u64) {
         let hashes_to_remove: Vec<ShellHash> = self

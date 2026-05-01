@@ -382,7 +382,7 @@ impl<S: KvStore + 'static> Node<S> {
                                                 .flatten()
                                                 .unwrap_or_default();
                                             if block_event_tx.send(BlockEvent::NewBlock {
-                                                header: saved_header,
+                                                header: saved_header.clone(),
                                                 receipts,
                                             }).is_err() {
                                                 tracing::warn!("no active subscribers for block events");
@@ -399,6 +399,44 @@ impl<S: KvStore + 'static> Node<S> {
                                                     Box::new(equivocation),
                                                 );
                                                 let _ = network.broadcast(msg).await;
+                                            }
+
+                                            // W.5: If wPoA is active and we're a validator,
+                                            // send our vote for the imported block.
+                                            // The proposer already cast its vote during block
+                                            // production; non-proposer validators vote here.
+                                            if self.consensus.read().engine_type() == EngineType::WPoA {
+                                                let weights = self.consensus.read().validator_weights();
+                                                // Initialize a round for this block if not already active.
+                                                {
+                                                    let mut round_guard = self.wpoa_round.lock();
+                                                    let needs_init = round_guard
+                                                        .as_ref()
+                                                        .map(|r| r.block_number != imported_number)
+                                                        .unwrap_or(true);
+                                                    if needs_init {
+                                                        let proposer = saved_header.proposer;
+                                                        let mut round = WPoaRound::new(imported_number, 0, weights);
+                                                        let _ = round.on_block_proposed(saved_hash, proposer);
+                                                        *round_guard = Some(round);
+                                                    }
+                                                }
+                                                if let Some(voter) = self.config.proposer_address {
+                                                    if let Ok(pq_sig) = signer.sign(saved_hash.as_bytes()) {
+                                                        let vote_msg = NetworkMessage::WPoaVote {
+                                                            block_hash: saved_hash,
+                                                            block_number: imported_number,
+                                                            voter,
+                                                            signature: pq_sig.data,
+                                                        };
+                                                        let _ = network.broadcast(vote_msg).await;
+                                                        tracing::debug!(
+                                                            block_number = imported_number,
+                                                            %saved_hash,
+                                                            "W.5: validator cast vote for imported block"
+                                                        );
+                                                    }
+                                                }
                                             }
                                         }
                                         Err(NodeError::GapDetected { .. }) => {

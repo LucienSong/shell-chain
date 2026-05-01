@@ -36,6 +36,42 @@ impl<S: KvStore + 'static> Node<S> {
             return Err(NodeError::NotProposer);
         }
 
+        // FF.5: Refuse to build on a parent that conflicts with the finalized chain.
+        // If the current head is below the last finalized number, or diverges from the
+        // finalized hash at that height, producing on top of it would create a fork off
+        // the finalized chain — reject to preserve safety.
+        {
+            let finality = self.finality.read();
+            let fin_number = finality.last_finalized_number();
+            if fin_number > 0 {
+                let head_number = head.number();
+                if head_number < fin_number {
+                    warn!(
+                        head_number,
+                        fin_number,
+                        "FF.5: head is below finalized number, refusing to produce block"
+                    );
+                    return Err(NodeError::ConflictsWithFinalized {
+                        incoming: head_number,
+                        fin_number,
+                    });
+                }
+                // If head is exactly at the finalized height, verify the hashes match.
+                if head_number == fin_number && head_hash != *finality.last_finalized_hash() {
+                    warn!(
+                        head_number,
+                        %head_hash,
+                        fin_hash = %finality.last_finalized_hash(),
+                        "FF.5: head hash diverges from finalized hash, refusing to produce block"
+                    );
+                    return Err(NodeError::ConflictsWithFinalized {
+                        incoming: head_number,
+                        fin_number,
+                    });
+                }
+            }
+        }
+
         // Collect pending transactions from mempool.
         let candidates = self.tx_pool.pending(max_txs);
 
