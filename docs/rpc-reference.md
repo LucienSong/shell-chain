@@ -710,3 +710,4 @@ Response when proof exists:
 - `proof`          — hex-encoded STARK batch proof bytes
 
 Returns `null` when no proof amendment has been generated for the block.
+
