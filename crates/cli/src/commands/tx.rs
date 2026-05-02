@@ -8,14 +8,16 @@ use std::path::PathBuf;
 use clap::Subcommand;
 use shell_core::{SignedTransaction, Transaction};
 use shell_crypto::Signer;
-use shell_keystore::{decrypt, EncryptedKey};
+use shell_keystore::{decrypt_any, EncryptedKey};
 use shell_primitives::{Address, Bytes, U256};
+
+use crate::password::{resolve_password, PasswordArgs};
 
 #[derive(Subcommand)]
 pub enum TxCommand {
     /// Send a value transfer transaction.
     Send {
-        /// Recipient address (`pq1...`; legacy `0x...` also accepted).
+        /// Recipient address (`pq1...` bech32m format).
         #[arg(long)]
         to: String,
 
@@ -69,7 +71,7 @@ pub enum TxCommand {
 
     /// Make a read-only call (eth_call).
     Call {
-        /// Contract address (`pq1...`; legacy `0x...` also accepted).
+        /// Contract address (`pq1...` bech32m format).
         #[arg(long)]
         to: String,
 
@@ -84,7 +86,10 @@ pub enum TxCommand {
 }
 
 /// Execute a transaction subcommand.
-pub fn execute(cmd: TxCommand) -> Result<(), Box<dyn std::error::Error>> {
+pub fn execute(
+    cmd: TxCommand,
+    password_args: PasswordArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
     match cmd {
         TxCommand::Send {
             to,
@@ -94,14 +99,25 @@ pub fn execute(cmd: TxCommand) -> Result<(), Box<dyn std::error::Error>> {
             chain_id,
             nonce,
             gas_limit,
-        } => cmd_send(to, value, keystore, rpc_url, chain_id, nonce, gas_limit),
+        } => cmd_send(
+            SendArgs {
+                to,
+                value,
+                keystore,
+                rpc_url,
+                chain_id,
+                nonce,
+                gas_limit,
+            },
+            &password_args,
+        ),
         TxCommand::Deploy {
             code,
             keystore,
             rpc_url,
             chain_id,
             value,
-        } => cmd_deploy(code, keystore, rpc_url, chain_id, value),
+        } => cmd_deploy(code, keystore, rpc_url, chain_id, value, &password_args),
         TxCommand::Call { to, data, rpc_url } => cmd_call(to, data, rpc_url),
     }
 }
@@ -110,7 +126,7 @@ pub fn execute(cmd: TxCommand) -> Result<(), Box<dyn std::error::Error>> {
 // Send
 // ---------------------------------------------------------------------------
 
-fn cmd_send(
+struct SendArgs {
     to: String,
     value: String,
     keystore: PathBuf,
@@ -118,8 +134,23 @@ fn cmd_send(
     chain_id: Option<u64>,
     nonce: Option<u64>,
     gas_limit: Option<u64>,
+}
+
+fn cmd_send(
+    args: SendArgs,
+    password_args: &PasswordArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let signer = load_keystore(&keystore)?;
+    let SendArgs {
+        to,
+        value,
+        keystore,
+        rpc_url,
+        chain_id,
+        nonce,
+        gas_limit,
+    } = args;
+
+    let signer = load_keystore(&keystore, password_args)?;
     let from = Address::from_public_key(signer.public_key(), signer.sig_type().as_u8());
     let to_addr = parse_address(&to)?;
 
@@ -178,8 +209,9 @@ fn cmd_deploy(
     rpc_url: String,
     chain_id: Option<u64>,
     value: Option<String>,
+    password_args: &PasswordArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let signer = load_keystore(&keystore)?;
+    let signer = load_keystore(&keystore, password_args)?;
     let from = Address::from_public_key(signer.public_key(), signer.sig_type().as_u8());
 
     let chain_id = match chain_id {
@@ -262,26 +294,28 @@ fn cmd_call(
 // ---------------------------------------------------------------------------
 
 /// Load a keystore file and decrypt the signer.
-fn load_keystore(path: &PathBuf) -> Result<Box<dyn Signer>, Box<dyn std::error::Error>> {
+fn load_keystore(
+    path: &PathBuf,
+    password_args: &PasswordArgs,
+) -> Result<Box<dyn Signer>, Box<dyn std::error::Error>> {
     if !path.exists() {
         return Err(format!("keystore file not found: {}", path.display()).into());
     }
     let json = std::fs::read_to_string(path)?;
     let encrypted: EncryptedKey = serde_json::from_str(&json)?;
 
-    eprint!("Enter keystore password: ");
-    let password = rpassword::read_password()?;
-    let signer = decrypt(&encrypted, password.as_bytes());
+    let password = resolve_password("Enter keystore password: ", password_args)?;
+    let signer = decrypt_any(&encrypted, password.as_bytes());
     // Zeroize password from memory immediately after use.
     let mut pw_bytes = password.into_bytes();
     pw_bytes.fill(0);
     drop(pw_bytes);
     let signer = signer?;
 
-    Ok(Box::new(signer))
+    Ok(signer)
 }
 
-/// Parse a user-facing address string (`pq1...` or legacy hex).
+/// Parse a user-facing address string. Only `pq1...` bech32m format is accepted.
 fn parse_address(s: &str) -> Result<Address, Box<dyn std::error::Error>> {
     Address::parse(s).map_err(|e| format!("invalid address '{s}': {e}").into())
 }
@@ -344,7 +378,7 @@ fn rpc_is_pubkey_registered(
     let body = serde_json::json!({
         "jsonrpc": "2.0",
         "method": "shell_getPqPubkey",
-        "params": [format!("0x{}", hex::encode(addr.as_ref()))],
+        "params": [addr.to_string()],
         "id": 1
     });
     let result = rpc_post(rpc_url, &body)?;
@@ -476,18 +510,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_decimal_address() {
-        let addr = parse_address("0x0000000000000000000000000000000000000001").unwrap();
-        assert_eq!(addr.as_bytes()[19], 1);
-    }
-
-    #[test]
-    fn parse_address_no_prefix() {
-        let addr = parse_address("0000000000000000000000000000000000000001").unwrap();
-        assert_eq!(addr.as_bytes()[19], 1);
-    }
-
-    #[test]
     fn parse_bech32m_address() {
         let raw = Address::from([0x11; 20]);
         let addr = parse_address(&raw.to_string()).unwrap();
@@ -495,7 +517,13 @@ mod tests {
     }
 
     #[test]
-    fn parse_address_invalid_length() {
+    fn parse_address_rejects_hex() {
+        assert!(parse_address("0x0000000000000000000000000000000000000001").is_err());
+        assert!(parse_address("0000000000000000000000000000000000000001").is_err());
+    }
+
+    #[test]
+    fn parse_address_invalid_format() {
         assert!(parse_address("0x1234").is_err());
     }
 

@@ -5877,6 +5877,7 @@ dependencies = [
  "shell-primitives",
  "shell-rpc",
  "shell-storage",
+ "tempfile",
  "tokio",
  "toml",
  "tracing",
@@ -6077,6 +6078,7 @@ name = "shell-node"
 version = "0.20.0"
 dependencies = [
  "alloy-rlp",
+ "hex",
  "http-body-util",
  "hyper",
  "hyper-util",
@@ -6138,6 +6140,7 @@ dependencies = [
  "shell-evm",
  "shell-mempool",
  "shell-primitives",
+ "shell-stark-prover",
  "shell-storage",
  "tempfile",
  "thiserror 2.0.18",

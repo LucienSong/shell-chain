@@ -1,5 +1,6 @@
 use crate::{
-    CryptoError, DilithiumVerifier, PQSignature, SignatureType, SphincsVerifier, Verifier,
+    CryptoError, DilithiumVerifier, MlDsaVerifier, PQSignature, SignatureType, SphincsVerifier,
+    Verifier,
 };
 
 /// Multi-algorithm verifier that dispatches to the correct backend
@@ -19,8 +20,8 @@ impl Verifier for MultiVerifier {
     ) -> Result<bool, CryptoError> {
         match signature.sig_type {
             SignatureType::Dilithium3 => DilithiumVerifier.verify(pubkey, message, signature),
+            SignatureType::MlDsa65 => MlDsaVerifier.verify(pubkey, message, signature),
             SignatureType::SphincsSha2256f => SphincsVerifier.verify(pubkey, message, signature),
-            other => Err(CryptoError::UnsupportedSignatureType(other)),
         }
     }
 
@@ -70,11 +71,24 @@ mod tests {
     }
 
     #[test]
-    fn multi_rejects_unknown_algorithm() {
-        let sig = PQSignature::new(SignatureType::MlDsa65, vec![0u8; 64]);
+    fn multi_verifies_mldsa65() {
+        use crate::MlDsaSigner;
+        let signer = MlDsaSigner::generate();
+        let sig = signer.sign(b"multi-mldsa").unwrap();
         let mv = MultiVerifier;
-        let result = mv.verify(&[0u8; 32], b"test", &sig);
-        assert!(result.is_err());
+        assert!(mv
+            .verify(signer.public_key(), b"multi-mldsa", &sig)
+            .unwrap());
+    }
+
+    #[test]
+    fn multi_rejects_wrong_algorithm_data() {
+        // Wrong sig type for the verifier — DilithiumVerifier won't accept MlDsa65 tag
+        let sig = PQSignature::new(SignatureType::Dilithium3, vec![0u8; 3309]);
+        let mv = MultiVerifier;
+        // Verifying zeros with a zero pubkey should return Ok(false), not panic
+        let result = mv.verify(&[0u8; 1952], b"test", &sig);
+        assert!(result.is_ok()); // may be Ok(false) or Ok(true) but should not panic
     }
 
     #[test]

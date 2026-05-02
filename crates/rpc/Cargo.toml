@@ -10,6 +10,7 @@ shell-primitives.workspace = true
 shell-crypto.workspace = true
 shell-core.workspace = true
 shell-storage.workspace = true
+shell-stark-prover = { path = "../stark-prover" }
 shell-mempool = { path = "../mempool" }
 shell-evm = { path = "../evm" }
 shell-consensus = { path = "../consensus" }

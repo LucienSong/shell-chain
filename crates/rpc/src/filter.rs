@@ -389,7 +389,7 @@ mod tests {
         let json = serde_json::json!({
             "address": [
                 Address::from([0x01; 20]).to_string(),
-                "0x0000000000000000000000000000000000000002"
+                Address::from([0x02; 20]).to_string()
             ]
         });
         let raw: RawLogFilter = serde_json::from_value(json).unwrap();

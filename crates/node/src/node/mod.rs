@@ -33,7 +33,7 @@ pub(crate) use shell_storage::{
     WorldState,
 };
 
-pub(crate) use crate::config::{NodeConfig, NodeRole};
+pub(crate) use crate::config::NodeConfig;
 pub(crate) use crate::error::NodeError;
 pub(crate) use crate::metrics::Metrics;
 pub(crate) use crate::prover_service::{ProverConfig, ProverService, ProverServiceHandle};
@@ -174,6 +174,14 @@ impl<S: KvStore + 'static> Node<S> {
         } else {
             FinalityState::new()
         };
+        let current_head = chain_store
+            .get_head_block()
+            .ok()
+            .flatten()
+            .map(|b| b.number())
+            .unwrap_or(0);
+        metrics.block_height.set(current_head as i64);
+        metrics.update_finality(current_head, finality_state.last_finalized_number());
 
         Self {
             config,
@@ -409,9 +417,14 @@ impl<S: KvStore + 'static> Node<S> {
     ) {
         let head_number = self.head_number();
         info!(head = head_number, reason, "requesting blocks from peers");
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
         let req = NetworkMessage::BlockRequest {
             start_number: head_number + 1,
-            count: 128,
+            count: 1, // request 1 block at a time — PQ-signed blocks can be several MB each
+            nonce,
         };
         let _ = network.broadcast(req).await;
         *sync_requested = true;
@@ -744,6 +757,74 @@ mod tests {
         assert_eq!(block.number(), 1);
         assert!(block.transactions.is_empty());
         assert!(block.proposer_seal.is_some());
+    }
+
+    #[test]
+    fn import_rejects_replacing_finalized_block() {
+        let (node, signer) = setup_node();
+        store_genesis(&node);
+        let verifier = MultiVerifier;
+
+        let block = node.produce_block(&signer, 100).unwrap();
+        let finalized_hash = block.hash();
+        node.finality
+            .write()
+            .set_finalized_direct(block.number(), finalized_hash);
+        node.chain_store
+            .set_finalized_number(block.number())
+            .unwrap();
+
+        let mut conflicting = block.clone();
+        conflicting.header.extra_data = Bytes::from(vec![0xFF]);
+        assert_ne!(conflicting.hash(), finalized_hash);
+
+        let err = node.import_block(conflicting, &verifier).unwrap_err();
+        assert!(matches!(
+            err,
+            NodeError::ConflictsWithFinalized {
+                incoming: 1,
+                fin_number: 1
+            }
+        ));
+    }
+
+    #[test]
+    fn node_initializes_finality_metrics_from_persisted_chain_state() {
+        let (node, signer) = setup_node();
+        store_genesis(&node);
+        let block = node.produce_block(&signer, 100).unwrap();
+        let finalized_hash = block.hash();
+        node.finality
+            .write()
+            .set_finalized_direct(block.number(), finalized_hash);
+        node.chain_store
+            .set_finalized_number(block.number())
+            .unwrap();
+
+        let db = node.store.clone();
+        let chain_store = Arc::new(ChainStore::new(db.clone()));
+        let world_state = Arc::new(RwLock::new(WorldState::new(db.clone())));
+        let authority = node.config.proposer_address.unwrap();
+        let consensus: Arc<RwLock<dyn ConsensusEngine>> = Arc::new(RwLock::new(PoaEngine::new(
+            PoaConfig::new(vec![authority], 1),
+        )));
+        let tx_pool = Arc::new(TxPool::new(MempoolConfig {
+            chain_id: 1337,
+            ..MempoolConfig::default()
+        }));
+
+        let restarted = Node::new(
+            NodeConfig::dev(authority),
+            db,
+            chain_store,
+            world_state,
+            tx_pool,
+            consensus,
+        );
+
+        assert_eq!(restarted.metrics.block_height.get(), 1);
+        assert_eq!(restarted.metrics.last_finalized_number.get(), 1);
+        assert_eq!(restarted.metrics.finality_lag_blocks.get(), 0);
     }
 
     #[test]
@@ -1377,8 +1458,8 @@ mod tests {
         );
         let err_msg = result.unwrap_err().to_string().to_lowercase();
         assert!(
-            err_msg.contains("pubkey") || err_msg.contains("missing"),
-            "expected pubkey-related error, got: {err_msg}"
+            err_msg.contains("state root mismatch"),
+            "expected state-root backstop rejection, got: {err_msg}"
         );
     }
 
@@ -2749,12 +2830,8 @@ mod tests {
         let block = node.produce_block(&proposer_signer, 20).unwrap();
         let block_num = block.number();
 
-        // produce_block pushes a ProofTask with a placeholder hash derived from
-        // block_number (see G4 in node.rs): hash_bytes[..8] = block_num.to_be_bytes().
-        // The ProverService stores the amendment under that same placeholder hash.
-        let mut placeholder = [0u8; 32];
-        placeholder[..8].copy_from_slice(&block_num.to_be_bytes());
-        let placeholder_hash = ShellHash::from(placeholder);
+        // produce_block pushes a ProofTask with the real post-seal block hash.
+        let block_hash = block.hash();
 
         assert_eq!(
             node.proof_backlog.lock().len(),
@@ -2784,13 +2861,13 @@ mod tests {
             "ProverService should have drained the backlog"
         );
 
-        // Amendment should be stored under the placeholder hash.
+        // Amendment should be stored under the real block hash.
         let stored_bytes = amendment_store
-            .get_amendment(&placeholder_hash)
+            .get_amendment(&block_hash)
             .expect("amendment store read failed");
         assert!(
             stored_bytes.is_some(),
-            "ProofAmendment for block #{block_num} should be stored under placeholder hash {placeholder_hash}"
+            "ProofAmendment for block #{block_num} should be stored under block hash {block_hash}"
         );
 
         // Deserialize and check the amendment.
@@ -3159,7 +3236,15 @@ mod tests {
             }
 
             // addr2 votes first — still below quorum
-            node.handle_wpoa_vote(addr2, block_hash, block_number, vec![0u8; 32]);
+            node.handle_wpoa_vote(
+                addr2,
+                block_hash,
+                block_number,
+                shell_crypto::PQSignature::new(
+                    shell_crypto::SignatureType::Dilithium3,
+                    vec![0u8; 32],
+                ),
+            );
             let phase1 = node
                 .wpoa_round
                 .lock()
@@ -3172,7 +3257,15 @@ mod tests {
             );
 
             // addr3 votes — quorum (2 of 3) reached
-            node.handle_wpoa_vote(addr3, block_hash, block_number, vec![0u8; 32]);
+            node.handle_wpoa_vote(
+                addr3,
+                block_hash,
+                block_number,
+                shell_crypto::PQSignature::new(
+                    shell_crypto::SignatureType::Dilithium3,
+                    vec![0u8; 32],
+                ),
+            );
             let phase2 = node
                 .wpoa_round
                 .lock()
@@ -3195,7 +3288,10 @@ mod tests {
                 block_hash,
                 block_number: 42,
                 voter,
-                signature: vec![1, 2, 3, 4],
+                signature: shell_crypto::PQSignature::new(
+                    shell_crypto::SignatureType::Dilithium3,
+                    vec![1, 2, 3, 4],
+                ),
             };
             let json = serde_json::to_string(&msg).expect("serialize failed");
             let decoded: NetworkMessage = serde_json::from_str(&json).expect("deserialize failed");
@@ -3209,7 +3305,7 @@ mod tests {
                     assert_eq!(bh, block_hash);
                     assert_eq!(bn, 42);
                     assert_eq!(v, voter);
-                    assert_eq!(sig, vec![1, 2, 3, 4]);
+                    assert_eq!(sig.data, vec![1, 2, 3, 4]);
                 }
                 _ => panic!("expected WPoaVote after deserialization"),
             }

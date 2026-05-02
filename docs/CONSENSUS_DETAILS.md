@@ -87,25 +87,61 @@ next epoch boundary.
 
 ## Finality
 
-Shell-Chain uses a **threshold attestation** model for finality. Blocks become
-final when ≥ 2/3 of validators have attested to them via `Attestation` messages.
+Shell-Chain uses a **BFT threshold attestation** model for wPoA finality. When a
+validator observes a valid block it signs the block hash and broadcasts a
+`WPoaVote`. The proposer and non-proposer validators also record their own vote
+locally, because libp2p broadcast does not echo a node's message back to itself.
+
+A block becomes finalized when votes for the same block hash reach the weighted
+wPoA quorum:
+
+```text
+quorum = ceil(2 * total_active_validator_weight / 3)
+```
+
+For the 3-validator testnet profile with weights `[2, 1, 1]`, total weight is 4
+and quorum is 3. Finality therefore requires the weight-2 validator plus at
+least one weight-1 validator, or all three validators.
 
 `FinalityState` tracks:
-- `finalized_height` — highest finalized block
-- `attestation_counts` — votes per block hash
-- `quorum_threshold` — ceil(2/3 × validator_count)
+- `last_finalized_number` — highest finalized block number
+- `last_finalized_hash` — canonical hash at the finalized height
+- pending attestations — votes by block hash before quorum
 
-A block at height H is **safe** once ≥ 1/3 + 1 validators have attested.
-A block is **finalized** once ≥ 2/3 have attested.
+When a quorum is reached, the node stores a **commit certificate** sidecar keyed
+by block hash. The sidecar contains the quorum signatures as a map of validator
+address to `PQSignature`, preserving the signature algorithm tag for verification.
+The certificate is intentionally stored outside the block header so finality can
+be deployed without changing existing block hashes.
+
+Finality is safety-critical:
+- Blocks at or below `last_finalized_number` cannot be replaced by a different
+  hash; import returns `ConflictsWithFinalized`.
+- Validators ignore stale or conflicting votes for finalized heights.
+- Producers refuse to build from a parent that conflicts with the finalized
+  chain.
+- Sync responses include available commit-certificate sidecars. A node that
+  receives a valid certificate verifies signer membership, PQ signatures, and
+  weighted quorum, then fast-finalizes the block without waiting to recollect
+  votes.
 
 RPC block tags map to these states:
 | Tag | Meaning |
 |-----|---------|
 | `latest` | Most recent sealed block |
-| `safe` | Block with ≥ 1/3+1 attestations |
-| `finalized` | Block with ≥ 2/3 attestations |
+| `safe` | Currently aliases the finalized block |
+| `finalized` | Latest block finalized by weighted wPoA quorum |
 | `pending` | Not yet sealed |
 | `earliest` | Genesis block |
+
+Finality status is exposed through:
+- `shell_getFinalityInfo` — current head, latest finalized block/hash, lag, and
+  pending attestation count.
+- `shell_finalityProof(blockHash)` — commit certificate sidecar for a finalized
+  block; the returned object's `certificate` field is `null` if no certificate
+  is stored locally.
+- Prometheus gauges `shell_last_finalized_number` and
+  `shell_finality_lag_blocks`.
 
 ---
 

@@ -67,18 +67,30 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
                     .chain_store
                     .get_block_by_number(n)
                     .map_err(internal_err)?;
-                Ok(block.as_ref().map(|b| block_to_rpc(b, full_txs)))
+                Ok(block.as_ref().map(|b| {
+                    let mut rpc = block_to_rpc(b, full_txs);
+                    self.fill_stark_proof(&b.hash(), &mut rpc);
+                    rpc
+                }))
             }
             BlockTag::Number(n) => {
                 let block = self
                     .chain_store
                     .get_block_by_number(n)
                     .map_err(internal_err)?;
-                Ok(block.as_ref().map(|b| block_to_rpc(b, full_txs)))
+                Ok(block.as_ref().map(|b| {
+                    let mut rpc = block_to_rpc(b, full_txs);
+                    self.fill_stark_proof(&b.hash(), &mut rpc);
+                    rpc
+                }))
             }
             BlockTag::Latest => {
                 let block = self.chain_store.get_head_block().map_err(internal_err)?;
-                Ok(block.as_ref().map(|b| block_to_rpc(b, full_txs)))
+                Ok(block.as_ref().map(|b| {
+                    let mut rpc = block_to_rpc(b, full_txs);
+                    self.fill_stark_proof(&b.hash(), &mut rpc);
+                    rpc
+                }))
             }
             BlockTag::Pending => {
                 // F-075: construct a pseudo-block from the mempool.
@@ -168,7 +180,11 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
             .chain_store
             .get_block_by_hash(&hash)
             .map_err(internal_err)?;
-        Ok(block.as_ref().map(|b| block_to_rpc(b, full_txs)))
+        Ok(block.as_ref().map(|b| {
+            let mut rpc = block_to_rpc(b, full_txs);
+            self.fill_stark_proof(&hash, &mut rpc);
+            rpc
+        }))
     }
 
     async fn get_transaction_by_hash(

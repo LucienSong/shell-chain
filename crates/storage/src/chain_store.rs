@@ -879,6 +879,33 @@ impl<S: KvStore> ChainStore<S> {
         }
     }
 
+    /// Store a commit certificate sidecar for a finalized block.
+    ///
+    /// The certificate encodes the quorum signatures that finalized the block.
+    /// Stored separately from the block header to preserve hash compatibility.
+    /// Key format: `CERT<32-byte-block-hash>`.
+    pub fn set_commit_certificate(
+        &self,
+        block_hash: &ShellHash,
+        cert: &[u8],
+    ) -> Result<(), StorageError> {
+        let mut key = Vec::with_capacity(4 + 32);
+        key.extend_from_slice(b"CERT");
+        key.extend_from_slice(block_hash.as_bytes());
+        self.store.put(&key, cert)
+    }
+
+    /// Retrieve the commit certificate for a finalized block, if any.
+    pub fn get_commit_certificate(
+        &self,
+        block_hash: &ShellHash,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        let mut key = Vec::with_capacity(4 + 32);
+        key.extend_from_slice(b"CERT");
+        key.extend_from_slice(block_hash.as_bytes());
+        self.store.get(&key)
+    }
+
     /// Store the total transaction count across all blocks.
     pub fn set_total_tx_count(&self, count: u64) -> Result<(), StorageError> {
         self.store.put(b"TOTAL_TX_COUNT", &count.to_be_bytes())

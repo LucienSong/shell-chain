@@ -6,6 +6,7 @@ use clap::Subcommand;
 use shell_keystore::EncryptedKey;
 
 use super::{account, key, tx};
+use crate::password::PasswordArgs;
 
 #[derive(Subcommand)]
 pub enum WalletCommand {
@@ -69,9 +70,14 @@ pub enum WalletCommand {
     },
 }
 
-pub fn execute(cmd: WalletCommand) -> Result<(), Box<dyn std::error::Error>> {
+pub fn execute(
+    cmd: WalletCommand,
+    password_args: PasswordArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
     match cmd {
-        WalletCommand::Create { output } => key::key_generate(output),
+        WalletCommand::Create { output } => {
+            key::key_generate(output, password_args, "dilithium3".into())
+        }
         WalletCommand::Balance { address, rpc_url } => {
             account::execute(account::AccountCommand::Balance { address, rpc_url })
         }
@@ -83,15 +89,18 @@ pub fn execute(cmd: WalletCommand) -> Result<(), Box<dyn std::error::Error>> {
             chain_id,
             nonce,
             gas_limit,
-        } => tx::execute(tx::TxCommand::Send {
-            to,
-            value,
-            keystore,
-            rpc_url,
-            chain_id,
-            nonce,
-            gas_limit,
-        }),
+        } => tx::execute(
+            tx::TxCommand::Send {
+                to,
+                value,
+                keystore,
+                rpc_url,
+                chain_id,
+                nonce,
+                gas_limit,
+            },
+            password_args,
+        ),
         WalletCommand::Export { keystore, output } => cmd_export(keystore, output),
     }
 }
@@ -120,7 +129,7 @@ mod tests {
             &src,
             r#"{
   "version": 1,
-  "address": "0x0000000000000000000000000000000000000001",
+  "address": "pq1qyqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqy0vusna",
   "key_type": "dilithium3",
   "public_key": "deadbeef",
   "ciphertext": "00",

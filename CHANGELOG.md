@@ -2,6 +2,166 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased] — F-PQ1-ONLY
+
+### Breaking Changes
+
+- **`0x` hex address format completely removed** (F-PQ1-ONLY): All user-facing addresses
+  (RPC responses, CLI output, genesis files, keystore `address` field, explorer) now use
+  canonical `pq1...` bech32m format exclusively. Legacy `0x` addresses are no longer
+  accepted by any input path. This affects:
+  - `shell-node` CLI (`key generate`, `key inspect`, `tx send`, `run`, `genesis add-alloc`)
+  - JSON-RPC: `eth_getBalance`, `eth_getTransactionCount`, `shell_getPqPubkey`, etc.
+  - `shell-sdk`: `getAddress()` returns `pq1...` (was `getHexAddress()`, now removed)
+  - Genesis files: `alloc` map keys must be `pq1...` addresses
+  - Keystores: `address` field uses `pq1...` (was `0x`-hex)
+
+### Added
+
+- **BFT finality and fork protection** (F-FORK-FINALITY phase 1):
+  - wPoA quorum votes now advance `FinalityState` and persist the latest finalized
+    block number.
+  - Commit certificates are stored as block-hash sidecars containing validator
+    `PQSignature`s, preserving block hash compatibility.
+  - Block import, vote handling, and production reject conflicts with already
+    finalized heights.
+  - Sync responses carry commit-certificate sidecars so peers can fast-finalize
+    after verifying signer membership, PQ signatures, and weighted quorum.
+  - RPC/Explorer/metrics surfaces added: `shell_getFinalityInfo`,
+    `shell_finalityProof`, finalized block tag support, block finality badges,
+    `shell_last_finalized_number`, and `shell_finality_lag_blocks`.
+
+- **STARK aggregate proof infrastructure** (STK.1–STK.5):
+  - `--enable-stark-aggregation` now defaults to **`true`** (was `false`).
+  - `RpcHandler` gains a `proof_amendment_store` field; `block_to_rpc` fallback queries
+    the `ProofAmendmentStore` when `sig_aggregate_proof` is `None` in the block header.
+  - New RPC method `shell_getProofAmendment(blockHash)` — returns the STARK proof
+    amendment for a block if one has been generated asynchronously.
+  - Metric `stark_amendments_queried_total` incremented when amendment is returned.
+  - Explorer block detail page shows `sigAggregateProof` badge and STARK proof section.
+
+- **Faucet service rewritten with PQ signing** (`agents/faucet`):
+  - Replaced `ethers` + ECDSA private key with `shell-sdk` keystore + PQ signing.
+  - Faucet authenticates via `decryptKeystore` + `ShellSigner`.
+  - New `/drip` endpoint (was `/faucet`). Accepts `pq1...` address only.
+  - Local nonce management prevents concurrent-request corruption.
+
+- **New docs**:
+  - `docs/stark-aggregation.md` — STARK aggregate proof architecture and RPC reference.
+  - `docs/genesis-format.md` — Genesis JSON schema, field reference, and examples.
+
+### Fixed
+
+- **CLI tests**: `env_password_empty_falls_through_to_error_on_tty` marked `#[ignore]` to
+  prevent blocking on real TTY (and deadlocking `ENV_LOCK` mutex in test suite).
+- **Keystore `encrypt_sphincs`**: `address` field now uses `address.to_string()` (pq1 format)
+  instead of legacy `format!("0x{}", hex::encode(...))`.
+- **CLI `parse_valid_address`**: Test now asserts that `0x` hex addresses are **rejected**.
+- **Wallet test fixture**: Updated from `0x000...0001` to canonical pq1 address.
+
+### Migration Guide (F-PQ1-ONLY)
+
+1. **All `0x` addresses in genesis files** must be updated to `pq1...` format.
+   Use `shell-node key inspect <keystore.json>` to get the pq1 address.
+2. **SDK users**: Replace `signer.getHexAddress()` with `signer.getAddress()`.
+   Replace `0x...` address strings in all RPC calls with `pq1...`.
+3. **Keystores**: Re-generate or re-encrypt; `address` field is now stored as `pq1...`.
+   Old keystores with `0x` address field are still **readable** (backwards compat).
+4. **Faucet**: Replace `FAUCET_PRIVATE_KEY` with `FAUCET_KEYSTORE_FILE` + `FAUCET_KEYSTORE_PASSWORD`.
+
+---
+
+## [Unreleased] — F-TESTNET-FIXES
+
+### Added
+
+- **ML-DSA-65 (FIPS 204) as independent first-class algorithm** (`crates/crypto/mldsa.rs`):
+  ML-DSA-65 is now a genuine FIPS 204 implementation using the `fips204` crate — not a
+  Dilithium3 alias. `SignatureType::MlDsa65` (algo_id=1) is enabled in `ALLOWED_ALGORITHMS`.
+  `MlDsaSigner` and `MlDsaVerifier` implement the `Signer`/`Verifier` traits alongside the
+  existing `DilithiumSigner`. Cross-language signing verified: Rust-generated ML-DSA-65
+  signatures verified by `shell-sdk`, and vice-versa. (**SIG.1–SIG.9**)
+
+- **Keystore v1 sk-only unified format** (`crates/keystore`): Both Rust CLI and TypeScript SDK
+  now store only the secret key in the encrypted ciphertext (`sk-only`). The `public_key` field
+  is stored in plaintext alongside. `shell-sdk decryptKeystore()` can now directly decrypt
+  keystores produced by `shell-node key generate` without any workaround. `key_type` supports
+  `"dilithium3"` and `"mldsa65"`. (**KS.1–KS.4**)
+
+- **CLI non-interactive password support** (`crates/cli/src/password.rs`):
+  Three new password resolution methods for CI/automation:
+  - `--password-file <path>`: read password from a file
+  - `--password-stdin`: read password from stdin (one line)
+  - `SHELL_KEYSTORE_PASSWORD` env var (requires `--allow-env-password` flag)
+  All key subcommands (`key generate`, `key inspect`, `key migrate`) and `run` use the new
+  `resolve_password()` resolver. (**CLI.1–CLI.3**)
+
+- **`shell-node key migrate` subcommand** (`crates/cli/src/commands/key.rs`): Migrates an
+  existing keystore to a different format (e.g. old sk‖pk format → sk-only v1). Outputs
+  to a new file path. (**KS.7**)
+
+- **`shell-node genesis add-alloc` subcommand** (`crates/cli/src/commands/genesis.rs`): Adds an
+  address/balance entry to a genesis JSON file's `alloc` section in-place. Simplifies test
+  account provisioning. (**GEN.2**)
+
+- **`agents/genesis-builder/`**: Node.js agent script that scans a keystore directory and
+  generates an `alloc` section for a genesis file. Supports `--dry-run`, `--balance`,
+  `--chain-id`. (**GEN.1**)
+
+- **Testnet test-accounts template** (`infra/testnet/test-accounts/`): Documentation template
+  describing keystore format, genesis alloc entry, and address format for the 10 testnet
+  test accounts. (**GEN.3**)
+
+- **Testnet archive manifest** (`infra/testnet/archive/MANIFEST.md`): Documents the genesis-0
+  testnet reset (2026-04-28), backup location on server, and post-reset state. (**RST.8**)
+
+- **CLI automation guide** (`docs/cli-automation.md`): Comprehensive guide for non-interactive
+  password usage in CI, Docker, and systemd environments. (**CLI.4**)
+
+- **Node CLI reference** (`docs/node-cli.md`): Full v0.20.0 flag reference for all `shell-node`
+  subcommands. (**CLI.5**)
+
+- **Keystore format spec** (`docs/keystore-format.md`): Canonical v1 keystore schema
+  specification. Documents KDF (argon2id), cipher (XChaCha20-Poly1305), and SDK compat. (**KS.5**)
+
+- **CONSTITUTION v1.5** (`projects/shell-chain/CONSTITUTION.md`): ML-DSA-65 promoted to
+  production in §13.1 (independent FIPS 204 algo, not Dilithium3 alias). Keystore v1 sk-only
+  and CLI non-interactive password also added to §13.1. §2.7 PQ crypto table updated.
+
+### Fixed
+
+- **`address` field now has `0x` prefix** in keystore JSON (`crates/keystore/src/crypto.rs`):
+  Previously written as bare hex `"ea119c03..."`, now `"0xea119c03..."`. Old keystores
+  (without prefix) are still readable via `trim_start_matches("0x")`. (**KS.6**)
+
+- **`SIG_IDS` bugfix** (`shell-sdk`): `SIGNATURE_TYPE_IDS.MlDsa65` now correctly maps to `1`
+  (not `0`). This fixes address derivation for ML-DSA-65 keys in the SDK.
+
+- **block_time override no longer logs a warning** (`crates/cli/src/commands/run.rs`): Explicit
+  `--block-time` override is logged at `info` level rather than `eprintln!` error/warning,
+  since the override is intentional. (**CLI.6**)
+
+- **Explorer address page missing transactions** (`shell-explorer`): Fixed batch RPC handler
+  to correctly aggregate transaction history per address. (commit `5e35652`) (**F-EXPLORER-FIX**)
+
+### Breaking Changes
+
+- **ML-DSA-65 `algo_id` changed from `0` to `1`**: If you have existing ML-DSA-65 keystores
+  signed with the old Dilithium3-alias behaviour, use `shell-node key migrate` or re-generate.
+  All **Dilithium3** keystores (`algo_id=0`, `key_type="dilithium3"`) are unaffected.
+- **Keystore `ciphertext` format changed**: SDK `encryptKeystore()` now stores sk-only (not
+  sk‖pk). Old SDK-generated keystores with sk‖pk format must be re-encrypted with the new SDK.
+
+### Migration Guide
+
+1. **ML-DSA-65 keys**: Re-generate with `shell-node key generate --algorithm mldsa65`.
+   Old keys generated before F-TESTNET-FIXES are Dilithium3 with an incorrect `key_type`
+   field — they will not verify correctly as ML-DSA-65.
+2. **SDK keystores (sk‖pk)**: Re-encrypt with updated `shell-sdk encryptKeystore()` (v0.6.0+).
+   Or use `shell-node key migrate --input old.json --output new.json`.
+3. **Testnet**: The testnet was reset to genesis-0 on 2026-04-28. All old test accounts have
+   been replaced. See `infra/testnet/test-accounts/` and `infra/testnet/archive/MANIFEST.md`.
+
 ## [0.20.0] — 2026-04-27
 
 ### Added

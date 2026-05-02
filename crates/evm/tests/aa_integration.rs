@@ -136,10 +136,7 @@ fn set_validation_code_allows_custom_validator_and_clear_restores_builtin_rules(
         CHAIN_ID,
     )
     .unwrap_err();
-    assert!(matches!(
-        rejected_err,
-        TxValidationError::DisallowedAlgorithm(SignatureType::MlDsa65)
-    ));
+    assert!(matches!(rejected_err, TxValidationError::SignatureInvalid));
 
     let builtin_signed = sign_tx(owner_addr, &owner, transfer_tx(4, receiver, 5), false);
     let builtin_result = apply_tx(&mut evm, &chain_store, &verifier, &builtin_signed, 5, 0, 0);

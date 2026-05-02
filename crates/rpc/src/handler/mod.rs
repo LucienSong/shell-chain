@@ -94,6 +94,10 @@ pub struct RpcHandler<S: KvStore + 'static> {
     storage_profile: Option<crate::types::StorageProfileInfo>,
     /// Optional consensus engine reference for `shell_consensusInfo` (W.6).
     consensus_engine: Option<Arc<parking_lot::RwLock<dyn ConsensusEngine>>>,
+    /// Optional proof amendment store for STARK proof fallback (STK.2).
+    proof_amendment_store: Option<Arc<shell_storage::ProofAmendmentStore<S>>>,
+    /// STK.5: counter for STARK proof amendment queries.
+    stark_amendments_queried_total: Arc<AtomicU64>,
 }
 
 impl<S: KvStore + 'static> Clone for RpcHandler<S> {
@@ -123,6 +127,8 @@ impl<S: KvStore + 'static> Clone for RpcHandler<S> {
             witness_store: self.witness_store.clone(),
             storage_profile: self.storage_profile.clone(),
             consensus_engine: self.consensus_engine.clone(),
+            proof_amendment_store: self.proof_amendment_store.clone(),
+            stark_amendments_queried_total: Arc::clone(&self.stark_amendments_queried_total),
         }
     }
 }
@@ -168,6 +174,8 @@ impl<S: KvStore + 'static> RpcHandler<S> {
             witness_store: None,
             storage_profile: None,
             consensus_engine: None,
+            proof_amendment_store: None,
+            stark_amendments_queried_total: Arc::new(AtomicU64::new(0)),
         };
         FilterRegistry::start_cleanup(Arc::clone(&handler.filter_registry));
         handler
@@ -187,6 +195,35 @@ impl<S: KvStore + 'static> RpcHandler<S> {
     ) -> Self {
         self.consensus_engine = Some(engine);
         self
+    }
+
+    /// Attach a proof amendment store for STARK proof fallback (STK.2/STK.3).
+    pub fn with_proof_amendment_store(
+        mut self,
+        store: Arc<shell_storage::ProofAmendmentStore<S>>,
+    ) -> Self {
+        self.proof_amendment_store = Some(store);
+        self
+    }
+
+    /// STK.2: If the block's `sig_aggregate_proof` is None and a proof amendment
+    /// store is configured, attempt to fill it from stored async proofs.
+    pub(crate) fn fill_stark_proof(&self, block_hash: &ShellHash, rpc_block: &mut RpcBlock) {
+        if rpc_block.sig_aggregate_proof.is_some() {
+            return;
+        }
+        let store = match &self.proof_amendment_store {
+            Some(s) => s,
+            None => return,
+        };
+        let bytes = match store.get_amendment(block_hash) {
+            Ok(Some(b)) => b,
+            _ => return,
+        };
+        if let Ok(amendment) = shell_stark_prover::ProofAmendment::from_json(&bytes) {
+            rpc_block.sig_aggregate_proof_size = Some(amendment.proof.proof_bytes.len() as u64);
+            rpc_block.sig_aggregate_proof = Some(hex_bytes(&amendment.proof.proof_bytes));
+        }
     }
 
     /// Attach a witness store for `shell_getBlockWitnesses` (Phase B4).
@@ -614,9 +651,10 @@ pub(crate) fn invalid_params_err(msg: impl std::fmt::Display) -> ErrorObjectOwne
     ErrorObjectOwned::owned(-32602, msg.to_string(), None::<()>)
 }
 
-/// Parse a user-facing address string (`pq1...` or legacy hex).
+/// Parse a user-facing address string. Only `pq1...` Bech32m format is accepted;
+/// legacy `0x` hex addresses are rejected with an error.
 pub(crate) fn parse_address(s: &str) -> Result<Address, ErrorObjectOwned> {
-    Address::parse(s).map_err(|e| internal_err(format!("invalid address: {e}")))
+    Address::parse(s).map_err(|e| invalid_params_err(format!("invalid address: {e}")))
 }
 
 /// Parse a 32-byte hex string into `ShellHash`.
@@ -2173,7 +2211,7 @@ mod tests {
     #[tokio::test]
     async fn propose_add_validator_no_signer_returns_error() {
         let handler = setup();
-        let target = format!("0x{}", "ab".repeat(20));
+        let target = Address::from([0xAB; 20]).to_string();
         let err = ShellApiServer::propose_add_validator(&handler, target)
             .await
             .unwrap_err();
@@ -2183,7 +2221,7 @@ mod tests {
     #[tokio::test]
     async fn propose_remove_validator_no_signer_returns_error() {
         let handler = setup();
-        let target = format!("0x{}", "ab".repeat(20));
+        let target = Address::from([0xAB; 20]).to_string();
         let err = ShellApiServer::propose_remove_validator(&handler, target)
             .await
             .unwrap_err();
@@ -2263,7 +2301,7 @@ mod tests {
     #[tokio::test]
     async fn propose_add_validator_returns_tx_hash_hex() {
         let (handler, _signer, _addr) = setup_with_proposer();
-        let target = format!("0x{}", "ab".repeat(20));
+        let target = Address::from([0xAB; 20]).to_string();
         let result = ShellApiServer::propose_add_validator(&handler, target)
             .await
             .unwrap();
@@ -2944,7 +2982,10 @@ mod tests {
         *finalized_number.write() = 100;
         assert_eq!(handler.parse_block_number("finalized").unwrap(), Some(100));
 
-        // Verify get_finality_info reflects the update.
+        // Verify get_finality_info reflects the full finality state.
+        finality
+            .write()
+            .set_finalized_direct(100, ShellHash::from([0x64; 32]));
         let result = ShellApiServer::get_finality_info(&handler).await.unwrap();
         assert_eq!(result["lastFinalizedBlock"], "0x64"); // 100 in hex
     }
@@ -3715,8 +3756,8 @@ mod tests {
         let addr = Address::from_public_key(&pubkey, 0);
 
         assert_eq!(
-            format!("0x{}", hex::encode(addr.0.as_slice())),
-            "0x5b72241d5d504c47cffd4a1e022c2725fb85a19b"
+            addr.to_string(),
+            "pq1q9dhyfqat4gyc370l49puq3vyujlhpdpnv25dxkc"
         );
 
         {

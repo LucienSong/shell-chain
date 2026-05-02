@@ -316,7 +316,7 @@ fn build_swarm_with_identity(
         .validation_mode(gossipsub::ValidationMode::Strict)
         .validate_messages() // F-062: hold messages until application validates
         .message_id_fn(message_id_fn)
-        .max_transmit_size(4 * 1024 * 1024) // 4 MiB — PQ blocks can be large
+        .max_transmit_size(50 * 1024 * 1024) // 50 MiB — PQ sigs (ML-DSA-65 ~3.3 KB) inflate blocks
         .build()
         .map_err(|e| NetworkError::Transport(format!("gossipsub config: {e}")))?;
 
@@ -970,6 +970,9 @@ impl NetworkService for Libp2pNetwork {
             | NetworkMessage::EquivocationEvidence(_)
             | NetworkMessage::ProofChallenge(_)
             | NetworkMessage::ProofChallengeResponse(_) => TopicKind::Blocks,
+            NetworkMessage::StorageCapability { .. }
+            | NetworkMessage::WPoaVote { .. }
+            | NetworkMessage::WPoaViewChange { .. } => TopicKind::Attestation,
         };
 
         let data =

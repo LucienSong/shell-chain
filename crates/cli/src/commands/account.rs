@@ -17,7 +17,7 @@ pub enum AccountCommand {
 
     /// Query the balance of an address.
     Balance {
-        /// Address to query (`pq1...`; legacy `0x...` also accepted).
+        /// Address to query (`pq1...` bech32m format).
         address: String,
 
         /// JSON-RPC endpoint URL.
@@ -27,7 +27,7 @@ pub enum AccountCommand {
 
     /// Query the nonce (transaction count) of an address.
     Nonce {
-        /// Address to query (`pq1...`; legacy `0x...` also accepted).
+        /// Address to query (`pq1...` bech32m format).
         address: String,
 
         /// JSON-RPC endpoint URL.
@@ -159,8 +159,8 @@ mod tests {
 
     #[test]
     fn parse_valid_address() {
-        let addr = parse_address("0x0000000000000000000000000000000000000042").unwrap();
-        assert_eq!(addr.as_bytes()[19], 0x42);
+        // hex addresses are rejected in F-PQ1-ONLY
+        assert!(parse_address("0x0000000000000000000000000000000000000042").is_err());
     }
 
     #[test]

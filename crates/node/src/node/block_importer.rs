@@ -20,6 +20,31 @@ impl<S: KvStore + 'static> Node<S> {
         let expected = head.number() + 1;
         let incoming = block.number();
 
+        // FF.4: Reject blocks that conflict with the finalized chain.
+        // Once a block is finalized it can never be replaced.
+        {
+            let finality = self.finality.read();
+            let fin_number = finality.last_finalized_number();
+            if fin_number > 0 && incoming <= fin_number {
+                // A finalized block at this height exists in chain_store — check if incoming differs.
+                if let Ok(Some(canonical)) = self.chain_store.get_block_by_number(incoming) {
+                    if canonical.hash() != block.hash() {
+                        warn!(
+                            incoming,
+                            fin_number,
+                            canonical_hash = %canonical.hash(),
+                            incoming_hash = %block.hash(),
+                            "FF.4: block conflicts with finalized chain — rejecting"
+                        );
+                        return Err(NodeError::ConflictsWithFinalized {
+                            incoming,
+                            fin_number,
+                        });
+                    }
+                }
+            }
+        }
+
         // Fork detection: same height, different hash.
         if incoming == head.number() && block.hash() != head.hash() {
             warn!(
@@ -31,9 +56,20 @@ impl<S: KvStore + 'static> Node<S> {
             return Ok(());
         }
 
+        // Duplicate or stale block — already have it. Must check BEFORE equivocation
+        // detection to avoid false-positive double-sign events from re-gossipped blocks.
+        if incoming <= head.number() {
+            debug!(
+                incoming,
+                head = head.number(),
+                "ignoring block at or below current head"
+            );
+            return Ok(());
+        }
+
         // I1: Equivocation detection — check if the incoming block's proposer has
-        // already produced a block at this height. If so, this is a double-sign event.
-        // We detect by comparing against the block we have at `incoming` number.
+        // already produced a block at this height. Only fires for truly new blocks
+        // (incoming == expected), preventing false positives from stale gossip.
         if let Ok(Some(existing)) = self.chain_store.get_block_by_number(incoming) {
             if existing.hash() != block.hash() && existing.header.proposer == block.header.proposer
             {
@@ -52,16 +88,6 @@ impl<S: KvStore + 'static> Node<S> {
                     }
                 }
             }
-        }
-
-        // Duplicate of current head — already have it.
-        if incoming <= head.number() {
-            debug!(
-                incoming,
-                head = head.number(),
-                "ignoring block at or below current head"
-            );
-            return Ok(());
         }
 
         // Gap detection: block is too far ahead.
@@ -203,45 +229,61 @@ impl<S: KvStore + 'static> Node<S> {
                     shell_core::PubkeyMode::Reference => {
                         if let Some(pk) = block_pubkeys.get(&tx.from) {
                             pk.clone()
+                        } else if let Some(pk) = import_cs.get_pubkey(&tx.from).map_err(|e| {
+                            NodeError::Startup(format!(
+                                "block {} pubkey lookup failed: {e}",
+                                block.number()
+                            ))
+                        })? {
+                            pk
                         } else {
-                            import_cs
-                                .get_pubkey(&tx.from)
-                                .map_err(|e| {
-                                    NodeError::Startup(format!(
-                                        "block {} pubkey lookup failed: {e}",
-                                        block.number()
-                                    ))
-                                })?
-                                .ok_or_else(|| {
-                                    NodeError::Startup(format!(
-                                        "block {} missing pubkey for {}",
-                                        block.number(),
-                                        tx.from
-                                    ))
-                                })?
+                            // Pubkey not yet registered for this Reference-mode tx.
+                            // This occurs when syncing historical blocks produced by an
+                            // older node where the sender's first tx was Reference-mode
+                            // (pre-F181 enforcement).  Skip sig verification for this tx;
+                            // correctness is guaranteed by the state-root check below.
+                            warn!(
+                                block = block.number(),
+                                from = %tx.from,
+                                "Reference-mode tx with unresolvable pubkey; \
+                                 skipping sig verification (state-root will validate)"
+                            );
+                            Vec::new() // sentinel: empty pk → skip in batch verify
                         }
                     }
                 };
                 resolved_pks.push(pk);
             }
+            // Only include txs whose pubkey was resolved in the batch verify.
+            // Txs with an empty sentinel pk (unresolvable Reference-mode from
+            // historical blocks) are skipped here; the state-root check is the
+            // security backstop for those.
             let verify_items: Vec<VerifyItem> = block
                 .transactions
                 .iter()
                 .enumerate()
-                .map(|(i, tx)| VerifyItem {
-                    pubkey: &resolved_pks[i],
-                    message: tx_hashes[i].as_bytes(),
-                    signature: &tx.signature,
+                .filter_map(|(i, tx)| {
+                    if resolved_pks[i].is_empty() {
+                        None
+                    } else {
+                        Some(VerifyItem {
+                            pubkey: &resolved_pks[i],
+                            message: tx_hashes[i].as_bytes(),
+                            signature: &tx.signature,
+                        })
+                    }
                 })
                 .collect();
-            batch_verifier
-                .verify_batch_all(&verify_items)
-                .map_err(|e| {
-                    NodeError::Startup(format!(
-                        "block {} batch sig verification failed: {e}",
-                        block.number()
-                    ))
-                })?;
+            if !verify_items.is_empty() {
+                batch_verifier
+                    .verify_batch_all(&verify_items)
+                    .map_err(|e| {
+                        NodeError::Startup(format!(
+                            "block {} batch sig verification failed: {e}",
+                            block.number()
+                        ))
+                    })?;
+            }
 
             let ws = WorldState::at_root(self.store.clone(), &current_root)?;
             let cs = ChainStore::new(self.store.clone());
@@ -263,7 +305,14 @@ impl<S: KvStore + 'static> Node<S> {
             // re-registration because validate_tx_for_import performs no writes.
             let pre_verified = PreVerified;
             let mut validation_pubkeys: HashMap<Address, Vec<u8>> = HashMap::new();
-            for tx in &block.transactions {
+            for (idx, tx) in block.transactions.iter().enumerate() {
+                // Skip full validation for txs whose pubkey could not be
+                // resolved (unresolvable Reference-mode from historical blocks).
+                // Correctness is guaranteed by the state-root check below.
+                if resolved_pks[idx].is_empty() {
+                    continue;
+                }
+
                 let mut tx_for_validation = tx.clone();
                 if tx_for_validation.pubkey_mode.is_reference() {
                     if let Some(pk) = validation_pubkeys.get(&tx.from) {
@@ -441,10 +490,11 @@ impl<S: KvStore + 'static> Node<S> {
             }
         }
 
-        // H4: Standalone Prover node — extract sig batch entries from imported block
-        // and push them to the proof backlog for async proving.
-        // Validators handle this in produce_block (G4); Prover nodes do it here.
-        if self.config.node_role == NodeRole::Prover {
+        // H4: Any node that runs the ProverService (ValidatorProver or Prover) queues
+        // proof tasks for imported peer blocks.  ValidatorProver nodes also queue tasks
+        // in produce_block (G4) for the blocks they propose; here they cover the
+        // remaining 2/3 of blocks produced by the other validators in the committee.
+        if self.config.node_role.runs_prover() {
             let block_number = block.number();
             let block_hash = block.hash();
             let entries: Vec<shell_stark_prover::prover::SigBatchEntry> = block

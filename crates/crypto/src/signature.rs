@@ -5,18 +5,19 @@ use serde::{Deserialize, Serialize};
 /// Currently accepted PQ signature algorithms.
 ///
 /// Transactions using algorithms not in this list will be rejected by
-/// the validation pipeline. Both algorithms are accepted during the
-/// initial post-quantum migration; the list can be narrowed later to
-/// deprecate or block weaker algorithms.
-pub const ALLOWED_ALGORITHMS: &[SignatureType] =
-    &[SignatureType::Dilithium3, SignatureType::SphincsSha2256f];
+/// the validation pipeline.
+pub const ALLOWED_ALGORITHMS: &[SignatureType] = &[
+    SignatureType::Dilithium3,
+    SignatureType::MlDsa65,
+    SignatureType::SphincsSha2256f,
+];
 
 /// Maximum allowed signature size in bytes.
 /// SPHINCS+-SHA2-256f produces ~49856 bytes; we allow some headroom.
 pub const MAX_SIGNATURE_BYTES: usize = 51_200;
 
-/// Maximum allowed Dilithium3 signature size (3309 bytes + headroom).
-pub const MAX_DILITHIUM_SIG_BYTES: usize = 4_096;
+/// Maximum allowed ML-DSA-65 signature size (3309 bytes + headroom).
+pub const MAX_ML_DSA_65_SIG_BYTES: usize = 4_096;
 
 /// Identifies which PQ signature algorithm was used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -151,9 +152,8 @@ impl PQSignature {
     /// Validate that the signature size is within acceptable bounds.
     pub fn validate_size(&self) -> Result<(), String> {
         let max = match self.sig_type {
-            SignatureType::Dilithium3 => MAX_DILITHIUM_SIG_BYTES,
+            SignatureType::Dilithium3 | SignatureType::MlDsa65 => MAX_ML_DSA_65_SIG_BYTES,
             SignatureType::SphincsSha2256f => MAX_SIGNATURE_BYTES,
-            _ => MAX_SIGNATURE_BYTES,
         };
         if self.data.len() > max {
             return Err(format!(
@@ -247,6 +247,6 @@ mod tests {
     fn allowed_algorithms_contains_expected() {
         assert!(ALLOWED_ALGORITHMS.contains(&SignatureType::Dilithium3));
         assert!(ALLOWED_ALGORITHMS.contains(&SignatureType::SphincsSha2256f));
-        assert!(!ALLOWED_ALGORITHMS.contains(&SignatureType::MlDsa65));
+        assert!(ALLOWED_ALGORITHMS.contains(&SignatureType::MlDsa65));
     }
 }

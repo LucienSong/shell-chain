@@ -13,7 +13,7 @@ use shell_genesis::{
     initialize_authority_pubkeys, initialize_genesis, AllocEntry, ConsensusConfig, GenesisConfig,
     NetworkType,
 };
-use shell_keystore::{decrypt, EncryptedKey};
+use shell_keystore::{decrypt_any, EncryptedKey};
 use shell_mempool::MempoolConfig;
 use shell_network::{NetworkBus, NetworkConfig};
 use shell_node::config::ConsensusEngineConfig;
@@ -24,6 +24,8 @@ use shell_rpc::RpcConfig;
 use shell_storage::{ChainStore, KvStore, MemoryDb, WorldState};
 
 use tracing::{error, info, warn};
+
+use crate::password::{resolve_password, PasswordArgs};
 
 /// Aggregated CLI arguments for the `run` subcommand.
 #[allow(dead_code)]
@@ -74,10 +76,14 @@ pub struct RunArgs {
     pub body_retention: Option<u64>,
     /// High-level storage profile: "archive", "full", or "light".
     pub storage_profile: String,
-    /// Enable STARK aggregate proof generation during block production (off by default).
+    /// Enable STARK aggregate proof generation during block production (on by default).
     pub enable_stark_aggregation: bool,
     /// Consensus engine: "poa" (default) or "wpoa".
     pub consensus_engine: Option<String>,
+    /// Node role: "validator", "validator-prover", or "prover".
+    pub node_role: String,
+    /// Password source for keystore decryption.
+    pub password_args: PasswordArgs,
 }
 
 /// Maximum genesis file size: 10 MB (F-082).
@@ -318,12 +324,10 @@ async fn run_with_store<S: KvStore + 'static>(
             let unlocked_address = Address::parse(&encrypted.address)
                 .map_err(|e| format!("invalid keystore address '{}': {e}", encrypted.address))?;
 
-            eprint!("Enter keystore password: ");
-            let password = rpassword::read_password()?;
-
-            let signer = decrypt(&encrypted, password.as_bytes())?;
+            let password = resolve_password("Enter keystore password: ", &args.password_args)?;
+            let signer = decrypt_any(&encrypted, password.as_bytes())?;
             info!("Keystore unlocked: {unlocked_address}");
-            Arc::new(signer)
+            Arc::from(signer)
         }
         None => {
             let path = args.datadir.join(DEV_AUTHORITY_KEY_FILE);
@@ -458,9 +462,9 @@ async fn run_with_store<S: KvStore + 'static>(
     let max_future_secs = genesis_config.consensus.max_future_secs();
     let epoch_length = genesis_config.consensus.epoch_length();
 
-    // F4: validate network_type vs block_time_secs consistency, warn on mismatch.
+    // F4: validate network_type vs block_time_secs consistency, log at info on mismatch.
     if let Err(e) = genesis_config.validate_network_consistency() {
-        eprintln!("⚠️  Genesis warning: {e}");
+        info!("Block-time override: {e}");
     }
     // F4: use effective block time (explicit consensus value or network-type default).
     let block_time_secs = genesis_config.effective_block_time_secs();
@@ -482,17 +486,17 @@ async fn run_with_store<S: KvStore + 'static>(
                     .with_epoch_length(epoch_length)
             };
             let build_wpoa = || -> WPoaConfig {
-                let poa = match &genesis_config.consensus {
+                let base_poa = build_poa();
+                match &genesis_config.consensus {
                     ConsensusConfig::WPoA { weights, .. } => {
                         if weights.len() == authorities.len() {
-                            build_poa().with_weights(weights.clone())
+                            WPoaConfig::with_weights(base_poa, weights.clone())
                         } else {
-                            build_poa()
+                            WPoaConfig::from_poa(base_poa)
                         }
                     }
-                    _ => build_poa(),
-                };
-                WPoaConfig::from_poa(poa)
+                    _ => WPoaConfig::from_poa(base_poa),
+                }
             };
             match args.consensus_engine.as_deref() {
                 Some("wpoa") => ConsensusEngineConfig::WPoa(build_wpoa()),
@@ -579,7 +583,10 @@ async fn run_with_store<S: KvStore + 'static>(
             ..shell_node::config::ParallelEvmConfig::default()
         },
         enable_stark_aggregation: args.enable_stark_aggregation,
-        node_role: shell_node::config::NodeRole::default(),
+        node_role: args
+            .node_role
+            .parse::<shell_node::config::NodeRole>()
+            .map_err(|e| format!("invalid --node-role: {e}"))?,
     };
 
     // Build the node (auto-detects existing state via NodeBuilder).
@@ -789,6 +796,12 @@ mod tests {
             enable_stark_aggregation: false,
             network: "dev".into(),
             consensus_engine: None,
+            node_role: "validator".into(),
+            password_args: crate::password::PasswordArgs {
+                password_file: None,
+                password_stdin: false,
+                allow_env_password: false,
+            },
         };
 
         let expected = ParallelEvmConfig {

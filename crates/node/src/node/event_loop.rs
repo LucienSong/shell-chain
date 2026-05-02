@@ -100,6 +100,7 @@ impl<S: KvStore + 'static> Node<S> {
                 as Arc<
                     parking_lot::RwLock<dyn shell_consensus::ConsensusEngine>,
                 >), // W.6: wire consensus engine for shell_consensusInfo
+            Some(Arc::new(self.amendment_store.clone())), // STK.4: wire proof amendment store
         )
         .await
         .map_err(|e| NodeError::Startup(format!("RPC: {e}")))?;
@@ -113,6 +114,10 @@ impl<S: KvStore + 'static> Node<S> {
         self.log_pruning_banner();
 
         let mut block_timer = interval(Duration::from_millis(self.config.block_time_ms));
+        // Use Skip so missed ticks are discarded rather than burst-fired; prevents
+        // simultaneous multi-block production by multiple validators when the event
+        // loop is briefly delayed (e.g. startup sync, block import latency).
+        block_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut peer_count_timer = interval(Duration::from_secs(10));
         let mut sync_retry_timer = interval(Duration::from_secs(SYNC_RETRY_BASE_INTERVAL_SECS));
         let mut shutdown_rx = self.shutdown_tx.subscribe();
@@ -214,6 +219,10 @@ impl<S: KvStore + 'static> Node<S> {
                                 self.metrics.block_production_ms.observe(elapsed);
                                 self.metrics.blocks_imported.inc();
                                 self.metrics.block_height.set(block.number() as i64);
+                                self.metrics.update_finality(
+                                    block.number(),
+                                    self.finality.read().last_finalized_number(),
+                                );
                                 self.metrics.tx_pool_size.set(self.tx_pool.len() as i64);
 
                                 let number = block.number();
@@ -275,6 +284,8 @@ impl<S: KvStore + 'static> Node<S> {
 
                                 // W.5: When using wPoA, initialize the round state machine
                                 // for the block we just produced and broadcast our vote.
+                                // Also record our own vote locally so the proposer can
+                                // reach quorum without waiting for an echo of its own message.
                                 if self.consensus.read().engine_type() == EngineType::WPoA {
                                     let weights = self.consensus.read().validator_weights();
                                     let mut round = WPoaRound::new(number, 0, weights);
@@ -287,9 +298,12 @@ impl<S: KvStore + 'static> Node<S> {
                                                 block_hash,
                                                 block_number: number,
                                                 voter,
-                                                signature: pq_sig.data,
+                                                signature: pq_sig.clone(),
                                             };
                                             let _ = network.broadcast(vote_msg).await;
+                                            // Record own vote locally so proposer can reach
+                                            // quorum without waiting for its message to echo.
+                                            self.handle_wpoa_vote(voter, block_hash, number, pq_sig);
                                         }
                                     }
                                 }
@@ -356,7 +370,9 @@ impl<S: KvStore + 'static> Node<S> {
                                     let saved_header = block.header.clone();
                                     let saved_hash = block.hash();
                                     let imported_number = block.number();
-                                    match self.import_block(*block, &verifier) {
+                                    // Use block_in_place so the CPU-heavy rayon batch-verify
+                                    // inside import_block doesn't starve other async tasks.
+                                    match tokio::task::block_in_place(|| self.import_block(*block, &verifier)) {
                                         Ok(()) => {
                                             sync_requested = false;
                                             sync_retry_attempts_without_progress = 0;
@@ -365,6 +381,10 @@ impl<S: KvStore + 'static> Node<S> {
                                             ));
                                             self.metrics.blocks_imported.inc();
                                             self.metrics.block_height.set(imported_number as i64);
+                                            self.metrics.update_finality(
+                                                imported_number,
+                                                self.finality.read().last_finalized_number(),
+                                            );
                                             self.metrics.tx_pool_size.set(self.tx_pool.len() as i64);
 
                                             // Notify eth_subscribe listeners.
@@ -375,7 +395,7 @@ impl<S: KvStore + 'static> Node<S> {
                                                 .flatten()
                                                 .unwrap_or_default();
                                             if block_event_tx.send(BlockEvent::NewBlock {
-                                                header: saved_header,
+                                                header: saved_header.clone(),
                                                 receipts,
                                             }).is_err() {
                                                 tracing::warn!("no active subscribers for block events");
@@ -392,6 +412,52 @@ impl<S: KvStore + 'static> Node<S> {
                                                     Box::new(equivocation),
                                                 );
                                                 let _ = network.broadcast(msg).await;
+                                            }
+
+                                            // W.5: If wPoA is active and we're a validator,
+                                            // send our vote for the imported block.
+                                            // The proposer already cast its vote during block
+                                            // production; non-proposer validators vote here.
+                                            if self.consensus.read().engine_type() == EngineType::WPoA {
+                                                let weights = self.consensus.read().validator_weights();
+                                                // Initialize a round for this block if not already active.
+                                                {
+                                                    let mut round_guard = self.wpoa_round.lock();
+                                                    let needs_init = round_guard
+                                                        .as_ref()
+                                                        .map(|r| r.block_number != imported_number)
+                                                        .unwrap_or(true);
+                                                    if needs_init {
+                                                        let proposer = saved_header.proposer;
+                                                        let mut round = WPoaRound::new(imported_number, 0, weights);
+                                                        let _ = round.on_block_proposed(saved_hash, proposer);
+                                                        *round_guard = Some(round);
+                                                    }
+                                                }
+                                                if let Some(voter) = self.config.proposer_address {
+                                                    if let Ok(pq_sig) = signer.sign(saved_hash.as_bytes()) {
+                                                        let vote_msg = NetworkMessage::WPoaVote {
+                                                            block_hash: saved_hash,
+                                                            block_number: imported_number,
+                                                            voter,
+                                                            signature: pq_sig.clone(),
+                                                        };
+                                                        let _ = network.broadcast(vote_msg).await;
+                                                        // Record own vote locally; validators should not
+                                                        // depend on receiving an echo of their own broadcast.
+                                                        self.handle_wpoa_vote(
+                                                            voter,
+                                                            saved_hash,
+                                                            imported_number,
+                                                            pq_sig,
+                                                        );
+                                                        tracing::debug!(
+                                                            block_number = imported_number,
+                                                            %saved_hash,
+                                                            "W.5: validator cast vote for imported block"
+                                                        );
+                                                    }
+                                                }
                                             }
                                         }
                                         Err(NodeError::GapDetected { .. }) => {
@@ -421,15 +487,21 @@ impl<S: KvStore + 'static> Node<S> {
                                             self.metrics.tx_pool_size.set(self.tx_pool.len() as i64);
                                         }
                                         Err(e) => {
-                                            // MempoolError::Duplicate is expected for re-broadcast; don't log it as error.
+                                            // MempoolError::Duplicate and nonce-gap errors are
+                                            // high-frequency under load; suppress them to avoid
+                                            // blocking the event loop with eprintln! syscalls.
                                             let msg = format!("{e}");
-                                            if !msg.contains("duplicate") && !msg.contains("Duplicate") {
+                                            if !msg.contains("duplicate")
+                                                && !msg.contains("Duplicate")
+                                                && !msg.contains("nonce gap")
+                                                && !msg.contains("nonce too low")
+                                            {
                                                 eprintln!("⚠  Tx handling error: {e}");
                                             }
                                         }
                                     }
                                 }
-                                NetworkMessage::BlockRequest { start_number, count } => {
+                                NetworkMessage::BlockRequest { start_number, count, .. } => {
                                     const MAX_BLOCK_RESPONSE: u64 = 128;
                                     let safe_count = count.min(MAX_BLOCK_RESPONSE);
                                     debug!(
@@ -452,27 +524,68 @@ impl<S: KvStore + 'static> Node<S> {
                                             from = start_number,
                                             "responding with blocks"
                                         );
-                                        let resp = NetworkMessage::BlockResponse { blocks };
+                                        let nonce = std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .unwrap_or_default()
+                                            .as_nanos() as u64;
+                                        let commit_certificates = blocks
+                                            .iter()
+                                            .filter_map(|block| {
+                                                let hash = block.hash();
+                                                match self.chain_store.get_commit_certificate(&hash) {
+                                                    Ok(Some(cert)) => Some((hash, cert)),
+                                                    Ok(None) => None,
+                                                    Err(e) => {
+                                                        warn!(
+                                                            %hash,
+                                                            error = %e,
+                                                            "FF.7: failed to load commit certificate for BlockResponse"
+                                                        );
+                                                        None
+                                                    }
+                                                }
+                                            })
+                                            .collect();
+                                        let resp = NetworkMessage::BlockResponse {
+                                            blocks,
+                                            commit_certificates,
+                                            nonce,
+                                        };
                                         let _ = network.broadcast(resp).await;
                                     }
                                 }
-                                NetworkMessage::BlockResponse { blocks } => {
+                                NetworkMessage::BlockResponse { blocks, commit_certificates, .. } => {
                                     info!(
                                         count = blocks.len(),
                                         "received BlockResponse, importing blocks"
                                     );
                                     let verifier = MultiVerifier;
                                     let mut last_ok = 0u64;
+                                    let certs: HashMap<ShellHash, Vec<u8>> =
+                                        commit_certificates.into_iter().collect();
                                     for block in blocks {
                                         let num = block.number();
                                         let hdr = block.header.clone();
                                         let bhash = block.hash();
-                                        match self.import_block(block, &verifier) {
+                                        match tokio::task::block_in_place(|| self.import_block(block, &verifier)) {
                                             Ok(()) => {
                                                 last_ok = num;
                                                 self.metrics.blocks_imported.inc();
                                                 self.metrics.block_height.set(num as i64);
+                                                self.metrics.update_finality(
+                                                    num,
+                                                    self.finality.read().last_finalized_number(),
+                                                );
                                                 debug!(number = num, "synced block");
+                                                if let Some(cert) = certs.get(&bhash) {
+                                                    self.fast_finalize_with_certificate(
+                                                        num, bhash, cert,
+                                                    );
+                                                    self.metrics.update_finality(
+                                                        num,
+                                                        self.finality.read().last_finalized_number(),
+                                                    );
+                                                }
 
                                                 // Notify eth_subscribe listeners.
                                                 let receipts = self
@@ -501,9 +614,14 @@ impl<S: KvStore + 'static> Node<S> {
                                     // Request next batch if we imported blocks
                                     // (there may be more to catch up on).
                                     if last_ok > 0 {
+                                        let nonce = std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .unwrap_or_default()
+                                            .as_nanos() as u64;
                                         let req = NetworkMessage::BlockRequest {
                                             start_number: last_ok + 1,
-                                            count: 128,
+                                            count: 1, // 1 block at a time — PQ-signed blocks can be several MB
+                                            nonce,
                                         };
                                         let _ = network.broadcast(req).await;
                                         sync_requested = true;
@@ -512,7 +630,10 @@ impl<S: KvStore + 'static> Node<S> {
                                             SYNC_RETRY_BASE_INTERVAL_SECS,
                                         ));
                                     } else {
-                                        sync_requested = false;
+                                        // No blocks were imported (e.g. gap-rejected by a
+                                        // broadcast response intended for another peer).
+                                        // Do NOT clear sync_requested so the retry timer
+                                        // continues to fire and re-request the missing batch.
                                         sync_retry_attempts_without_progress = 0;
                                         sync_retry_timer.reset_after(Duration::from_secs(
                                             SYNC_RETRY_BASE_INTERVAL_SECS,
@@ -575,22 +696,19 @@ impl<S: KvStore + 'static> Node<S> {
                                     debug!(%peer, ?holder, "received ProofAck for block {}", block_hash);
                                 }
                                 // I1: Received equivocation evidence from a peer.
-                                // Independently verify and apply slashing if valid.
+                                // Independently verify and log; slashing is deferred until
+                                // the proposer-schedule epoch-boundary design is complete,
+                                // to prevent mid-chain validator-set corruption causing
+                                // cascading false-equivocation (wPoA stability fix).
                                 NetworkMessage::EquivocationEvidence(equivocation) => {
                                     if equivocation.verify() {
                                         warn!(
                                             offender = %equivocation.offender,
                                             block_number = equivocation.header_a.number,
-                                            "I1: equivocation evidence verified, slashing {}",
-                                            equivocation.offender
+                                            "I1: equivocation evidence verified (slashing deferred — epoch-boundary not implemented)"
                                         );
-                                        self.consensus
-                                            .write()
-                                            .slash_authority(&equivocation.offender);
-                                        warn!(
-                                            offender = %equivocation.offender,
-                                            "I1: authority slashed — excluded from future block production"
-                                        );
+                                        // TODO: apply slash_authority only at epoch boundary
+                                        // once ValidatorSet epoch transitions are in place.
                                     } else {
                                         warn!(%peer, "I1: received invalid equivocation evidence, ignoring");
                                     }

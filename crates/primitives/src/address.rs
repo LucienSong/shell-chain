@@ -72,28 +72,11 @@ impl Address {
 
     /// Parse a user-facing address string.
     ///
-    /// Accepts the canonical `pq1...` Bech32m format and legacy hex strings
-    /// (`0x...` or bare 40-hex form) during the migration window.
+    /// Only the canonical `pq1...` Bech32m format is accepted.
+    /// Legacy `0x` hex strings are rejected — use a migration tool to convert old addresses.
     pub fn parse(s: &str) -> Result<Self, PrimitivesError> {
-        if Self::looks_like_bech32m(s) {
-            let (addr, _) = Self::from_bech32m(s)?;
-            return Ok(addr);
-        }
-
-        Self::from_hex(s)
-    }
-
-    pub fn to_hex(&self) -> String {
-        format!("0x{}", hex::encode(self.0))
-    }
-
-    pub fn from_hex(s: &str) -> Result<Self, PrimitivesError> {
-        let trimmed = s
-            .strip_prefix("0x")
-            .or_else(|| s.strip_prefix("0X"))
-            .unwrap_or(s);
-        let bytes = hex::decode(trimmed)?;
-        Self::try_from_slice(&bytes)
+        let (addr, _) = Self::from_bech32m(s)?;
+        Ok(addr)
     }
 
     /// Try to construct from a byte slice, returning an error if length ≠ 20.
@@ -115,16 +98,11 @@ impl Address {
         let hash = hasher.finalize();
         Self::from_slice(&hash.as_bytes()[..20])
     }
-
-    fn looks_like_bech32m(s: &str) -> bool {
-        s.to_ascii_lowercase()
-            .starts_with(&format!("{}1", Self::BECH32_HRP))
-    }
 }
 
 impl fmt::Debug for Address {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Address(0x{})", hex::encode(self.0))
+        write!(f, "Address({})", self)
     }
 }
 
@@ -209,7 +187,7 @@ impl<'de> Deserialize<'de> for Address {
         D: Deserializer<'de>,
     {
         let raw = String::deserialize(deserializer)?;
-        Self::parse(&raw).map_err(D::Error::custom)
+        raw.parse::<Self>().map_err(D::Error::custom)
     }
 }
 
@@ -272,15 +250,36 @@ mod tests {
     }
 
     #[test]
-    fn address_hex_helpers_roundtrip() {
-        let addr = Address::from([0x34; 20]);
-        let encoded = addr.to_hex();
-
-        assert_eq!(Address::from_hex(&encoded).unwrap(), addr);
-        assert_eq!(
-            Address::from_hex(encoded.trim_start_matches("0x")).unwrap(),
-            addr
+    fn address_debug_uses_pq1() {
+        let addr = Address::from([0x01; 20]);
+        let dbg = format!("{addr:?}");
+        assert!(
+            dbg.starts_with("Address(pq1"),
+            "expected pq1 in debug: {dbg}"
         );
+        assert!(!dbg.contains("0x"), "debug must not contain 0x: {dbg}");
+    }
+
+    #[test]
+    fn address_serde_rejects_hex() {
+        let result: Result<Address, _> =
+            serde_json::from_str("\"0x0101010101010101010101010101010101010101\"");
+        assert!(result.is_err(), "serde must reject 0x hex address");
+    }
+
+    #[test]
+    fn address_parse_rejects_hex() {
+        let addr = Address::from([0x22; 20]);
+        assert!(
+            Address::parse(&format!("0x{}", hex::encode(addr.as_bytes()))).is_err(),
+            "parse must reject 0x hex"
+        );
+        assert!(
+            Address::parse(&hex::encode(addr.as_bytes())).is_err(),
+            "parse must reject bare hex"
+        );
+        // pq1 still works
+        assert_eq!(Address::parse(&addr.to_string()).unwrap(), addr);
     }
 
     #[test]
@@ -300,22 +299,9 @@ mod tests {
     }
 
     #[test]
-    fn address_serde_accepts_legacy_hex() {
-        let addr: Address =
-            serde_json::from_str("\"0x0101010101010101010101010101010101010101\"").unwrap();
-        assert_eq!(addr, Address::from([0x01; 20]));
-    }
-
-    #[test]
-    fn address_parse_accepts_bech32_and_legacy_hex() {
+    fn address_parse_accepts_bech32_only() {
         let addr = Address::from([0x22; 20]);
-
         assert_eq!(Address::parse(&addr.to_string()).unwrap(), addr);
-        assert_eq!(Address::parse(&addr.to_hex()).unwrap(), addr);
-        assert_eq!(
-            Address::parse(addr.to_hex().trim_start_matches("0x")).unwrap(),
-            addr
-        );
     }
 
     #[test]

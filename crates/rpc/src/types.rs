@@ -796,31 +796,12 @@ mod tests {
     }
 
     #[test]
-    fn call_request_accepts_legacy_hex_addresses() {
-        let req: CallRequest = serde_json::from_value(serde_json::json!({
+    fn call_request_rejects_hex_addresses() {
+        let result: Result<CallRequest, _> = serde_json::from_value(serde_json::json!({
             "from": "0x0000000000000000000000000000000000000001",
             "to": "0x0000000000000000000000000000000000000002",
-            "accessList": [
-                {
-                    "address": "0x0000000000000000000000000000000000000003",
-                    "storageKeys": []
-                }
-            ]
-        }))
-        .unwrap();
-
-        assert_eq!(
-            req.from,
-            Some(Address::from_hex("0x0000000000000000000000000000000000000001").unwrap())
-        );
-        assert_eq!(
-            req.to,
-            Some(Address::from_hex("0x0000000000000000000000000000000000000002").unwrap())
-        );
-        assert_eq!(
-            req.access_list.as_ref().unwrap()[0].address,
-            Address::from_hex("0x0000000000000000000000000000000000000003").unwrap()
-        );
+        }));
+        assert!(result.is_err(), "hex addresses must be rejected");
     }
 
     #[test]

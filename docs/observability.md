@@ -79,6 +79,8 @@ All metrics are prefixed `shell_`.
 | `shell_validator_active_count` | Gauge | — | Active validators in current epoch |
 | `shell_validator_weight` | Gauge | `validator` | Proposer weight per validator address |
 | `shell_consensus_slot_miss_total` | Counter | `validator` | Missed proposer slots per validator |
+| `shell_last_finalized_number` | Gauge | — | Latest block finalized by weighted wPoA quorum |
+| `shell_finality_lag_blocks` | Gauge | — | Difference between canonical head and latest finalized block |
 
 ### STARK prover (K4)
 

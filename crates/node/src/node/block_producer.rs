@@ -24,6 +24,53 @@ impl<S: KvStore + 'static> Node<S> {
             return Err(NodeError::NotProposer);
         }
 
+        // Guard against double-production: if we already have a canonical block at
+        // next_number (can happen if a peer's block arrived between timer tick and here),
+        // abort to avoid equivocation.
+        if self.chain_store.get_block_by_number(next_number)?.is_some() {
+            debug!(
+                next_number,
+                "canonical block already exists, skipping production"
+            );
+            return Err(NodeError::NotProposer);
+        }
+
+        // FF.5: Refuse to build on a parent that conflicts with the finalized chain.
+        // If the current head is below the last finalized number, or diverges from the
+        // finalized hash at that height, producing on top of it would create a fork off
+        // the finalized chain — reject to preserve safety.
+        {
+            let finality = self.finality.read();
+            let fin_number = finality.last_finalized_number();
+            if fin_number > 0 {
+                let head_number = head.number();
+                if head_number < fin_number {
+                    warn!(
+                        head_number,
+                        fin_number,
+                        "FF.5: head is below finalized number, refusing to produce block"
+                    );
+                    return Err(NodeError::ConflictsWithFinalized {
+                        incoming: head_number,
+                        fin_number,
+                    });
+                }
+                // If head is exactly at the finalized height, verify the hashes match.
+                if head_number == fin_number && head_hash != *finality.last_finalized_hash() {
+                    warn!(
+                        head_number,
+                        %head_hash,
+                        fin_hash = %finality.last_finalized_hash(),
+                        "FF.5: head hash diverges from finalized hash, refusing to produce block"
+                    );
+                    return Err(NodeError::ConflictsWithFinalized {
+                        incoming: head_number,
+                        fin_number,
+                    });
+                }
+            }
+        }
+
         // Collect pending transactions from mempool.
         let candidates = self.tx_pool.pending(max_txs);
 
@@ -181,42 +228,39 @@ impl<S: KvStore + 'static> Node<S> {
             proposer_seal: None,
         };
 
-        // C3: If STARK aggregation is enabled, generate a batch commitment proof
-        // over all transactions that carry embedded pubkeys (the source of bloat).
-        // G4: Collect signature entries and push to the proof backlog for async proving.
-        // Block production is no longer blocked waiting for a STARK proof.
-        // The background ProverService will generate the proof and store a ProofAmendment.
-        if self.stark_aggregation {
+        // C3: If STARK aggregation is enabled, collect sig batch entries now.
+        // G4: ProofTask pushed to backlog AFTER signing so we have the real block hash.
+        let stark_entries: Option<Vec<SigBatchEntry>> = if self.stark_aggregation {
             let entries: Vec<SigBatchEntry> = included_txs
                 .iter()
-                .filter_map(|tx| {
-                    if let shell_core::PubkeyMode::Embedded(ref pk) = tx.pubkey_mode {
-                        let mut msg_hash = [0u8; 32];
-                        msg_hash.copy_from_slice(tx.hash().as_bytes());
-                        let mut pk_hash = [0u8; 32];
-                        let copy_len = pk.len().min(32);
-                        pk_hash[..copy_len].copy_from_slice(&pk[..copy_len]);
-                        Some(SigBatchEntry { msg_hash, pk_hash })
-                    } else {
-                        None
-                    }
+                .map(|tx| {
+                    let mut msg_hash = [0u8; 32];
+                    msg_hash.copy_from_slice(tx.hash().as_bytes());
+                    let pk_hash = match &tx.pubkey_mode {
+                        shell_core::PubkeyMode::Embedded(ref pk) => {
+                            let mut h = [0u8; 32];
+                            let copy_len = pk.len().min(32);
+                            h[..copy_len].copy_from_slice(&pk[..copy_len]);
+                            h
+                        }
+                        shell_core::PubkeyMode::Reference => {
+                            // Use sender address bytes as pk identifier for Reference-mode txs.
+                            let mut h = [0u8; 32];
+                            h[..20].copy_from_slice(tx.from.0.as_slice());
+                            h
+                        }
+                    };
+                    SigBatchEntry { msg_hash, pk_hash }
                 })
                 .collect();
-
-            if !entries.is_empty() {
-                let block_num = block.header.number;
-                let mut hash_bytes = [0u8; 32];
-                // Use a placeholder hash — real hash assigned after signing below.
-                // The backlog task is updated by the ProverService on pop.
-                hash_bytes[..8].copy_from_slice(&block_num.to_be_bytes());
-                let mut backlog = self.proof_backlog.lock();
-                backlog.push(ProofTask::new(hash_bytes, block_num, entries));
-                debug!(
-                    block = block_num,
-                    "G4: proof task queued in backlog (async proving)"
-                );
+            if entries.is_empty() {
+                None
+            } else {
+                Some(entries)
             }
-        }
+        } else {
+            None
+        };
 
         // Sign the block with the proposer's key.
         self.consensus.read().sign_block(&mut block, signer)?;
@@ -226,6 +270,18 @@ impl<S: KvStore + 'static> Node<S> {
 
         // Commit to storage.
         let block_hash = block.hash();
+
+        // G4: Push proof task with real block hash (now available after signing).
+        if let Some(entries) = stark_entries {
+            let block_num = block.header.number;
+            let hash_bytes: [u8; 32] = *block_hash.as_bytes();
+            let mut backlog = self.proof_backlog.lock();
+            backlog.push(ProofTask::new(hash_bytes, block_num, entries));
+            debug!(
+                block = block_num,
+                "G4: proof task queued in backlog (async proving)"
+            );
+        }
         self.chain_store.put_block(&block)?;
         self.chain_store.put_receipts(&block_hash, &receipts)?;
         self.chain_store

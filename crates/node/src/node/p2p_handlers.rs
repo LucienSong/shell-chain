@@ -144,10 +144,38 @@ impl<S: KvStore + 'static> Node<S> {
         voter: Address,
         block_hash: ShellHash,
         block_number: u64,
-        signature: Vec<u8>,
+        sig: shell_crypto::PQSignature,
     ) {
-        let sig =
-            shell_crypto::PQSignature::new(shell_crypto::SignatureType::Dilithium3, signature);
+        // FF.6: Drop votes for blocks that have already been finalized at a different hash
+        // (stale or conflicting vote). Penalise the sender.
+        {
+            let finality = self.finality.read();
+            let fin_number = finality.last_finalized_number();
+            if fin_number > 0 && block_number <= fin_number {
+                // Check if the vote is for the same hash as the finalized block.
+                let fin_hash_at_height = self
+                    .chain_store
+                    .get_block_by_number(block_number)
+                    .ok()
+                    .flatten()
+                    .map(|b| b.hash());
+                if fin_hash_at_height.as_ref() != Some(&block_hash) {
+                    tracing::warn!(
+                        block_number,
+                        %block_hash,
+                        fin_number,
+                        %voter,
+                        "FF.6: vote for finalized block with wrong hash — dropping and penalising"
+                    );
+                    let peer_id = shell_consensus::ScoringPeerId::from(format!("{voter:?}"));
+                    self.peer_scorer
+                        .lock()
+                        .record_event(&peer_id, shell_consensus::PeerEvent::InvalidProofPayload);
+                    return;
+                }
+            }
+        }
+
         let mut guard = self.wpoa_round.lock();
         if let Some(ref mut round) = *guard {
             if round.block_number != block_number {
@@ -168,17 +196,90 @@ impl<S: KvStore + 'static> Node<S> {
                     } => {
                         tracing::info!(
                             %block_hash,
+                            block_number,
                             signers = quorum_signatures.len(),
                             "W.5: block committed with quorum"
                         );
                         // PS.1: reward all quorum signers.
-                        let mut scorer = self.peer_scorer.lock();
-                        for signer in quorum_signatures.keys() {
-                            let signer_id =
-                                shell_consensus::ScoringPeerId::from(format!("{signer:?}"));
-                            scorer.record_event(
-                                &signer_id,
-                                shell_consensus::PeerEvent::ValidProofDelivered,
+                        {
+                            let mut scorer = self.peer_scorer.lock();
+                            for signer in quorum_signatures.keys() {
+                                let signer_id =
+                                    shell_consensus::ScoringPeerId::from(format!("{signer:?}"));
+                                scorer.record_event(
+                                    &signer_id,
+                                    shell_consensus::PeerEvent::ValidProofDelivered,
+                                );
+                            }
+                        }
+                        // FF.1 / FF.3: Advance finality and persist.
+                        // The round state machine already verified weight-based quorum,
+                        // so BlockCommitted IS the finality signal.  Verify the block
+                        // is locally canonical before finalizing (safety guard).
+                        let locally_canonical = self
+                            .chain_store
+                            .get_block_by_number(block_number)
+                            .ok()
+                            .flatten()
+                            .map(|b| b.hash() == block_hash)
+                            .unwrap_or(false);
+
+                        if locally_canonical {
+                            let advanced = self
+                                .finality
+                                .write()
+                                .set_finalized_direct(block_number, block_hash);
+                            if advanced {
+                                let current_head = self
+                                    .chain_store
+                                    .get_head_block()
+                                    .ok()
+                                    .flatten()
+                                    .map(|b| b.number())
+                                    .unwrap_or(block_number);
+                                self.metrics.update_finality(current_head, block_number);
+                                tracing::info!(
+                                    block_number,
+                                    %block_hash,
+                                    "FF: block finalized"
+                                );
+                                if let Err(e) = self.chain_store.set_finalized_number(block_number)
+                                {
+                                    tracing::warn!(
+                                        block_number,
+                                        error = %e,
+                                        "FF: failed to persist finalized number"
+                                    );
+                                }
+                                // FF.2: Store commit certificate sidecar.
+                                match Self::encode_commit_certificate(&quorum_signatures) {
+                                    Ok(encoded) => {
+                                        if let Err(e) = self
+                                            .chain_store
+                                            .set_commit_certificate(&block_hash, &encoded)
+                                        {
+                                            tracing::warn!(
+                                                %block_hash,
+                                                error = %e,
+                                                "FF.2: failed to store commit certificate"
+                                            );
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            %block_hash,
+                                            error = %e,
+                                            "FF.2: failed to encode commit certificate"
+                                        );
+                                    }
+                                }
+                            }
+                        } else {
+                            tracing::warn!(
+                                block_number,
+                                %block_hash,
+                                "FF: BlockCommitted but block not locally canonical — \
+                                 finality deferred until block is imported"
                             );
                         }
                     }
@@ -201,6 +302,141 @@ impl<S: KvStore + 'static> Node<S> {
                 }
             }
         }
+    }
+
+    pub fn encode_commit_certificate(
+        quorum_signatures: &HashMap<Address, shell_crypto::PQSignature>,
+    ) -> Result<Vec<u8>, serde_json::Error> {
+        let cert: HashMap<String, shell_crypto::PQSignature> = quorum_signatures
+            .iter()
+            .map(|(addr, sig)| (addr.to_string(), sig.clone()))
+            .collect();
+        serde_json::to_vec(&cert)
+    }
+
+    fn parse_certificate_signer(raw: &str) -> Option<Address> {
+        if let Some(inner) = raw
+            .strip_prefix("Address(")
+            .and_then(|s| s.strip_suffix(')'))
+        {
+            inner.parse().ok()
+        } else {
+            raw.parse().ok()
+        }
+    }
+
+    fn decode_commit_certificate(
+        cert: &[u8],
+    ) -> Option<HashMap<Address, shell_crypto::PQSignature>> {
+        if let Ok(raw) = serde_json::from_slice::<HashMap<String, shell_crypto::PQSignature>>(cert)
+        {
+            return Some(
+                raw.into_iter()
+                    .filter_map(|(addr, sig)| {
+                        Self::parse_certificate_signer(&addr).map(|a| (a, sig))
+                    })
+                    .collect(),
+            );
+        }
+
+        // Legacy sidecars encoded {Address(...) -> sig_hex} and implicitly used Dilithium3.
+        let raw = serde_json::from_slice::<HashMap<String, String>>(cert).ok()?;
+        Some(
+            raw.into_iter()
+                .filter_map(|(addr, sig_hex)| {
+                    let addr = Self::parse_certificate_signer(&addr)?;
+                    let data = hex::decode(sig_hex).ok()?;
+                    Some((
+                        addr,
+                        shell_crypto::PQSignature::new(
+                            shell_crypto::SignatureType::Dilithium3,
+                            data,
+                        ),
+                    ))
+                })
+                .collect(),
+        )
+    }
+
+    pub fn fast_finalize_with_certificate(
+        &self,
+        block_number: u64,
+        block_hash: ShellHash,
+        cert: &[u8],
+    ) -> bool {
+        let Some(signatures) = Self::decode_commit_certificate(cert) else {
+            warn!(block_number, %block_hash, "FF.7: invalid commit certificate encoding");
+            return false;
+        };
+        let weights = self.consensus.read().validator_weights();
+        let total_weight: u64 = weights.values().sum();
+        let quorum = (2 * total_weight).div_ceil(3);
+        let verifier = MultiVerifier;
+        let mut signed_weight = 0u64;
+
+        for (signer, sig) in signatures {
+            let Some(weight) = weights.get(&signer).copied() else {
+                warn!(block_number, %block_hash, %signer, "FF.7: certificate contains non-validator signer");
+                return false;
+            };
+            let pubkey = self
+                .known_authorities
+                .read()
+                .get(&signer)
+                .cloned()
+                .or_else(|| self.chain_store.get_pubkey(&signer).ok().flatten());
+            let Some(pubkey) = pubkey else {
+                warn!(block_number, %block_hash, %signer, "FF.7: certificate signer pubkey unknown");
+                return false;
+            };
+            match verifier.verify(&pubkey, block_hash.as_bytes(), &sig) {
+                Ok(true) => signed_weight += weight,
+                Ok(false) => {
+                    warn!(block_number, %block_hash, %signer, "FF.7: invalid certificate signature");
+                    return false;
+                }
+                Err(e) => {
+                    warn!(block_number, %block_hash, %signer, error = %e, "FF.7: certificate signature verification failed");
+                    return false;
+                }
+            }
+        }
+
+        if signed_weight < quorum {
+            warn!(
+                block_number,
+                %block_hash,
+                signed_weight,
+                quorum,
+                "FF.7: certificate below quorum"
+            );
+            return false;
+        }
+
+        if let Err(e) = self.chain_store.set_commit_certificate(&block_hash, cert) {
+            warn!(block_number, %block_hash, error = %e, "FF.7: failed to persist commit certificate");
+            return false;
+        }
+        let advanced = self
+            .finality
+            .write()
+            .set_finalized_direct(block_number, block_hash);
+        if advanced {
+            if let Err(e) = self.chain_store.set_finalized_number(block_number) {
+                warn!(block_number, %block_hash, error = %e, "FF.7: failed to persist finalized number");
+                return false;
+            }
+            let current_head = self
+                .chain_store
+                .get_head_block()
+                .ok()
+                .flatten()
+                .map(|b| b.number())
+                .unwrap_or(block_number);
+            self.metrics.update_finality(current_head, block_number);
+            info!(block_number, %block_hash, "FF.7: fast-finalized block via commit certificate");
+        }
+        true
     }
 
     /// PS.2: Flush wPoA peer scorer to the network-level ban list.

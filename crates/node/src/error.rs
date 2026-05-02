@@ -25,6 +25,9 @@ pub enum NodeError {
     #[error("block gap detected: incoming #{incoming} but expected #{expected}")]
     GapDetected { incoming: u64, expected: u64 },
 
+    #[error("block #{incoming} conflicts with finalized chain (finalized up to #{fin_number})")]
+    ConflictsWithFinalized { incoming: u64, fin_number: u64 },
+
     #[error("startup failed: {0}")]
     Startup(String),
 }

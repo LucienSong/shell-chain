@@ -5,6 +5,9 @@
 //! - `run`           — start the node (block production + RPC + network)
 //! - `init`          — initialize genesis and data directory
 //! - `key generate`  — create a new encrypted keystore file
+//! - `key inspect`   — display keystore address (no password required)
+//! - `key migrate`   — migrate keystore to current v1 sk-only format
+//! - `genesis add-alloc` — add allocation entry to a genesis JSON file
 //! - `tx send|deploy|call` — transaction operations
 //! - `account list|balance|nonce` — account management
 //! - `wallet create|balance|send|export` — lightweight wallet UX
@@ -20,8 +23,10 @@ use tracing_subscriber::EnvFilter;
 
 mod commands;
 mod config;
+mod password;
 
 use config::ShellConfig;
+use password::PasswordArgs;
 
 #[derive(Parser)]
 #[command(
@@ -41,6 +46,22 @@ struct Cli {
     /// Log level filter (RUST_LOG style, e.g. "debug", "shell_node=trace").
     #[arg(long, global = true)]
     log_level: Option<String>,
+
+    /// Read keystore password from this file (first non-empty line).
+    /// Avoids interactive prompt; useful for CI and automation.
+    #[arg(long, global = true)]
+    password_file: Option<PathBuf>,
+
+    /// Read keystore password from stdin (one line, no echo).
+    /// Pipe the password: `echo "pw" | shell-node key generate --password-stdin`.
+    #[arg(long, global = true, default_value = "false")]
+    password_stdin: bool,
+
+    /// Allow reading the keystore password from the SHELL_KEYSTORE_PASSWORD
+    /// environment variable. Must be opted-in explicitly; never active by default.
+    /// Example: `SHELL_KEYSTORE_PASSWORD=pw shell-node --allow-env-password key generate`.
+    #[arg(long, global = true, default_value = "false")]
+    allow_env_password: bool,
 
     #[command(subcommand)]
     command: Commands,
@@ -207,13 +228,24 @@ enum Commands {
         body_retention: Option<u64>,
 
         /// Enable STARK aggregate proof generation during block production.
-        /// WARNING: expensive (~150ms per block). Off by default.
-        #[arg(long, default_value = "false")]
+        /// WARNING: expensive (~150ms per block). On by default for testnet.
+        #[arg(long, default_value = "true")]
         enable_stark_aggregation: bool,
 
         /// Consensus engine: "poa" (default) or "wpoa".
         #[arg(long)]
         consensus_engine: Option<String>,
+
+        /// Node role: "validator" (default), "validator-prover", or "prover".
+        ///
+        ///   validator        — produces blocks only (no STARK proof work).
+        ///   validator-prover — produces blocks AND runs the background ProverService.
+        ///   prover           — no block production; dedicated proof work only.
+        ///
+        /// Use "validator-prover" when --enable-stark-aggregation is set to
+        /// actually generate and commit STARK proofs.
+        #[arg(long, default_value = "validator")]
+        node_role: String,
     },
 
     /// Initialize genesis block and data directory.
@@ -235,6 +267,12 @@ enum Commands {
     Key {
         #[command(subcommand)]
         action: KeyCommands,
+    },
+
+    /// Genesis file management utilities.
+    Genesis {
+        #[command(subcommand)]
+        action: GenesisCommands,
     },
 
     /// Export chain state to a snapshot file.
@@ -307,23 +345,73 @@ enum BackupCommands {
 
 #[derive(Subcommand)]
 enum KeyCommands {
-    /// Generate a new Dilithium3 keypair and save as encrypted keystore.
+    /// Generate a new PQ keypair and save as encrypted keystore.
     Generate {
         /// Output path for the keystore file.
         #[arg(long, default_value = "keystore.json")]
         output: PathBuf,
+
+        /// PQ algorithm to use: `dilithium3` (default) or `mldsa65` (FIPS 204).
+        #[arg(long, default_value = "dilithium3")]
+        algorithm: String,
     },
 
-    /// Display the address of a keystore file.
+    /// Inspect the address of a keystore file (no password required).
     Inspect {
         /// Path to the keystore file.
         path: PathBuf,
+    },
+
+    /// Migrate a keystore to the current v1 sk-only format.
+    ///
+    /// Use this if you have keystores produced by shell-sdk < 0.6.0 (sk‖pk ciphertext).
+    /// Decrypts with the current password and re-encrypts using the v1 sk-only format.
+    Migrate {
+        /// Input keystore path (source).
+        #[arg(long)]
+        input: PathBuf,
+
+        /// Output keystore path (destination).
+        #[arg(long)]
+        output: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum GenesisCommands {
+    /// Add an allocation entry to a genesis JSON file.
+    ///
+    /// Reads the genesis file, inserts (or updates) the `alloc` entry for the
+    /// given address with the specified balance, and writes the file back.
+    AddAlloc {
+        /// Path to genesis.json to modify (modified in-place unless --output is set).
+        #[arg(long)]
+        genesis: PathBuf,
+
+        /// Shell-chain address to add (hex or pq1… bech32).
+        #[arg(long)]
+        address: String,
+
+        /// Balance in wei (e.g. 1000000000000000000 for 1 SHELL).
+        #[arg(long)]
+        balance: String,
+
+        /// Write output to this file instead of modifying genesis in-place.
+        #[arg(long)]
+        output: Option<PathBuf>,
     },
 }
 
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
+
+    // Build password args from global flags (used by key/run/tx subcommands).
+    let password_args = PasswordArgs {
+        password_file: cli.password_file,
+        password_stdin: cli.password_stdin,
+        allow_env_password: cli.allow_env_password,
+    };
 
     // Build env filter: --log-level flag > RUST_LOG env var > "info" default.
     let filter = match &cli.log_level {
@@ -398,6 +486,7 @@ async fn main() {
             body_retention,
             enable_stark_aggregation,
             consensus_engine,
+            node_role,
         } => {
             // Load config file if specified (CLI args override file values).
             let file_config = match &config_path {
@@ -551,6 +640,8 @@ async fn main() {
                 body_retention,
                 enable_stark_aggregation,
                 consensus_engine,
+                node_role,
+                password_args: password_args.clone(),
             })
             .await
         }
@@ -560,8 +651,21 @@ async fn main() {
             network,
         } => commands::init(cli.datadir, genesis, chain_id, network),
         Commands::Key { action } => match action {
-            KeyCommands::Generate { output } => commands::key_generate(output),
+            KeyCommands::Generate { output, algorithm } => {
+                commands::key_generate(output, password_args, algorithm)
+            }
             KeyCommands::Inspect { path } => commands::key_inspect(path),
+            KeyCommands::Migrate { input, output } => {
+                commands::key_migrate(input, output, &password_args)
+            }
+        },
+        Commands::Genesis { action } => match action {
+            GenesisCommands::AddAlloc {
+                genesis,
+                address,
+                balance,
+                output,
+            } => commands::genesis_add_alloc(genesis, address, balance, output),
         },
         Commands::ExportState { block, output } => {
             commands::export_state(cli.datadir, output, block)
@@ -569,9 +673,9 @@ async fn main() {
         Commands::ImportState { snapshot } => commands::import_state(cli.datadir, snapshot),
         Commands::Removedb { force } => commands::removedb(cli.datadir, force),
         Commands::Version => commands::version(),
-        Commands::Tx { command } => commands::tx::execute(command),
+        Commands::Tx { command } => commands::tx::execute(command, password_args),
         Commands::Account { command } => commands::account::execute(command),
-        Commands::Wallet { command } => commands::wallet::execute(command),
+        Commands::Wallet { command } => commands::wallet::execute(command, password_args),
         Commands::Backup { command } => match command {
             BackupCommands::Create { output } => commands::create_backup(cli.datadir, output),
             BackupCommands::Restore { backup_path } => {

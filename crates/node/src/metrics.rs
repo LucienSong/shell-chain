@@ -18,6 +18,10 @@ use prometheus::{
 pub struct Metrics {
     /// Current block height.
     pub block_height: IntGauge,
+    /// Latest finalized block number.
+    pub last_finalized_number: IntGauge,
+    /// Difference between current head and latest finalized block.
+    pub finality_lag_blocks: IntGauge,
     /// Number of connected peers.
     pub peer_count: IntGauge,
     /// Number of pending transactions in the mempool.
@@ -82,6 +86,14 @@ impl Metrics {
 
         let block_height =
             IntGauge::with_opts(Opts::new("shell_block_height", "Current block height"))?;
+        let last_finalized_number = IntGauge::with_opts(Opts::new(
+            "shell_last_finalized_number",
+            "Latest finalized block number",
+        ))?;
+        let finality_lag_blocks = IntGauge::with_opts(Opts::new(
+            "shell_finality_lag_blocks",
+            "Difference between current head and latest finalized block",
+        ))?;
         let peer_count =
             IntGauge::with_opts(Opts::new("shell_peer_count", "Number of connected peers"))?;
         let tx_pool_size = IntGauge::with_opts(Opts::new(
@@ -172,6 +184,8 @@ impl Metrics {
         )?;
 
         registry.register(Box::new(block_height.clone()))?;
+        registry.register(Box::new(last_finalized_number.clone()))?;
+        registry.register(Box::new(finality_lag_blocks.clone()))?;
         registry.register(Box::new(peer_count.clone()))?;
         registry.register(Box::new(tx_pool_size.clone()))?;
         registry.register(Box::new(block_production_ms.clone()))?;
@@ -192,6 +206,8 @@ impl Metrics {
 
         Ok(Self {
             block_height,
+            last_finalized_number,
+            finality_lag_blocks,
             peer_count,
             tx_pool_size,
             block_production_ms,
@@ -224,6 +240,13 @@ impl Metrics {
             return String::new();
         }
         String::from_utf8(buffer).unwrap_or_default()
+    }
+
+    /// Update finality gauges from the current canonical head/finality pair.
+    pub fn update_finality(&self, current_head: u64, finalized: u64) {
+        self.last_finalized_number.set(finalized as i64);
+        self.finality_lag_blocks
+            .set(current_head.saturating_sub(finalized) as i64);
     }
 
     /// Update validator weight metric for a single validator.
@@ -418,6 +441,8 @@ mod tests {
     fn metrics_new_creates_valid_instance() {
         let m = Metrics::new().expect("metrics init");
         assert_eq!(m.block_height.get(), 0);
+        assert_eq!(m.last_finalized_number.get(), 0);
+        assert_eq!(m.finality_lag_blocks.get(), 0);
         assert_eq!(m.peer_count.get(), 0);
         assert_eq!(m.tx_pool_size.get(), 0);
         assert_eq!(m.blocks_imported.get(), 0);
@@ -428,6 +453,7 @@ mod tests {
     fn gather_returns_prometheus_text_format() {
         let m = Metrics::new().expect("metrics init");
         m.block_height.set(42);
+        m.update_finality(42, 40);
         m.blocks_imported.inc();
 
         let output = m.gather();
@@ -438,6 +464,14 @@ mod tests {
         assert!(
             output.contains("shell_blocks_imported_total 1"),
             "should contain blocks_imported metric"
+        );
+        assert!(
+            output.contains("shell_last_finalized_number 40"),
+            "should contain last_finalized_number metric"
+        );
+        assert!(
+            output.contains("shell_finality_lag_blocks 2"),
+            "should contain finality_lag_blocks metric"
         );
         assert!(
             output.contains("shell_peer_count"),
