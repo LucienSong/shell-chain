@@ -14,6 +14,58 @@ impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
         Ok(hex_u64(self.tx_pool.len() as u64))
     }
 
+    async fn shell_get_block_by_number(
+        &self,
+        number: String,
+        tx_detail: Option<String>,
+    ) -> Result<Option<RpcBlock>, ErrorObjectOwned> {
+        let detail = parse_block_tx_detail(tx_detail.as_deref())?;
+        let tag = parse_block_tag(&number)?;
+        let block = match tag {
+            BlockTag::Finalized => {
+                let n = *self.finalized_number.read();
+                self.chain_store
+                    .get_block_by_number(n)
+                    .map_err(internal_err)?
+            }
+            BlockTag::Number(n) => self
+                .chain_store
+                .get_block_by_number(n)
+                .map_err(internal_err)?,
+            BlockTag::Latest | BlockTag::Pending => {
+                self.chain_store.get_head_block().map_err(internal_err)?
+            }
+        };
+
+        Ok(block.as_ref().map(|b| {
+            let mut rpc = block_to_rpc_with_detail(b, detail);
+            if detail.include_stark_proof() {
+                self.fill_stark_proof(&b.hash(), &mut rpc);
+            }
+            rpc
+        }))
+    }
+
+    async fn shell_get_block_by_hash(
+        &self,
+        hash: ShellHash,
+        tx_detail: Option<String>,
+    ) -> Result<Option<RpcBlock>, ErrorObjectOwned> {
+        let detail = parse_block_tx_detail(tx_detail.as_deref())?;
+        let block = self
+            .chain_store
+            .get_block_by_hash(&hash)
+            .map_err(internal_err)?;
+
+        Ok(block.as_ref().map(|b| {
+            let mut rpc = block_to_rpc_with_detail(b, detail);
+            if detail.include_stark_proof() {
+                self.fill_stark_proof(&hash, &mut rpc);
+            }
+            rpc
+        }))
+    }
+
     async fn send_transaction(&self, tx: SignedTransaction) -> Result<ShellHash, ErrorObjectOwned> {
         self.submit_tx(tx)
     }

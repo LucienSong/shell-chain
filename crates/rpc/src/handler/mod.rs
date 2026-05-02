@@ -741,12 +741,39 @@ pub(crate) fn validate_block_is_latest(s: &str) -> Result<(), ErrorObjectOwned> 
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BlockTxDetail {
+    Hashes,
+    Summary,
+    Full,
+}
+
+impl BlockTxDetail {
+    fn include_stark_proof(self) -> bool {
+        matches!(self, Self::Hashes | Self::Full)
+    }
+}
+
+pub(crate) fn parse_block_tx_detail(
+    tx_detail: Option<&str>,
+) -> Result<BlockTxDetail, ErrorObjectOwned> {
+    match tx_detail.unwrap_or("hashes") {
+        "hashes" | "hash" | "false" => Ok(BlockTxDetail::Hashes),
+        "summary" | "light" | "lite" => Ok(BlockTxDetail::Summary),
+        "full" | "true" => Ok(BlockTxDetail::Full),
+        other => Err(invalid_params_err(format!(
+            "invalid tx detail mode '{other}', expected hashes, summary, or full"
+        ))),
+    }
+}
+
 /// Convert a core Block to an RpcBlock response.
 ///
-/// When `full_txs` is true the `transactions` array contains full
-/// [`RpcTransaction`] objects (as required by `eth_getBlockByNumber` /
-/// `eth_getBlockByHash`).  When false it contains only transaction hashes.
-pub(crate) fn block_to_rpc(block: &Block, full_txs: bool) -> RpcBlock {
+/// `Hashes` and `Full` match Ethereum-compatible `eth_getBlockByNumber` /
+/// `eth_getBlockByHash` semantics. `Summary` is a Shell extension for explorers:
+/// it includes row-ready transaction metadata but strips signatures, full input
+/// data, and STARK aggregate proof bytes.
+pub(crate) fn block_to_rpc_with_detail(block: &Block, detail: BlockTxDetail) -> RpcBlock {
     // F-074: approximate block size from RLP-encoded lengths.
     let header_size = block.header.length();
     let tx_size: usize = block.transactions.iter().map(|tx| tx.length()).sum();
@@ -759,8 +786,8 @@ pub(crate) fn block_to_rpc(block: &Block, full_txs: bool) -> RpcBlock {
         format!("0x{}", "00".repeat(BLOOM_SIZE))
     };
 
-    let transactions = if full_txs {
-        serde_json::to_value(
+    let transactions = match detail {
+        BlockTxDetail::Full => serde_json::to_value(
             block
                 .transactions
                 .iter()
@@ -776,16 +803,31 @@ pub(crate) fn block_to_rpc(block: &Block, full_txs: bool) -> RpcBlock {
                 })
                 .collect::<Vec<_>>(),
         )
-        .unwrap_or_default()
-    } else {
-        serde_json::to_value(
+        .unwrap_or_default(),
+        BlockTxDetail::Summary => serde_json::to_value(
+            block
+                .transactions
+                .iter()
+                .enumerate()
+                .map(|(i, tx)| {
+                    tx_to_rpc_summary(
+                        tx,
+                        Some(block.hash()),
+                        Some(block.header.number),
+                        Some(i as u32),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        )
+        .unwrap_or_default(),
+        BlockTxDetail::Hashes => serde_json::to_value(
             block
                 .transactions
                 .iter()
                 .map(|tx| tx.hash())
                 .collect::<Vec<ShellHash>>(),
         )
-        .unwrap_or_default()
+        .unwrap_or_default(),
     };
 
     RpcBlock {
@@ -820,12 +862,27 @@ pub(crate) fn block_to_rpc(block: &Block, full_txs: bool) -> RpcBlock {
             .sig_aggregate_proof
             .as_ref()
             .map(|p| p.len() as u64),
-        sig_aggregate_proof: block
-            .header
-            .sig_aggregate_proof
-            .as_ref()
-            .map(|p| hex_bytes(p.as_ref())),
+        sig_aggregate_proof: if detail.include_stark_proof() {
+            block
+                .header
+                .sig_aggregate_proof
+                .as_ref()
+                .map(|p| hex_bytes(p.as_ref()))
+        } else {
+            None
+        },
     }
+}
+
+pub(crate) fn block_to_rpc(block: &Block, full_txs: bool) -> RpcBlock {
+    block_to_rpc_with_detail(
+        block,
+        if full_txs {
+            BlockTxDetail::Full
+        } else {
+            BlockTxDetail::Hashes
+        },
+    )
 }
 
 /// Convert a SignedTransaction to an RpcTransaction response.
@@ -874,6 +931,25 @@ pub(crate) fn tx_to_rpc(
         }),
         max_fee_per_blob_gas: tx.tx.max_fee_per_blob_gas.map(hex_u64),
         blob_versioned_hashes: tx.tx.blob_versioned_hashes.clone(),
+    }
+}
+
+pub(crate) fn tx_to_rpc_summary(
+    tx: &SignedTransaction,
+    block_hash: Option<ShellHash>,
+    block_number: Option<u64>,
+    tx_index: Option<u32>,
+) -> RpcTransactionSummary {
+    RpcTransactionSummary {
+        hash: tx.hash(),
+        block_hash,
+        block_number: block_number.map(hex_u64),
+        transaction_index: tx_index.map(|i| hex_u64(i as u64)),
+        from: tx.sender(),
+        to: tx.tx.to,
+        value: hex_u256(tx.tx.value),
+        tx_type: format!("{:#x}", tx.tx.tx_type),
+        has_input: !tx.tx.data.is_empty(),
     }
 }
 

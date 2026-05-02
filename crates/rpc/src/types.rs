@@ -90,6 +90,27 @@ pub struct RpcTransaction {
     pub blob_versioned_hashes: Option<Vec<ShellHash>>,
 }
 
+/// Lightweight transaction response for explorer block rows.
+///
+/// This intentionally excludes signature compatibility fields (`v/r/s`), full
+/// calldata, access lists, blob fields, and other heavy data. `hasInput` lets
+/// clients distinguish simple transfers from contract calls without receiving
+/// the full input payload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcTransactionSummary {
+    pub hash: ShellHash,
+    pub block_hash: Option<ShellHash>,
+    pub block_number: Option<String>,
+    pub transaction_index: Option<String>,
+    pub from: Address,
+    pub to: Option<Address>,
+    pub value: String,
+    #[serde(rename = "type")]
+    pub tx_type: String,
+    pub has_input: bool,
+}
+
 /// EIP-2930 access list item for RPC responses.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
