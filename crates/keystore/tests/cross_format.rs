@@ -8,12 +8,11 @@
 //! Password: "fixture-password-42"
 //! Generated with: shell-sdk Node.js script using argon2id(t_cost=2) + XChaCha20-Poly1305.
 
-use shell_keystore::{decrypt_any, decrypt_mldsa};
-use shell_keystore::EncryptedKey;
 use shell_crypto::Signer;
+use shell_keystore::EncryptedKey;
+use shell_keystore::{decrypt_any, decrypt_mldsa};
 
-const FIXTURE_JSON: &str =
-    include_str!("fixtures/sdk-keystore-mldsa65.json");
+const FIXTURE_JSON: &str = include_str!("fixtures/sdk-keystore-mldsa65.json");
 
 const PASSWORD: &[u8] = b"fixture-password-42";
 
@@ -27,7 +26,10 @@ fn ks4_sdk_fixture_parses() {
     assert_eq!(ek.version, 1, "fixture version must be 1");
     assert_eq!(ek.key_type, "mldsa65", "fixture key_type must be mldsa65");
     assert_eq!(ek.kdf, "argon2id", "fixture kdf must be argon2id");
-    assert_eq!(ek.cipher, "xchacha20-poly1305", "fixture cipher must be xchacha20-poly1305");
+    assert_eq!(
+        ek.cipher, "xchacha20-poly1305",
+        "fixture cipher must be xchacha20-poly1305"
+    );
     assert!(
         ek.address.starts_with("pq1"),
         "SDK keystore address must start with pq1 (F-PQ1-ONLY)",
@@ -37,8 +39,8 @@ fn ks4_sdk_fixture_parses() {
 #[test]
 fn ks4_decrypt_mldsa_decrypts_sdk_keystore() {
     let ek = load_fixture();
-    let signer = decrypt_mldsa(&ek, PASSWORD)
-        .expect("decrypt_mldsa must succeed with correct password");
+    let signer =
+        decrypt_mldsa(&ek, PASSWORD).expect("decrypt_mldsa must succeed with correct password");
 
     // ML-DSA-65 public key: 1952 bytes
     assert_eq!(
@@ -57,8 +59,7 @@ fn ks4_decrypt_mldsa_decrypts_sdk_keystore() {
 #[test]
 fn ks4_decrypt_any_dispatches_to_mldsa() {
     let ek = load_fixture();
-    let signer = decrypt_any(&ek, PASSWORD)
-        .expect("decrypt_any must succeed for mldsa65 key_type");
+    let signer = decrypt_any(&ek, PASSWORD).expect("decrypt_any must succeed for mldsa65 key_type");
 
     assert_eq!(signer.public_key().len(), 1952);
 }
@@ -75,8 +76,7 @@ fn ks4_decrypted_key_address_matches_fixture() {
     let derived_pq1 = derived.to_string();
 
     assert_eq!(
-        derived_pq1,
-        ek.address,
+        derived_pq1, ek.address,
         "address derived from decrypted pk must match SDK-stored address",
     );
 }
@@ -111,12 +111,18 @@ fn ks4_mldsa_sign_and_verify() {
     let pq_sig = signer.sign(message).expect("signing must succeed");
 
     // ML-DSA-65 signature: 3309 bytes
-    assert_eq!(pq_sig.data.len(), 3309, "ML-DSA-65 signature must be 3309 bytes");
+    assert_eq!(
+        pq_sig.data.len(),
+        3309,
+        "ML-DSA-65 signature must be 3309 bytes"
+    );
 
     // Verify with the stateless MlDsaVerifier
     let verifier = MlDsaVerifier;
     assert!(
-        verifier.verify(signer.public_key(), message, &pq_sig).unwrap(),
+        verifier
+            .verify(signer.public_key(), message, &pq_sig)
+            .unwrap(),
         "MlDsaVerifier must verify signature from SDK-decrypted key",
     );
 }

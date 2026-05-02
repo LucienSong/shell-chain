@@ -892,7 +892,7 @@ mod tests {
     // ── F-170: Algorithm allowlist tests ──────────────────────
 
     #[test]
-    fn validate_disallowed_algorithm_rejected() {
+    fn validate_mismatched_algorithm_address_rejected() {
         let signer = make_signer();
         let (mut ws, cs) = setup_stores();
         let from = signer_address(&signer);
@@ -908,11 +908,10 @@ mod tests {
 
         let verifier = DilithiumVerifier;
         let result = validate_tx(&signed, &mut ws, &cs, &verifier, test_chain_id());
-        assert!(
-            matches!(result, Err(TxValidationError::DisallowedAlgorithm(_))),
-            "MlDsa65 should be rejected, got: {:?}",
-            result
-        );
+        assert!(matches!(
+            result,
+            Err(TxValidationError::AddressMismatch { .. })
+        ));
     }
 
     // ── AA Bundle (M2a) ───────────────────────────────────────

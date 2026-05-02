@@ -86,7 +86,10 @@ pub enum TxCommand {
 }
 
 /// Execute a transaction subcommand.
-pub fn execute(cmd: TxCommand, password_args: PasswordArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub fn execute(
+    cmd: TxCommand,
+    password_args: PasswordArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
     match cmd {
         TxCommand::Send {
             to,
@@ -96,7 +99,18 @@ pub fn execute(cmd: TxCommand, password_args: PasswordArgs) -> Result<(), Box<dy
             chain_id,
             nonce,
             gas_limit,
-        } => cmd_send(to, value, keystore, rpc_url, chain_id, nonce, gas_limit, &password_args),
+        } => cmd_send(
+            SendArgs {
+                to,
+                value,
+                keystore,
+                rpc_url,
+                chain_id,
+                nonce,
+                gas_limit,
+            },
+            &password_args,
+        ),
         TxCommand::Deploy {
             code,
             keystore,
@@ -112,7 +126,7 @@ pub fn execute(cmd: TxCommand, password_args: PasswordArgs) -> Result<(), Box<dy
 // Send
 // ---------------------------------------------------------------------------
 
-fn cmd_send(
+struct SendArgs {
     to: String,
     value: String,
     keystore: PathBuf,
@@ -120,8 +134,22 @@ fn cmd_send(
     chain_id: Option<u64>,
     nonce: Option<u64>,
     gas_limit: Option<u64>,
+}
+
+fn cmd_send(
+    args: SendArgs,
     password_args: &PasswordArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let SendArgs {
+        to,
+        value,
+        keystore,
+        rpc_url,
+        chain_id,
+        nonce,
+        gas_limit,
+    } = args;
+
     let signer = load_keystore(&keystore, password_args)?;
     let from = Address::from_public_key(signer.public_key(), signer.sig_type().as_u8());
     let to_addr = parse_address(&to)?;
@@ -266,7 +294,10 @@ fn cmd_call(
 // ---------------------------------------------------------------------------
 
 /// Load a keystore file and decrypt the signer.
-fn load_keystore(path: &PathBuf, password_args: &PasswordArgs) -> Result<Box<dyn Signer>, Box<dyn std::error::Error>> {
+fn load_keystore(
+    path: &PathBuf,
+    password_args: &PasswordArgs,
+) -> Result<Box<dyn Signer>, Box<dyn std::error::Error>> {
     if !path.exists() {
         return Err(format!("keystore file not found: {}", path.display()).into());
     }

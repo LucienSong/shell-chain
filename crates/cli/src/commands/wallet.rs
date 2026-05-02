@@ -70,9 +70,14 @@ pub enum WalletCommand {
     },
 }
 
-pub fn execute(cmd: WalletCommand, password_args: PasswordArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub fn execute(
+    cmd: WalletCommand,
+    password_args: PasswordArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
     match cmd {
-        WalletCommand::Create { output } => key::key_generate(output, password_args, "dilithium3".into()),
+        WalletCommand::Create { output } => {
+            key::key_generate(output, password_args, "dilithium3".into())
+        }
         WalletCommand::Balance { address, rpc_url } => {
             account::execute(account::AccountCommand::Balance { address, rpc_url })
         }
@@ -84,15 +89,18 @@ pub fn execute(cmd: WalletCommand, password_args: PasswordArgs) -> Result<(), Bo
             chain_id,
             nonce,
             gas_limit,
-        } => tx::execute(tx::TxCommand::Send {
-            to,
-            value,
-            keystore,
-            rpc_url,
-            chain_id,
-            nonce,
-            gas_limit,
-        }, password_args),
+        } => tx::execute(
+            tx::TxCommand::Send {
+                to,
+                value,
+                keystore,
+                rpc_url,
+                chain_id,
+                nonce,
+                gas_limit,
+            },
+            password_args,
+        ),
         WalletCommand::Export { keystore, output } => cmd_export(keystore, output),
     }
 }

@@ -2,8 +2,10 @@
 
 use std::path::PathBuf;
 
-use shell_crypto::{DilithiumSigner, MlDsaSigner, Signer, SignatureType};
-use shell_keystore::{decrypt, decrypt_mldsa, encrypt, encrypt_mldsa, EncryptedKey};
+use shell_crypto::{DilithiumSigner, MlDsaSigner, SignatureType, Signer};
+use shell_keystore::{
+    decrypt, decrypt_mldsa, decrypt_sphincs, encrypt, encrypt_mldsa, encrypt_sphincs, EncryptedKey,
+};
 use shell_primitives::Address;
 
 use tracing::info;
@@ -40,7 +42,9 @@ pub fn key_generate(
             (encrypted, pubkey_hex, address)
         }
         other => {
-            return Err(format!("unsupported algorithm: {other}; valid: dilithium3, mldsa65").into());
+            return Err(
+                format!("unsupported algorithm: {other}; valid: dilithium3, mldsa65").into(),
+            );
         }
     };
 
@@ -66,10 +70,7 @@ pub fn key_inspect(path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 
     // Derive canonical pq1 address from the stored public key (works for both
     // old hex-format keystores and new pq1-format keystores).
-    let sig_type = match encrypted.key_type.as_str() {
-        "mldsa65" => SignatureType::MlDsa65,
-        _ => SignatureType::Dilithium3,
-    };
+    let sig_type = signature_type_from_key_type(&encrypted.key_type)?;
     let pubkey_bytes = hex::decode(&encrypted.public_key)
         .map_err(|e| format!("invalid public_key in keystore: {e}"))?;
     let address = Address::from_public_key(&pubkey_bytes, sig_type.as_u8());
@@ -94,7 +95,6 @@ pub fn key_inspect(path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
-
 
 /// Migrate a keystore to the current v1 sk-only format with pq1 address.
 ///
@@ -125,11 +125,17 @@ pub fn key_migrate(
                 .map_err(|e| format!("decryption failed: {e}"))?;
             encrypt_mldsa(&signer, password.as_bytes())?
         }
-        _ => {
+        "sphincs-sha2-256f" => {
+            let signer = decrypt_sphincs(&encrypted, password.as_bytes())
+                .map_err(|e| format!("decryption failed: {e}"))?;
+            encrypt_sphincs(&signer, password.as_bytes())?
+        }
+        "dilithium3" | "" => {
             let signer = decrypt(&encrypted, password.as_bytes())
                 .map_err(|e| format!("decryption failed: {e}"))?;
             encrypt(&signer, password.as_bytes())?
         }
+        other => return Err(format!("unsupported keystore algorithm: {other}").into()),
     };
 
     let new_json = serde_json::to_string_pretty(&new_encrypted)?;
@@ -143,4 +149,15 @@ pub fn key_migrate(
     eprintln!("  Version:   {}", new_encrypted.version);
 
     Ok(())
+}
+
+fn signature_type_from_key_type(
+    key_type: &str,
+) -> Result<SignatureType, Box<dyn std::error::Error>> {
+    match key_type {
+        "dilithium3" | "" => Ok(SignatureType::Dilithium3),
+        "mldsa65" => Ok(SignatureType::MlDsa65),
+        "sphincs-sha2-256f" => Ok(SignatureType::SphincsSha2256f),
+        other => Err(format!("unsupported keystore algorithm: {other}").into()),
+    }
 }

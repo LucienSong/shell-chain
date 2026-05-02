@@ -76,7 +76,9 @@ mod tests {
         let signer = MlDsaSigner::generate();
         let sig = signer.sign(b"multi-mldsa").unwrap();
         let mv = MultiVerifier;
-        assert!(mv.verify(signer.public_key(), b"multi-mldsa", &sig).unwrap());
+        assert!(mv
+            .verify(signer.public_key(), b"multi-mldsa", &sig)
+            .unwrap());
     }
 
     #[test]

@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use serde_json::Value;
+use shell_primitives::Address;
 
 /// Add (or update) an allocation entry in a genesis JSON file.
 ///
@@ -20,8 +21,8 @@ pub fn genesis_add_alloc(
     let mut doc: Value = serde_json::from_str(&raw)
         .map_err(|e| format!("invalid JSON in {}: {e}", genesis_path.display()))?;
 
-    // Normalize address: strip 0x prefix for alloc key.
-    let addr_key = address.trim_start_matches("0x").to_lowercase();
+    let address = Address::parse(&address).map_err(|e| format!("invalid pq1 address: {e}"))?;
+    let addr_key = address.to_string();
 
     // Ensure `alloc` object exists.
     let alloc = doc
@@ -32,7 +33,8 @@ pub fn genesis_add_alloc(
 
     // Insert or overwrite the allocation entry.
     let entry = serde_json::json!({
-        "balance": balance
+        "balance": balance,
+        "nonce": 0
     });
     alloc
         .as_object_mut()
@@ -43,7 +45,7 @@ pub fn genesis_add_alloc(
     let new_json = serde_json::to_string_pretty(&doc)?;
     std::fs::write(&out_path, &new_json)?;
 
-    eprintln!("✓ Alloc added: 0x{addr_key} → {balance} wei");
+    eprintln!("✓ Alloc added: {addr_key} → {balance} wei");
     eprintln!("  Written to: {}", out_path.display());
 
     Ok(())

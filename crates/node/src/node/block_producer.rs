@@ -27,12 +27,11 @@ impl<S: KvStore + 'static> Node<S> {
         // Guard against double-production: if we already have a canonical block at
         // next_number (can happen if a peer's block arrived between timer tick and here),
         // abort to avoid equivocation.
-        if self
-            .chain_store
-            .get_block_by_number(next_number)?
-            .is_some()
-        {
-            debug!(next_number, "canonical block already exists, skipping production");
+        if self.chain_store.get_block_by_number(next_number)?.is_some() {
+            debug!(
+                next_number,
+                "canonical block already exists, skipping production"
+            );
             return Err(NodeError::NotProposer);
         }
 
@@ -254,7 +253,11 @@ impl<S: KvStore + 'static> Node<S> {
                     SigBatchEntry { msg_hash, pk_hash }
                 })
                 .collect();
-            if entries.is_empty() { None } else { Some(entries) }
+            if entries.is_empty() {
+                None
+            } else {
+                Some(entries)
+            }
         } else {
             None
         };

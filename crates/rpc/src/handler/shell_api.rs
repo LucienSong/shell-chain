@@ -758,7 +758,7 @@ impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
             .fetch_add(1, Ordering::Relaxed);
 
         Ok(serde_json::json!({
-            "block_hash": format!("{:?}", amendment.block_hash),
+            "block_hash": amendment.block_hash.to_string(),
             "block_number": amendment.block_number,
             "proof_version": amendment.version,
             "prover": amendment.prover,

@@ -77,10 +77,7 @@ pub fn decrypt(
 ///
 /// Stores `key_type = "mldsa65"` so [`decrypt_any`] can reconstruct the
 /// correct signer.
-pub fn encrypt_mldsa(
-    signer: &MlDsaSigner,
-    password: &[u8],
-) -> Result<EncryptedKey, KeystoreError> {
+pub fn encrypt_mldsa(signer: &MlDsaSigner, password: &[u8]) -> Result<EncryptedKey, KeystoreError> {
     let mut salt = [0u8; 32];
     let mut nonce = [0u8; 24];
     rand::rng().fill_bytes(&mut salt);
@@ -191,7 +188,6 @@ fn raw_decrypt(
     derived_key.zeroize();
     Ok((secret_key, public_key))
 }
-
 
 fn derive_key(password: &[u8], salt: &[u8], params: &KdfParams) -> Result<[u8; 32], KeystoreError> {
     let argon2_params = Params::new(params.m_cost, params.t_cost, params.p_cost, Some(32))

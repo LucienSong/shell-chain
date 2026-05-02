@@ -583,9 +583,10 @@ async fn run_with_store<S: KvStore + 'static>(
             ..shell_node::config::ParallelEvmConfig::default()
         },
         enable_stark_aggregation: args.enable_stark_aggregation,
-        node_role: args.node_role.parse::<shell_node::config::NodeRole>().map_err(|e| {
-            format!("invalid --node-role: {e}")
-        })?,
+        node_role: args
+            .node_role
+            .parse::<shell_node::config::NodeRole>()
+            .map_err(|e| format!("invalid --node-role: {e}"))?,
     };
 
     // Build the node (auto-detects existing state via NodeBuilder).
@@ -796,7 +797,11 @@ mod tests {
             network: "dev".into(),
             consensus_engine: None,
             node_role: "validator".into(),
-            password_args: crate::password::PasswordArgs { password_file: None, password_stdin: false, allow_env_password: false },
+            password_args: crate::password::PasswordArgs {
+                password_file: None,
+                password_stdin: false,
+                allow_env_password: false,
+            },
         };
 
         let expected = ParallelEvmConfig {

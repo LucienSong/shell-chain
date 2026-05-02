@@ -1,6 +1,11 @@
 [advisories]
 # Deny crates with known security advisories.
-ignore = []
+ignore = [
+    # Pulled by libp2p 0.56 via hickory-proto 0.25.2. Upstream has not
+    # released a libp2p version that can consume hickory-proto >=0.26.1 yet.
+    "RUSTSEC-2026-0118",
+    "RUSTSEC-2026-0119",
+]
 # Unmaintained crates: "none" skips the check (use "workspace" or "all" to enable).
 unmaintained = "none"
 

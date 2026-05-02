@@ -33,7 +33,7 @@ pub(crate) use shell_storage::{
     WorldState,
 };
 
-pub(crate) use crate::config::{NodeConfig, NodeRole};
+pub(crate) use crate::config::NodeConfig;
 pub(crate) use crate::error::NodeError;
 pub(crate) use crate::metrics::Metrics;
 pub(crate) use crate::prover_service::{ProverConfig, ProverService, ProverServiceHandle};

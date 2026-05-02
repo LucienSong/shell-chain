@@ -32,10 +32,10 @@ fn main() {
     let sk_bytes = sk.into_bytes();
 
     // Reconstruct from bytes for signing (arrays are non-Copy)
-    let sk_for_sign = ml_dsa_65::PrivateKey::try_from_bytes(sk_bytes)
-        .expect("valid private key bytes");
-    let pk_for_verify = ml_dsa_65::PublicKey::try_from_bytes(pk_bytes)
-        .expect("valid public key bytes");
+    let sk_for_sign =
+        ml_dsa_65::PrivateKey::try_from_bytes(sk_bytes).expect("valid private key bytes");
+    let pk_for_verify =
+        ml_dsa_65::PublicKey::try_from_bytes(pk_bytes).expect("valid public key bytes");
 
     // ── Deterministic signing ────────────────────────────────────────────────
     // sign_seed = all-zero bytes → this is the `rnd` (ρ′ input) per FIPS 204 §6.2.
@@ -90,7 +90,12 @@ fn main() {
     std::fs::write(&output_path, &json_str).expect("write fixture file");
 
     println!("Written: {}", output_path.display());
-    println!("  pk_len={} sk_len={} sig_len={}", pk_bytes.len(), sk_bytes.len(), sig.len());
+    println!(
+        "  pk_len={} sk_len={} sig_len={}",
+        pk_bytes.len(),
+        sk_bytes.len(),
+        sig.len()
+    );
     println!("  keygen_seed: {}", bytes_to_hex(&keygen_seed));
     println!("  pk[0..32]:   {}...", bytes_to_hex(&pk_bytes[..32]));
     println!("  sig[0..32]:  {}...", bytes_to_hex(&sig[..32]));

@@ -208,11 +208,7 @@ impl<S: KvStore + 'static> RpcHandler<S> {
 
     /// STK.2: If the block's `sig_aggregate_proof` is None and a proof amendment
     /// store is configured, attempt to fill it from stored async proofs.
-    pub(crate) fn fill_stark_proof(
-        &self,
-        block_hash: &ShellHash,
-        rpc_block: &mut RpcBlock,
-    ) {
+    pub(crate) fn fill_stark_proof(&self, block_hash: &ShellHash, rpc_block: &mut RpcBlock) {
         if rpc_block.sig_aggregate_proof.is_some() {
             return;
         }
@@ -224,13 +220,9 @@ impl<S: KvStore + 'static> RpcHandler<S> {
             Ok(Some(b)) => b,
             _ => return,
         };
-        if let Ok(amendment) =
-            shell_stark_prover::ProofAmendment::from_json(&bytes)
-        {
-            rpc_block.sig_aggregate_proof_size =
-                Some(amendment.proof.proof_bytes.len() as u64);
-            rpc_block.sig_aggregate_proof =
-                Some(hex_bytes(&amendment.proof.proof_bytes));
+        if let Ok(amendment) = shell_stark_prover::ProofAmendment::from_json(&bytes) {
+            rpc_block.sig_aggregate_proof_size = Some(amendment.proof.proof_bytes.len() as u64);
+            rpc_block.sig_aggregate_proof = Some(hex_bytes(&amendment.proof.proof_bytes));
         }
     }
 
@@ -662,7 +654,7 @@ pub(crate) fn invalid_params_err(msg: impl std::fmt::Display) -> ErrorObjectOwne
 /// Parse a user-facing address string. Only `pq1...` Bech32m format is accepted;
 /// legacy `0x` hex addresses are rejected with an error.
 pub(crate) fn parse_address(s: &str) -> Result<Address, ErrorObjectOwned> {
-    Address::parse(s).map_err(|e| internal_err(format!("invalid address: {e}")))
+    Address::parse(s).map_err(|e| invalid_params_err(format!("invalid address: {e}")))
 }
 
 /// Parse a 32-byte hex string into `ShellHash`.
@@ -3760,7 +3752,10 @@ mod tests {
                 .unwrap();
         let addr = Address::from_public_key(&pubkey, 0);
 
-        assert_eq!(addr.to_string(), "pq1q9dhyfqat4gyc370l49puq3vyujlhpdpnv25dxkc");
+        assert_eq!(
+            addr.to_string(),
+            "pq1q9dhyfqat4gyc370l49puq3vyujlhpdpnv25dxkc"
+        );
 
         {
             let mut ws = handler.world_state.write();

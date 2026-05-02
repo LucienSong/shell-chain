@@ -11,7 +11,7 @@ shell-chain exposes the following JSON-RPC namespaces:
 - **`debug_`** (2 methods)
 - **`trace_`** (2 methods)
 - **`evm_`** (5 methods)
-- **`shell_`** (28 methods)
+- **`shell_`** (30 methods)
 
 All methods use JSON-RPC 2.0. Hex quantities are `0x`-prefixed strings.
 
@@ -500,14 +500,22 @@ Returns chain performance statistics for the performance dashboard.
 get_finality_info() → serde_json::Value
 ```
 
-Returns finality information: current head, latest finalized block/hash, finality lag, and pending attestations.
+Returns finality information: last finalized block, current head, and pending attestations.
 
 ### shell_finalityProof
 ```
-finality_proof(block_hash: ShellHash) → serde_json::Value
+finality_proof(block_hash: ShellHash, ) → serde_json::Value
 ```
 
-Returns the commit certificate sidecar for a finalized block hash, or `null` if no certificate is stored locally.
+Returns the commit certificate (quorum signatures) for a finalized block.
+
+The certificate is a JSON object mapping validator address → signature hex.
+Returns the wrapper with `certificate: null` if no certificate is stored
+for the given block hash.
+
+Response fields:
+- `blockHash`   — the queried block hash
+- `certificate` — `{ "<address>": "<sig_hex>", ... }` or `null`
 
 ### shell_consensusInfo
 ```
@@ -684,3 +692,21 @@ after STARK proof arrives" (archive mode behavior).
 Returns an error when the node has not been configured with a profile
 (e.g. legacy startup paths). Stable consumers should treat such an
 error as `"profile: unknown"`.
+
+### shell_getProofAmendment
+```
+get_proof_amendment(block_hash: String, ) → serde_json::Value
+```
+
+Returns the STARK proof amendment for a block if one has been generated.
+
+`block_hash` must be a `0x`-prefixed 32-byte hex hash.
+
+Response when proof exists:
+- `block_hash`     — the block hash
+- `block_number`   — the block height
+- `proof_version`  — amendment protocol version
+- `prover`         — address of the prover
+- `proof`          — hex-encoded STARK batch proof bytes
+
+Returns `null` when no proof amendment has been generated for the block.

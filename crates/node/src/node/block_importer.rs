@@ -36,7 +36,10 @@ impl<S: KvStore + 'static> Node<S> {
                             incoming_hash = %block.hash(),
                             "FF.4: block conflicts with finalized chain — rejecting"
                         );
-                        return Err(NodeError::ConflictsWithFinalized { incoming, fin_number });
+                        return Err(NodeError::ConflictsWithFinalized {
+                            incoming,
+                            fin_number,
+                        });
                     }
                 }
             }
@@ -226,15 +229,12 @@ impl<S: KvStore + 'static> Node<S> {
                     shell_core::PubkeyMode::Reference => {
                         if let Some(pk) = block_pubkeys.get(&tx.from) {
                             pk.clone()
-                        } else if let Some(pk) = import_cs
-                            .get_pubkey(&tx.from)
-                            .map_err(|e| {
-                                NodeError::Startup(format!(
-                                    "block {} pubkey lookup failed: {e}",
-                                    block.number()
-                                ))
-                            })?
-                        {
+                        } else if let Some(pk) = import_cs.get_pubkey(&tx.from).map_err(|e| {
+                            NodeError::Startup(format!(
+                                "block {} pubkey lookup failed: {e}",
+                                block.number()
+                            ))
+                        })? {
                             pk
                         } else {
                             // Pubkey not yet registered for this Reference-mode tx.

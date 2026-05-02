@@ -138,7 +138,8 @@ Finality status is exposed through:
 - `shell_getFinalityInfo` — current head, latest finalized block/hash, lag, and
   pending attestation count.
 - `shell_finalityProof(blockHash)` — commit certificate sidecar for a finalized
-  block, or `null` if no certificate is stored locally.
+  block; the returned object's `certificate` field is `null` if no certificate
+  is stored locally.
 - Prometheus gauges `shell_last_finalized_number` and
   `shell_finality_lag_blocks`.
 

@@ -1047,9 +1047,9 @@ Returns finality status for the connected node.
 
 ### shell_finalityProof
 
-Returns the commit certificate sidecar for a finalized block hash. The
-certificate maps validator addresses to post-quantum signatures and is `null`
-when the local node has no certificate for the requested hash.
+Returns a wrapper object for a finalized block hash. The `certificate` field
+maps validator addresses to post-quantum signatures and is `null` when the
+local node has no certificate for the requested hash.
 
 **Parameters:**
 | # | Type | Required | Description |

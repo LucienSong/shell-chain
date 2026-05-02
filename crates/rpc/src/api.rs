@@ -433,7 +433,8 @@ pub trait ShellApi {
     /// Returns the commit certificate (quorum signatures) for a finalized block.
     ///
     /// The certificate is a JSON object mapping validator address → signature hex.
-    /// Returns `null` if no certificate is stored for the given block hash.
+    /// Returns the wrapper with `certificate: null` if no certificate is stored
+    /// for the given block hash.
     ///
     /// Response fields:
     /// - `blockHash`   — the queried block hash

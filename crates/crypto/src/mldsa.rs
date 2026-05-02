@@ -23,8 +23,7 @@ pub struct MlDsaSigner {
 impl MlDsaSigner {
     /// Generate a fresh ML-DSA-65 key pair.
     pub fn generate() -> Self {
-        let (pk, sk) =
-            ml_dsa_65::try_keygen().expect("ML-DSA-65 key generation should not fail");
+        let (pk, sk) = ml_dsa_65::try_keygen().expect("ML-DSA-65 key generation should not fail");
         Self {
             secret_key_bytes: zeroize::Zeroizing::new(sk.into_bytes().to_vec()),
             public_key_bytes: pk.into_bytes().to_vec(),
@@ -113,13 +112,12 @@ impl Verifier for MlDsaVerifier {
         if signature.sig_type != SignatureType::MlDsa65 {
             return Err(CryptoError::UnsupportedSignatureType(signature.sig_type));
         }
-        let pk_arr =
-            <[u8; ML_DSA_65_PK_LEN]>::try_from(pubkey).map_err(|_| {
-                CryptoError::InvalidPublicKeyLength {
-                    expected: ML_DSA_65_PK_LEN,
-                    got: pubkey.len(),
-                }
-            })?;
+        let pk_arr = <[u8; ML_DSA_65_PK_LEN]>::try_from(pubkey).map_err(|_| {
+            CryptoError::InvalidPublicKeyLength {
+                expected: ML_DSA_65_PK_LEN,
+                got: pubkey.len(),
+            }
+        })?;
         let sig_arr =
             <[u8; ML_DSA_65_SIG_LEN]>::try_from(signature.data.as_slice()).map_err(|_| {
                 CryptoError::InvalidSignatureLength {
@@ -160,7 +158,9 @@ mod tests {
         let signer = MlDsaSigner::generate();
         let sig = signer.sign(b"correct message").unwrap();
         let verifier = MlDsaVerifier;
-        assert!(!verifier.verify(signer.public_key(), b"wrong message", &sig).unwrap());
+        assert!(!verifier
+            .verify(signer.public_key(), b"wrong message", &sig)
+            .unwrap());
     }
 
     #[test]
@@ -169,7 +169,9 @@ mod tests {
         let signer2 = MlDsaSigner::generate();
         let sig = signer1.sign(b"test").unwrap();
         let verifier = MlDsaVerifier;
-        assert!(!verifier.verify(signer2.public_key(), b"test", &sig).unwrap());
+        assert!(!verifier
+            .verify(signer2.public_key(), b"test", &sig)
+            .unwrap());
     }
 
     #[test]
@@ -234,6 +236,8 @@ mod tests {
         let bad_sig = PQSignature::new(SignatureType::MlDsa65, bad_data);
         let verifier = MlDsaVerifier;
         // May be Ok(false) or Err — either is correct
-        assert!(!verifier.verify(signer.public_key(), msg, &bad_sig).unwrap_or(false));
+        assert!(!verifier
+            .verify(signer.public_key(), msg, &bad_sig)
+            .unwrap_or(false));
     }
 }

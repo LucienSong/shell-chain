@@ -45,8 +45,7 @@ fn hex_to_bytes(hex: &str) -> Vec<u8> {
 }
 
 fn load_fixture() -> Fixture {
-    let json =
-        include_str!("fixtures/mldsa65-cross-lang.json");
+    let json = include_str!("fixtures/mldsa65-cross-lang.json");
     serde_json::from_str(json).expect("valid fixture JSON")
 }
 
@@ -90,7 +89,9 @@ fn cross_lang_rust_sig_matches_fixture() {
         .expect("32-byte sign seed");
 
     let sk = ml_dsa_65::PrivateKey::try_from_bytes(sk_bytes).expect("valid sk");
-    let sig = sk.try_sign_with_seed(&sign_seed, &msg, &[]).expect("sign succeeded");
+    let sig = sk
+        .try_sign_with_seed(&sign_seed, &msg, &[])
+        .expect("sign succeeded");
 
     assert_eq!(sig.len(), fixture.rust_vector.signature_len);
     assert_eq!(
@@ -114,7 +115,9 @@ fn cross_lang_noble_sig_matches_fixture() {
         .expect("32-byte sign seed");
 
     let sk = ml_dsa_65::PrivateKey::try_from_bytes(sk_bytes).expect("valid sk");
-    let sig = sk.try_sign_with_seed(&sign_seed, &msg, &[]).expect("sign succeeded");
+    let sig = sk
+        .try_sign_with_seed(&sign_seed, &msg, &[])
+        .expect("sign succeeded");
 
     assert_eq!(sig.len(), fixture.noble_vector.signature_len);
     assert_eq!(
@@ -195,7 +198,9 @@ fn cross_lang_mldsa_verifier_accepts_noble_sig() {
     let verifier = MlDsaVerifier;
 
     assert!(
-        verifier.verify(&pk_bytes, &msg, &sig).expect("no crypto error"),
+        verifier
+            .verify(&pk_bytes, &msg, &sig)
+            .expect("no crypto error"),
         "MlDsaVerifier must accept Noble-generated signature"
     );
 }
@@ -214,7 +219,9 @@ fn cross_lang_mldsa_signer_produces_verifiable_sig() {
 
     let verifier = MlDsaVerifier;
     assert!(
-        verifier.verify(&pk_bytes, &msg, &sig).expect("no crypto error"),
+        verifier
+            .verify(&pk_bytes, &msg, &sig)
+            .expect("no crypto error"),
         "MlDsaSigner (from fixture key) must produce a verifiable signature"
     );
 }

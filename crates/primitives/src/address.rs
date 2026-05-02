@@ -253,7 +253,10 @@ mod tests {
     fn address_debug_uses_pq1() {
         let addr = Address::from([0x01; 20]);
         let dbg = format!("{addr:?}");
-        assert!(dbg.starts_with("Address(pq1"), "expected pq1 in debug: {dbg}");
+        assert!(
+            dbg.starts_with("Address(pq1"),
+            "expected pq1 in debug: {dbg}"
+        );
         assert!(!dbg.contains("0x"), "debug must not contain 0x: {dbg}");
     }
 

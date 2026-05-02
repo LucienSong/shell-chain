@@ -651,16 +651,21 @@ async fn main() {
             network,
         } => commands::init(cli.datadir, genesis, chain_id, network),
         Commands::Key { action } => match action {
-            KeyCommands::Generate { output, algorithm } => commands::key_generate(output, password_args, algorithm),
+            KeyCommands::Generate { output, algorithm } => {
+                commands::key_generate(output, password_args, algorithm)
+            }
             KeyCommands::Inspect { path } => commands::key_inspect(path),
             KeyCommands::Migrate { input, output } => {
                 commands::key_migrate(input, output, &password_args)
             }
         },
         Commands::Genesis { action } => match action {
-            GenesisCommands::AddAlloc { genesis, address, balance, output } => {
-                commands::genesis_add_alloc(genesis, address, balance, output)
-            }
+            GenesisCommands::AddAlloc {
+                genesis,
+                address,
+                balance,
+                output,
+            } => commands::genesis_add_alloc(genesis, address, balance, output),
         },
         Commands::ExportState { block, output } => {
             commands::export_state(cli.datadir, output, block)
