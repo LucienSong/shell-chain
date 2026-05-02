@@ -1458,8 +1458,8 @@ mod tests {
         );
         let err_msg = result.unwrap_err().to_string().to_lowercase();
         assert!(
-            err_msg.contains("pubkey") || err_msg.contains("missing"),
-            "expected pubkey-related error, got: {err_msg}"
+            err_msg.contains("state root mismatch"),
+            "expected state-root backstop rejection, got: {err_msg}"
         );
     }
 
@@ -2830,12 +2830,8 @@ mod tests {
         let block = node.produce_block(&proposer_signer, 20).unwrap();
         let block_num = block.number();
 
-        // produce_block pushes a ProofTask with a placeholder hash derived from
-        // block_number (see G4 in node.rs): hash_bytes[..8] = block_num.to_be_bytes().
-        // The ProverService stores the amendment under that same placeholder hash.
-        let mut placeholder = [0u8; 32];
-        placeholder[..8].copy_from_slice(&block_num.to_be_bytes());
-        let placeholder_hash = ShellHash::from(placeholder);
+        // produce_block pushes a ProofTask with the real post-seal block hash.
+        let block_hash = block.hash();
 
         assert_eq!(
             node.proof_backlog.lock().len(),
@@ -2865,13 +2861,13 @@ mod tests {
             "ProverService should have drained the backlog"
         );
 
-        // Amendment should be stored under the placeholder hash.
+        // Amendment should be stored under the real block hash.
         let stored_bytes = amendment_store
-            .get_amendment(&placeholder_hash)
+            .get_amendment(&block_hash)
             .expect("amendment store read failed");
         assert!(
             stored_bytes.is_some(),
-            "ProofAmendment for block #{block_num} should be stored under placeholder hash {placeholder_hash}"
+            "ProofAmendment for block #{block_num} should be stored under block hash {block_hash}"
         );
 
         // Deserialize and check the amendment.
