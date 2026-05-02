@@ -2211,7 +2211,7 @@ mod tests {
     #[tokio::test]
     async fn propose_add_validator_no_signer_returns_error() {
         let handler = setup();
-        let target = format!("0x{}", "ab".repeat(20));
+        let target = Address::from([0xAB; 20]).to_string();
         let err = ShellApiServer::propose_add_validator(&handler, target)
             .await
             .unwrap_err();
@@ -2221,7 +2221,7 @@ mod tests {
     #[tokio::test]
     async fn propose_remove_validator_no_signer_returns_error() {
         let handler = setup();
-        let target = format!("0x{}", "ab".repeat(20));
+        let target = Address::from([0xAB; 20]).to_string();
         let err = ShellApiServer::propose_remove_validator(&handler, target)
             .await
             .unwrap_err();
@@ -2301,7 +2301,7 @@ mod tests {
     #[tokio::test]
     async fn propose_add_validator_returns_tx_hash_hex() {
         let (handler, _signer, _addr) = setup_with_proposer();
-        let target = format!("0x{}", "ab".repeat(20));
+        let target = Address::from([0xAB; 20]).to_string();
         let result = ShellApiServer::propose_add_validator(&handler, target)
             .await
             .unwrap();
@@ -2982,7 +2982,10 @@ mod tests {
         *finalized_number.write() = 100;
         assert_eq!(handler.parse_block_number("finalized").unwrap(), Some(100));
 
-        // Verify get_finality_info reflects the update.
+        // Verify get_finality_info reflects the full finality state.
+        finality
+            .write()
+            .set_finalized_direct(100, ShellHash::from([0x64; 32]));
         let result = ShellApiServer::get_finality_info(&handler).await.unwrap();
         assert_eq!(result["lastFinalizedBlock"], "0x64"); // 100 in hex
     }
