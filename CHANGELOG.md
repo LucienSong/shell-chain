@@ -118,7 +118,7 @@ All notable changes to this project will be documented in this file.
 - **CLI automation guide** (`docs/cli-automation.md`): Comprehensive guide for non-interactive
   password usage in CI, Docker, and systemd environments. (**CLI.4**)
 
-- **Node CLI reference** (`docs/node-cli.md`): Full v0.20.0 flag reference for all `shell-node`
+- **Node CLI reference** (`docs/node-cli.md`): Full v0.21.0 flag reference for all `shell-node`
   subcommands. (**CLI.5**)
 
 - **Keystore format spec** (`docs/keystore-format.md`): Canonical v1 keystore schema

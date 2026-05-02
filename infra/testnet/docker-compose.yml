@@ -7,7 +7,7 @@ version: '3.8'
 #   docker compose -f infra/testnet/docker-compose.yml up -d
 #
 # Environment variables (set in .env or export before running):
-#   SHELL_IMAGE      — Docker image tag, e.g. ghcr.io/shelldao/shell-chain:0.20.0
+#   SHELL_IMAGE      — Docker image tag, e.g. ghcr.io/shelldao/shell-chain:0.21.0
 #   NODE1_KEY_PATH   — host path to validator-1 encrypted keystore JSON
 #   NODE2_KEY_PATH   — validator-2 keystore
 #   NODE3_KEY_PATH   — validator-3 keystore
