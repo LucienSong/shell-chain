@@ -220,7 +220,7 @@ docker compose -f docker-compose.alpha.yml up -d
 
 ```bash
 curl http://localhost:9090/health
-# {"status":"ok","version":"0.6.0","block_height":...}
+# {"status":"ok","version":"0.21.0","block_height":...}
 
 curl http://localhost:9090/ready
 # {"ready":true} or {"ready":false,"reason":"..."}

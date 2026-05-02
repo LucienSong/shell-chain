@@ -120,7 +120,7 @@ dk = argon2id(
 The derived key `dk` is 32 bytes and is used directly as the XChaCha20-Poly1305 key.
 It is zeroed from memory immediately after use.
 
-**CLI defaults** (v0.20.0):
+**CLI defaults** (v0.21.0):
 
 | Parameter | Default | Notes |
 |-----------|---------|-------|
@@ -242,7 +242,7 @@ The TypeScript SDK (`shell-sdk`) uses the same format. Key details:
 - `decryptKeystore()` reads `public_key` from the JSON for address verification
 - `SIG_IDS`: `{ dilithium3: 0, mldsa65: 1 }` — used to derive the correct address
 
-The SDK and CLI are **fully cross-compatible** since v0.20.0 (fixed in F-TESTNET-FIXES):
+The SDK and CLI are **fully cross-compatible** since shell-chain v0.21.0 / shell-sdk v0.7.0 (fixed in F-TESTNET-FIXES):
 - A Rust CLI keystore can be decrypted by `shell-sdk`
 - An SDK keystore can be decrypted by the Rust CLI / `shell-keystore` crate
 
@@ -263,9 +263,9 @@ The SDK and CLI are **fully cross-compatible** since v0.20.0 (fixed in F-TESTNET
 ## 12. Migration from Pre-v1 (sk+pk) Format
 
 Before F-TESTNET-FIXES (v0.20.0), the SDK `encryptKeystore()` stored `sk ‖ pk` in the
-ciphertext. This format is **not supported** by v0.20.0+.
+ciphertext. This format is **not supported** by shell-chain v0.21.0+ / shell-sdk v0.7.0+.
 
-If you have keystores produced by `shell-sdk < 0.6.0`, re-encrypt them:
+If you have keystores produced by `shell-sdk < 0.7.0`, re-encrypt them:
 
 ```bash
 # 1. Decrypt with old SDK → extract sk
@@ -276,7 +276,7 @@ echo "old-password" | shell-node --password-stdin key generate \
 # (then manually import your existing key material)
 ```
 
-Or use the `shell-node key migrate` subcommand (v0.20.0+):
+Or use the `shell-node key migrate` subcommand (v0.21.0+):
 
 ```bash
 shell-node --password-file /run/secrets/pw key migrate \
