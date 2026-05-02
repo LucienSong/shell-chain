@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased] — F-PQ1-ONLY
+## [0.21.0] — 2026-05-02 — F-PQ1-ONLY + F-FORK-FINALITY
 
 ### Breaking Changes
 
@@ -71,7 +71,7 @@ All notable changes to this project will be documented in this file.
 
 ---
 
-## [Unreleased] — F-TESTNET-FIXES
+### F-TESTNET-FIXES
 
 ### Added
 
