@@ -1181,6 +1181,10 @@ mod tests {
             .world_state_mut()
             .set_validators(&[v1])
             .unwrap();
+        evm.state_db_mut()
+            .chain_store()
+            .put_pubkey(&new_val, &[0xAB; 32])
+            .unwrap();
 
         let calldata = system_contracts::encode_add_validator_calldata(&new_val);
         let signed = make_system_tx(v1, calldata);
@@ -1209,16 +1213,22 @@ mod tests {
         let mut evm = setup_evm();
         let v1 = ShellAddress::from([0x01; 20]);
         let v2 = ShellAddress::from([0x02; 20]);
+        let v3 = ShellAddress::from([0x03; 20]);
         evm.state_db_mut()
             .world_state_mut()
-            .set_validators(&[v1, v2])
+            .set_validators(&[v1, v2, v3])
             .unwrap();
 
         let calldata = system_contracts::encode_remove_validator_calldata(&v2);
-        let signed = make_system_tx(v1, calldata);
+        let first_vote = make_system_tx(v1, calldata.clone());
         let header = sample_header();
 
-        let tx_result = evm.execute_tx(&signed, &header, 0, 0).unwrap();
+        let pending = evm.execute_tx(&first_vote, &header, 0, 0).unwrap();
+        assert_eq!(pending.receipt.status, 1);
+        assert!(pending.receipt.logs.is_empty());
+
+        let second_vote = make_system_tx(v3, calldata);
+        let tx_result = evm.execute_tx(&second_vote, &header, 0, 1).unwrap();
         assert_eq!(tx_result.receipt.status, 1);
 
         assert_eq!(tx_result.receipt.logs.len(), 1);
