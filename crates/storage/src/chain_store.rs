@@ -750,7 +750,7 @@ impl<S: KvStore> ChainStore<S> {
     /// Get transaction hashes involving a given address, with pagination.
     ///
     /// Scans the address→tx index for `address` within the specified block range.
-    /// Returns tx hashes in ascending block order, paginated by `offset` and `limit`.
+    /// Returns tx hashes newest-first by block number, paginated by `offset` and `limit`.
     pub fn get_txs_by_address(
         &self,
         address: &Address,

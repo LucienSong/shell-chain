@@ -201,6 +201,41 @@ impl Block {
     }
 }
 
+fn decode_system_transaction_list(buf: &mut &[u8]) -> alloy_rlp::Result<Vec<SystemTransaction>> {
+    let system_txs_header = alloy_rlp::Header::decode(buf)?;
+    if !system_txs_header.list {
+        return Err(alloy_rlp::Error::UnexpectedString);
+    }
+    let system_txs_end = buf.len().saturating_sub(system_txs_header.payload_length);
+    let mut system_transactions = Vec::new();
+    while buf.len() > system_txs_end {
+        let bytes = Bytes::decode(buf)?;
+        system_transactions.push(
+            SystemTransaction::from_wire_bytes(bytes.as_ref())
+                .map_err(|_| alloy_rlp::Error::Custom("invalid system transaction payload"))?,
+        );
+    }
+    Ok(system_transactions)
+}
+
+fn decode_optional_system_transaction_list(
+    buf: &mut &[u8],
+    list_end: usize,
+) -> alloy_rlp::Result<Vec<SystemTransaction>> {
+    if buf.len() <= list_end || buf.first().copied().unwrap_or(0) == 0x80 {
+        return Ok(Vec::new());
+    }
+
+    let checkpoint = *buf;
+    match decode_system_transaction_list(buf) {
+        Ok(system_transactions) => Ok(system_transactions),
+        Err(_) => {
+            *buf = checkpoint;
+            Ok(Vec::new())
+        }
+    }
+}
+
 impl Decodable for BlockHeader {
     fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
         let header = alloy_rlp::Header::decode(buf)?;
@@ -360,22 +395,7 @@ impl Decodable for Block {
             transactions.push(SignedTransaction::decode(buf)?);
         }
 
-        let mut system_transactions = Vec::new();
-        if buf.len() > end && buf.first().copied().unwrap_or(0) != 0x80 {
-            let system_txs_header = alloy_rlp::Header::decode(buf)?;
-            if !system_txs_header.list {
-                return Err(alloy_rlp::Error::UnexpectedString);
-            }
-            let system_txs_end = buf.len().saturating_sub(system_txs_header.payload_length);
-            while buf.len() > system_txs_end {
-                let bytes = Bytes::decode(buf)?;
-                system_transactions.push(
-                    SystemTransaction::from_wire_bytes(bytes.as_ref()).map_err(|_| {
-                        alloy_rlp::Error::Custom("invalid system transaction payload")
-                    })?,
-                );
-            }
-        }
+        let system_transactions = decode_optional_system_transaction_list(buf, end)?;
 
         // Proposer seal: empty bytes (0x80) → None, RLP list → PQSignature
         let proposer_seal = if buf.len() > end && buf.first().copied().unwrap_or(0) == 0x80 {
@@ -632,22 +652,7 @@ impl Decodable for StrippedBlock {
             transactions.push(StrippedTransaction::decode(buf)?);
         }
 
-        let mut system_transactions = Vec::new();
-        if buf.len() > end && buf.first().copied().unwrap_or(0) != 0x80 {
-            let system_txs_header = alloy_rlp::Header::decode(buf)?;
-            if !system_txs_header.list {
-                return Err(alloy_rlp::Error::UnexpectedString);
-            }
-            let system_txs_end = buf.len().saturating_sub(system_txs_header.payload_length);
-            while buf.len() > system_txs_end {
-                let bytes = Bytes::decode(buf)?;
-                system_transactions.push(
-                    SystemTransaction::from_wire_bytes(bytes.as_ref()).map_err(|_| {
-                        alloy_rlp::Error::Custom("invalid system transaction payload")
-                    })?,
-                );
-            }
-        }
+        let system_transactions = decode_optional_system_transaction_list(buf, end)?;
 
         let proposer_seal = if buf.len() > end && buf.first().copied().unwrap_or(0) == 0x80 {
             let _ = alloy_rlp::Header::decode_bytes(buf, false)?;
@@ -678,6 +683,7 @@ impl Decodable for StrippedBlock {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::StarkRewardParams;
 
     fn sample_header() -> BlockHeader {
         BlockHeader {
@@ -700,6 +706,42 @@ mod tests {
             excess_blob_gas: 0,
             witness_root: None,
         }
+    }
+
+    fn encode_legacy_empty_block(
+        header: &BlockHeader,
+        proposer_seal: Option<&PQSignature>,
+    ) -> Vec<u8> {
+        let txs_payload = 0usize;
+        let txs_list_len = alloy_rlp::Header {
+            list: true,
+            payload_length: txs_payload,
+        }
+        .length()
+        .saturating_add(txs_payload);
+        let seal_len = proposer_seal.map_or(1, Encodable::length);
+        let payload_length = header
+            .length()
+            .saturating_add(txs_list_len)
+            .saturating_add(seal_len);
+
+        let mut buf = Vec::new();
+        alloy_rlp::Header {
+            list: true,
+            payload_length,
+        }
+        .encode(&mut buf);
+        header.encode(&mut buf);
+        alloy_rlp::Header {
+            list: true,
+            payload_length: txs_payload,
+        }
+        .encode(&mut buf);
+        match proposer_seal {
+            Some(seal) => seal.encode(&mut buf),
+            None => Bytes::new().encode(&mut buf),
+        }
+        buf
     }
 
     #[test]
@@ -800,19 +842,29 @@ mod tests {
     }
 
     #[test]
+    fn block_decode_accepts_legacy_non_empty_proposer_seal_without_system_transactions() {
+        let seal = PQSignature::new(SignatureType::Dilithium3, vec![0xAB; 64]);
+        let encoded = encode_legacy_empty_block(&sample_header(), Some(&seal));
+        let decoded = Block::decode(&mut encoded.as_slice()).unwrap();
+
+        assert!(decoded.system_transactions.is_empty());
+        assert_eq!(decoded.proposer_seal, Some(seal));
+    }
+
+    #[test]
     fn block_rlp_roundtrip_with_system_transaction_payload() {
-        let system_tx = SystemTransaction::stark_reward(
-            10,
-            7,
-            0,
-            Address::from([0x11; 20]),
-            shell_primitives::U256::from(50u64),
-            ShellHash::from([0x22; 32]),
-            1,
-            100,
-            40,
-            Bytes::from_static(b"proof-payload"),
-        );
+        let system_tx = SystemTransaction::stark_reward(StarkRewardParams {
+            chain_id: 10,
+            block_number: 7,
+            tx_index: 0,
+            recipient: Address::from([0x11; 20]),
+            value: shell_primitives::U256::from(50u64),
+            source_hash: ShellHash::from([0x22; 32]),
+            layer: 1,
+            original_size: 100,
+            compressed_size: 40,
+            proof_payload: Bytes::from_static(b"proof-payload"),
+        });
         let block = Block {
             header: sample_header(),
             transactions: vec![],
@@ -935,6 +987,16 @@ mod tests {
         let decoded = StrippedBlock::decode(&mut buf.as_slice()).unwrap();
         assert_eq!(decoded.header, stripped.header);
         assert!(decoded.transactions.is_empty());
+    }
+
+    #[test]
+    fn stripped_block_decode_accepts_legacy_non_empty_proposer_seal_without_system_transactions() {
+        let seal = PQSignature::new(SignatureType::Dilithium3, vec![0xCD; 64]);
+        let encoded = encode_legacy_empty_block(&sample_header(), Some(&seal));
+        let decoded = StrippedBlock::decode(&mut encoded.as_slice()).unwrap();
+
+        assert!(decoded.system_transactions.is_empty());
+        assert_eq!(decoded.proposer_seal, Some(seal));
     }
 
     #[test]

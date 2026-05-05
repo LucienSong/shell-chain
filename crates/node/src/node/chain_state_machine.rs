@@ -24,13 +24,14 @@ impl ChainStateMachine {
         finalized_number: u64,
         canonical_hash_at_incoming: Option<ShellHash>,
     ) -> Result<BlockImportTransition, NodeError> {
-        if finalized_number > 0 && incoming_number <= finalized_number {
-            if canonical_hash_at_incoming.is_some_and(|canonical| canonical != incoming_hash) {
-                return Err(NodeError::ConflictsWithFinalized {
-                    incoming: incoming_number,
-                    fin_number: finalized_number,
-                });
-            }
+        if finalized_number > 0
+            && incoming_number <= finalized_number
+            && canonical_hash_at_incoming.is_some_and(|canonical| canonical != incoming_hash)
+        {
+            return Err(NodeError::ConflictsWithFinalized {
+                incoming: incoming_number,
+                fin_number: finalized_number,
+            });
         }
 
         let expected = head_number.saturating_add(1);

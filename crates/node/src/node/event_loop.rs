@@ -368,16 +368,14 @@ impl<S: KvStore + 'static> Node<S> {
                         let max_idle_ms = self.config.max_idle_interval_ms;
                         let has_pending_stark_settlement =
                             !self.pending_stark_settlements.lock().is_empty();
-                        if max_idle_ms > 0 && self.tx_pool.is_empty() && !has_pending_stark_settlement {
-                            if !Self::block_time_elapsed(
-                                head.header.timestamp,
-                                now_secs,
-                                max_idle_ms,
-                            ) {
-                                continue;
-                            }
-                            // Heartbeat: produce an empty block to keep chain alive.
+                        if max_idle_ms > 0
+                            && self.tx_pool.is_empty()
+                            && !has_pending_stark_settlement
+                            && !Self::block_time_elapsed(head.header.timestamp, now_secs, max_idle_ms)
+                        {
+                            continue;
                         }
+                        // Heartbeat: produce an empty block to keep chain alive.
 
                         let start = std::time::Instant::now();
                         match self.produce_block(&*signer, 500) {

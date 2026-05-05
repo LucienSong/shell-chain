@@ -185,7 +185,7 @@ impl ProofBacklog {
             take += 1;
         }
 
-        if layer == 1 && min_l1_entries > 0 && entries < min_l1_entries {
+        if layer == 1 && min_l1_entries > 0 && entries < min_l1_entries && take < max_sources {
             return None;
         }
 
@@ -377,6 +377,25 @@ mod tests {
             .expect("L1 range reaches 512 entries");
         assert_eq!(merged.block_number, 3);
         assert_eq!(merged.entries.len(), MIN_L1_STARK_TXS);
+    }
+
+    #[test]
+    fn l1_pop_advances_when_max_sources_reached_below_minimum() {
+        let mut b = ProofBacklog::new();
+        for block_number in 1..=DEFAULT_MAX_L1_RANGE_SOURCES as u64 {
+            b.push(ProofTask::new(
+                [block_number as u8; 32],
+                block_number,
+                vec![],
+            ));
+        }
+
+        let merged = b
+            .pop_contiguous_with_min_entries(DEFAULT_MAX_L1_RANGE_SOURCES, MIN_L1_STARK_TXS)
+            .expect("max source window must make forward progress");
+        assert_eq!(merged.block_number, DEFAULT_MAX_L1_RANGE_SOURCES as u64);
+        assert!(merged.entries.is_empty());
+        assert!(b.is_empty());
     }
 
     #[test]

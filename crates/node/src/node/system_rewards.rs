@@ -111,18 +111,20 @@ impl<S: KvStore + 'static> Node<S> {
             .compressed_size
             .unwrap_or(amendment.size_bytes() as u64);
         Ok(SystemTransaction::stark_reward(
-            self.config.chain_id,
-            block_number,
-            tx_index,
-            amendment.prover,
-            self.stark_reward_value(block_number, amendment)?,
-            amendment.block_hash,
-            amendment.layer,
-            original_size,
-            compressed_size,
-            Bytes::from(amendment.to_json().map_err(|e| {
-                NodeError::Startup(format!("serialize STARK reward proof payload: {e}"))
-            })?),
+            shell_core::StarkRewardParams {
+                chain_id: self.config.chain_id,
+                block_number,
+                tx_index,
+                recipient: amendment.prover,
+                value: self.stark_reward_value(block_number, amendment)?,
+                source_hash: amendment.block_hash,
+                layer: amendment.layer,
+                original_size,
+                compressed_size,
+                proof_payload: Bytes::from(amendment.to_json().map_err(|e| {
+                    NodeError::Startup(format!("serialize STARK reward proof payload: {e}"))
+                })?),
+            },
         ))
     }
 

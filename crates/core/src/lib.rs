@@ -15,7 +15,7 @@ pub use fee::{
 };
 pub use log::{Log, LogError, MAX_LOG_TOPICS};
 pub use receipt::TransactionReceipt;
-pub use reward::{SystemTransaction, SystemTxKind};
+pub use reward::{StarkRewardParams, SystemTransaction, SystemTxKind};
 pub use transaction::{
     AaBundle, AccessListItem, InnerCall, PubkeyMode, SessionAuth, SignedTransaction, Transaction,
     AA_BUNDLE_PRESENCE_FLAG, AA_BUNDLE_TX_TYPE, AA_INNER_CALL_INTRINSIC_GAS,

@@ -1876,18 +1876,18 @@ mod tests {
             U256::from(10u64),
             block.header.parent_hash,
         );
-        let stark_reward = SystemTransaction::stark_reward(
-            42,
-            block.number(),
-            block.transactions.len() as u32 + 1,
-            test_address(b"stark-reward-to"),
-            U256::from(20u64),
-            ShellHash::from([0x44; 32]),
-            1,
-            100,
-            40,
-            Bytes::from_static(b"proof"),
-        );
+        let stark_reward = SystemTransaction::stark_reward(shell_core::StarkRewardParams {
+            chain_id: 42,
+            block_number: block.number(),
+            tx_index: block.transactions.len() as u32 + 1,
+            recipient: test_address(b"stark-reward-to"),
+            value: U256::from(20u64),
+            source_hash: ShellHash::from([0x44; 32]),
+            layer: 1,
+            original_size: 100,
+            compressed_size: 40,
+            proof_payload: Bytes::from_static(b"proof"),
+        });
 
         handler.chain_store.put_block(&block).unwrap();
         handler.chain_store.set_canonical(0, &block_hash).unwrap();

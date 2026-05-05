@@ -54,6 +54,21 @@ pub struct SystemTransaction {
     pub proof_payload: Option<Bytes>,
 }
 
+/// Inputs for constructing a first-class STARK reward system transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StarkRewardParams {
+    pub chain_id: u64,
+    pub block_number: u64,
+    pub tx_index: u32,
+    pub recipient: Address,
+    pub value: U256,
+    pub source_hash: ShellHash,
+    pub layer: u32,
+    pub original_size: u64,
+    pub compressed_size: u64,
+    pub proof_payload: Bytes,
+}
+
 impl SystemTransaction {
     pub fn block_gas_reward(
         chain_id: u64,
@@ -79,31 +94,20 @@ impl SystemTransaction {
         }
     }
 
-    pub fn stark_reward(
-        chain_id: u64,
-        block_number: u64,
-        tx_index: u32,
-        recipient: Address,
-        value: U256,
-        source_hash: ShellHash,
-        layer: u32,
-        original_size: u64,
-        compressed_size: u64,
-        proof_payload: Bytes,
-    ) -> Self {
+    pub fn stark_reward(params: StarkRewardParams) -> Self {
         Self {
             kind: SystemTxKind::StarkReward,
-            chain_id,
-            block_number,
-            tx_index,
+            chain_id: params.chain_id,
+            block_number: params.block_number,
+            tx_index: params.tx_index,
             from: Address::ZERO,
-            to: recipient,
-            value,
-            source_hash,
-            layer: Some(layer),
-            original_size: Some(original_size),
-            compressed_size: Some(compressed_size),
-            proof_payload: Some(proof_payload),
+            to: params.recipient,
+            value: params.value,
+            source_hash: params.source_hash,
+            layer: Some(params.layer),
+            original_size: Some(params.original_size),
+            compressed_size: Some(params.compressed_size),
+            proof_payload: Some(params.proof_payload),
         }
     }
 
@@ -156,18 +160,18 @@ mod tests {
             SystemTransaction::block_gas_reward(10, 7, 3, recipient, U256::from(123u64), source);
         let same =
             SystemTransaction::block_gas_reward(10, 7, 3, recipient, U256::from(123u64), source);
-        let stark_reward = SystemTransaction::stark_reward(
-            10,
-            7,
-            3,
+        let stark_reward = SystemTransaction::stark_reward(StarkRewardParams {
+            chain_id: 10,
+            block_number: 7,
+            tx_index: 3,
             recipient,
-            U256::from(123u64),
-            source,
-            1,
-            100,
-            49,
-            Bytes::from_static(b"proof"),
-        );
+            value: U256::from(123u64),
+            source_hash: source,
+            layer: 1,
+            original_size: 100,
+            compressed_size: 49,
+            proof_payload: Bytes::from_static(b"proof"),
+        });
 
         assert_eq!(block_reward.hash(), same.hash());
         assert_ne!(block_reward.hash(), stark_reward.hash());
@@ -177,30 +181,30 @@ mod tests {
     fn compression_valid_requires_strictly_under_half() {
         let recipient = Address::from([0x11; 20]);
         let source = ShellHash::from([0x22; 32]);
-        let valid = SystemTransaction::stark_reward(
-            10,
-            7,
-            3,
+        let valid = SystemTransaction::stark_reward(StarkRewardParams {
+            chain_id: 10,
+            block_number: 7,
+            tx_index: 3,
             recipient,
-            U256::from(1u8),
-            source,
-            1,
-            100,
-            49,
-            Bytes::from_static(b"proof"),
-        );
-        let exactly_half = SystemTransaction::stark_reward(
-            10,
-            7,
-            3,
+            value: U256::from(1u8),
+            source_hash: source,
+            layer: 1,
+            original_size: 100,
+            compressed_size: 49,
+            proof_payload: Bytes::from_static(b"proof"),
+        });
+        let exactly_half = SystemTransaction::stark_reward(StarkRewardParams {
+            chain_id: 10,
+            block_number: 7,
+            tx_index: 3,
             recipient,
-            U256::from(1u8),
-            source,
-            1,
-            100,
-            50,
-            Bytes::from_static(b"proof"),
-        );
+            value: U256::from(1u8),
+            source_hash: source,
+            layer: 1,
+            original_size: 100,
+            compressed_size: 50,
+            proof_payload: Bytes::from_static(b"proof"),
+        });
 
         assert!(valid.is_compression_valid());
         assert!(!exactly_half.is_compression_valid());

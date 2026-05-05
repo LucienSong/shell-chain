@@ -556,6 +556,7 @@ mod tests {
         let mut block = Block {
             header,
             transactions: vec![],
+            system_transactions: vec![],
             proposer_seal: None,
         };
 
@@ -781,6 +782,7 @@ mod tests {
         let mut block = Block {
             header,
             transactions: vec![],
+            system_transactions: vec![],
             proposer_seal: None,
         };
 
@@ -809,6 +811,7 @@ mod tests {
         let mut block = Block {
             header,
             transactions: vec![],
+            system_transactions: vec![],
             proposer_seal: None,
         };
 
@@ -842,6 +845,7 @@ mod tests {
         let mut block = Block {
             header,
             transactions: vec![],
+            system_transactions: vec![],
             proposer_seal: None,
         };
 
@@ -861,6 +865,7 @@ mod tests {
         let mut block = Block {
             header: child_header,
             transactions: vec![],
+            system_transactions: vec![],
             proposer_seal: None,
         };
         engine.sign_block(&mut block, &signer).unwrap();
@@ -942,6 +947,7 @@ mod tests {
         let mut block = Block {
             header: h,
             transactions: vec![],
+            system_transactions: vec![],
             proposer_seal: None,
         };
         let config = PoaConfig::new(vec![addr], 1);
