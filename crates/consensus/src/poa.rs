@@ -176,6 +176,7 @@ impl PoaConfig {
             !new_authorities.is_empty(),
             "authority set must not be empty"
         );
+        self.authority_weights.clear();
         self.authorities = new_authorities;
     }
 }
@@ -697,6 +698,17 @@ mod tests {
         config.set_authorities(new_addrs.clone());
         assert_eq!(config.authorities, new_addrs);
         assert_eq!(config.authorities.len(), 2);
+    }
+
+    #[test]
+    fn set_authorities_clears_stale_weights() {
+        let addrs = make_addrs(2);
+        let mut config = PoaConfig::new(addrs, 1).with_weights(vec![3, 1]);
+
+        let new_addrs = make_addrs(2);
+        config.set_authorities(new_addrs);
+
+        assert!(config.authority_weights.is_empty());
     }
 
     #[test]

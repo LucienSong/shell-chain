@@ -5,7 +5,7 @@ use shell_primitives::{Address, Bytes, ShellHash};
 
 use crate::transaction::PubkeyMode;
 use crate::witness::{StrippedTransaction, TxWitness, WitnessBundle};
-use crate::SignedTransaction;
+use crate::{SignedTransaction, SystemTransaction};
 
 /// Block header.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -142,6 +142,8 @@ impl BlockHeader {
 pub struct Block {
     pub header: BlockHeader,
     pub transactions: Vec<SignedTransaction>,
+    #[serde(default)]
+    pub system_transactions: Vec<SystemTransaction>,
     /// PoA proposer seal (PQ signature over the header hash).
     /// Stored outside the header to avoid circular hashing.
     pub proposer_seal: Option<PQSignature>,
@@ -176,6 +178,17 @@ impl Block {
         }
         .length()
         .saturating_add(txs_payload);
+        let system_txs_payload: usize = self
+            .system_transactions
+            .iter()
+            .map(|tx| tx.to_wire_bytes().map(|b| b.length()).unwrap_or(1))
+            .sum();
+        let system_txs_list_len = alloy_rlp::Header {
+            list: true,
+            payload_length: system_txs_payload,
+        }
+        .length()
+        .saturating_add(system_txs_payload);
         let seal_len = match &self.proposer_seal {
             Some(seal) => seal.length(),
             None => 1, // 0x80 empty bytes
@@ -183,6 +196,7 @@ impl Block {
         self.header
             .length()
             .saturating_add(txs_list_len)
+            .saturating_add(system_txs_list_len)
             .saturating_add(seal_len)
     }
 }
@@ -288,6 +302,22 @@ impl Encodable for Block {
         for tx in &self.transactions {
             tx.encode(out);
         }
+        let system_txs_payload: usize = self
+            .system_transactions
+            .iter()
+            .map(|tx| tx.to_wire_bytes().map(|b| b.length()).unwrap_or(1))
+            .sum();
+        alloy_rlp::Header {
+            list: true,
+            payload_length: system_txs_payload,
+        }
+        .encode(out);
+        for tx in &self.system_transactions {
+            match tx.to_wire_bytes() {
+                Ok(bytes) => bytes.encode(out),
+                Err(_) => Bytes::new().encode(out),
+            }
+        }
         match &self.proposer_seal {
             Some(seal) => seal.encode(out),
             None => {
@@ -330,6 +360,23 @@ impl Decodable for Block {
             transactions.push(SignedTransaction::decode(buf)?);
         }
 
+        let mut system_transactions = Vec::new();
+        if buf.len() > end && buf.first().copied().unwrap_or(0) != 0x80 {
+            let system_txs_header = alloy_rlp::Header::decode(buf)?;
+            if !system_txs_header.list {
+                return Err(alloy_rlp::Error::UnexpectedString);
+            }
+            let system_txs_end = buf.len().saturating_sub(system_txs_header.payload_length);
+            while buf.len() > system_txs_end {
+                let bytes = Bytes::decode(buf)?;
+                system_transactions.push(
+                    SystemTransaction::from_wire_bytes(bytes.as_ref()).map_err(|_| {
+                        alloy_rlp::Error::Custom("invalid system transaction payload")
+                    })?,
+                );
+            }
+        }
+
         // Proposer seal: empty bytes (0x80) → None, RLP list → PQSignature
         let proposer_seal = if buf.len() > end && buf.first().copied().unwrap_or(0) == 0x80 {
             let _ = alloy_rlp::Header::decode_bytes(buf, false)?;
@@ -351,6 +398,7 @@ impl Decodable for Block {
         Ok(Self {
             header: block_header,
             transactions,
+            system_transactions,
             proposer_seal,
         })
     }
@@ -371,6 +419,8 @@ impl Decodable for Block {
 pub struct StrippedBlock {
     pub header: BlockHeader,
     pub transactions: Vec<StrippedTransaction>,
+    #[serde(default)]
+    pub system_transactions: Vec<SystemTransaction>,
     /// PoA proposer seal — kept in the stripped body (not a tx witness).
     pub proposer_seal: Option<PQSignature>,
 }
@@ -401,6 +451,7 @@ impl StrippedBlock {
         let stripped = Self {
             header: block.header.clone(),
             transactions: stripped_txs,
+            system_transactions: block.system_transactions.clone(),
             proposer_seal: block.proposer_seal.clone(),
         };
         (stripped, WitnessBundle::new(witnesses))
@@ -471,6 +522,7 @@ impl StrippedBlock {
         Block {
             header: self.header,
             transactions,
+            system_transactions: self.system_transactions,
             proposer_seal: self.proposer_seal,
         }
     }
@@ -483,6 +535,17 @@ impl StrippedBlock {
         }
         .length()
         .saturating_add(txs_payload);
+        let system_txs_payload: usize = self
+            .system_transactions
+            .iter()
+            .map(|tx| tx.to_wire_bytes().map(|b| b.length()).unwrap_or(1))
+            .sum();
+        let system_txs_list_len = alloy_rlp::Header {
+            list: true,
+            payload_length: system_txs_payload,
+        }
+        .length()
+        .saturating_add(system_txs_payload);
         let seal_len = match &self.proposer_seal {
             Some(seal) => seal.length(),
             None => 1,
@@ -490,6 +553,7 @@ impl StrippedBlock {
         self.header
             .length()
             .saturating_add(txs_list_len)
+            .saturating_add(system_txs_list_len)
             .saturating_add(seal_len)
     }
 }
@@ -510,6 +574,22 @@ impl Encodable for StrippedBlock {
         .encode(out);
         for tx in &self.transactions {
             tx.encode(out);
+        }
+        let system_txs_payload: usize = self
+            .system_transactions
+            .iter()
+            .map(|tx| tx.to_wire_bytes().map(|b| b.length()).unwrap_or(1))
+            .sum();
+        alloy_rlp::Header {
+            list: true,
+            payload_length: system_txs_payload,
+        }
+        .encode(out);
+        for tx in &self.system_transactions {
+            match tx.to_wire_bytes() {
+                Ok(bytes) => bytes.encode(out),
+                Err(_) => Bytes::new().encode(out),
+            }
         }
         match &self.proposer_seal {
             Some(seal) => seal.encode(out),
@@ -552,6 +632,23 @@ impl Decodable for StrippedBlock {
             transactions.push(StrippedTransaction::decode(buf)?);
         }
 
+        let mut system_transactions = Vec::new();
+        if buf.len() > end && buf.first().copied().unwrap_or(0) != 0x80 {
+            let system_txs_header = alloy_rlp::Header::decode(buf)?;
+            if !system_txs_header.list {
+                return Err(alloy_rlp::Error::UnexpectedString);
+            }
+            let system_txs_end = buf.len().saturating_sub(system_txs_header.payload_length);
+            while buf.len() > system_txs_end {
+                let bytes = Bytes::decode(buf)?;
+                system_transactions.push(
+                    SystemTransaction::from_wire_bytes(bytes.as_ref()).map_err(|_| {
+                        alloy_rlp::Error::Custom("invalid system transaction payload")
+                    })?,
+                );
+            }
+        }
+
         let proposer_seal = if buf.len() > end && buf.first().copied().unwrap_or(0) == 0x80 {
             let _ = alloy_rlp::Header::decode_bytes(buf, false)?;
             None
@@ -572,6 +669,7 @@ impl Decodable for StrippedBlock {
         Ok(Self {
             header: block_header,
             transactions,
+            system_transactions,
             proposer_seal,
         })
     }
@@ -648,6 +746,7 @@ mod tests {
         let block = Block {
             header: sample_header(),
             transactions: vec![],
+            system_transactions: vec![],
             proposer_seal: None,
         };
         assert_eq!(block.number(), 0);
@@ -659,6 +758,7 @@ mod tests {
         let block = Block {
             header: sample_header(),
             transactions: vec![],
+            system_transactions: vec![],
             proposer_seal: None,
         };
         let json = serde_json::to_string(&block).unwrap();
@@ -690,12 +790,46 @@ mod tests {
         let block = Block {
             header: sample_header(),
             transactions: vec![],
+            system_transactions: vec![],
             proposer_seal: None,
         };
         let mut buf = Vec::new();
         block.encode(&mut buf);
         let decoded = Block::decode(&mut buf.as_slice()).unwrap();
         assert_eq!(block, decoded);
+    }
+
+    #[test]
+    fn block_rlp_roundtrip_with_system_transaction_payload() {
+        let system_tx = SystemTransaction::stark_reward(
+            10,
+            7,
+            0,
+            Address::from([0x11; 20]),
+            shell_primitives::U256::from(50u64),
+            ShellHash::from([0x22; 32]),
+            1,
+            100,
+            40,
+            Bytes::from_static(b"proof-payload"),
+        );
+        let block = Block {
+            header: sample_header(),
+            transactions: vec![],
+            system_transactions: vec![system_tx],
+            proposer_seal: None,
+        };
+        let mut buf = Vec::new();
+        block.encode(&mut buf);
+        let decoded = Block::decode(&mut buf.as_slice()).unwrap();
+        assert_eq!(block, decoded);
+        assert_eq!(
+            decoded.system_transactions[0]
+                .proof_payload
+                .as_ref()
+                .unwrap(),
+            &Bytes::from_static(b"proof-payload")
+        );
     }
 
     // ── B2: witness_root tests ─────────────────────────────────────────────
@@ -793,6 +927,7 @@ mod tests {
         let stripped = StrippedBlock {
             header: sample_header(),
             transactions: vec![],
+            system_transactions: vec![],
             proposer_seal: None,
         };
         let mut buf = Vec::new();
@@ -808,6 +943,7 @@ mod tests {
         let block = Block {
             header: sample_header(),
             transactions: vec![signed.clone()],
+            system_transactions: vec![],
             proposer_seal: None,
         };
 
@@ -828,6 +964,7 @@ mod tests {
         let original = Block {
             header: sample_header(),
             transactions: vec![signed],
+            system_transactions: vec![],
             proposer_seal: None,
         };
 
@@ -856,6 +993,7 @@ mod tests {
         let original = Block {
             header: sample_header(),
             transactions: vec![signed.clone()],
+            system_transactions: vec![],
             proposer_seal: None,
         };
 
@@ -917,6 +1055,7 @@ mod tests {
         let original = Block {
             header: sample_header(),
             transactions: vec![signed],
+            system_transactions: vec![],
             proposer_seal: None,
         };
 

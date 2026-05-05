@@ -29,7 +29,7 @@ use parking_lot::Mutex;
 use tracing::{info, warn};
 
 use shell_network::{NetworkMessage, PeerId};
-use shell_storage::{ChainStore, KvStore};
+use shell_storage::{BlockAvailability, ChainStore, KvStore};
 
 /// Capability metadata received from a remote peer.
 #[derive(Debug, Clone)]
@@ -222,7 +222,14 @@ impl<S: KvStore + 'static> HistoricalBodySync<S> {
                 Ok(Some(h)) => h,
                 _ => continue,
             };
-            if !self.chain_store.has_body(&hash).unwrap_or(true) {
+            let availability = self
+                .chain_store
+                .block_availability(&hash)
+                .unwrap_or(BlockAvailability::BodyOnly);
+            if matches!(
+                availability,
+                BlockAvailability::Missing | BlockAvailability::HeaderOnly
+            ) {
                 return Some(n);
             }
         }
@@ -236,7 +243,14 @@ impl<S: KvStore + 'static> HistoricalBodySync<S> {
                     .get_block_hash_by_number(n)
                     .ok()
                     .flatten()
-                    .map(|h| !self.chain_store.has_body(&h).unwrap_or(true))
+                    .map(|h| {
+                        matches!(
+                            self.chain_store
+                                .block_availability(&h)
+                                .unwrap_or(BlockAvailability::BodyOnly),
+                            BlockAvailability::Missing | BlockAvailability::HeaderOnly
+                        )
+                    })
                     .unwrap_or(false)
             })
             .count() as u64

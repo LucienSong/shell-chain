@@ -81,7 +81,20 @@ contract ValidatorCheck {
 ### Access control
 
 Only existing validators can call `addValidator` / `removeValidator`. Calls from
-non-validators revert with `SystemContractError::Unauthorised`.
+non-validators revert with `SystemContractError::Unauthorized`.
+
+Writes are governed by weighted majority of the current active validator set:
+
+- each validator address can vote once for an `(operation, target, validator-set)`
+  tuple;
+- the change is pending until voted weight is greater than half of current total
+  validator weight;
+- accepted changes update the validator set in world state and are reloaded by
+  consensus at the configured epoch boundary;
+- `addValidator` requires the target address to have a registered PQ public key
+  in chain storage, so a newly legal validator can immediately verify/produce
+  proposer seals;
+- `removeValidator` cannot remove the last remaining validator.
 
 ---
 

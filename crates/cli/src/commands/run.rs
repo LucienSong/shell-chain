@@ -16,8 +16,7 @@ use shell_genesis::{
 use shell_keystore::{decrypt_any, EncryptedKey};
 use shell_mempool::MempoolConfig;
 use shell_network::{NetworkBus, NetworkConfig};
-use shell_node::config::ConsensusEngineConfig;
-use shell_node::config::NodeConfig;
+use shell_node::config::{ConsensusEngineConfig, NodeConfig, NodeRole};
 use shell_node::pruning::StorageProfile;
 use shell_primitives::{Address, ShellHash};
 use shell_rpc::RpcConfig;
@@ -97,6 +96,25 @@ struct DevAuthorityKeyFile {
     secret_key: String,
 }
 
+fn proposer_address_for_role(role: NodeRole, authority: Address) -> Option<Address> {
+    role.is_validator().then_some(authority)
+}
+
+fn validate_role_authority(
+    role: NodeRole,
+    authority: Address,
+    authorities: &[Address],
+) -> Result<(), String> {
+    if role.is_validator() && !authorities.contains(&authority) {
+        warn!(
+            role = ?role,
+            %authority,
+            "validator role address is not in genesis; node may produce only after a validator-set transition makes it active"
+        );
+    }
+    Ok(())
+}
+
 fn load_or_create_dev_signer(path: &Path) -> Result<DilithiumSigner, Box<dyn std::error::Error>> {
     if path.exists() {
         let json = std::fs::read_to_string(path)?;
@@ -153,22 +171,6 @@ fn validate_state_root<S: KvStore + 'static>(
         )),
         Err(_) => Err(format!("world state validation panicked at {state_root}")),
     }
-}
-
-fn recompute_total_tx_count<S: KvStore + 'static>(
-    chain_store: &ChainStore<S>,
-    head_number: u64,
-) -> Result<u64, Box<dyn std::error::Error>> {
-    let mut total = 0u64;
-    for number in 0..=head_number {
-        let block = chain_store
-            .get_block_by_number(number)?
-            .ok_or_else(|| format!("missing canonical block #{number} during tx-count repair"))?;
-        total = total
-            .checked_add(block.transactions.len() as u64)
-            .ok_or("total tx count overflow during repair")?;
-    }
-    Ok(total)
 }
 
 fn repair_head_state_if_needed<S: KvStore + 'static>(
@@ -231,7 +233,7 @@ fn repair_head_state_if_needed<S: KvStore + 'static>(
     if persisted_finalized > recovered.number() {
         chain_store.set_finalized_number(recovered.number())?;
     }
-    chain_store.set_total_tx_count(recompute_total_tx_count(chain_store, recovered.number())?)?;
+    chain_store.rebuild_chain_totals(recovered.number())?;
 
     warn!(
         old_head = head.number(),
@@ -461,6 +463,11 @@ async fn run_with_store<S: KvStore + 'static>(
     let authority_pubkeys = genesis_config.consensus.authority_pubkeys().to_vec();
     let max_future_secs = genesis_config.consensus.max_future_secs();
     let epoch_length = genesis_config.consensus.epoch_length();
+    let node_role = args
+        .node_role
+        .parse::<NodeRole>()
+        .map_err(|e| format!("invalid --node-role: {e}"))?;
+    validate_role_authority(node_role, authority, &authorities)?;
 
     // F4: validate network_type vs block_time_secs consistency, log at info on mismatch.
     if let Err(e) = genesis_config.validate_network_consistency() {
@@ -534,7 +541,7 @@ async fn run_with_store<S: KvStore + 'static>(
             ..RpcConfig::default()
         },
         network: NetworkConfig::default(),
-        proposer_address: Some(authority),
+        proposer_address: proposer_address_for_role(node_role, authority),
         block_time_ms: args.block_time,
         data_dir: args.datadir.to_string_lossy().into(),
         pruning: {
@@ -583,10 +590,7 @@ async fn run_with_store<S: KvStore + 'static>(
             ..shell_node::config::ParallelEvmConfig::default()
         },
         enable_stark_aggregation: args.enable_stark_aggregation,
-        node_role: args
-            .node_role
-            .parse::<shell_node::config::NodeRole>()
-            .map_err(|e| format!("invalid --node-role: {e}"))?,
+        node_role,
     };
 
     // Build the node (auto-detects existing state via NodeBuilder).
@@ -840,6 +844,39 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    #[test]
+    fn prover_role_has_no_proposer_address() {
+        let authority = Address::from([1u8; 20]);
+
+        assert_eq!(
+            proposer_address_for_role(NodeRole::Prover, authority),
+            None,
+            "prover-only nodes must never be configured as block producers"
+        );
+        assert_eq!(
+            proposer_address_for_role(NodeRole::Validator, authority),
+            Some(authority)
+        );
+        assert_eq!(
+            proposer_address_for_role(NodeRole::ValidatorProver, authority),
+            Some(authority)
+        );
+    }
+
+    #[test]
+    fn validator_roles_allow_post_genesis_activation() {
+        let authority = Address::from([1u8; 20]);
+        let other = Address::from([2u8; 20]);
+
+        assert!(validate_role_authority(NodeRole::Validator, authority, &[authority]).is_ok());
+        assert!(
+            validate_role_authority(NodeRole::ValidatorProver, authority, &[authority]).is_ok()
+        );
+        assert!(validate_role_authority(NodeRole::Prover, authority, &[other]).is_ok());
+
+        assert!(validate_role_authority(NodeRole::ValidatorProver, authority, &[other]).is_ok());
+    }
+
     fn test_genesis(authority: Address) -> GenesisConfig {
         GenesisConfig {
             chain_id: 1337,
@@ -891,6 +928,7 @@ mod tests {
                 witness_root: None,
             },
             transactions: vec![],
+            system_transactions: vec![],
             proposer_seal: None,
         }
     }

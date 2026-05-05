@@ -26,6 +26,9 @@ pub fn initialize_genesis<S: KvStore + 'static>(
         world_state
             .set_validators(&authorities)
             .map_err(|e| GenesisError::StateInit(e.to_string()))?;
+        world_state
+            .set_validator_weights(&authorities, &config.consensus.authority_weights())
+            .map_err(|e| GenesisError::StateInit(e.to_string()))?;
     }
 
     // Mark native system-contract addresses with deterministic placeholder
@@ -69,6 +72,7 @@ pub fn initialize_genesis<S: KvStore + 'static>(
     let block = Block {
         header,
         transactions: vec![],
+        system_transactions: vec![],
         proposer_seal: None,
     };
 
@@ -362,6 +366,29 @@ mod tests {
 
         let expected = config.consensus.authorities().to_vec();
         assert_eq!(validators, expected);
+    }
+
+    #[test]
+    fn wpoa_genesis_writes_validator_weights_to_world_state() {
+        let v1 = Address::from([0x01; 20]);
+        let v2 = Address::from([0x02; 20]);
+        let config = GenesisConfig {
+            consensus: ConsensusConfig::WPoA {
+                authorities: vec![v1, v2],
+                authority_pubkeys: vec![],
+                block_time_secs: 1,
+                max_future_secs: 60,
+                epoch_length: 0,
+                weights: vec![3, 0],
+            },
+            ..test_genesis()
+        };
+        let store = Arc::new(MemoryDb::new());
+        let block = initialize_genesis(&config, Arc::clone(&store)).unwrap();
+
+        let ws = WorldState::at_root(store, &block.header.state_root).unwrap();
+        assert_eq!(ws.get_validator_weight(&v1).unwrap(), 3);
+        assert_eq!(ws.get_validator_weight(&v2).unwrap(), 1);
     }
 
     #[test]

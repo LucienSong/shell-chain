@@ -650,9 +650,18 @@ pub trait ShellApi {
     /// Response when proof exists:
     /// - `block_hash`     — the block hash
     /// - `block_number`   — the block height
+    /// - `start_block`    — first source block covered by the proof
+    /// - `end_block`      — final source block covered by the proof
+    /// - `source_count`   — number of source blocks covered by the proof
+    /// - `layer`          — STARK compression layer
+    /// - `proof_entries`  — number of PQ signature entries aggregated
     /// - `proof_version`  — amendment protocol version
     /// - `prover`         — address of the prover
     /// - `proof`          — hex-encoded STARK batch proof bytes
+    ///
+    /// Pointer responses for non-final source blocks include `target_hash` and
+    /// `target_block`, with `proof: null`; query the target hash for full proof
+    /// bytes and proof entry counts.
     ///
     /// Returns `null` when no proof amendment has been generated for the block.
     #[method(name = "getProofAmendment")]

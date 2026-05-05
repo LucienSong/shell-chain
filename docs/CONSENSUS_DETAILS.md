@@ -10,10 +10,35 @@ optional **weighted PoA (wPoA)** extension and async STARK proof aggregation.
 - [PoA Engine](#poa-engine)
 - [wPoA Extension](#wpoa-extension)
 - [Validator Set](#validator-set)
+- [Core Chain Invariants](#core-chain-invariants)
 - [Finality](#finality)
 - [Fork Choice](#fork-choice)
 - [Slashing](#slashing)
 - [Proof Challenges](#proof-challenges)
+
+---
+
+## Core Chain Invariants
+
+`shell-node` treats these as the minimum safety invariants for production,
+import, sync, and RPC readiness:
+
+1. The persisted head block must exist and its `(number -> hash)` canonical
+   mapping must point back to the same hash.
+2. `last_finalized_number` must never be ahead of the canonical head.
+3. When `last_finalized_number > 0`, the finalized hash tracked by finality must
+   equal the canonical hash at that height.
+4. The live `WorldState` root must equal the canonical head `state_root`.
+5. Canonical aggregate counters may lag and be rebuilt, but their persisted
+   `totals_head` must never be ahead of the canonical head.
+6. Side forks may be persisted for fork-choice/reorg inspection, but they must
+   not overwrite `(number -> hash)` canonical mappings unless an explicit
+   non-finalized reorg transition is executed.
+7. Production readiness must be `Ready` before an SG/testnet validator proposes;
+   isolated production is allowed only for explicit dev profiles.
+
+The node exposes these rules internally through `check_core_invariants()`. A
+failure is a degraded/startup error, not a recoverable mempool condition.
 
 ---
 
@@ -27,6 +52,24 @@ blocks in round-robin order. A block is valid if:
 3. All transactions have valid Dilithium3 signatures (verified via `WitnessBundle`).
 4. The block timestamp is within the allowed drift window.
 5. State root and witness root match the executed result.
+
+### Demand-driven production and rewards
+
+Testnet/mainnet production ticks every 2 seconds, but validators only build a
+normal block when executable transactions are available. While idle, validators
+skip empty slots and produce only a 600-second heartbeat block. Heartbeat blocks
+carry no user transactions, consume zero gas, and do not pay rewards.
+
+For normal transaction blocks, transaction fees are split by consensus rule:
+
+- the block producer receives 50% of effective gas fees as a deterministic
+  `blockGasReward` system transaction;
+- L1 STARK settlement receives the remaining 50% of covered source-block gas
+  fees, plus mint reward `100 SHELL / 2^L`;
+- L2+ recursive STARK settlements receive only the layer-discounted mint reward.
+
+Reward records are first-class system transactions with deterministic hashes,
+receipts, block inclusion indexes, and address-history indexing.
 
 ### Configuration
 

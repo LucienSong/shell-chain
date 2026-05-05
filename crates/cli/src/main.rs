@@ -81,13 +81,13 @@ enum Commands {
         rpc_addr: String,
 
         /// Network profile: "dev", "testnet", or "mainnet".
-        /// Drives block time (dev/testnet=30s, mainnet=2s) and feature defaults.
+        /// Drives block time (dev=30s, testnet/mainnet=2s) and feature defaults.
         /// Block time can be further overridden with --block-time.
         #[arg(long, default_value = "dev")]
         network: String,
 
         /// Block production interval in milliseconds.
-        /// Defaults to the network profile default (dev/testnet: 30000, mainnet: 2000).
+        /// Defaults to the network profile default (dev: 30000, testnet/mainnet: 2000).
         /// Explicit values override the network profile default.
         #[arg(long)]
         block_time: Option<u64>,
@@ -174,10 +174,10 @@ enum Commands {
 
         /// Max idle seconds before producing a heartbeat block when mempool is
         /// empty. `0` disables idle-skip and produces a block on every tick
-        /// (legacy behavior). Default `60`: skip empty blocks but heartbeat
-        /// at least once per minute to keep sync, light clients, and timestamp
-        /// monotonicity healthy.
-        #[arg(long, default_value = "60")]
+        /// (legacy behavior). Default `600`: skip empty blocks but heartbeat
+        /// every ten minutes to keep sync, light clients, and timestamp
+        /// monotonicity healthy without reward inflation.
+        #[arg(long, default_value = "600")]
         max_idle_interval: u64,
 
         /// Maximum number of pending transactions in the mempool.
@@ -530,8 +530,8 @@ async fn main() {
 
             // Block time: explicit CLI > config file > network-profile default.
             let network_default_block_time = match effective_network.as_str() {
-                "mainnet" => 2_000u64,
-                _ => 30_000u64, // dev + testnet
+                "testnet" | "mainnet" => 2_000u64,
+                _ => 30_000u64, // dev
             };
             let effective_block_time = block_time
                 .or(file_config.node.block_time)

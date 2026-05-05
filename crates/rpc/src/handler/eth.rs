@@ -70,6 +70,15 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
                 Ok(block.as_ref().map(|b| {
                     let mut rpc = block_to_rpc(b, full_txs);
                     self.fill_stark_proof(&b.hash(), &mut rpc);
+                    self.attach_system_txs(
+                        b,
+                        &mut rpc,
+                        if full_txs {
+                            BlockTxDetail::Full
+                        } else {
+                            BlockTxDetail::Hashes
+                        },
+                    );
                     rpc
                 }))
             }
@@ -81,6 +90,15 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
                 Ok(block.as_ref().map(|b| {
                     let mut rpc = block_to_rpc(b, full_txs);
                     self.fill_stark_proof(&b.hash(), &mut rpc);
+                    self.attach_system_txs(
+                        b,
+                        &mut rpc,
+                        if full_txs {
+                            BlockTxDetail::Full
+                        } else {
+                            BlockTxDetail::Hashes
+                        },
+                    );
                     rpc
                 }))
             }
@@ -89,6 +107,15 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
                 Ok(block.as_ref().map(|b| {
                     let mut rpc = block_to_rpc(b, full_txs);
                     self.fill_stark_proof(&b.hash(), &mut rpc);
+                    self.attach_system_txs(
+                        b,
+                        &mut rpc,
+                        if full_txs {
+                            BlockTxDetail::Full
+                        } else {
+                            BlockTxDetail::Hashes
+                        },
+                    );
                     rpc
                 }))
             }
@@ -165,6 +192,8 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
                     excess_blob_gas: hex_u64(0),
                     sig_aggregate_proof: None,
                     sig_aggregate_proof_size: None,
+                    compression_layer: 0,
+                    pruning_status: "pending".into(),
                 };
                 Ok(Some(pending_block))
             }
@@ -183,6 +212,15 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
         Ok(block.as_ref().map(|b| {
             let mut rpc = block_to_rpc(b, full_txs);
             self.fill_stark_proof(&hash, &mut rpc);
+            self.attach_system_txs(
+                b,
+                &mut rpc,
+                if full_txs {
+                    BlockTxDetail::Full
+                } else {
+                    BlockTxDetail::Hashes
+                },
+            );
             rpc
         }))
     }
@@ -220,6 +258,19 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
             }
         }
 
+        if let Some(system_tx) = self
+            .chain_store
+            .get_system_transaction_by_hash(&hash)
+            .map_err(internal_err)?
+        {
+            let block_hash = self
+                .chain_store
+                .get_tx_location(&hash)
+                .map_err(internal_err)?
+                .map(|(h, _)| h);
+            return Ok(Some(system_tx_to_rpc(&system_tx, block_hash)));
+        }
+
         Ok(None)
     }
 
@@ -244,16 +295,45 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
             if let (Some(block), Some(receipts)) = (block, receipts) {
                 if let Some(receipt) = receipts.get(tx_index as usize) {
                     // F-067: populate from/to/effective_gas_price from the transaction.
-                    let (from, to, eff_gas_price, tx_type_val) =
+                    let (from, to, eff_gas_price, tx_type_val, shell_type, reward_kind) =
                         if let Some(tx) = block.transactions.get(tx_index as usize) {
                             let price = shell_core::effective_gas_price(
                                 tx.tx.max_fee_per_gas,
                                 tx.tx.max_priority_fee_per_gas,
                                 block.header.base_fee_per_gas,
                             );
-                            (tx.sender(), tx.tx.to, price, tx.tx.tx_type)
+                            let shell_type = if tx.is_aa_bundle() {
+                                "aaBatch"
+                            } else if tx.tx.to.is_none() {
+                                "contractCreate"
+                            } else if !tx.tx.data.is_empty() {
+                                "contractCall"
+                            } else {
+                                "transfer"
+                            };
+                            (
+                                tx.sender(),
+                                tx.tx.to,
+                                price,
+                                tx.tx.tx_type,
+                                Some(shell_type.into()),
+                                None,
+                            )
+                        } else if let Some(system_tx) = self
+                            .chain_store
+                            .get_system_transaction_by_hash(&hash)
+                            .map_err(internal_err)?
+                        {
+                            (
+                                system_tx.from,
+                                Some(system_tx.to),
+                                0,
+                                0x80u8,
+                                Some(system_tx.kind.as_str().into()),
+                                Some(system_tx.kind.as_str().into()),
+                            )
                         } else {
-                            (Address::ZERO, None, 0, 2u8)
+                            (Address::ZERO, None, 0, 2u8, None, None)
                         };
 
                     return Ok(Some(RpcReceipt {
@@ -279,6 +359,8 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
                             .collect(),
                         logs_bloom: hex_bytes(receipt.logs_bloom.as_ref()),
                         tx_type: format!("{:#x}", tx_type_val),
+                        shell_type,
+                        reward_kind,
                     }));
                 }
             }
@@ -322,16 +404,47 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
 
         let mut rpc_receipts = Vec::with_capacity(receipts.len());
         for (i, receipt) in receipts.iter().enumerate() {
-            let (from, to, eff_gas_price, tx_type_val) =
+            let (from, to, eff_gas_price, tx_type_val, shell_type, reward_kind) =
                 if let Some(tx) = block_obj.transactions.get(i) {
                     let price = shell_core::effective_gas_price(
                         tx.tx.max_fee_per_gas,
                         tx.tx.max_priority_fee_per_gas,
                         block_obj.header.base_fee_per_gas,
                     );
-                    (tx.sender(), tx.tx.to, price, tx.tx.tx_type)
+                    let shell_type = if tx.is_aa_bundle() {
+                        "aaBatch"
+                    } else if tx.tx.to.is_none() {
+                        "contractCreate"
+                    } else if !tx.tx.data.is_empty() {
+                        "contractCall"
+                    } else {
+                        "transfer"
+                    };
+                    (
+                        tx.sender(),
+                        tx.tx.to,
+                        price,
+                        tx.tx.tx_type,
+                        Some(shell_type.into()),
+                        None,
+                    )
+                } else if let Some(system_tx) = self
+                    .chain_store
+                    .get_system_transactions(&block_hash)
+                    .map_err(internal_err)?
+                    .into_iter()
+                    .find(|tx| tx.tx_index as usize == i)
+                {
+                    (
+                        system_tx.from,
+                        Some(system_tx.to),
+                        0,
+                        0x80u8,
+                        Some(system_tx.kind.as_str().into()),
+                        Some(system_tx.kind.as_str().into()),
+                    )
                 } else {
-                    (Address::ZERO, None, 0, 2u8)
+                    (Address::ZERO, None, 0, 2u8, None, None)
                 };
 
             rpc_receipts.push(RpcReceipt {
@@ -357,6 +470,8 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
                     .collect(),
                 logs_bloom: hex_bytes(receipt.logs_bloom.as_ref()),
                 tx_type: format!("{:#x}", tx_type_val),
+                shell_type,
+                reward_kind,
             });
         }
 

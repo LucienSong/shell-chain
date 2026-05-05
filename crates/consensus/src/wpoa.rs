@@ -67,6 +67,7 @@ impl WPoaConfig {
 pub struct WPoaEngine {
     inner: PoaEngine,
     validator_set: ValidatorSet,
+    validator_set_config: ValidatorSetConfig,
     #[allow(dead_code)]
     verifier: Arc<dyn Verifier>,
     signer: Option<Arc<dyn Signer>>,
@@ -75,19 +76,24 @@ pub struct WPoaEngine {
 impl WPoaEngine {
     /// Construct a `WPoaEngine` from a `WPoaConfig`.
     pub fn new(config: WPoaConfig, verifier: Arc<dyn Verifier>) -> Self {
-        let entries = config
-            .poa
+        let mut poa = config.poa;
+        let weights: Vec<u64> = poa
             .authorities
             .iter()
             .enumerate()
-            .map(|(i, addr)| (*addr, config.weights.get(i).copied().unwrap_or(1)));
+            .map(|(i, _)| config.weights.get(i).copied().unwrap_or(1))
+            .collect();
+        poa.authority_weights = weights.clone();
+
+        let entries = poa.authorities.iter().copied().zip(weights);
 
         let validator_set =
             ValidatorSet::from_genesis(entries, config.validator_set_config.clone());
 
         Self {
-            inner: PoaEngine::new(config.poa),
+            inner: PoaEngine::new(poa),
             validator_set,
+            validator_set_config: config.validator_set_config,
             verifier,
             signer: None,
         }
@@ -224,6 +230,32 @@ impl ConsensusEngine for WPoaEngine {
         self.inner.config_mut().slash_authority(offender);
     }
 
+    fn set_authorities(&mut self, authorities: Vec<Address>) {
+        let current_weights = self.validator_weights();
+        let weights: Vec<u64> = authorities
+            .iter()
+            .map(|addr| current_weights.get(addr).copied().unwrap_or(1))
+            .collect();
+        self.set_authorities_with_weights(authorities, weights);
+    }
+
+    fn set_authorities_with_weights(&mut self, authorities: Vec<Address>, weights: Vec<u64>) {
+        assert!(!authorities.is_empty(), "authority set must not be empty");
+        let weights: Vec<u64> = (0..authorities.len())
+            .map(|idx| weights.get(idx).copied().unwrap_or(1).max(1))
+            .collect();
+
+        {
+            let config = self.inner.config_mut();
+            config.authorities = authorities.clone();
+            config.authority_weights = weights.clone();
+        }
+        self.validator_set = ValidatorSet::from_genesis(
+            authorities.into_iter().zip(weights),
+            self.validator_set_config.clone(),
+        );
+    }
+
     fn validator_weights(&self) -> std::collections::HashMap<Address, u64> {
         self.validator_set
             .active_validators()
@@ -299,5 +331,47 @@ mod tests {
     fn engine_type_is_wpoa() {
         let e = engine(vec![addr(1)], vec![1]);
         assert_eq!(e.engine_type(), EngineType::WPoA);
+    }
+
+    #[test]
+    fn poa_config_metadata_uses_wpoa_weights() {
+        let e = engine(vec![addr(1), addr(2)], vec![2, 1]);
+
+        assert_eq!(e.proposer_for_block(0), addr(1));
+        assert_eq!(e.poa_config().proposer_for_block(0), addr(1));
+        assert_eq!(e.proposer_for_block(1), addr(1));
+        assert_eq!(e.poa_config().proposer_for_block(1), addr(1));
+        assert_eq!(e.proposer_for_block(2), addr(2));
+        assert_eq!(e.poa_config().proposer_for_block(2), addr(2));
+    }
+
+    #[test]
+    fn set_authorities_updates_wpoa_validator_set() {
+        let mut e = engine(vec![addr(1), addr(2)], vec![2, 1]);
+
+        e.set_authorities(vec![addr(1), addr(3)]);
+
+        assert!(e.validator_set().is_active(&addr(1)));
+        assert!(!e.validator_set().is_active(&addr(2)));
+        assert!(e.validator_set().is_active(&addr(3)));
+        assert_eq!(e.validator_weights().get(&addr(1)), Some(&2));
+        assert_eq!(e.validator_weights().get(&addr(3)), Some(&1));
+        assert_eq!(e.proposer_for_block(0), addr(1));
+        assert_eq!(e.proposer_for_block(1), addr(1));
+        assert_eq!(e.proposer_for_block(2), addr(3));
+    }
+
+    #[test]
+    fn set_authorities_with_weights_uses_canonical_weights() {
+        let mut e = engine(vec![addr(1), addr(2)], vec![1, 1]);
+
+        e.set_authorities_with_weights(vec![addr(1), addr(3)], vec![4, 2]);
+
+        assert_eq!(e.validator_weights().get(&addr(1)), Some(&4));
+        assert_eq!(e.validator_weights().get(&addr(3)), Some(&2));
+        assert_eq!(e.poa_config().authority_weights, vec![4, 2]);
+        assert_eq!(e.proposer_for_block(0), addr(1));
+        assert_eq!(e.proposer_for_block(3), addr(1));
+        assert_eq!(e.proposer_for_block(4), addr(3));
     }
 }

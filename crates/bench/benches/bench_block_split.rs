@@ -73,6 +73,7 @@ fn make_block(tx_count: usize) -> Block {
             ..BlockHeader::default()
         },
         transactions: txs,
+        system_transactions: vec![],
         proposer_seal: None,
     }
 }

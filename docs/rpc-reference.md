@@ -493,7 +493,9 @@ Returns network statistics for the performance dashboard.
 get_chain_stats() → serde_json::Value
 ```
 
-Returns chain performance statistics for the performance dashboard.
+Returns chain performance statistics for the performance dashboard. Cumulative
+fields such as `totalTransactions` and `gasUsedTotal` cover the canonical chain
+from block 0 through the current head.
 
 ### shell_getFinalityInfo
 ```
@@ -710,4 +712,3 @@ Response when proof exists:
 - `proof`          — hex-encoded STARK batch proof bytes
 
 Returns `null` when no proof amendment has been generated for the block.
-

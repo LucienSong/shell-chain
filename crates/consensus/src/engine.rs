@@ -51,6 +51,16 @@ pub trait ConsensusEngine: Send + Sync {
     /// Return a mutable reference to the underlying PoA configuration.
     fn poa_config_mut(&mut self) -> &mut PoaConfig;
 
+    /// Replace the active authority set from canonical chain state.
+    fn set_authorities(&mut self, authorities: Vec<Address>) {
+        self.poa_config_mut().set_authorities(authorities);
+    }
+
+    /// Replace the active authority set and aligned weights from canonical chain state.
+    fn set_authorities_with_weights(&mut self, authorities: Vec<Address>, _weights: Vec<u64>) {
+        self.set_authorities(authorities);
+    }
+
     /// Sign a block header with the proposer's key.
     fn sign_block(&self, block: &mut Block, signer: &dyn Signer) -> Result<(), ConsensusError>;
 

@@ -19,6 +19,8 @@ impl<S: KvStore + 'static> Node<S> {
         use tokio::time::{interval, Duration};
 
         *self.runtime_signer.write() = Some(Arc::clone(&signer));
+        let local_signer_address =
+            Address::from_public_key(signer.public_key(), signer.sig_type().as_u8());
 
         // Spawn the Prometheus metrics HTTP server if enabled.
         if self.config.metrics.enabled {
@@ -40,7 +42,9 @@ impl<S: KvStore + 'static> Node<S> {
         // Start JSON-RPC server.
         // Pass the signer to the RPC layer if this node is a validator,
         // enabling governance RPCs (proposeAddValidator / proposeRemoveValidator).
-        let proposer_signer: Option<Arc<dyn Signer>> = if self.config.proposer_address.is_some() {
+        let can_produce_blocks =
+            self.config.node_role.is_validator() && self.config.proposer_address.is_some();
+        let proposer_signer: Option<Arc<dyn Signer>> = if can_produce_blocks {
             Some(Arc::clone(&signer))
         } else {
             None
@@ -64,6 +68,17 @@ impl<S: KvStore + 'static> Node<S> {
             .rpc
             .validate_dev_rpc_exposure()
             .map_err(NodeError::Startup)?;
+
+        let invariant_snapshot = self.check_core_invariants()?;
+        info!(
+            head = invariant_snapshot.head_number,
+            head_hash = %invariant_snapshot.head_hash,
+            finalized = invariant_snapshot.finalized_number,
+            finalized_hash = %invariant_snapshot.finalized_hash,
+            chain_totals_head = ?invariant_snapshot.chain_totals_head,
+            tx_pool_len = invariant_snapshot.tx_pool_len,
+            "core chain invariants satisfied"
+        );
 
         let rpc_handle = start_rpc_server(
             self.config.rpc.clone(),
@@ -120,34 +135,71 @@ impl<S: KvStore + 'static> Node<S> {
         block_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut peer_count_timer = interval(Duration::from_secs(10));
         let mut sync_retry_timer = interval(Duration::from_secs(SYNC_RETRY_BASE_INTERVAL_SECS));
+        let mut tx_rebroadcast_timer = interval(Duration::from_secs(TX_REBROADCAST_INTERVAL_SECS));
         let mut shutdown_rx = self.shutdown_tx.subscribe();
-        // Track the last time a block was produced for idle-block-skip.
-        let mut last_block_time = std::time::Instant::now();
         let mut sync_retry_attempts_without_progress = 0u32;
+        let startup_sync_grace = Self::startup_sync_grace(self.config.block_time_ms);
+        let catch_up_timeout = Self::catch_up_timeout(self.config.block_time_ms);
 
         // Skip the first immediate tick.
         block_timer.tick().await;
         peer_count_timer.tick().await;
         sync_retry_timer.tick().await;
+        tx_rebroadcast_timer.tick().await;
 
         // Startup sync: request blocks we don't have from peers.
         // Track whether we are catching up so we don't spam requests.
         let mut sync_requested = false;
-        if network.peer_count().await > 0 {
-            self.request_missing_blocks(network, &mut sync_requested, "initial-sync")
-                .await;
+        let mut sync_request_nonce: Option<u64> = None;
+        let startup_peers = network.peer_count().await;
+        let allow_isolated_production = self.config.network_type == shell_genesis::NetworkType::Dev
+            || self.consensus.read().poa_config().authorities.len() == 1;
+        let mut production_readiness = ProductionReadiness::new(
+            allow_isolated_production,
+            startup_peers,
+            self.head_number(),
+            std::time::Instant::now(),
+            startup_sync_grace,
+        );
+        if startup_peers > 0 {
+            self.request_missing_blocks(
+                network,
+                None,
+                &mut sync_requested,
+                &mut sync_request_nonce,
+                "initial-sync",
+            )
+            .await;
         }
+
+        let rebuilt_stark_settlements = self.rebuild_settled_stark_sources_from_chain()?;
+        if rebuilt_stark_settlements > 0 {
+            info!(
+                rebuilt = rebuilt_stark_settlements,
+                "rebuilt settled STARK source index from canonical chain"
+            );
+        }
+
+        let (prover_amendment_tx, mut prover_amendment_rx) = tokio::sync::mpsc::unbounded_channel();
 
         // H3: Start background prover service if this node is configured to run proving.
         if self.config.node_role.runs_prover() {
-            let prover_address = self.config.proposer_address.unwrap_or_default();
+            let seeded = self.enqueue_stark_frontier_backlog(8)?;
+            if seeded > 0 {
+                info!(
+                    seeded,
+                    "queued historical STARK frontier proof tasks before starting prover"
+                );
+            }
+            let prover_address = self.config.proposer_address.unwrap_or(local_signer_address);
             let prover_config = ProverConfig::default();
             let service = ProverService::new(
                 Arc::clone(&self.proof_backlog),
                 self.amendment_store.clone(),
                 prover_config,
                 prover_address,
-            );
+            )
+            .with_amendment_sender(prover_amendment_tx);
             let handle = service.start();
             *self.prover_service_handle.lock() = Some(handle);
             info!(
@@ -198,14 +250,130 @@ impl<S: KvStore + 'static> Node<S> {
 
         loop {
             tokio::select! {
+                Some(amendment) = prover_amendment_rx.recv() => {
+                    if let Err(e) = self.validate_stark_amendment_ordering(&amendment) {
+                        debug!(
+                            block = amendment.block_number,
+                            layer = amendment.layer,
+                            "local STARK proof is stored but not settlement-ready: {e}"
+                        );
+                        continue;
+                    }
+                    if can_produce_blocks {
+                        self.pending_stark_settlements.lock().push(amendment.clone());
+                        info!(
+                            block = amendment.block_number,
+                            layer = amendment.layer,
+                            "local STARK proof queued for reward settlement"
+                        );
+                    }
+                    match amendment.to_json() {
+                        Ok(payload) => {
+                            let block_hash = amendment.block_hash;
+                            let block_number = amendment.block_number;
+                            let msg = NetworkMessage::ProofAmendment {
+                                block_hash,
+                                block_number,
+                                payload,
+                            };
+                            if let Err(e) = network.broadcast(msg).await {
+                                warn!(
+                                    %block_hash,
+                                    block = block_number,
+                                    "failed to broadcast local STARK proof amendment: {e}"
+                                );
+                            } else {
+                                self.metrics.stark_amendments_broadcast.inc();
+                                info!(
+                                    %block_hash,
+                                    block = block_number,
+                                    layer = amendment.layer,
+                                    "broadcast local STARK proof amendment"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            warn!(
+                                block = amendment.block_number,
+                                "failed to serialize local STARK proof amendment for broadcast: {e}"
+                            );
+                        }
+                    }
+                }
                 _ = block_timer.tick() => {
-                    if self.config.proposer_address.is_some() {
+                    if can_produce_blocks {
+                        let peers = network.peer_count().await;
+                        production_readiness.refresh(
+                            peers,
+                            sync_requested,
+                            self.head_number(),
+                            std::time::Instant::now(),
+                        );
+                        if !production_readiness.can_produce() {
+                            debug!(
+                                state = ?production_readiness.state(),
+                                reason = production_readiness.reason(),
+                                peers,
+                                head = self.head_number(),
+                                "block production paused by readiness gate"
+                            );
+                            continue;
+                        }
+                        if let Some((preferred_hash, preferred_number, canonical_number)) =
+                            self.preferred_fork_ahead()
+                        {
+                            debug!(
+                                %preferred_hash,
+                                preferred_number,
+                                canonical_number,
+                                "block production paused because fork-choice prefers an ahead non-canonical branch"
+                            );
+                            continue;
+                        }
+
+                        let head = match self.chain_store.get_head_block() {
+                            Ok(Some(head)) => head,
+                            Ok(None) => {
+                                tracing::error!(
+                                    "block production paused because canonical head is missing"
+                                );
+                                continue;
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    error = %e,
+                                    "block production paused because canonical head could not be loaded"
+                                );
+                                continue;
+                            }
+                        };
+                        let now_secs = Self::wall_clock_secs();
+                        if !Self::block_time_elapsed(
+                            head.header.timestamp,
+                            now_secs,
+                            self.config.block_time_ms,
+                        ) {
+                            tracing::trace!(
+                                head = head.number(),
+                                head_timestamp = head.header.timestamp,
+                                now_secs,
+                                block_time_ms = self.config.block_time_ms,
+                                "block production paused until global block cadence elapses"
+                            );
+                            continue;
+                        }
+
                         // Idle-block-skip: when mempool is empty and we haven't
                         // exceeded max_idle_interval, skip block production.
                         let max_idle_ms = self.config.max_idle_interval_ms;
-                        if max_idle_ms > 0 && self.tx_pool.is_empty() {
-                            let idle_dur = std::time::Duration::from_millis(max_idle_ms);
-                            if last_block_time.elapsed() < idle_dur {
+                        let has_pending_stark_settlement =
+                            !self.pending_stark_settlements.lock().is_empty();
+                        if max_idle_ms > 0 && self.tx_pool.is_empty() && !has_pending_stark_settlement {
+                            if !Self::block_time_elapsed(
+                                head.header.timestamp,
+                                now_secs,
+                                max_idle_ms,
+                            ) {
                                 continue;
                             }
                             // Heartbeat: produce an empty block to keep chain alive.
@@ -214,7 +382,6 @@ impl<S: KvStore + 'static> Node<S> {
                         let start = std::time::Instant::now();
                         match self.produce_block(&*signer, 500) {
                             Ok(block) => {
-                                last_block_time = std::time::Instant::now();
                                 let elapsed = start.elapsed().as_secs_f64();
                                 self.metrics.block_production_ms.observe(elapsed);
                                 self.metrics.blocks_imported.inc();
@@ -248,7 +415,7 @@ impl<S: KvStore + 'static> Node<S> {
                                     };
                                     match validators {
                                         Ok(v) if !v.is_empty() => {
-                                            self.consensus.write().poa_config_mut().set_authorities(v);
+                                            self.consensus.write().set_authorities(v);
                                         }
                                         Ok(_) => {
                                             // Empty validator set in world state — keep current authorities.
@@ -292,7 +459,11 @@ impl<S: KvStore + 'static> Node<S> {
                                     let proposer = block.header.proposer;
                                     let _ = round.on_block_proposed(block_hash, proposer);
                                     *self.wpoa_round.lock() = Some(round);
-                                    if let Some(voter) = self.config.proposer_address {
+                                    if can_produce_blocks {
+                                        let voter = self
+                                            .config
+                                            .proposer_address
+                                            .expect("validated block producer has proposer address");
                                         if let Ok(pq_sig) = signer.sign(block_hash.as_bytes()) {
                                             let vote_msg = NetworkMessage::WPoaVote {
                                                 block_hash,
@@ -340,7 +511,11 @@ impl<S: KvStore + 'static> Node<S> {
                                     if let Some(ref mut r) = *self.wpoa_round.lock() {
                                         r.start_view_change(new_view);
                                     }
-                                    if let Some(voter) = self.config.proposer_address {
+                                    if can_produce_blocks {
+                                        let voter = self
+                                            .config
+                                            .proposer_address
+                                            .expect("validated block producer has proposer address");
                                         let block_number = self
                                             .wpoa_round
                                             .lock()
@@ -370,15 +545,35 @@ impl<S: KvStore + 'static> Node<S> {
                                     let saved_header = block.header.clone();
                                     let saved_hash = block.hash();
                                     let imported_number = block.number();
+                                    let head_before_import = self.head_number();
                                     // Use block_in_place so the CPU-heavy rayon batch-verify
                                     // inside import_block doesn't starve other async tasks.
                                     match tokio::task::block_in_place(|| self.import_block(*block, &verifier)) {
                                         Ok(()) => {
-                                            sync_requested = false;
+                                            let head_after_import = self.head_number();
+                                            let canonical_advanced =
+                                                head_after_import > head_before_import
+                                                    && head_after_import == imported_number;
+                                            if !canonical_advanced {
+                                                debug!(
+                                                    number = imported_number,
+                                                    %saved_hash,
+                                                    head = head_after_import,
+                                                    "NewBlock import did not advance canonical head"
+                                                );
+                                                continue;
+                                            }
+                                            if production_readiness.state()
+                                                != ProductionReadinessState::CatchingUp
+                                            {
+                                                sync_requested = false;
+                                                sync_request_nonce = None;
+                                            }
                                             sync_retry_attempts_without_progress = 0;
                                             sync_retry_timer.reset_after(Duration::from_secs(
                                                 SYNC_RETRY_BASE_INTERVAL_SECS,
                                             ));
+                                            production_readiness.note_import_progress(imported_number);
                                             self.metrics.blocks_imported.inc();
                                             self.metrics.block_height.set(imported_number as i64);
                                             self.metrics.update_finality(
@@ -434,7 +629,11 @@ impl<S: KvStore + 'static> Node<S> {
                                                         *round_guard = Some(round);
                                                     }
                                                 }
-                                                if let Some(voter) = self.config.proposer_address {
+                                                if can_produce_blocks {
+                                                    let voter = self
+                                                        .config
+                                                        .proposer_address
+                                                        .expect("validated block producer has proposer address");
                                                     if let Ok(pq_sig) = signer.sign(saved_hash.as_bytes()) {
                                                         let vote_msg = NetworkMessage::WPoaVote {
                                                             block_hash: saved_hash,
@@ -466,10 +665,23 @@ impl<S: KvStore + 'static> Node<S> {
                                             if !sync_requested {
                                                 self.request_missing_blocks(
                                                     network,
+                                                    Some(&peer),
                                                     &mut sync_requested,
+                                                    &mut sync_request_nonce,
                                                     "gap-detected",
                                                 )
                                                 .await;
+                                                production_readiness.note_sync_requested(
+                                                    self.head_number(),
+                                                    std::time::Instant::now(),
+                                                    catch_up_timeout,
+                                                    "gap-detected",
+                                                );
+                                            } else {
+                                                debug!(
+                                                    head = self.head_number(),
+                                                    "gap detected while sync request is already in flight"
+                                                );
                                             }
                                         }
                                         Err(e) => {
@@ -501,7 +713,7 @@ impl<S: KvStore + 'static> Node<S> {
                                         }
                                     }
                                 }
-                                NetworkMessage::BlockRequest { start_number, count, .. } => {
+                                NetworkMessage::BlockRequest { start_number, count, nonce } => {
                                     const MAX_BLOCK_RESPONSE: u64 = 128;
                                     let safe_count = count.min(MAX_BLOCK_RESPONSE);
                                     debug!(
@@ -518,47 +730,43 @@ impl<S: KvStore + 'static> Node<S> {
                                             _ => break,
                                         }
                                     }
-                                    if !blocks.is_empty() {
-                                        info!(
-                                            count = blocks.len(),
-                                            from = start_number,
-                                            "responding with blocks"
-                                        );
-                                        let nonce = std::time::SystemTime::now()
-                                            .duration_since(std::time::UNIX_EPOCH)
-                                            .unwrap_or_default()
-                                            .as_nanos() as u64;
-                                        let commit_certificates = blocks
-                                            .iter()
-                                            .filter_map(|block| {
-                                                let hash = block.hash();
-                                                match self.chain_store.get_commit_certificate(&hash) {
-                                                    Ok(Some(cert)) => Some((hash, cert)),
-                                                    Ok(None) => None,
-                                                    Err(e) => {
-                                                        warn!(
-                                                            %hash,
-                                                            error = %e,
-                                                            "FF.7: failed to load commit certificate for BlockResponse"
-                                                        );
-                                                        None
-                                                    }
-                                                }
-                                            })
-                                            .collect();
-                                        let resp = NetworkMessage::BlockResponse {
-                                            blocks,
-                                            commit_certificates,
-                                            nonce,
-                                        };
-                                        let _ = network.broadcast(resp).await;
-                                    }
-                                }
-                                NetworkMessage::BlockResponse { blocks, commit_certificates, .. } => {
                                     info!(
                                         count = blocks.len(),
+                                        from = start_number,
+                                        "responding to block request"
+                                    );
+                                    let commit_certificates = blocks
+                                        .iter()
+                                        .filter_map(|block| {
+                                            let hash = block.hash();
+                                            match self.chain_store.get_commit_certificate(&hash) {
+                                                Ok(Some(cert)) => Some((hash, cert)),
+                                                Ok(None) => None,
+                                                Err(e) => {
+                                                    warn!(
+                                                        %hash,
+                                                        error = %e,
+                                                        "FF.7: failed to load commit certificate for BlockResponse"
+                                                    );
+                                                    None
+                                                }
+                                            }
+                                        })
+                                        .collect();
+                                    let resp = NetworkMessage::BlockResponse {
+                                        blocks,
+                                        commit_certificates,
+                                        nonce,
+                                    };
+                                    let _ = network.send_to_peer(&peer, resp).await;
+                                }
+                                NetworkMessage::BlockResponse { blocks, commit_certificates, nonce } => {
+                                    info!(
+                                        count = blocks.len(),
+                                        nonce,
                                         "received BlockResponse, importing blocks"
                                     );
+                                    let response_matches_sync = sync_request_nonce == Some(nonce);
                                     let verifier = MultiVerifier;
                                     let mut last_ok = 0u64;
                                     let certs: HashMap<ShellHash, Vec<u8>> =
@@ -567,9 +775,24 @@ impl<S: KvStore + 'static> Node<S> {
                                         let num = block.number();
                                         let hdr = block.header.clone();
                                         let bhash = block.hash();
+                                        let head_before_import = self.head_number();
                                         match tokio::task::block_in_place(|| self.import_block(block, &verifier)) {
                                             Ok(()) => {
+                                                let head_after_import = self.head_number();
+                                                let canonical_advanced =
+                                                    head_after_import > head_before_import
+                                                        && head_after_import == num;
+                                                if !canonical_advanced {
+                                                    debug!(
+                                                        number = num,
+                                                        %bhash,
+                                                        head = head_after_import,
+                                                        "BlockResponse import did not advance canonical head"
+                                                    );
+                                                    continue;
+                                                }
                                                 last_ok = num;
+                                                production_readiness.note_import_progress(num);
                                                 self.metrics.blocks_imported.inc();
                                                 self.metrics.block_height.set(num as i64);
                                                 self.metrics.update_finality(
@@ -614,6 +837,22 @@ impl<S: KvStore + 'static> Node<S> {
                                     // Request next batch if we imported blocks
                                     // (there may be more to catch up on).
                                     if last_ok > 0 {
+                                        let peers = network.peer_count().await;
+                                        if peers == 0 {
+                                            sync_requested = false;
+                                            sync_request_nonce = None;
+                                            production_readiness.refresh(
+                                                peers,
+                                                sync_requested,
+                                                self.head_number(),
+                                                std::time::Instant::now(),
+                                            );
+                                            sync_retry_attempts_without_progress = 0;
+                                            sync_retry_timer.reset_after(Duration::from_secs(
+                                                SYNC_RETRY_BASE_INTERVAL_SECS,
+                                            ));
+                                            continue;
+                                        }
                                         let nonce = std::time::SystemTime::now()
                                             .duration_since(std::time::UNIX_EPOCH)
                                             .unwrap_or_default()
@@ -623,18 +862,53 @@ impl<S: KvStore + 'static> Node<S> {
                                             count: 1, // 1 block at a time — PQ-signed blocks can be several MB
                                             nonce,
                                         };
-                                        let _ = network.broadcast(req).await;
+                                        let _ = network.send_to_peer(&peer, req).await;
                                         sync_requested = true;
+                                        sync_request_nonce = Some(nonce);
+                                        if response_matches_sync {
+                                            production_readiness.note_sync_requested(
+                                                self.head_number(),
+                                                std::time::Instant::now(),
+                                                catch_up_timeout,
+                                                "block-response-next-batch",
+                                            );
+                                        } else {
+                                            production_readiness.note_head_probe(
+                                                self.head_number(),
+                                                std::time::Instant::now(),
+                                                startup_sync_grace,
+                                                "block-response-next-batch",
+                                            );
+                                        }
                                         sync_retry_attempts_without_progress = 0;
                                         sync_retry_timer.reset_after(Duration::from_secs(
                                             SYNC_RETRY_BASE_INTERVAL_SECS,
                                         ));
                                     } else {
                                         // No blocks were imported (e.g. gap-rejected by a
-                                        // broadcast response intended for another peer).
-                                        // Do NOT clear sync_requested so the retry timer
-                                        // continues to fire and re-request the missing batch.
-                                        sync_retry_attempts_without_progress = 0;
+                                        // broadcast response intended for another peer). Only a
+                                        // response to our current sync request proves this request
+                                        // is exhausted; unrelated broadcast responses must not
+                                        // clear the gate.
+                                        if response_matches_sync {
+                                            sync_request_nonce = None;
+                                            if production_readiness.state()
+                                                == ProductionReadinessState::CatchingUp
+                                            {
+                                                sync_requested = true;
+                                                production_readiness.refresh(
+                                                    network.peer_count().await,
+                                                    sync_requested,
+                                                    self.head_number(),
+                                                    std::time::Instant::now(),
+                                                );
+                                                sync_retry_attempts_without_progress = 0;
+                                            } else {
+                                                sync_requested = false;
+                                                production_readiness.note_sync_idle();
+                                                sync_retry_attempts_without_progress = 0;
+                                            }
+                                        }
                                         sync_retry_timer.reset_after(Duration::from_secs(
                                             SYNC_RETRY_BASE_INTERVAL_SECS,
                                         ));
@@ -663,31 +937,129 @@ impl<S: KvStore + 'static> Node<S> {
                                 // Deserialize, store via ProofAmendmentStore, log result.
                                 NetworkMessage::ProofAmendment { block_hash, block_number, payload } => {
                                     debug!(%peer, block = block_number, "received ProofAmendment");
-                                    if let Err(e) = self.amendment_store.put_amendment(&block_hash, &payload) {
-                                        warn!(%peer, block = block_number, "failed to store proof amendment: {e}");
-                                    } else {
-                                        info!(block = block_number, "G5: proof amendment stored from peer {peer}");
-                                        // L2: delete witness bundle once proof is secured, unless grace window is active.
-                                        let grace = self.config.pruning.proof_replacement_grace;
-                                        if grace == 0 {
-                                            match self.chain_store.delete_witness_bundle(&block_hash) {
-                                                Ok(()) => info!(block = block_number, "L2: witness bundle deleted after proof replacement"),
-                                                Err(e) => warn!(block = block_number, "L2: failed to delete witness bundle: {e}"),
+                                    let mut amendment = match shell_stark_prover::ProofAmendment::from_json(&payload) {
+                                        Ok(amendment) => amendment,
+                                        Err(e) => {
+                                            warn!(block = block_number, "invalid proof amendment payload: {e}");
+                                            continue;
+                                        }
+                                    };
+                                    if amendment.block_hash != block_hash {
+                                        warn!(
+                                            block = block_number,
+                                            envelope_hash = %block_hash,
+                                            payload_hash = %amendment.block_hash,
+                                            "proof amendment envelope hash does not match payload"
+                                        );
+                                        continue;
+                                    }
+                                    let covered_hashes = amendment.covered_hashes();
+                                    let original_size = match amendment.original_size {
+                                        Some(size) => Some(size),
+                                        None => {
+                                            let mut total = 0u64;
+                                            let mut complete = true;
+                                            for hash in &covered_hashes {
+                                                match self.witness_store.bundle_size(hash) {
+                                                    Ok(Some(size)) => {
+                                                        total = total.saturating_add(size);
+                                                    }
+                                                    Ok(None) => {
+                                                        complete = false;
+                                                        debug!(
+                                                            block = block_number,
+                                                            %hash,
+                                                            "STARK source witness already absent; cannot prove compression from local source size"
+                                                        );
+                                                        break;
+                                                    }
+                                                    Err(e) => {
+                                                        complete = false;
+                                                        warn!(block = block_number, %hash, "failed to read witness size for compression accounting: {e}");
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                            complete.then_some(total)
+                                        }
+                                    };
+                                    let compression_valid = original_size
+                                        .map(|size| amendment.is_compression_valid_for(size))
+                                        .unwrap_or(false);
+                                    if !compression_valid {
+                                        warn!(
+                                            block = block_number,
+                                            layer = amendment.layer,
+                                            source_count = covered_hashes.len(),
+                                            proof_size = amendment.size_bytes(),
+                                            original_size = original_size.unwrap_or_default(),
+                                            "STARK proof did not meet strict <50% compression threshold; witness retained and reward ineligible"
+                                        );
+                                        continue;
+                                    }
+                                    let already_settled = {
+                                        let settled = self.settled_stark_sources.lock();
+                                        amendment.covered_hashes().into_iter().any(|source| {
+                                            settled.contains(&(amendment.layer, source))
+                                        })
+                                    };
+                                    if already_settled {
+                                        debug!(
+                                            block = block_number,
+                                            source = %amendment.block_hash,
+                                            layer = amendment.layer,
+                                            "STARK proof already settled; ignoring duplicate amendment"
+                                        );
+                                        continue;
+                                    }
+                                    if amendment.original_size.is_none() {
+                                        amendment.original_size = original_size;
+                                    }
+                                     if amendment.start_block.is_none() {
+                                          amendment.start_block = amendment.range_start_block();
+                                      }
+                                      if amendment.compressed_size.is_none() {
+                                          amendment.compressed_size =
+                                              Some(amendment.size_bytes() as u64);
+                                      }
+                                     if let Err(e) = self.validate_stark_amendment_ordering(&amendment) {
+                                         warn!(
+                                             block = block_number,
+                                             layer = amendment.layer,
+                                             "STARK proof rejected by ordered compression frontier: {e}"
+                                         );
+                                         continue;
+                                     }
+                                    match self.store_stark_artifacts(&amendment, None) {
+                                        Ok(stored) => {
+                                            info!(
+                                                block = block_number,
+                                                layer = amendment.layer,
+                                                stored,
+                                                "G5: proof amendment artifacts stored from peer {peer}"
+                                            );
+                                        }
+                                        Err(e) => {
+                                            warn!(%peer, block = block_number, "failed to store proof amendment artifacts: {e}");
+                                            continue;
+                                        }
+                                    }
+                                    self.pending_stark_settlements.lock().push(amendment.clone());
+                                    // L2: delete covered witness bundles once proof is secured, unless grace window is active.
+                                    let grace = self.config.pruning.proof_replacement_grace;
+                                    let head = self.chain_store.get_head_block()
+                                        .ok().flatten().map(|b| b.header.number).unwrap_or(0);
+                                    for hash in covered_hashes {
+                                        if grace == 0 || head.saturating_sub(block_number) >= grace {
+                                            match self.chain_store.delete_witness_bundle(&hash) {
+                                                Ok(()) => info!(block = block_number, %hash, "L2: witness bundle deleted after proof replacement"),
+                                                Err(e) => warn!(block = block_number, %hash, "L2: failed to delete witness bundle: {e}"),
                                             }
                                         } else {
-                                            let head = self.chain_store.get_head_block()
-                                                .ok().flatten().map(|b| b.header.number).unwrap_or(0);
-                                            if head.saturating_sub(block_number) >= grace {
-                                                match self.chain_store.delete_witness_bundle(&block_hash) {
-                                                    Ok(()) => info!(block = block_number, "L2: witness bundle deleted after grace period"),
-                                                    Err(e) => warn!(block = block_number, "L2: failed to delete witness bundle: {e}"),
-                                                }
-                                            } else {
-                                                // Schedule deletion: delete once head reaches block_number + grace.
-                                                let delete_at = block_number.saturating_add(grace);
-                                                self.pending_grace_deletes.lock().insert(block_hash, delete_at);
-                                                debug!(block = block_number, grace, head, delete_at, "L2: proof stored, within grace window — deletion scheduled");
-                                            }
+                                            // Schedule deletion: delete once head reaches block_number + grace.
+                                            let delete_at = block_number.saturating_add(grace);
+                                            self.pending_grace_deletes.lock().insert(hash, delete_at);
+                                            debug!(block = block_number, %hash, grace, head, delete_at, "L2: proof stored, within grace window — deletion scheduled");
                                         }
                                     }
                                 }
@@ -719,11 +1091,11 @@ impl<S: KvStore + 'static> Node<S> {
                                     debug!(%peer, block = challenge.block_number, reason = %challenge.reason, "I2: received ProofChallenge");
                                     if let Ok(Some(proof_bytes)) = self.amendment_store.get_amendment(&challenge.block_hash) {
                                         use shell_consensus::ChallengeResponse;
-                                        if let Some(our_address) = self.config.proposer_address {
+                                        if self.config.node_role.runs_prover() {
                                             let resp = ChallengeResponse {
                                                 block_hash: challenge.block_hash,
                                                 proof_bytes,
-                                                responder: our_address,
+                                                responder: local_signer_address,
                                             };
                                             let _ = network.broadcast(NetworkMessage::ProofChallengeResponse(Box::new(resp))).await;
                                             debug!(block = challenge.block_number, "I2: sent ChallengeResponse");
@@ -864,10 +1236,6 @@ impl<S: KvStore + 'static> Node<S> {
                         }
                         Some(NetworkEvent::PeerConnected(peer)) => {
                             info!(%peer, "peer connected");
-                            sync_requested = false;
-                            sync_retry_attempts_without_progress = 0;
-                            sync_retry_timer
-                                .reset_after(Duration::from_secs(SYNC_RETRY_BASE_INTERVAL_SECS));
                             // L4: re-advertise storage capability so newly connected peer knows.
                             {
                                 let profile = StorageProfile::from_pruning_config(&self.config.pruning);
@@ -877,9 +1245,35 @@ impl<S: KvStore + 'static> Node<S> {
                                     oldest_body_block: oldest,
                                 }).await;
                             }
-                            self.request_missing_blocks(
+                            if !sync_requested {
+                                sync_retry_attempts_without_progress = 0;
+                                sync_retry_timer.reset_after(Duration::from_secs(
+                                    SYNC_RETRY_BASE_INTERVAL_SECS,
+                                ));
+                                self.request_missing_blocks(
+                                    network,
+                                    Some(&peer),
+                                    &mut sync_requested,
+                                    &mut sync_request_nonce,
+                                    "peer-connected",
+                                )
+                                .await;
+                                production_readiness.note_head_probe(
+                                    self.head_number(),
+                                    std::time::Instant::now(),
+                                    startup_sync_grace,
+                                    "peer-connected",
+                                );
+                            } else {
+                                debug!(
+                                    head = self.head_number(),
+                                    "peer connected while sync request is already in flight"
+                                );
+                            }
+                            self.rebroadcast_pending_transactions(
                                 network,
-                                &mut sync_requested,
+                                Some(&peer),
+                                MAX_TX_REBROADCAST_PER_TICK,
                                 "peer-connected",
                             )
                             .await;
@@ -887,10 +1281,20 @@ impl<S: KvStore + 'static> Node<S> {
                         Some(NetworkEvent::PeerDisconnected(peer)) => {
                             info!(%peer, "peer disconnected");
                             self.peer_caps.remove(&peer);
-                            sync_requested = false;
-                            sync_retry_attempts_without_progress = 0;
-                            sync_retry_timer
-                                .reset_after(Duration::from_secs(SYNC_RETRY_BASE_INTERVAL_SECS));
+                            if network.peer_count().await == 0 {
+                                sync_requested = false;
+                                sync_request_nonce = None;
+                                sync_retry_attempts_without_progress = 0;
+                                production_readiness.refresh(
+                                    0,
+                                    sync_requested,
+                                    self.head_number(),
+                                    std::time::Instant::now(),
+                                );
+                                sync_retry_timer.reset_after(Duration::from_secs(
+                                    SYNC_RETRY_BASE_INTERVAL_SECS,
+                                ));
+                            }
                         }
                         Some(NetworkEvent::RoutingTableUpdated { peer_count }) => {
                             debug!(peer_count, "routing table updated");
@@ -901,10 +1305,18 @@ impl<S: KvStore + 'static> Node<S> {
                                 ));
                                 self.request_missing_blocks(
                                     network,
+                                    None,
                                     &mut sync_requested,
+                                    &mut sync_request_nonce,
                                     "routing-update",
                                 )
                                 .await;
+                                production_readiness.note_head_probe(
+                                    self.head_number(),
+                                    std::time::Instant::now(),
+                                    startup_sync_grace,
+                                    "routing-update",
+                                );
                             }
                         }
                         None => {
@@ -918,6 +1330,18 @@ impl<S: KvStore + 'static> Node<S> {
                 Some(signed_tx) = tx_broadcast_rx.recv() => {
                     let msg = NetworkMessage::NewTransaction(Box::new(signed_tx));
                     let _ = network.broadcast(msg).await;
+                }
+
+                _ = tx_rebroadcast_timer.tick() => {
+                    if network.peer_count().await > 0 && !self.tx_pool.is_empty() {
+                        self.rebroadcast_pending_transactions(
+                            network,
+                            None,
+                            MAX_TX_REBROADCAST_PER_TICK,
+                            "periodic",
+                        )
+                        .await;
+                    }
                 }
 
                 // Periodically update peer count metric.
@@ -977,17 +1401,71 @@ impl<S: KvStore + 'static> Node<S> {
                 }
 
                 _ = sync_retry_timer.tick() => {
-                    if sync_requested && network.peer_count().await > 0 {
+                    let peers = network.peer_count().await;
+                    if sync_requested {
+                        if peers == 0 {
+                            warn!(
+                                head = self.head_number(),
+                                "sync requested but no peers are connected; clearing sync gate to prevent production deadlock"
+                            );
+                            sync_requested = false;
+                            sync_request_nonce = None;
+                            sync_retry_attempts_without_progress = 0;
+                            production_readiness.refresh(
+                                peers,
+                                sync_requested,
+                                self.head_number(),
+                                std::time::Instant::now(),
+                            );
+                            sync_retry_timer.reset_after(Duration::from_secs(
+                                SYNC_RETRY_BASE_INTERVAL_SECS,
+                            ));
+                            continue;
+                        }
                         self.request_missing_blocks(
                             network,
+                            None,
                             &mut sync_requested,
+                            &mut sync_request_nonce,
                             "sync-retry",
                         )
                         .await;
                         sync_retry_attempts_without_progress =
                             sync_retry_attempts_without_progress.saturating_add(1);
+                        if sync_retry_attempts_without_progress >= SYNC_RETRY_BACKOFF_THRESHOLD {
+                            production_readiness.refresh(
+                                peers,
+                                sync_requested,
+                                self.head_number(),
+                                std::time::Instant::now(),
+                            );
+                        }
                         sync_retry_timer.reset_after(Duration::from_secs(
                             Self::sync_retry_delay_secs(sync_retry_attempts_without_progress),
+                        ));
+                    } else if peers > 0 {
+                        // NewBlock gossip is best-effort. If a node misses the producer's
+                        // announcement and no later block creates an explicit gap, it would
+                        // otherwise stay stale until a reconnect/routing event. Periodically
+                        // ask peers for head+1 as a cheap head probe; an empty response clears
+                        // the sync request without moving readiness out of Ready.
+                        self.request_missing_blocks(
+                            network,
+                            None,
+                            &mut sync_requested,
+                            &mut sync_request_nonce,
+                            "periodic-head-probe",
+                        )
+                        .await;
+                        production_readiness.note_head_probe(
+                            self.head_number(),
+                            std::time::Instant::now(),
+                            startup_sync_grace,
+                            "periodic-head-probe",
+                        );
+                        sync_retry_attempts_without_progress = 0;
+                        sync_retry_timer.reset_after(Duration::from_secs(
+                            SYNC_RETRY_BASE_INTERVAL_SECS,
                         ));
                     }
                 }
@@ -1017,5 +1495,193 @@ impl<S: KvStore + 'static> Node<S> {
 
         let _ = network.shutdown().await;
         Ok(())
+    }
+
+    pub(crate) fn rebuild_settled_stark_sources_from_chain(&self) -> Result<usize, NodeError> {
+        let head = self
+            .chain_store
+            .get_head_block()?
+            .map(|block| block.number())
+            .unwrap_or(0);
+        let mut rebuilt = 0usize;
+        let mut settled = self.settled_stark_sources.lock();
+        settled.clear();
+        for number in 0..=head {
+            let Some(block) = self.chain_store.get_block_by_number(number)? else {
+                continue;
+            };
+            let legacy = Self::decode_system_extra(&block.header.extra_data)?;
+            let tx_settlements = block
+                .system_transactions
+                .iter()
+                .filter(|tx| tx.kind == SystemTxKind::StarkReward)
+                .filter_map(|tx| {
+                    let payload = tx.proof_payload.as_ref()?;
+                    let amendment = ProofAmendment::from_json(payload.as_ref()).ok()?;
+                    Some((amendment, Some(tx.hash())))
+                });
+            for (amendment, settlement_tx_hash) in legacy
+                .into_iter()
+                .map(|amendment| (amendment, None))
+                .chain(tx_settlements)
+            {
+                self.store_stark_artifacts(&amendment, settlement_tx_hash)?;
+                for source in amendment.covered_hashes() {
+                    if settled.insert((amendment.layer, source)) {
+                        rebuilt += 1;
+                    }
+                }
+            }
+        }
+        Ok(rebuilt)
+    }
+
+    pub(crate) fn enqueue_stark_frontier_backlog(
+        &self,
+        max_blocks: usize,
+    ) -> Result<usize, NodeError> {
+        if max_blocks == 0 || !self.config.node_role.runs_prover() {
+            return Ok(0);
+        }
+        if !self.pending_stark_settlements.lock().is_empty() {
+            return Ok(0);
+        }
+        let head = self
+            .chain_store
+            .get_head_block()?
+            .map(|block| block.number())
+            .unwrap_or(0);
+        let mut queued = 0usize;
+        let mut tasks = Vec::new();
+        for number in 0..=head {
+            if queued >= max_blocks {
+                break;
+            }
+            let Some(hash) = self.chain_store.get_block_hash_by_number(number)? else {
+                continue;
+            };
+            if self.settled_stark_sources.lock().contains(&(1, hash)) {
+                continue;
+            }
+            if self
+                .pending_stark_settlements
+                .lock()
+                .iter()
+                .any(|amendment| {
+                    amendment.layer == 1
+                        && amendment
+                            .covered_hashes()
+                            .into_iter()
+                            .any(|source| source == hash)
+                })
+            {
+                continue;
+            }
+            if self.proof_backlog.lock().contains_source(1, &hash) {
+                continue;
+            }
+            if let Some(bytes) = self.amendment_store.get_amendment(&hash)? {
+                if let Ok(amendment) = ProofAmendment::from_json(&bytes) {
+                    if self.validate_stark_amendment_ordering(&amendment).is_ok() {
+                        let covered = amendment.covered_hashes().len().max(1);
+                        self.pending_stark_settlements.lock().push(amendment);
+                        queued = queued.saturating_add(covered);
+                        continue;
+                    }
+                }
+            }
+            if !self.is_stark_compression_source(&hash, &std::collections::HashMap::new())? {
+                continue;
+            }
+            let Some(block) = self.chain_store.get_block_by_hash(&hash)? else {
+                continue;
+            };
+            let entries: Vec<SigBatchEntry> = block
+                .transactions
+                .iter()
+                .map(|tx| {
+                    let mut msg_hash = [0u8; 32];
+                    msg_hash.copy_from_slice(tx.hash().as_bytes());
+                    let pk_hash = match &tx.pubkey_mode {
+                        shell_core::PubkeyMode::Embedded(pk) => {
+                            let mut h = [0u8; 32];
+                            let copy_len = pk.len().min(32);
+                            h[..copy_len].copy_from_slice(&pk[..copy_len]);
+                            h
+                        }
+                        shell_core::PubkeyMode::Reference => {
+                            let mut h = [0u8; 32];
+                            h[..20].copy_from_slice(tx.from.0.as_slice());
+                            h
+                        }
+                    };
+                    SigBatchEntry { msg_hash, pk_hash }
+                })
+                .collect();
+            let mut hash_bytes = [0u8; 32];
+            hash_bytes.copy_from_slice(hash.as_bytes());
+            let original_size = self.stark_source_original_size(&hash, &block, entries.len())?;
+            tasks.push(ProofTask::with_sources(
+                hash_bytes,
+                number,
+                entries,
+                1,
+                vec![hash],
+                original_size,
+            ));
+            queued += 1;
+        }
+        if !tasks.is_empty() {
+            let mut backlog = self.proof_backlog.lock();
+            for task in tasks.into_iter().rev() {
+                if !task
+                    .source_hashes
+                    .iter()
+                    .any(|source| backlog.contains_source(task.layer, source))
+                {
+                    backlog.push_front(task);
+                }
+            }
+        }
+        Ok(queued)
+    }
+
+    fn wall_clock_secs() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    }
+
+    fn block_time_elapsed(parent_timestamp: u64, now_secs: u64, block_time_ms: u64) -> bool {
+        let interval_secs = block_time_ms
+            .saturating_add(999)
+            .saturating_div(1_000)
+            .max(1);
+        now_secs >= parent_timestamp.saturating_add(interval_secs)
+    }
+}
+
+#[cfg(test)]
+mod cadence_tests {
+    use super::*;
+    use shell_storage::MemoryDb;
+
+    #[test]
+    fn block_time_elapsed_requires_global_parent_timestamp_gap() {
+        assert!(!Node::<MemoryDb>::block_time_elapsed(1_000, 1_001, 2_000));
+        assert!(Node::<MemoryDb>::block_time_elapsed(1_000, 1_002, 2_000));
+    }
+
+    #[test]
+    fn block_time_elapsed_rounds_subsecond_config_up() {
+        assert!(!Node::<MemoryDb>::block_time_elapsed(1_000, 1_000, 500));
+        assert!(Node::<MemoryDb>::block_time_elapsed(1_000, 1_001, 500));
+    }
+
+    #[test]
+    fn block_time_elapsed_gates_heartbeat_from_parent_timestamp() {
+        assert!(!Node::<MemoryDb>::block_time_elapsed(1_000, 1_599, 600_000));
+        assert!(Node::<MemoryDb>::block_time_elapsed(1_000, 1_600, 600_000));
     }
 }
