@@ -984,7 +984,7 @@ mod tests {
     #[test]
     fn core_invariants_reject_finalized_ahead_of_head() {
         let (node, _signer) = setup_node();
-        store_genesis(&node);
+        store_consistent_genesis(&node);
         node.finality
             .write()
             .set_finalized_direct(1, ShellHash::from_slice(&[0xAA; 32]));
@@ -1279,7 +1279,12 @@ mod tests {
         let (node, signer) = setup_node();
         store_genesis(&node);
         let hashes = produce_witnessed_blocks(&node, &signer, 2);
-        let amendment = dummy_ordered_amendment(1, vec![hashes[0], hashes[1]], 2);
+        let genesis_hash = node
+            .chain_store
+            .get_block_hash_by_number(0)
+            .unwrap()
+            .expect("genesis hash");
+        let amendment = dummy_ordered_amendment(1, vec![genesis_hash, hashes[0], hashes[1]], 2);
 
         let mut manifest_block = node.produce_block(&signer, 100).unwrap();
         manifest_block.header.extra_data =
@@ -1292,7 +1297,7 @@ mod tests {
         node.chain_store.set_head(&manifest_hash).unwrap();
 
         let rebuilt = node.rebuild_settled_stark_sources_from_chain().unwrap();
-        assert_eq!(rebuilt, 2);
+        assert_eq!(rebuilt, 3);
 
         let pointer_bytes = node
             .amendment_store
@@ -1331,7 +1336,12 @@ mod tests {
             .get_block_by_hash(&hashes[1])
             .unwrap()
             .unwrap();
-        let amendment = dummy_ordered_amendment(1, vec![hashes[0], hashes[1]], 2);
+        let genesis_hash = leader
+            .chain_store
+            .get_block_hash_by_number(0)
+            .unwrap()
+            .expect("genesis hash");
+        let amendment = dummy_ordered_amendment(1, vec![genesis_hash, hashes[0], hashes[1]], 2);
         leader.pending_stark_settlements.lock().push(amendment);
         let settlement_block = leader.produce_block(&signer, 100).unwrap();
         let settlement_tx_hash = settlement_block
@@ -1468,8 +1478,14 @@ mod tests {
         let (node, signer) = setup_node();
         store_genesis(&node);
         let hashes = produce_witnessed_blocks(&node, &signer, 1);
-        let l1 = dummy_ordered_amendment(1, vec![hashes[0]], 1);
-        let l2 = dummy_ordered_amendment(2, vec![hashes[0]], 1);
+        let genesis_hash = node
+            .chain_store
+            .get_block_hash_by_number(0)
+            .unwrap()
+            .expect("genesis hash");
+        let sources = vec![genesis_hash, hashes[0]];
+        let l1 = dummy_ordered_amendment(1, sources.clone(), 1);
+        let l2 = dummy_ordered_amendment(2, sources, 1);
 
         node.pending_stark_settlements.lock().extend([l1, l2]);
         let settlement_block = node.produce_block(&signer, 100).unwrap();
@@ -1833,7 +1849,7 @@ mod tests {
     #[test]
     fn import_block_with_valid_seal() {
         let (node, signer) = setup_node();
-        store_genesis(&node);
+        store_consistent_genesis(&node);
         let proposer = node.config.proposer_address.unwrap();
 
         // Register authority pubkey so seal verification runs.
@@ -1856,7 +1872,7 @@ mod tests {
         }));
         let config = NodeConfig::dev(proposer);
         let node2 = Node::new(config, node2_db, node2_cs, node2_ws, tx_pool, consensus);
-        store_genesis(&node2);
+        store_consistent_genesis(&node2);
 
         // Register authority pubkey on node2.
         node2.register_authority_pubkey(proposer, signer.public_key().to_vec());
@@ -2330,7 +2346,14 @@ mod tests {
                 witness_root: None,
             },
             transactions: vec![signed0, signed1], // Reference first = wrong order
-            system_transactions: vec![],
+            system_transactions: vec![SystemTransaction::block_gas_reward(
+                1337,
+                1,
+                2,
+                proposer,
+                U256::from(21_000u64).saturating_mul(U256::from(shell_core::INITIAL_BASE_FEE)),
+                genesis_hash,
+            )],
             proposer_seal: None,
         };
 
@@ -2644,7 +2667,7 @@ mod tests {
         // Disable idle-skip so the loop produces blocks even with an empty
         // mempool (this test only verifies block production, not idle behavior).
         node.config.max_idle_interval_ms = 0;
-        store_genesis(&node);
+        store_consistent_genesis(&node);
 
         let bus = NetworkBus::new(64);
         let mut network = bus.join(&NetworkConfig::default());
@@ -3360,9 +3383,11 @@ mod tests {
             "receipts should be stored for block with txs"
         );
         let receipts = receipts.unwrap();
-        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts.len(), 2);
         assert_eq!(receipts[0].status, 1, "transfer tx should succeed");
         assert_eq!(receipts[0].gas_used, 21_000);
+        assert_eq!(receipts[1].status, 1, "block gas reward should succeed");
+        assert_eq!(receipts[1].gas_used, 0);
     }
 
     #[test]

@@ -304,9 +304,9 @@ mod tests {
     }
 
     #[test]
-    fn testnet_config_block_time_is_30s() {
+    fn testnet_config_block_time_is_2s() {
         let cfg = NodeConfig::for_network(Address::ZERO, NetworkType::Testnet);
-        assert_eq!(cfg.block_time_ms, 30_000);
+        assert_eq!(cfg.block_time_ms, 2_000);
     }
 
     #[test]
