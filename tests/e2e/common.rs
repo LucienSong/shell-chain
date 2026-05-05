@@ -89,6 +89,7 @@ pub fn make_block(number: u64, parent_hash: ShellHash) -> Block {
             witness_root: None,
         },
         transactions: vec![],
+        system_transactions: vec![],
         proposer_seal: None,
     }
 }

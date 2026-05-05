@@ -50,6 +50,10 @@ pub struct RpcBlock {
         skip_serializing_if = "Option::is_none"
     )]
     pub sig_aggregate_proof_size: Option<u64>,
+    /// Highest STARK compression layer currently known for this block.
+    pub compression_layer: u32,
+    /// Current local witness/pruning state for this block.
+    pub pruning_status: String,
 }
 
 /// Hex-encoded transaction response.
@@ -88,6 +92,52 @@ pub struct RpcTransaction {
     /// EIP-4844 blob versioned hashes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub blob_versioned_hashes: Option<Vec<ShellHash>>,
+    /// Shell product-level transaction type (`transfer`, `blockReward`, etc.).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shell_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reward_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reward_layer: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reward_source_hash: Option<ShellHash>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub original_size: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compressed_size: Option<String>,
+}
+
+/// Lightweight transaction response for explorer block rows.
+///
+/// This intentionally excludes signature compatibility fields (`v/r/s`), full
+/// calldata, access lists, blob fields, and other heavy data. `hasInput` lets
+/// clients distinguish simple transfers from contract calls without receiving
+/// the full input payload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcTransactionSummary {
+    pub hash: ShellHash,
+    pub block_hash: Option<ShellHash>,
+    pub block_number: Option<String>,
+    pub transaction_index: Option<String>,
+    pub from: Address,
+    pub to: Option<Address>,
+    pub value: String,
+    #[serde(rename = "type")]
+    pub tx_type: String,
+    pub has_input: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shell_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reward_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reward_layer: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reward_source_hash: Option<ShellHash>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub original_size: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compressed_size: Option<String>,
 }
 
 /// EIP-2930 access list item for RPC responses.
@@ -117,6 +167,10 @@ pub struct RpcReceipt {
     pub logs_bloom: String,
     #[serde(rename = "type")]
     pub tx_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shell_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reward_kind: Option<String>,
 }
 
 /// Hex-encoded log response.
@@ -356,6 +410,8 @@ mod tests {
             excess_blob_gas: "0x0".into(),
             sig_aggregate_proof: None,
             sig_aggregate_proof_size: None,
+            compression_layer: 0,
+            pruning_status: "unknown".into(),
         };
 
         let json = serde_json::to_value(&block).unwrap();
@@ -421,6 +477,8 @@ mod tests {
             excess_blob_gas: hex_u64(0),
             sig_aggregate_proof: None,
             sig_aggregate_proof_size: None,
+            compression_layer: 0,
+            pruning_status: "unknown".into(),
         };
 
         let json = serde_json::to_value(&block).unwrap();
@@ -469,6 +527,12 @@ mod tests {
             access_list: None,
             max_fee_per_blob_gas: None,
             blob_versioned_hashes: None,
+            shell_type: Some("transfer".into()),
+            reward_kind: None,
+            reward_layer: None,
+            reward_source_hash: None,
+            original_size: None,
+            compressed_size: None,
         };
 
         let json = serde_json::to_value(&tx).unwrap();
@@ -526,6 +590,12 @@ mod tests {
             access_list: None,
             max_fee_per_blob_gas: None,
             blob_versioned_hashes: None,
+            shell_type: Some("contractCreate".into()),
+            reward_kind: None,
+            reward_layer: None,
+            reward_source_hash: None,
+            original_size: None,
+            compressed_size: None,
         };
 
         let json = serde_json::to_value(&tx).unwrap();
@@ -571,6 +641,12 @@ mod tests {
             access_list: None,
             max_fee_per_blob_gas: None,
             blob_versioned_hashes: None,
+            shell_type: Some("transfer".into()),
+            reward_kind: None,
+            reward_layer: None,
+            reward_source_hash: None,
+            original_size: None,
+            compressed_size: None,
         };
 
         let json = serde_json::to_string(&tx).unwrap();
@@ -606,6 +682,12 @@ mod tests {
             access_list: Some(vec![]),
             max_fee_per_blob_gas: Some("0xf4240".into()),
             blob_versioned_hashes: Some(vec![ShellHash::ZERO]),
+            shell_type: Some("transfer".into()),
+            reward_kind: None,
+            reward_layer: None,
+            reward_source_hash: None,
+            original_size: None,
+            compressed_size: None,
         };
 
         let json = serde_json::to_value(&tx).unwrap();
@@ -631,6 +713,8 @@ mod tests {
             logs: vec![],
             logs_bloom: format!("0x{}", "00".repeat(256)),
             tx_type: "0x2".into(),
+            shell_type: Some("transfer".into()),
+            reward_kind: None,
         };
 
         let json = serde_json::to_value(&receipt).unwrap();
@@ -677,6 +761,8 @@ mod tests {
             logs: vec![],
             logs_bloom: format!("0x{}", "00".repeat(256)),
             tx_type: "0x2".into(),
+            shell_type: Some("transfer".into()),
+            reward_kind: None,
         };
 
         let json = serde_json::to_value(&receipt).unwrap();
@@ -749,6 +835,8 @@ mod tests {
             excess_blob_gas: "0x0".into(),
             sig_aggregate_proof: None,
             sig_aggregate_proof_size: None,
+            compression_layer: 0,
+            pruning_status: "unknown".into(),
         };
 
         let json = serde_json::to_string(&block).unwrap();

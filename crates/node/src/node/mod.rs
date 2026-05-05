@@ -2,11 +2,15 @@
 
 mod block_importer;
 mod block_producer;
+mod chain_state_machine;
 mod dev_rpc;
 mod event_loop;
+mod invariants;
 mod p2p_handlers;
+mod readiness;
+mod system_rewards;
 
-pub(crate) use std::collections::{BTreeMap, HashMap};
+pub(crate) use std::collections::{BTreeMap, HashMap, HashSet};
 pub(crate) use std::sync::Arc;
 pub(crate) use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -19,18 +23,21 @@ pub(crate) use shell_consensus::{
     ForkChoice, PeerScorer, PeerScoringConfig, ProofWindowManager, WPoaEvent, WPoaRound,
     WindowConfig,
 };
-pub(crate) use shell_core::{calculate_base_fee, Account, Block, BlockHeader, SignedTransaction};
+pub(crate) use shell_core::{
+    calculate_base_fee, effective_gas_price, Account, Block, BlockHeader, SignedTransaction,
+    SystemTransaction, SystemTxKind, TransactionReceipt,
+};
 pub(crate) use shell_crypto::{
     BatchVerifier, MultiVerifier, PreVerified, Signer, Verifier, VerifyItem,
 };
 pub(crate) use shell_evm::{commit_evm_state, validate_tx_for_import, ShellEvm, ShellStateDb};
 pub(crate) use shell_mempool::TxPool;
 pub(crate) use shell_network::{NetworkMessage, NetworkService};
-pub(crate) use shell_primitives::{Address, Bytes, ShellHash};
+pub(crate) use shell_primitives::{Address, Bytes, ShellHash, U256};
 pub(crate) use shell_rpc::DevRpcControl;
 pub(crate) use shell_storage::{
-    BodyPruner, ChainStore, KvStore, ProofAmendmentStore, StatePruner, WitnessPruner, WitnessStore,
-    WorldState,
+    validator_registry_addr, BodyPruner, ChainStore, KvStore, ProofAmendmentStore, StatePruner,
+    WitnessPruner, WitnessStore, WorldState,
 };
 
 pub(crate) use crate::config::NodeConfig;
@@ -38,10 +45,12 @@ pub(crate) use crate::error::NodeError;
 pub(crate) use crate::metrics::Metrics;
 pub(crate) use crate::prover_service::{ProverConfig, ProverService, ProverServiceHandle};
 pub(crate) use crate::pruning::{StateRootTracker, StorageProfile};
+pub(crate) use chain_state_machine::{BlockImportTransition, ChainStateMachine};
+pub(crate) use readiness::{ProductionReadiness, ProductionReadinessState};
 
 pub(crate) use shell_stark_prover::{
     prover::{verify_sig_batch, SigBatchEntry},
-    ProofBacklog, ProofTask,
+    ProofAmendment, ProofBacklog, ProofTask, MIN_L1_STARK_TXS,
 };
 
 /// A running shell-chain node.
@@ -75,6 +84,12 @@ pub struct Node<S: KvStore + 'static> {
     pub proof_backlog: Arc<parking_lot::Mutex<ProofBacklog>>,
     /// G5: Stores async STARK proof amendments received from the network.
     pub amendment_store: ProofAmendmentStore<S>,
+    /// Compression-valid STARK proof amendments waiting to be settled in the
+    /// next locally produced block.
+    pending_stark_settlements: Arc<parking_lot::Mutex<Vec<ProofAmendment>>>,
+    /// In-memory guard against duplicate STARK reward settlement in the current
+    /// process lifetime. The block-committed settlement remains authoritative.
+    settled_stark_sources: parking_lot::Mutex<HashSet<(u32, ShellHash)>>,
     /// H3: Handle to the background prover service (non-None when `node_role.runs_prover()`).
     prover_service_handle: parking_lot::Mutex<Option<ProverServiceHandle>>,
     /// I1: Queue of equivocation proofs discovered during import_block, to be broadcast
@@ -108,17 +123,24 @@ pub struct Node<S: KvStore + 'static> {
     /// PS.2: Ban list bridge — scored-below-threshold peers are fed into the
     /// network-level ban list so libp2p disconnects them (Constitution §13.5).
     pub peer_ban_list: parking_lot::Mutex<shell_network::PeerBanList>,
+    /// Recent tx gossip timestamps used to avoid rebroadcasting the same large
+    /// PQ-signed transactions too frequently.
+    tx_rebroadcast_seen: parking_lot::Mutex<HashMap<ShellHash, std::time::Instant>>,
 }
 
 const SYNC_RETRY_BASE_INTERVAL_SECS: u64 = 5;
 const SYNC_RETRY_MAX_INTERVAL_SECS: u64 = 30;
 const SYNC_RETRY_BACKOFF_THRESHOLD: u32 = 3;
+const TX_REBROADCAST_INTERVAL_SECS: u64 = 10;
+const MAX_TX_REBROADCAST_PER_TICK: usize = 64;
+const TX_REBROADCAST_COOLDOWN_SECS: u64 = 60;
 
 struct DevSnapshot {
     head_hash: ShellHash,
     head_number: u64,
     state_root: ShellHash,
     total_tx_count: u64,
+    total_gas_used: U256,
     finalized_number: u64,
     pending_txs: Vec<SignedTransaction>,
     next_block_timestamp: Option<u64>,
@@ -199,6 +221,8 @@ impl<S: KvStore + 'static> Node<S> {
             stark_aggregation,
             proof_backlog: Arc::new(parking_lot::Mutex::new(ProofBacklog::new())),
             amendment_store,
+            pending_stark_settlements: Arc::new(parking_lot::Mutex::new(Vec::new())),
+            settled_stark_sources: parking_lot::Mutex::new(HashSet::new()),
             prover_service_handle: parking_lot::Mutex::new(None),
             equivocation_queue: parking_lot::Mutex::new(Vec::new()),
             finality: Arc::new(RwLock::new(finality_state)),
@@ -222,6 +246,7 @@ impl<S: KvStore + 'static> Node<S> {
                 3,
                 std::time::Duration::from_secs(300),
             )),
+            tx_rebroadcast_seen: parking_lot::Mutex::new(HashMap::new()),
         }
     }
 
@@ -344,7 +369,7 @@ impl<S: KvStore + 'static> Node<S> {
         local_ws: &mut WorldState<S>,
         effects: &shell_evm::SystemContractEffects,
     ) -> Result<(), NodeError> {
-        let validators = if effects.validator_set_changed {
+        let registry_account = if effects.validator_set_changed {
             let validators = local_ws.get_validators()?;
             if validators.is_empty() {
                 return Err(NodeError::Startup(
@@ -358,7 +383,10 @@ impl<S: KvStore + 'static> Node<S> {
                     WorldState::<S>::MAX_VALIDATORS,
                 )));
             }
-            Some(validators)
+            let registry = validator_registry_addr();
+            Some(local_ws.get_account(&registry)?.ok_or_else(|| {
+                NodeError::Startup("system tx removed validator registry account".into())
+            })?)
         } else {
             None
         };
@@ -372,19 +400,74 @@ impl<S: KvStore + 'static> Node<S> {
             updated_accounts.push((*address, account));
         }
 
-        if validators.is_none() && updated_accounts.is_empty() {
+        if registry_account.is_none() && updated_accounts.is_empty() {
             return Ok(());
         }
 
         let mut ws = self.world_state.write();
-        if let Some(validators) = validators {
-            ws.set_validators(&validators)?;
+        if let Some(account) = registry_account {
+            ws.set_account(&validator_registry_addr(), &account)?;
         }
         for (address, account) in updated_accounts {
             ws.set_account(&address, &account)?;
         }
 
         Ok(())
+    }
+
+    fn reload_authorities_if_boundary(&self, block_number: u64) -> Result<(), NodeError> {
+        let should_reload = {
+            let consensus = self.consensus.read();
+            let config = consensus.poa_config();
+            config.epoch_length == 0 || config.is_epoch_boundary(block_number)
+        };
+        if !should_reload {
+            return Ok(());
+        }
+
+        let (validators, weights) = {
+            let ws = self.world_state.read();
+            let validators = ws.get_validators()?;
+            let weights: Result<Vec<u64>, _> = validators
+                .iter()
+                .map(|validator| ws.get_validator_weight(validator))
+                .collect();
+            (validators, weights?)
+        };
+        if validators.is_empty() {
+            warn!(
+                block = block_number,
+                "validator registry is empty at reload boundary; keeping current authority set"
+            );
+            return Ok(());
+        }
+
+        self.consensus
+            .write()
+            .set_authorities_with_weights(validators, weights);
+        Ok(())
+    }
+
+    fn register_fork_choice_block(
+        &self,
+        block_hash: ShellHash,
+        parent_hash: ShellHash,
+        block_number: u64,
+    ) -> bool {
+        let (attestation_count, is_finalized) = {
+            let finality = self.finality.read();
+            (
+                finality.attestation_count(&block_hash),
+                finality.last_finalized_number() >= block_number,
+            )
+        };
+        self.fork_choice.write().add_block(
+            block_hash,
+            parent_hash,
+            block_number,
+            attestation_count,
+            is_finalized,
+        )
     }
 
     /// Register an authority's public key for seal verification.
@@ -401,6 +484,22 @@ impl<S: KvStore + 'static> Node<S> {
             .unwrap_or(0)
     }
 
+    fn preferred_fork_ahead(&self) -> Option<(ShellHash, u64, u64)> {
+        let canonical_head = self.chain_store.get_head_block().ok().flatten()?;
+        let canonical_number = canonical_head.number();
+        let fork_choice = self.fork_choice.read();
+        let preferred_hash = *fork_choice.head();
+        if preferred_hash == canonical_head.hash() {
+            return None;
+        }
+        let preferred_number = fork_choice.score(&preferred_hash)?.block_number;
+        (preferred_number > canonical_number).then_some((
+            preferred_hash,
+            preferred_number,
+            canonical_number,
+        ))
+    }
+
     fn sync_retry_delay_secs(attempts_without_progress: u32) -> u64 {
         if attempts_without_progress < SYNC_RETRY_BACKOFF_THRESHOLD {
             SYNC_RETRY_BASE_INTERVAL_SECS
@@ -409,14 +508,29 @@ impl<S: KvStore + 'static> Node<S> {
         }
     }
 
+    fn startup_sync_grace(block_time_ms: u64) -> std::time::Duration {
+        std::time::Duration::from_millis(block_time_ms.clamp(2_000, 10_000))
+    }
+
+    fn catch_up_timeout(block_time_ms: u64) -> std::time::Duration {
+        std::time::Duration::from_millis(block_time_ms.saturating_mul(3).clamp(10_000, 90_000))
+    }
+
     async fn request_missing_blocks<N: NetworkService + ?Sized>(
         &self,
         network: &mut N,
+        target_peer: Option<&shell_network::PeerId>,
         sync_requested: &mut bool,
+        sync_request_nonce: &mut Option<u64>,
         reason: &'static str,
     ) {
         let head_number = self.head_number();
-        info!(head = head_number, reason, "requesting blocks from peers");
+        info!(
+            head = head_number,
+            reason,
+            peer = target_peer.map(|p| p.0.as_str()).unwrap_or("broadcast"),
+            "requesting blocks from peer"
+        );
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -426,8 +540,74 @@ impl<S: KvStore + 'static> Node<S> {
             count: 1, // request 1 block at a time — PQ-signed blocks can be several MB each
             nonce,
         };
-        let _ = network.broadcast(req).await;
+        let send_result = if let Some(peer) = target_peer {
+            network.send_to_peer(peer, req).await
+        } else {
+            network.broadcast(req).await
+        };
+        if let Err(e) = send_result {
+            tracing::warn!(reason, error = %e, "failed to request missing blocks");
+        }
         *sync_requested = true;
+        *sync_request_nonce = Some(nonce);
+    }
+
+    async fn rebroadcast_pending_transactions<N: NetworkService + ?Sized>(
+        &self,
+        network: &mut N,
+        target_peer: Option<&shell_network::PeerId>,
+        limit: usize,
+        reason: &'static str,
+    ) {
+        let txs = self.tx_pool.pending(limit);
+        if txs.is_empty() {
+            return;
+        }
+
+        let txs: Vec<SignedTransaction> = if target_peer.is_none() {
+            let now = std::time::Instant::now();
+            let cooldown = std::time::Duration::from_secs(TX_REBROADCAST_COOLDOWN_SECS);
+            let mut seen = self.tx_rebroadcast_seen.lock();
+            seen.retain(|_, last_seen| now.duration_since(*last_seen) < cooldown);
+            txs.into_iter()
+                .filter(|tx| {
+                    let hash = tx.hash();
+                    if seen
+                        .get(&hash)
+                        .is_some_and(|last_seen| now.duration_since(*last_seen) < cooldown)
+                    {
+                        false
+                    } else {
+                        seen.insert(hash, now);
+                        true
+                    }
+                })
+                .collect()
+        } else {
+            txs
+        };
+        if txs.is_empty() {
+            return;
+        }
+
+        debug!(
+            count = txs.len(),
+            reason,
+            peer = target_peer.map(|p| p.0.as_str()).unwrap_or("broadcast"),
+            "rebroadcasting pending transactions"
+        );
+        for tx in txs {
+            let msg = NetworkMessage::NewTransaction(Box::new(tx));
+            let result = if let Some(peer) = target_peer {
+                network.send_to_peer(peer, msg).await
+            } else {
+                network.broadcast(msg).await
+            };
+            if let Err(e) = result {
+                warn!(reason, error = %e, "failed to rebroadcast pending transaction");
+                break;
+            }
+        }
     }
 
     fn current_block_timestamp(&self, parent_timestamp: u64) -> u64 {
@@ -449,7 +629,7 @@ impl<S: KvStore + 'static> Node<S> {
             .chain_store
             .get_head_block()?
             .ok_or(NodeError::NoGenesis)?;
-        let total_tx_count = self.chain_store.get_total_tx_count()?;
+        let (total_tx_count, total_gas_used) = self.chain_store.get_chain_totals(head.number())?;
         let finalized_number = self.chain_store.get_finalized_number()?.unwrap_or(0);
         let pending_txs = self.tx_pool.pending(self.tx_pool.len());
 
@@ -464,6 +644,7 @@ impl<S: KvStore + 'static> Node<S> {
                 head_number: head.number(),
                 state_root: head.header.state_root,
                 total_tx_count,
+                total_gas_used,
                 finalized_number,
                 pending_txs,
                 next_block_timestamp,
@@ -481,6 +662,7 @@ impl<S: KvStore + 'static> Node<S> {
                     head_number: s.head_number,
                     state_root: s.state_root,
                     total_tx_count: s.total_tx_count,
+                    total_gas_used: s.total_gas_used,
                     finalized_number: s.finalized_number,
                     pending_txs: s.pending_txs.clone(),
                     next_block_timestamp: s.next_block_timestamp,
@@ -502,6 +684,10 @@ impl<S: KvStore + 'static> Node<S> {
         self.chain_store.set_head(&snapshot.head_hash)?;
         self.chain_store
             .set_total_tx_count(snapshot.total_tx_count)?;
+        self.chain_store
+            .set_total_gas_used(snapshot.total_gas_used)?;
+        self.chain_store
+            .set_chain_totals_head(snapshot.head_number)?;
         self.chain_store
             .set_finalized_number(snapshot.finalized_number)?;
 
@@ -655,7 +841,7 @@ impl<S: KvStore + 'static> Node<S> {
 mod tests {
     use super::*;
     use crate::pruning::PruningConfig;
-    use shell_consensus::{PoaConfig, PoaEngine};
+    use shell_consensus::{PoaConfig, PoaEngine, WPoaConfig, WPoaEngine};
     use shell_core::Transaction;
     use shell_crypto::{DilithiumSigner, Signer};
     use shell_mempool::MempoolConfig;
@@ -707,6 +893,40 @@ mod tests {
                 witness_root: None,
             },
             transactions: vec![],
+            system_transactions: vec![],
+            proposer_seal: None,
+        };
+        let hash = genesis.hash();
+        node.chain_store.put_block(&genesis).unwrap();
+        node.chain_store.set_canonical(0, &hash).unwrap();
+        node.chain_store.set_head(&hash).unwrap();
+    }
+
+    fn store_consistent_genesis(node: &Node<MemoryDb>) {
+        let state_root = current_state_root(node);
+        let genesis = Block {
+            header: BlockHeader {
+                parent_hash: ShellHash::default(),
+                state_root,
+                transactions_root: ShellHash::default(),
+                receipts_root: ShellHash::default(),
+                logs_bloom: Bytes::default(),
+                number: 0,
+                gas_limit: 30_000_000,
+                gas_used: 0,
+                timestamp: 1_700_000_000,
+                extra_data: Bytes::default(),
+                proposer: node.config.proposer_address.unwrap(),
+                sig_aggregate_proof: None,
+                base_fee_per_gas: 0,
+                withdrawals_root: ShellHash::ZERO,
+                parent_beacon_block_root: ShellHash::ZERO,
+                blob_gas_used: 0,
+                excess_blob_gas: 0,
+                witness_root: None,
+            },
+            transactions: vec![],
+            system_transactions: vec![],
             proposer_seal: None,
         };
         let hash = genesis.hash();
@@ -746,6 +966,546 @@ mod tests {
         assert_eq!(Node::<MemoryDb>::sync_retry_delay_secs(2), 5);
         assert_eq!(Node::<MemoryDb>::sync_retry_delay_secs(3), 30);
         assert_eq!(Node::<MemoryDb>::sync_retry_delay_secs(10), 30);
+    }
+
+    #[test]
+    fn core_invariants_accept_consistent_genesis() {
+        let (node, _signer) = setup_node();
+        store_consistent_genesis(&node);
+
+        let snapshot = node.check_core_invariants().unwrap();
+
+        assert_eq!(snapshot.head_number, 0);
+        assert_eq!(snapshot.finalized_number, 0);
+        assert_eq!(snapshot.chain_totals_head, None);
+        assert_eq!(snapshot.tx_pool_len, 0);
+    }
+
+    #[test]
+    fn core_invariants_reject_finalized_ahead_of_head() {
+        let (node, _signer) = setup_node();
+        store_consistent_genesis(&node);
+        node.finality
+            .write()
+            .set_finalized_direct(1, ShellHash::from_slice(&[0xAA; 32]));
+
+        let err = node.check_core_invariants().unwrap_err();
+
+        assert!(
+            matches!(err, NodeError::Startup(message) if message.contains("finalized #1 is ahead of head #0"))
+        );
+    }
+
+    #[test]
+    fn preferred_fork_ahead_only_flags_higher_noncanonical_branch() {
+        let (node, _signer) = setup_node();
+        store_genesis(&node);
+        let genesis_hash = node.chain_store.get_head_hash().unwrap().unwrap();
+        let same_height_fork = ShellHash::from_slice(&[0x21; 32]);
+        let ahead_fork = ShellHash::from_slice(&[0x22; 32]);
+
+        node.fork_choice
+            .write()
+            .add_block(same_height_fork, ShellHash::ZERO, 0, 10, false);
+        assert!(node.preferred_fork_ahead().is_none());
+
+        node.fork_choice
+            .write()
+            .add_block(ahead_fork, genesis_hash, 1, 11, false);
+        assert_eq!(node.preferred_fork_ahead(), Some((ahead_fork, 1, 0)));
+    }
+
+    fn dummy_proof_amendment(
+        layer: u32,
+        original_size: u64,
+        compressed_size: u64,
+    ) -> ProofAmendment {
+        ProofAmendment {
+            version: shell_stark_prover::amendment::PROOF_AMENDMENT_VERSION,
+            block_hash: ShellHash::from_slice(&[0x11; 32]),
+            block_number: 7,
+            start_block: Some(6),
+            proof: shell_stark_prover::proof::SigBatchProof {
+                version: shell_stark_prover::proof::SIG_BATCH_PROOF_VERSION,
+                batch_root_bytes: [0x22; 16],
+                n_sigs: if layer == 1 { MIN_L1_STARK_TXS } else { 2 },
+                proof_bytes: vec![0x33; compressed_size as usize],
+            },
+            prover: Address::from([0x44; 20]),
+            prover_signature: Bytes::from(vec![0x55; 8]),
+            layer,
+            source_hashes: vec![
+                ShellHash::from_slice(&[0x66; 32]),
+                ShellHash::from_slice(&[0x77; 32]),
+            ],
+            original_size: Some(original_size),
+            compressed_size: Some(compressed_size),
+            settlement_tx_hash: None,
+        }
+    }
+
+    #[test]
+    fn system_extra_roundtrips_stark_settlements() {
+        let amendment = dummy_proof_amendment(2, 1_000, 400);
+
+        let encoded = Node::<MemoryDb>::encode_system_extra(std::slice::from_ref(&amendment))
+            .expect("encode system extra");
+        let decoded = Node::<MemoryDb>::decode_system_extra(&encoded).expect("decode system extra");
+
+        assert_eq!(decoded, vec![amendment]);
+        assert!(
+            Node::<MemoryDb>::decode_system_extra(&Bytes::from_static(b"legacy extra data"))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn stark_reward_value_enforces_per_source_layer_mint_and_compression() {
+        let (node, _signer) = setup_node();
+        let l2 = dummy_proof_amendment(2, 1_000, 400);
+        let invalid = dummy_proof_amendment(1, 1_000, 500);
+
+        assert_eq!(
+            node.stark_reward_value(0, &l2).unwrap(),
+            U256::from(50_000_000_000_000_000_000u128)
+        );
+        assert_eq!(
+            node.stark_reward_value(20_047, &l2).unwrap(),
+            U256::from(50_000_000_000_000_000_000u128)
+        );
+        assert!(node.stark_reward_value(20_047, &invalid).is_err());
+    }
+
+    fn dummy_ordered_amendment(
+        layer: u32,
+        source_hashes: Vec<ShellHash>,
+        end_block: u64,
+    ) -> ProofAmendment {
+        let block_hash = *source_hashes
+            .last()
+            .expect("ordered amendment needs at least one source");
+        ProofAmendment {
+            version: shell_stark_prover::amendment::PROOF_AMENDMENT_VERSION,
+            block_hash,
+            block_number: end_block,
+            start_block: end_block
+                .checked_add(1)
+                .and_then(|end_plus_one| end_plus_one.checked_sub(source_hashes.len() as u64)),
+            proof: shell_stark_prover::proof::SigBatchProof {
+                version: shell_stark_prover::proof::SIG_BATCH_PROOF_VERSION,
+                batch_root_bytes: [0x22; 16],
+                n_sigs: if layer == 1 {
+                    MIN_L1_STARK_TXS
+                } else {
+                    source_hashes.len()
+                },
+                proof_bytes: vec![0x33; 128],
+            },
+            prover: Address::from([0x44; 20]),
+            prover_signature: Bytes::from(vec![0x55; 8]),
+            layer,
+            source_hashes,
+            original_size: Some(10_000),
+            compressed_size: Some(128),
+            settlement_tx_hash: None,
+        }
+    }
+
+    fn put_dummy_witness(node: &Node<MemoryDb>, hash: &ShellHash) {
+        use shell_core::{TxWitness, WitnessBundle};
+        use shell_crypto::{PQSignature, SignatureType};
+
+        let bundle = WitnessBundle {
+            witnesses: vec![TxWitness::new_reference(PQSignature {
+                sig_type: SignatureType::Dilithium3,
+                data: vec![0xAA; 256],
+            })],
+        };
+        node.witness_store.put_bundle(hash, &bundle).unwrap();
+    }
+
+    fn produce_witnessed_blocks(
+        node: &Node<MemoryDb>,
+        signer: &DilithiumSigner,
+        count: u64,
+    ) -> Vec<ShellHash> {
+        (0..count)
+            .map(|_| {
+                let block = node.produce_block(signer, 10).unwrap();
+                let hash = block.hash();
+                put_dummy_witness(node, &hash);
+                hash
+            })
+            .collect()
+    }
+
+    #[test]
+    fn stark_l1_ordering_rejects_gap_before_frontier() {
+        let (node, signer) = setup_node();
+        store_genesis(&node);
+        let hashes = produce_witnessed_blocks(&node, &signer, 3);
+
+        let gap = dummy_ordered_amendment(1, vec![hashes[1]], 2);
+        let err = node.validate_stark_amendment_ordering(&gap).unwrap_err();
+
+        assert!(
+            err.to_string().contains("frontier #0"),
+            "expected frontier rejection, got {err}"
+        );
+    }
+
+    #[test]
+    fn stark_settlement_sequence_rejects_gap_before_frontier() {
+        let (node, signer) = setup_node();
+        store_genesis(&node);
+        let hashes = produce_witnessed_blocks(&node, &signer, 2);
+
+        let gap = dummy_ordered_amendment(1, vec![hashes[1]], 2);
+        let err = node.validate_stark_settlement_sequence(&[gap]).unwrap_err();
+
+        assert!(
+            err.to_string().contains("frontier #0"),
+            "expected sequence frontier rejection, got {err}"
+        );
+    }
+
+    #[test]
+    fn stark_l1_ordering_accepts_next_frontier() {
+        let (node, signer) = setup_node();
+        store_genesis(&node);
+        let genesis_hash = node
+            .chain_store
+            .get_block_hash_by_number(0)
+            .unwrap()
+            .unwrap();
+        let hashes = produce_witnessed_blocks(&node, &signer, 3);
+
+        let first = dummy_ordered_amendment(1, vec![genesis_hash, hashes[0], hashes[1]], 2);
+        node.validate_stark_amendment_ordering(&first).unwrap();
+        node.settled_stark_sources.lock().extend(
+            first
+                .covered_hashes()
+                .into_iter()
+                .map(|hash| (first.layer, hash)),
+        );
+
+        let next = dummy_ordered_amendment(1, vec![hashes[2]], 3);
+        node.validate_stark_amendment_ordering(&next).unwrap();
+    }
+
+    #[test]
+    fn stark_l2_ordering_requires_lower_layer_sources() {
+        let (node, signer) = setup_node();
+        store_genesis(&node);
+        let genesis_hash = node
+            .chain_store
+            .get_block_hash_by_number(0)
+            .unwrap()
+            .unwrap();
+        let hashes = produce_witnessed_blocks(&node, &signer, 2);
+
+        let l1_first = dummy_ordered_amendment(1, vec![genesis_hash, hashes[0]], 1);
+        node.settled_stark_sources.lock().extend(
+            l1_first
+                .covered_hashes()
+                .into_iter()
+                .map(|hash| (l1_first.layer, hash)),
+        );
+
+        let l2_with_gap = dummy_ordered_amendment(2, vec![genesis_hash, hashes[0], hashes[1]], 2);
+        let err = node
+            .validate_stark_amendment_ordering(&l2_with_gap)
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("requires block #2 to be compressed at L1"),
+            "expected lower-layer gap rejection, got {err}"
+        );
+    }
+
+    #[test]
+    fn stark_l2_ordering_rejects_mixed_l0_l1_sources() {
+        let (node, signer) = setup_node();
+        store_genesis(&node);
+        let genesis_hash = node
+            .chain_store
+            .get_block_hash_by_number(0)
+            .unwrap()
+            .unwrap();
+        let hashes = produce_witnessed_blocks(&node, &signer, 2);
+
+        let l1_first = dummy_ordered_amendment(1, vec![genesis_hash, hashes[0]], 1);
+        node.settled_stark_sources.lock().extend(
+            l1_first
+                .covered_hashes()
+                .into_iter()
+                .map(|hash| (l1_first.layer, hash)),
+        );
+
+        let mixed_l2 = dummy_ordered_amendment(2, vec![genesis_hash, hashes[0], hashes[1]], 2);
+        let err = node
+            .validate_stark_amendment_ordering(&mixed_l2)
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("requires block #2 to be compressed at L1"),
+            "expected mixed-layer range rejection, got {err}"
+        );
+    }
+
+    #[test]
+    fn stark_settlement_sequence_allows_l2_after_l1_in_same_block() {
+        let (node, signer) = setup_node();
+        store_genesis(&node);
+        let genesis_hash = node
+            .chain_store
+            .get_block_hash_by_number(0)
+            .unwrap()
+            .unwrap();
+        let hashes = produce_witnessed_blocks(&node, &signer, 1);
+
+        let sources = vec![genesis_hash, hashes[0]];
+        let l1 = dummy_ordered_amendment(1, sources.clone(), 1);
+        let l2 = dummy_ordered_amendment(2, sources, 1);
+
+        node.validate_stark_settlement_sequence(&[l1, l2]).unwrap();
+    }
+
+    #[test]
+    fn stark_rebuild_materializes_canonical_proof_pointers() {
+        let (node, signer) = setup_node();
+        store_genesis(&node);
+        let hashes = produce_witnessed_blocks(&node, &signer, 2);
+        let genesis_hash = node
+            .chain_store
+            .get_block_hash_by_number(0)
+            .unwrap()
+            .expect("genesis hash");
+        let amendment = dummy_ordered_amendment(1, vec![genesis_hash, hashes[0], hashes[1]], 2);
+
+        let mut manifest_block = node.produce_block(&signer, 100).unwrap();
+        manifest_block.header.extra_data =
+            Node::<MemoryDb>::encode_system_extra(std::slice::from_ref(&amendment)).unwrap();
+        let manifest_hash = manifest_block.hash();
+        node.chain_store.put_block(&manifest_block).unwrap();
+        node.chain_store
+            .set_canonical(manifest_block.number(), &manifest_hash)
+            .unwrap();
+        node.chain_store.set_head(&manifest_hash).unwrap();
+
+        let rebuilt = node.rebuild_settled_stark_sources_from_chain().unwrap();
+        assert_eq!(rebuilt, 3);
+
+        let pointer_bytes = node
+            .amendment_store
+            .get_amendment(&hashes[0])
+            .unwrap()
+            .expect("first covered source should store a pointer");
+        assert!(matches!(
+            shell_stark_prover::StoredProofArtifact::from_json(&pointer_bytes).unwrap(),
+            shell_stark_prover::StoredProofArtifact::Pointer(_)
+        ));
+
+        let proof_bytes = node
+            .amendment_store
+            .get_amendment(&hashes[1])
+            .unwrap()
+            .expect("final covered source should store the full proof");
+        assert!(matches!(
+            shell_stark_prover::StoredProofArtifact::from_json(&proof_bytes).unwrap(),
+            shell_stark_prover::StoredProofArtifact::Amendment(_)
+        ));
+    }
+
+    #[test]
+    fn import_block_materializes_canonical_proof_pointers() {
+        let (leader, signer) = setup_node();
+        store_genesis(&leader);
+        let proposer = leader.config.proposer_address.unwrap();
+        let hashes = produce_witnessed_blocks(&leader, &signer, 2);
+        let block1 = leader
+            .chain_store
+            .get_block_by_hash(&hashes[0])
+            .unwrap()
+            .unwrap();
+        let block2 = leader
+            .chain_store
+            .get_block_by_hash(&hashes[1])
+            .unwrap()
+            .unwrap();
+        let genesis_hash = leader
+            .chain_store
+            .get_block_hash_by_number(0)
+            .unwrap()
+            .expect("genesis hash");
+        let amendment = dummy_ordered_amendment(1, vec![genesis_hash, hashes[0], hashes[1]], 2);
+        leader.pending_stark_settlements.lock().push(amendment);
+        let settlement_block = leader.produce_block(&signer, 100).unwrap();
+        let settlement_tx_hash = settlement_block
+            .system_transactions
+            .iter()
+            .find(|tx| tx.kind == SystemTxKind::StarkReward)
+            .expect("settlement tx")
+            .hash();
+
+        let follower_db = Arc::new(MemoryDb::new());
+        let follower_chain_store = Arc::new(ChainStore::new(follower_db.clone()));
+        let follower_world_state = Arc::new(RwLock::new(WorldState::new(follower_db.clone())));
+        let follower_consensus: Arc<RwLock<dyn ConsensusEngine>> = Arc::new(RwLock::new(
+            PoaEngine::new(PoaConfig::new(vec![proposer], 1)),
+        ));
+        let follower_tx_pool = Arc::new(TxPool::new(MempoolConfig {
+            chain_id: 1337,
+            ..MempoolConfig::default()
+        }));
+        let follower = Node::new(
+            NodeConfig::dev(proposer),
+            follower_db,
+            follower_chain_store,
+            follower_world_state,
+            follower_tx_pool,
+            follower_consensus,
+        );
+        store_genesis(&follower);
+        follower.register_authority_pubkey(proposer, signer.public_key().to_vec());
+        let verifier = MultiVerifier;
+
+        follower.import_block(block1, &verifier).unwrap();
+        put_dummy_witness(&follower, &hashes[0]);
+        follower.import_block(block2, &verifier).unwrap();
+        put_dummy_witness(&follower, &hashes[1]);
+        follower.import_block(settlement_block, &verifier).unwrap();
+
+        let pointer_bytes = follower
+            .amendment_store
+            .get_amendment(&hashes[0])
+            .unwrap()
+            .expect("import should store pointer for first source");
+        match shell_stark_prover::StoredProofArtifact::from_json(&pointer_bytes).unwrap() {
+            shell_stark_prover::StoredProofArtifact::Pointer(pointer) => {
+                assert_eq!(pointer.settlement_tx_hash, Some(settlement_tx_hash));
+            }
+            other => panic!("expected pointer, got {other:?}"),
+        }
+
+        let proof_bytes = follower
+            .amendment_store
+            .get_amendment(&hashes[1])
+            .unwrap()
+            .expect("import should store full proof for final source");
+        assert!(matches!(
+            shell_stark_prover::StoredProofArtifact::from_json(&proof_bytes).unwrap(),
+            shell_stark_prover::StoredProofArtifact::Amendment(_)
+        ));
+    }
+
+    #[test]
+    fn import_invalid_stark_settlement_does_not_poison_settled_index() {
+        let (leader, signer) = setup_node();
+        store_genesis(&leader);
+        let proposer = leader.config.proposer_address.unwrap();
+        let hashes = produce_witnessed_blocks(&leader, &signer, 2);
+        let block1 = leader
+            .chain_store
+            .get_block_by_hash(&hashes[0])
+            .unwrap()
+            .unwrap();
+        let block2 = leader
+            .chain_store
+            .get_block_by_hash(&hashes[1])
+            .unwrap()
+            .unwrap();
+        let amendment = dummy_ordered_amendment(1, vec![hashes[0], hashes[1]], 2);
+        leader.pending_stark_settlements.lock().push(amendment);
+        let mut bad_settlement_block = leader.produce_block(&signer, 100).unwrap();
+        bad_settlement_block.header.state_root = ShellHash::from([0x99; 32]);
+        leader
+            .consensus
+            .read()
+            .sign_block(&mut bad_settlement_block, &signer)
+            .unwrap();
+
+        let follower_db = Arc::new(MemoryDb::new());
+        let follower_chain_store = Arc::new(ChainStore::new(follower_db.clone()));
+        let follower_world_state = Arc::new(RwLock::new(WorldState::new(follower_db.clone())));
+        let follower_consensus: Arc<RwLock<dyn ConsensusEngine>> = Arc::new(RwLock::new(
+            PoaEngine::new(PoaConfig::new(vec![proposer], 1)),
+        ));
+        let follower_tx_pool = Arc::new(TxPool::new(MempoolConfig {
+            chain_id: 1337,
+            ..MempoolConfig::default()
+        }));
+        let follower = Node::new(
+            NodeConfig::dev(proposer),
+            follower_db,
+            follower_chain_store,
+            follower_world_state,
+            follower_tx_pool,
+            follower_consensus,
+        );
+        store_genesis(&follower);
+        follower.register_authority_pubkey(proposer, signer.public_key().to_vec());
+        let verifier = MultiVerifier;
+
+        follower.import_block(block1, &verifier).unwrap();
+        put_dummy_witness(&follower, &hashes[0]);
+        follower.import_block(block2, &verifier).unwrap();
+        put_dummy_witness(&follower, &hashes[1]);
+        let err = follower
+            .import_block(bad_settlement_block, &verifier)
+            .unwrap_err();
+
+        assert!(
+            err.to_string().contains("state root mismatch"),
+            "expected state root mismatch, got {err}"
+        );
+        assert!(!follower
+            .settled_stark_sources
+            .lock()
+            .contains(&(1, hashes[0])));
+        assert!(follower
+            .amendment_store
+            .get_amendment(&hashes[0])
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn block_producer_settles_l1_and_l2_in_same_block() {
+        let (node, signer) = setup_node();
+        store_genesis(&node);
+        let hashes = produce_witnessed_blocks(&node, &signer, 1);
+        let genesis_hash = node
+            .chain_store
+            .get_block_hash_by_number(0)
+            .unwrap()
+            .expect("genesis hash");
+        let sources = vec![genesis_hash, hashes[0]];
+        let l1 = dummy_ordered_amendment(1, sources.clone(), 1);
+        let l2 = dummy_ordered_amendment(2, sources, 1);
+
+        node.pending_stark_settlements.lock().extend([l1, l2]);
+        let settlement_block = node.produce_block(&signer, 100).unwrap();
+        assert!(
+            settlement_block.header.extra_data.is_empty(),
+            "STARK settlement manifests must live in reward tx payloads, not block extra_data"
+        );
+        let settlements: Vec<ProofAmendment> = settlement_block
+            .system_transactions
+            .iter()
+            .filter(|tx| tx.kind == SystemTxKind::StarkReward)
+            .map(|tx| {
+                let payload = tx.proof_payload.as_ref().expect("proof payload");
+                ProofAmendment::from_json(payload.as_ref()).expect("proof payload decodes")
+            })
+            .collect();
+
+        assert_eq!(settlements.len(), 2);
+        assert_eq!(settlements[0].layer, 1);
+        assert_eq!(settlements[1].layer, 2);
     }
 
     #[test]
@@ -1075,6 +1835,7 @@ mod tests {
                 witness_root: None,
             },
             transactions: vec![],
+            system_transactions: vec![],
             proposer_seal: None,
         };
 
@@ -1088,7 +1849,7 @@ mod tests {
     #[test]
     fn import_block_with_valid_seal() {
         let (node, signer) = setup_node();
-        store_genesis(&node);
+        store_consistent_genesis(&node);
         let proposer = node.config.proposer_address.unwrap();
 
         // Register authority pubkey so seal verification runs.
@@ -1111,7 +1872,7 @@ mod tests {
         }));
         let config = NodeConfig::dev(proposer);
         let node2 = Node::new(config, node2_db, node2_cs, node2_ws, tx_pool, consensus);
-        store_genesis(&node2);
+        store_consistent_genesis(&node2);
 
         // Register authority pubkey on node2.
         node2.register_authority_pubkey(proposer, signer.public_key().to_vec());
@@ -1244,6 +2005,144 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(follower_account.nonce, 2);
+    }
+
+    #[test]
+    fn produce_add_validator_after_pubkey_registration_keeps_state_readable() {
+        let (leader, proposer_signer) = setup_node();
+        let proposer = leader.config.proposer_address.unwrap();
+        {
+            let mut ws = leader.world_state.write();
+            ws.set_validators(&[proposer]).unwrap();
+            ws.set_validator_weight(&proposer, 1).unwrap();
+        }
+        fund_account(&leader, &proposer, U256::from(1_000_000_000_000_000u64));
+        store_consistent_genesis(&leader);
+        leader.register_authority_pubkey(proposer, proposer_signer.public_key().to_vec());
+
+        let target_signer = DilithiumSigner::generate();
+        let target =
+            Address::from_public_key(target_signer.public_key(), target_signer.sig_type().as_u8());
+        fund_account(&leader, &target, U256::from(1_000_000_000_000_000u64));
+
+        let register_tx = Transaction {
+            chain_id: 1337,
+            nonce: 0,
+            to: Some(target),
+            value: U256::ZERO,
+            data: Bytes::new(),
+            gas_limit: 21_000,
+            max_fee_per_gas: shell_core::INITIAL_BASE_FEE,
+            max_priority_fee_per_gas: 0,
+            access_list: None,
+            tx_type: 2,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
+        };
+        let register_sig = target_signer
+            .sign(register_tx.hash().0.as_slice())
+            .expect("sign failed");
+        let register_signed = SignedTransaction::with_pubkey(
+            target,
+            register_tx,
+            register_sig,
+            target_signer.public_key().to_vec(),
+        );
+        let verifier = MultiVerifier;
+        {
+            let mut ws = leader.world_state.write();
+            leader
+                .tx_pool
+                .insert(
+                    register_signed,
+                    &mut ws,
+                    leader.chain_store.as_ref(),
+                    &verifier,
+                )
+                .unwrap();
+        }
+
+        let block1 = leader.produce_block(&proposer_signer, 100).unwrap();
+        let block1_hash = block1.hash();
+        assert_eq!(block1.number(), 1);
+        let block1_state = WorldState::at_root(leader.store.clone(), &block1.header.state_root)
+            .expect("block1 state root reopens");
+        assert_eq!(
+            block1_state
+                .get_validators()
+                .expect("block1 validators readable from header state root"),
+            vec![proposer]
+        );
+        assert!(leader.chain_store.get_pubkey(&target).unwrap().is_some());
+        assert_eq!(
+            leader
+                .world_state
+                .read()
+                .get_validators()
+                .expect("validators readable after pubkey-registration block"),
+            vec![proposer]
+        );
+
+        let add_tx = Transaction {
+            chain_id: 1337,
+            nonce: 0,
+            to: Some(shell_evm::registry_address()),
+            value: U256::ZERO,
+            data: Bytes::copy_from_slice(&shell_evm::encode_add_validator_calldata(&target)),
+            gas_limit: 100_000,
+            max_fee_per_gas: shell_core::INITIAL_BASE_FEE,
+            max_priority_fee_per_gas: 0,
+            access_list: None,
+            tx_type: 2,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
+        };
+        let add_sig = proposer_signer
+            .sign(add_tx.hash().0.as_slice())
+            .expect("sign failed");
+        let add_signed = SignedTransaction::with_pubkey(
+            proposer,
+            add_tx,
+            add_sig,
+            proposer_signer.public_key().to_vec(),
+        );
+        {
+            let mut ws = leader.world_state.write();
+            leader
+                .tx_pool
+                .insert(
+                    add_signed.clone(),
+                    &mut ws,
+                    leader.chain_store.as_ref(),
+                    &verifier,
+                )
+                .unwrap();
+        }
+        let block2 = leader.produce_block(&proposer_signer, 100).unwrap();
+        assert_eq!(block2.number(), 2);
+        let block2_hash = block2.hash();
+        let receipts = leader
+            .chain_store
+            .get_receipts(&block2_hash)
+            .unwrap()
+            .unwrap();
+        let add_receipt = receipts
+            .iter()
+            .find(|receipt| receipt.tx_hash == add_signed.hash())
+            .expect("add-validator receipt stored");
+        assert_eq!(add_receipt.status, 1);
+
+        let validators = leader
+            .world_state
+            .read()
+            .get_validators()
+            .expect("validators readable after add-validator block");
+        assert_eq!(validators, vec![proposer, target]);
+
+        let reopened = WorldState::at_root(leader.store.clone(), &block2.header.state_root)
+            .expect("block2 state root reopens");
+        assert_eq!(reopened.get_validators().unwrap(), vec![proposer, target]);
+        assert_ne!(block1_hash, block2_hash);
     }
 
     /// F-405 Test 1: Block with [Embedded TX₀, Reference TX₁] from same sender.
@@ -1447,6 +2346,14 @@ mod tests {
                 witness_root: None,
             },
             transactions: vec![signed0, signed1], // Reference first = wrong order
+            system_transactions: vec![SystemTransaction::block_gas_reward(
+                1337,
+                1,
+                2,
+                proposer,
+                U256::from(21_000u64).saturating_mul(U256::from(shell_core::INITIAL_BASE_FEE)),
+                genesis_hash,
+            )],
             proposer_seal: None,
         };
 
@@ -1710,6 +2617,7 @@ mod tests {
                 witness_root: None,
             },
             transactions: vec![],
+            system_transactions: vec![],
             proposer_seal: None,
         };
 
@@ -1759,7 +2667,7 @@ mod tests {
         // Disable idle-skip so the loop produces blocks even with an empty
         // mempool (this test only verifies block production, not idle behavior).
         node.config.max_idle_interval_ms = 0;
-        store_genesis(&node);
+        store_consistent_genesis(&node);
 
         let bus = NetworkBus::new(64);
         let mut network = bus.join(&NetworkConfig::default());
@@ -1833,10 +2741,7 @@ mod tests {
                 let validators = ws.get_validators().unwrap();
                 drop(ws);
                 if !validators.is_empty() {
-                    node.consensus
-                        .write()
-                        .poa_config_mut()
-                        .set_authorities(validators);
+                    node.consensus.write().set_authorities(validators);
                 }
             }
         }
@@ -1895,16 +2800,50 @@ mod tests {
                 let validators = ws.get_validators().unwrap();
                 drop(ws);
                 if !validators.is_empty() {
-                    node.consensus
-                        .write()
-                        .poa_config_mut()
-                        .set_authorities(validators);
+                    node.consensus.write().set_authorities(validators);
                 }
             }
         }
 
         // Now the validator set should be updated.
         assert_eq!(node.consensus.read().poa_config().authorities.len(), 2);
+    }
+
+    #[test]
+    fn authority_reload_uses_world_state_weights() {
+        let signer = DilithiumSigner::generate();
+        let authority = Address::from_public_key(signer.public_key(), signer.sig_type().as_u8());
+        let new_val = Address::from([0xDD; 20]);
+
+        let db = Arc::new(MemoryDb::new());
+        let chain_store = Arc::new(ChainStore::new(db.clone()));
+        let world_state = Arc::new(RwLock::new(WorldState::new(db.clone())));
+        let poa = PoaConfig::new(vec![authority], 1);
+        let consensus: Arc<RwLock<dyn ConsensusEngine>> = Arc::new(RwLock::new(WPoaEngine::new(
+            WPoaConfig::with_weights(poa, vec![1]),
+            Arc::new(MultiVerifier),
+        )));
+        let tx_pool = Arc::new(TxPool::new(MempoolConfig {
+            chain_id: 1337,
+            ..MempoolConfig::default()
+        }));
+
+        let config = NodeConfig::dev(authority);
+        let node = Node::new(config, db, chain_store, world_state, tx_pool, consensus);
+        {
+            let mut ws = node.world_state.write();
+            ws.set_validators(&[authority, new_val]).unwrap();
+            ws.set_validator_weights(&[authority, new_val], &[4, 2])
+                .unwrap();
+        }
+
+        node.reload_authorities_if_boundary(1).unwrap();
+
+        let consensus = node.consensus.read();
+        let weights = consensus.validator_weights();
+        assert_eq!(weights.get(&authority), Some(&4));
+        assert_eq!(weights.get(&new_val), Some(&2));
+        assert_eq!(consensus.poa_config().authority_weights, vec![4, 2]);
     }
 
     // ── Pruning integration tests ──────────────────────────────────────
@@ -2024,6 +2963,7 @@ mod tests {
                     witness_root: None,
                 },
                 transactions: vec![],
+                system_transactions: vec![],
                 proposer_seal: None,
             };
             parent_hash = block.hash();
@@ -2073,6 +3013,7 @@ mod tests {
                 witness_root: None,
             },
             transactions: vec![],
+            system_transactions: vec![],
             proposer_seal: None,
         };
 
@@ -2088,7 +3029,7 @@ mod tests {
     }
 
     #[test]
-    fn import_fork_block_at_same_height_skipped() {
+    fn import_fork_block_at_same_height_is_stored_as_side_fork() {
         let (node, _signer) = setup_node();
         store_genesis(&node);
         let verifier = MultiVerifier;
@@ -2119,6 +3060,7 @@ mod tests {
                 witness_root: None,
             },
             transactions: vec![],
+            system_transactions: vec![],
             proposer_seal: None,
         };
         let block1_hash = block1.hash();
@@ -2151,17 +3093,91 @@ mod tests {
                 witness_root: None,
             },
             transactions: vec![],
+            system_transactions: vec![],
             proposer_seal: None,
         };
+        let fork_hash = fork_block.hash();
 
-        // Should succeed (silently skipped as fork), head unchanged.
+        // Should succeed, keep canonical head unchanged, and retain the side fork
+        // for later fork-choice/reorg handling.
         let result = node.import_block(fork_block, &verifier);
         assert!(result.is_ok());
         assert_eq!(
             node.chain_store.get_head_hash().unwrap().unwrap(),
             block1_hash,
-            "head should remain unchanged after fork block is skipped"
+            "head should remain unchanged after side-fork import"
         );
+        assert_eq!(
+            node.chain_store.get_side_fork_hashes(1).unwrap(),
+            vec![fork_hash]
+        );
+        assert_eq!(
+            node.chain_store
+                .get_block_by_hash(&fork_hash)
+                .unwrap()
+                .unwrap()
+                .hash(),
+            fork_hash
+        );
+        assert!(
+            node.fork_choice.read().contains(&block1_hash),
+            "canonical imported block should be registered with fork choice"
+        );
+        assert!(
+            node.fork_choice.read().contains(&fork_hash),
+            "side-fork block should be registered with fork choice"
+        );
+    }
+
+    #[test]
+    fn import_next_height_wrong_parent_is_stored_as_side_fork() {
+        let (node, _signer) = setup_node();
+        store_genesis(&node);
+        let verifier = MultiVerifier;
+        let proposer = node.config.proposer_address.unwrap();
+        let state_root = current_state_root(&node);
+        let genesis_hash = node.chain_store.get_head_hash().unwrap().unwrap();
+        let wrong_parent = ShellHash::from([0x42; 32]);
+
+        let fork_block = Block {
+            header: BlockHeader {
+                parent_hash: wrong_parent,
+                state_root,
+                transactions_root: ShellHash::default(),
+                receipts_root: ShellHash::default(),
+                logs_bloom: Bytes::default(),
+                number: 1,
+                gas_limit: 30_000_000,
+                gas_used: 0,
+                timestamp: 1_700_000_001,
+                extra_data: Bytes::default(),
+                proposer,
+                sig_aggregate_proof: None,
+                base_fee_per_gas: shell_core::INITIAL_BASE_FEE,
+                withdrawals_root: ShellHash::ZERO,
+                parent_beacon_block_root: ShellHash::ZERO,
+                blob_gas_used: 0,
+                excess_blob_gas: 0,
+                witness_root: None,
+            },
+            transactions: vec![],
+            system_transactions: vec![],
+            proposer_seal: None,
+        };
+        let fork_hash = fork_block.hash();
+
+        node.import_block(fork_block, &verifier).unwrap();
+
+        assert_eq!(
+            node.chain_store.get_head_hash().unwrap().unwrap(),
+            genesis_hash,
+            "disconnected next-height block must not become canonical head"
+        );
+        assert_eq!(
+            node.chain_store.get_side_fork_hashes(1).unwrap(),
+            vec![fork_hash]
+        );
+        assert!(node.fork_choice.read().contains(&fork_hash));
     }
 
     #[test]
@@ -2237,6 +3253,7 @@ mod tests {
                 witness_root: None,
             },
             transactions: vec![],
+            system_transactions: vec![],
             proposer_seal: None,
         };
 
@@ -2366,9 +3383,11 @@ mod tests {
             "receipts should be stored for block with txs"
         );
         let receipts = receipts.unwrap();
-        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts.len(), 2);
         assert_eq!(receipts[0].status, 1, "transfer tx should succeed");
         assert_eq!(receipts[0].gas_used, 21_000);
+        assert_eq!(receipts[1].status, 1, "block gas reward should succeed");
+        assert_eq!(receipts[1].gas_used, 0);
     }
 
     #[test]
@@ -2423,6 +3442,7 @@ mod tests {
                 witness_root: None,
             },
             transactions: vec![],
+            system_transactions: vec![],
             proposer_seal: None,
         };
 
@@ -2462,6 +3482,7 @@ mod tests {
         let mut competing_block = Block {
             header: block1.header.clone(),
             transactions: vec![],
+            system_transactions: vec![],
             proposer_seal: None,
         };
         competing_block.header.timestamp += 999; // different timestamp → different hash
@@ -2510,6 +3531,7 @@ mod tests {
                 witness_root,
             },
             transactions: vec![],
+            system_transactions: vec![],
             proposer_seal: None,
         }
     }
@@ -2631,6 +3653,7 @@ mod tests {
 
         let mut config = NodeConfig::dev(authority);
         config.enable_stark_aggregation = true;
+        config.node_role = crate::config::NodeRole::ValidatorProver;
         let node = Node::new(config, db, chain_store, world_state, tx_pool, consensus);
         (node, signer)
     }
@@ -2744,10 +3767,13 @@ mod tests {
             println!("║  Block #{num}: {txs} embedded txs → backlog depth after = {depth}");
         }
 
-        // Every block with embedded txs must push a proof task.
+        // Every block with embedded txs must push a proof task, and the STARK
+        // frontier must retain the empty genesis source so ranges start at #0.
         assert_eq!(
-            total_backlog, NUM_BLOCKS,
-            "expected {NUM_BLOCKS} proof tasks in backlog, got {total_backlog}"
+            total_backlog,
+            NUM_BLOCKS + 1,
+            "expected {} proof tasks in backlog, got {total_backlog}",
+            NUM_BLOCKS + 1
         );
 
         // ── Phase 4: compression ratio analysis (using known STARK proof sizes) ─
@@ -2802,10 +3828,28 @@ mod tests {
         );
     }
 
-    /// STARK compression: verify ProverService processes the backlog and stores
-    /// proof amendments.
+    #[test]
+    fn stark_frontier_backlog_includes_empty_genesis_block() {
+        let (node, _proposer_signer) = setup_stark_node();
+        store_genesis(&node);
+
+        let queued = node.enqueue_stark_frontier_backlog(8).unwrap();
+        assert_eq!(queued, 1);
+
+        let backlog = node.proof_backlog.lock();
+        let task = backlog
+            .peek()
+            .expect("empty genesis source should be queued");
+        assert_eq!(task.block_number, 0);
+        assert!(task.entries.is_empty());
+        assert_eq!(task.original_size, Some(0));
+        assert_eq!(task.source_hashes.len(), 1);
+    }
+
+    /// STARK compression: verify ProverService does not prove L1 ranges before
+    /// the minimum tx-entry threshold is reached.
     #[tokio::test]
-    async fn stark_prover_service_processes_backlog() {
+    async fn stark_prover_service_waits_for_l1_minimum() {
         use crate::prover_service::{ProverConfig, ProverService};
         use shell_storage::ProofAmendmentStore;
 
@@ -2826,78 +3870,50 @@ mod tests {
             drop(ws);
         }
 
-        // Produce block 1 → 5 embedded txs → 1 proof task queued.
+        // Produce block 1 → 5 embedded txs, plus the empty genesis frontier task.
         let block = node.produce_block(&proposer_signer, 20).unwrap();
-        let block_num = block.number();
 
         // produce_block pushes a ProofTask with the real post-seal block hash.
         let block_hash = block.hash();
 
         assert_eq!(
             node.proof_backlog.lock().len(),
-            1,
-            "expected 1 proof task after producing 1 block with {TXS} embedded txs"
+            2,
+            "expected genesis + block proof tasks after producing 1 block with {TXS} embedded txs"
         );
 
         // Start ProverService to process the backlog.
         let db = node.store.clone();
         let amendment_store = ProofAmendmentStore::new(db);
+        let settlement_queue = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let (amendment_tx, mut amendment_rx) = tokio::sync::mpsc::unbounded_channel();
         let svc = ProverService::new(
             Arc::clone(&node.proof_backlog),
             amendment_store.clone(),
             ProverConfig::default(),
             node.config.proposer_address.unwrap_or_default(),
-        );
+        )
+        .with_amendment_sender(amendment_tx)
+        .with_settlement_queue(Arc::clone(&settlement_queue));
         let handle = svc.start();
 
-        // Wait for proof to be processed (proving 5 entries takes ~5-15ms in mock mode).
         tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
         handle.shutdown().await;
 
-        // Backlog should be drained.
         assert_eq!(
             node.proof_backlog.lock().len(),
-            0,
-            "ProverService should have drained the backlog"
+            2,
+            "ProverService must wait until L1 reaches the minimum tx-entry threshold"
         );
-
-        // Amendment should be stored under the real block hash.
-        let stored_bytes = amendment_store
+        assert!(settlement_queue.lock().is_empty());
+        assert!(
+            amendment_rx.try_recv().is_err(),
+            "no under-threshold L1 proof should be broadcast"
+        );
+        assert!(amendment_store
             .get_amendment(&block_hash)
-            .expect("amendment store read failed");
-        assert!(
-            stored_bytes.is_some(),
-            "ProofAmendment for block #{block_num} should be stored under block hash {block_hash}"
-        );
-
-        // Deserialize and check the amendment.
-        let bytes = stored_bytes.unwrap();
-        let amendment: shell_stark_prover::ProofAmendment =
-            serde_json::from_slice(&bytes).expect("amendment deserialization failed");
-        let proof_size = amendment.proof.size_bytes();
-        let raw_sig_pubkey_size = TXS * (3309 + 1952);
-
-        println!("\n╔══ STARK ProverService Test ════════════════════════════════════╗");
-        println!("║  Block #{block_num}: {TXS} embedded txs → proof generated & stored");
-        println!(
-            "║  Proof size: {proof_size} bytes ({:.1} KB)",
-            proof_size as f64 / 1024.0
-        );
-        println!(
-            "║  Raw sig+pubkey: {raw_sig_pubkey_size} bytes ({:.1} KB)",
-            raw_sig_pubkey_size as f64 / 1024.0
-        );
-        println!(
-            "║  Actual compression: {:.1}×",
-            raw_sig_pubkey_size as f64 / proof_size as f64
-        );
-        println!("╚════════════════════════════════════════════════════════════════╝\n");
-
-        assert!(proof_size > 0, "proof must be non-empty");
-        assert!(
-            proof_size < raw_sig_pubkey_size,
-            "STARK proof ({proof_size} B) should be smaller than raw sig+pubkey data ({raw_sig_pubkey_size} B)"
-        );
+            .unwrap()
+            .is_none());
     }
 
     // ─── L2: proof-replaces-witness tests ──────────────────────────────────────
@@ -3057,6 +4073,7 @@ mod tests {
                     witness_root: None,
                 },
                 transactions: vec![],
+                system_transactions: vec![],
                 proposer_seal: None,
             };
             let h = genesis.hash();

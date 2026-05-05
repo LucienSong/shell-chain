@@ -331,6 +331,29 @@ pub trait ShellApi {
     #[method(name = "pendingCount")]
     async fn pending_count(&self) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
 
+    /// Returns a block by number with Shell transaction detail modes.
+    ///
+    /// `tx_detail` accepts:
+    /// - `"hashes"` / `null`: transaction hashes only
+    /// - `"summary"`: row-ready tx metadata without signatures, calldata, or proofs
+    /// - `"full"`: full Ethereum-compatible transaction objects
+    #[method(name = "getBlockByNumber")]
+    async fn shell_get_block_by_number(
+        &self,
+        number: String,
+        tx_detail: Option<String>,
+    ) -> Result<Option<RpcBlock>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns a block by hash with Shell transaction detail modes.
+    ///
+    /// See `shell_getBlockByNumber` for supported `tx_detail` values.
+    #[method(name = "getBlockByHash")]
+    async fn shell_get_block_by_hash(
+        &self,
+        hash: ShellHash,
+        tx_detail: Option<String>,
+    ) -> Result<Option<RpcBlock>, jsonrpsee::types::ErrorObjectOwned>;
+
     /// Submit a signed transaction as structured JSON (developer-friendly).
     #[method(name = "sendTransaction")]
     async fn send_transaction(
@@ -627,9 +650,18 @@ pub trait ShellApi {
     /// Response when proof exists:
     /// - `block_hash`     — the block hash
     /// - `block_number`   — the block height
+    /// - `start_block`    — first source block covered by the proof
+    /// - `end_block`      — final source block covered by the proof
+    /// - `source_count`   — number of source blocks covered by the proof
+    /// - `layer`          — STARK compression layer
+    /// - `proof_entries`  — number of PQ signature entries aggregated
     /// - `proof_version`  — amendment protocol version
     /// - `prover`         — address of the prover
     /// - `proof`          — hex-encoded STARK batch proof bytes
+    ///
+    /// Pointer responses for non-final source blocks include `target_hash` and
+    /// `target_block`, with `proof: null`; query the target hash for full proof
+    /// bytes and proof entry counts.
     ///
     /// Returns `null` when no proof amendment has been generated for the block.
     #[method(name = "getProofAmendment")]

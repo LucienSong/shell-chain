@@ -73,7 +73,7 @@ shell-node [GLOBAL FLAGS] run [OPTIONS]
 | `--rpc-tls-key <PATH>` | — | PEM TLS private key for HTTPS/WSS |
 | `--unsafe-dev-exposed` | `false` | Allow `evm_*` dev methods on non-loopback listeners |
 | `--metrics-addr <ADDR>` | `127.0.0.1:9090` | Prometheus metrics HTTP address |
-| `--max-idle-interval <SECS>` | `60` | Max idle seconds before heartbeat block (0 = disabled) |
+| `--max-idle-interval <SECS>` | `600` | Max idle seconds before heartbeat block (0 = disabled) |
 | `--mempool-max-size <N>` | `4096` | Maximum pending transactions in mempool |
 | `--mempool-price-bump <PCT>` | `10` | Minimum gas-price bump % to replace a pending tx |
 | `--state-cache-size-mb <MB>` | `64` | Account LRU cache size for world-state trie |
@@ -90,7 +90,7 @@ shell-node [GLOBAL FLAGS] run [OPTIONS]
 | Profile | Block Time | Chain ID default |
 |---------|-----------|------------------|
 | `dev` | 2 000 ms | 1337 |
-| `testnet` | 30 000 ms | 10 |
+| `testnet` | 2 000 ms | 10 |
 | `mainnet` | 2 000 ms | 1 |
 
 **Storage Profiles:**
@@ -110,7 +110,7 @@ shell-node \
   --keystore /opt/shell/validator.json \
   --rpc-addr 0.0.0.0:8545 \
   --network testnet \
-  --block-time 10000 \
+  --block-time 2000 \
   --db rocksdb \
   --chain-id 10 \
   --p2p \

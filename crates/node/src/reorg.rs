@@ -205,6 +205,7 @@ mod tests {
         Block {
             header,
             transactions: vec![],
+            system_transactions: vec![],
             proposer_seal: None,
         }
     }

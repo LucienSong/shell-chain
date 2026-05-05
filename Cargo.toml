@@ -116,3 +116,14 @@ winterfell = "0.13"
 [patch.crates-io]
 ark-relations = { path = "deps/ark-relations" }
 libp2p-yamux = { path = "deps/libp2p-yamux" }
+
+[profile.dev]
+debug = 1
+split-debuginfo = "unpacked"
+
+[profile.test]
+debug = 1
+split-debuginfo = "unpacked"
+
+[profile.release]
+strip = "debuginfo"

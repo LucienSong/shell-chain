@@ -8,15 +8,15 @@ pub(crate) use jsonrpsee::types::ErrorObjectOwned;
 
 pub(crate) use alloy_rlp::Encodable;
 pub(crate) use shell_consensus::{ConsensusEngine, FinalityState};
-pub(crate) use shell_core::{Block, BlockHeader, SignedTransaction, Transaction};
+pub(crate) use shell_core::{
+    Block, BlockHeader, SignedTransaction, SystemTransaction, Transaction, INITIAL_BASE_FEE,
+};
 pub(crate) use shell_crypto::{MultiVerifier, Signer};
 pub(crate) use shell_evm::bloom::BLOOM_SIZE;
 pub(crate) use shell_evm::{ShellEvm, ShellStateDb};
 pub(crate) use shell_mempool::TxPool;
 pub(crate) use shell_primitives::{Address, Bytes, ShellHash, U256};
-pub(crate) use shell_storage::{
-    ChainStore, KvStore, WitnessStore, WorldState, MAX_ADDRESS_TX_HISTORY_OFFSET,
-};
+pub(crate) use shell_storage::{ChainStore, KvStore, WitnessStore, WorldState};
 
 pub(crate) use crate::admin::{AdminApiServer, NodeInfo, PeerInfo};
 pub(crate) use crate::api::{
@@ -206,9 +206,34 @@ impl<S: KvStore + 'static> RpcHandler<S> {
         self
     }
 
+    /// STK.2: Annotate the block with local compression/pruning state and proof
+    /// size metadata without attaching the full proof bytes.
+    pub(crate) fn fill_stark_metadata(&self, block_hash: &ShellHash, rpc_block: &mut RpcBlock) {
+        self.fill_block_compression_metadata(block_hash, rpc_block);
+        if rpc_block.sig_aggregate_proof_size.is_some() {
+            return;
+        }
+        let store = match &self.proof_amendment_store {
+            Some(s) => s,
+            None => return,
+        };
+        let bytes = match store.get_amendment(block_hash) {
+            Ok(Some(b)) => b,
+            _ => return,
+        };
+        match shell_stark_prover::StoredProofArtifact::from_json(&bytes) {
+            Ok(shell_stark_prover::StoredProofArtifact::Amendment(amendment)) => {
+                rpc_block.sig_aggregate_proof_size = Some(amendment.proof.proof_bytes.len() as u64);
+            }
+            Ok(shell_stark_prover::StoredProofArtifact::Pointer(_)) | Err(_) => {}
+        }
+    }
+
     /// STK.2: If the block's `sig_aggregate_proof` is None and a proof amendment
-    /// store is configured, attempt to fill it from stored async proofs.
+    /// store is configured, attempt to fill it from stored async proofs. Also
+    /// annotates the block with the local compression/pruning state.
     pub(crate) fn fill_stark_proof(&self, block_hash: &ShellHash, rpc_block: &mut RpcBlock) {
+        self.fill_stark_metadata(block_hash, rpc_block);
         if rpc_block.sig_aggregate_proof.is_some() {
             return;
         }
@@ -220,10 +245,41 @@ impl<S: KvStore + 'static> RpcHandler<S> {
             Ok(Some(b)) => b,
             _ => return,
         };
-        if let Ok(amendment) = shell_stark_prover::ProofAmendment::from_json(&bytes) {
-            rpc_block.sig_aggregate_proof_size = Some(amendment.proof.proof_bytes.len() as u64);
-            rpc_block.sig_aggregate_proof = Some(hex_bytes(&amendment.proof.proof_bytes));
+        match shell_stark_prover::StoredProofArtifact::from_json(&bytes) {
+            Ok(shell_stark_prover::StoredProofArtifact::Amendment(amendment)) => {
+                rpc_block.sig_aggregate_proof_size = Some(amendment.proof.proof_bytes.len() as u64);
+                rpc_block.sig_aggregate_proof = Some(hex_bytes(&amendment.proof.proof_bytes));
+            }
+            Ok(shell_stark_prover::StoredProofArtifact::Pointer(_)) | Err(_) => {}
         }
+    }
+
+    fn fill_block_compression_metadata(&self, block_hash: &ShellHash, rpc_block: &mut RpcBlock) {
+        let mut layer = 0u32;
+        let mut has_proof = false;
+        if let Some(store) = &self.proof_amendment_store {
+            if let Ok(Some(bytes)) = store.get_amendment(block_hash) {
+                if let Ok(artifact) = shell_stark_prover::StoredProofArtifact::from_json(&bytes) {
+                    layer = artifact.layer();
+                    has_proof = true;
+                }
+            }
+        }
+
+        let has_witness = self
+            .witness_store
+            .as_ref()
+            .and_then(|store| store.has_bundle(block_hash).ok())
+            .unwrap_or(false);
+
+        rpc_block.compression_layer = layer;
+        rpc_block.pruning_status = match (has_proof, has_witness) {
+            (true, true) => "compressedWitnessRetained",
+            (true, false) => "pruned",
+            (false, true) => "unpruned",
+            (false, false) => "notWitnessed",
+        }
+        .to_string();
     }
 
     /// Attach a witness store for `shell_getBlockWitnesses` (Phase B4).
@@ -353,6 +409,13 @@ impl<S: KvStore + 'static> RpcHandler<S> {
             let ws = self.world_state.read();
             ws.get_nonce(&proposer_addr).map_err(internal_err)?
         };
+        let max_fee_per_gas = self
+            .chain_store
+            .get_head_block()
+            .map_err(internal_err)?
+            .map(|head| head.header.base_fee_per_gas)
+            .filter(|fee| *fee > 0)
+            .unwrap_or(INITIAL_BASE_FEE);
 
         let tx = Transaction {
             chain_id: self.chain_id,
@@ -361,7 +424,7 @@ impl<S: KvStore + 'static> RpcHandler<S> {
             value: U256::ZERO,
             data: Bytes::copy_from_slice(&calldata),
             gas_limit: 100_000,
-            max_fee_per_gas: 0,
+            max_fee_per_gas,
             max_priority_fee_per_gas: 0,
             access_list: None,
             tx_type: 2,
@@ -741,12 +804,113 @@ pub(crate) fn validate_block_is_latest(s: &str) -> Result<(), ErrorObjectOwned> 
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BlockTxDetail {
+    Hashes,
+    Summary,
+    Full,
+}
+
+impl BlockTxDetail {
+    fn include_stark_proof(self) -> bool {
+        matches!(self, Self::Hashes | Self::Full)
+    }
+}
+
+impl<S: KvStore + 'static> RpcHandler<S> {
+    pub(crate) fn attach_system_txs(
+        &self,
+        block: &Block,
+        rpc: &mut RpcBlock,
+        detail: BlockTxDetail,
+    ) {
+        let block_hash = block.hash();
+        let Ok(system_txs) = self.chain_store.get_system_transactions(&block_hash) else {
+            return;
+        };
+        if system_txs.is_empty() {
+            return;
+        }
+
+        let Ok(mut existing) =
+            serde_json::from_value::<Vec<serde_json::Value>>(rpc.transactions.clone())
+        else {
+            return;
+        };
+        let ordered_system_txs = ordered_system_txs(&system_txs);
+        match detail {
+            BlockTxDetail::Full => {
+                let mut merged: Vec<serde_json::Value> = ordered_system_txs
+                    .into_iter()
+                    .filter_map(|tx| {
+                        serde_json::to_value(system_tx_to_rpc(tx, Some(block_hash))).ok()
+                    })
+                    .collect();
+                merged.extend(existing);
+                existing = merged;
+            }
+            BlockTxDetail::Summary => {
+                let mut merged: Vec<serde_json::Value> = ordered_system_txs
+                    .into_iter()
+                    .filter_map(|tx| {
+                        serde_json::to_value(system_tx_to_rpc_summary(tx, Some(block_hash))).ok()
+                    })
+                    .collect();
+                merged.extend(existing);
+                existing = merged;
+            }
+            BlockTxDetail::Hashes => {
+                let mut merged: Vec<serde_json::Value> = ordered_system_txs
+                    .into_iter()
+                    .map(|tx| serde_json::json!(tx.hash()))
+                    .collect();
+                merged.extend(existing);
+                existing = merged;
+            }
+        }
+        rpc.transactions = serde_json::Value::Array(existing);
+    }
+}
+
+fn ordered_system_txs(system_txs: &[SystemTransaction]) -> Vec<&SystemTransaction> {
+    let mut ordered = system_txs.iter().collect::<Vec<_>>();
+    ordered.sort_by_key(|tx| {
+        let priority = match tx.kind {
+            shell_core::SystemTxKind::BlockGasReward => 0u8,
+            shell_core::SystemTxKind::StarkReward => 1u8,
+        };
+        (priority, tx.tx_index)
+    });
+    ordered
+}
+
+fn system_tx_type_hex(kind: shell_core::SystemTxKind) -> &'static str {
+    match kind {
+        shell_core::SystemTxKind::BlockGasReward => "0x80",
+        shell_core::SystemTxKind::StarkReward => "0x81",
+    }
+}
+
+pub(crate) fn parse_block_tx_detail(
+    tx_detail: Option<&str>,
+) -> Result<BlockTxDetail, ErrorObjectOwned> {
+    match tx_detail.unwrap_or("hashes") {
+        "hashes" | "hash" | "false" => Ok(BlockTxDetail::Hashes),
+        "summary" | "light" | "lite" => Ok(BlockTxDetail::Summary),
+        "full" | "true" => Ok(BlockTxDetail::Full),
+        other => Err(invalid_params_err(format!(
+            "invalid tx detail mode '{other}', expected hashes, summary, or full"
+        ))),
+    }
+}
+
 /// Convert a core Block to an RpcBlock response.
 ///
-/// When `full_txs` is true the `transactions` array contains full
-/// [`RpcTransaction`] objects (as required by `eth_getBlockByNumber` /
-/// `eth_getBlockByHash`).  When false it contains only transaction hashes.
-pub(crate) fn block_to_rpc(block: &Block, full_txs: bool) -> RpcBlock {
+/// `Hashes` and `Full` match Ethereum-compatible `eth_getBlockByNumber` /
+/// `eth_getBlockByHash` semantics. `Summary` is a Shell extension for explorers:
+/// it includes row-ready transaction metadata but strips signatures, full input
+/// data, and STARK aggregate proof bytes.
+pub(crate) fn block_to_rpc_with_detail(block: &Block, detail: BlockTxDetail) -> RpcBlock {
     // F-074: approximate block size from RLP-encoded lengths.
     let header_size = block.header.length();
     let tx_size: usize = block.transactions.iter().map(|tx| tx.length()).sum();
@@ -759,8 +923,8 @@ pub(crate) fn block_to_rpc(block: &Block, full_txs: bool) -> RpcBlock {
         format!("0x{}", "00".repeat(BLOOM_SIZE))
     };
 
-    let transactions = if full_txs {
-        serde_json::to_value(
+    let transactions = match detail {
+        BlockTxDetail::Full => serde_json::to_value(
             block
                 .transactions
                 .iter()
@@ -776,16 +940,31 @@ pub(crate) fn block_to_rpc(block: &Block, full_txs: bool) -> RpcBlock {
                 })
                 .collect::<Vec<_>>(),
         )
-        .unwrap_or_default()
-    } else {
-        serde_json::to_value(
+        .unwrap_or_default(),
+        BlockTxDetail::Summary => serde_json::to_value(
+            block
+                .transactions
+                .iter()
+                .enumerate()
+                .map(|(i, tx)| {
+                    tx_to_rpc_summary(
+                        tx,
+                        Some(block.hash()),
+                        Some(block.header.number),
+                        Some(i as u32),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        )
+        .unwrap_or_default(),
+        BlockTxDetail::Hashes => serde_json::to_value(
             block
                 .transactions
                 .iter()
                 .map(|tx| tx.hash())
                 .collect::<Vec<ShellHash>>(),
         )
-        .unwrap_or_default()
+        .unwrap_or_default(),
     };
 
     RpcBlock {
@@ -820,12 +999,29 @@ pub(crate) fn block_to_rpc(block: &Block, full_txs: bool) -> RpcBlock {
             .sig_aggregate_proof
             .as_ref()
             .map(|p| p.len() as u64),
-        sig_aggregate_proof: block
-            .header
-            .sig_aggregate_proof
-            .as_ref()
-            .map(|p| hex_bytes(p.as_ref())),
+        sig_aggregate_proof: if detail.include_stark_proof() {
+            block
+                .header
+                .sig_aggregate_proof
+                .as_ref()
+                .map(|p| hex_bytes(p.as_ref()))
+        } else {
+            None
+        },
+        compression_layer: 0,
+        pruning_status: "unknown".into(),
     }
+}
+
+pub(crate) fn block_to_rpc(block: &Block, full_txs: bool) -> RpcBlock {
+    block_to_rpc_with_detail(
+        block,
+        if full_txs {
+            BlockTxDetail::Full
+        } else {
+            BlockTxDetail::Hashes
+        },
+    )
 }
 
 /// Convert a SignedTransaction to an RpcTransaction response.
@@ -874,6 +1070,121 @@ pub(crate) fn tx_to_rpc(
         }),
         max_fee_per_blob_gas: tx.tx.max_fee_per_blob_gas.map(hex_u64),
         blob_versioned_hashes: tx.tx.blob_versioned_hashes.clone(),
+        shell_type: Some(
+            if tx.is_aa_bundle() {
+                "aaBatch"
+            } else if tx.tx.to.is_none() {
+                "contractCreate"
+            } else if !tx.tx.data.is_empty() {
+                "contractCall"
+            } else {
+                "transfer"
+            }
+            .into(),
+        ),
+        reward_kind: None,
+        reward_layer: None,
+        reward_source_hash: None,
+        original_size: None,
+        compressed_size: None,
+    }
+}
+
+pub(crate) fn system_tx_to_rpc(
+    tx: &SystemTransaction,
+    block_hash: Option<ShellHash>,
+) -> RpcTransaction {
+    RpcTransaction {
+        hash: tx.hash(),
+        block_hash,
+        block_number: Some(hex_u64(tx.block_number)),
+        transaction_index: Some(hex_u64(tx.tx_index as u64)),
+        from: tx.from,
+        to: Some(tx.to),
+        value: hex_u256(tx.value),
+        gas: hex_u64(0),
+        gas_price: hex_u64(0),
+        max_fee_per_gas: hex_u64(0),
+        max_priority_fee_per_gas: hex_u64(0),
+        nonce: hex_u64(0),
+        input: tx
+            .proof_payload
+            .as_ref()
+            .map(|payload| hex_bytes(payload.as_ref()))
+            .unwrap_or_else(|| "0x".into()),
+        chain_id: hex_u64(tx.chain_id),
+        tx_type: system_tx_type_hex(tx.kind).into(),
+        v: "0x0".into(),
+        r: "0x0".into(),
+        s: "0x0".into(),
+        access_list: None,
+        max_fee_per_blob_gas: None,
+        blob_versioned_hashes: None,
+        shell_type: Some(tx.kind.as_str().into()),
+        reward_kind: Some(tx.kind.as_str().into()),
+        reward_layer: tx.layer.map(|l| hex_u64(l as u64)),
+        reward_source_hash: Some(tx.source_hash),
+        original_size: tx.original_size.map(hex_u64),
+        compressed_size: tx.compressed_size.map(hex_u64),
+    }
+}
+
+pub(crate) fn tx_to_rpc_summary(
+    tx: &SignedTransaction,
+    block_hash: Option<ShellHash>,
+    block_number: Option<u64>,
+    tx_index: Option<u32>,
+) -> RpcTransactionSummary {
+    RpcTransactionSummary {
+        hash: tx.hash(),
+        block_hash,
+        block_number: block_number.map(hex_u64),
+        transaction_index: tx_index.map(|i| hex_u64(i as u64)),
+        from: tx.sender(),
+        to: tx.tx.to,
+        value: hex_u256(tx.tx.value),
+        tx_type: format!("{:#x}", tx.tx.tx_type),
+        has_input: !tx.tx.data.is_empty(),
+        shell_type: Some(
+            if tx.is_aa_bundle() {
+                "aaBatch"
+            } else if tx.tx.to.is_none() {
+                "contractCreate"
+            } else if !tx.tx.data.is_empty() {
+                "contractCall"
+            } else {
+                "transfer"
+            }
+            .into(),
+        ),
+        reward_kind: None,
+        reward_layer: None,
+        reward_source_hash: None,
+        original_size: None,
+        compressed_size: None,
+    }
+}
+
+pub(crate) fn system_tx_to_rpc_summary(
+    tx: &SystemTransaction,
+    block_hash: Option<ShellHash>,
+) -> RpcTransactionSummary {
+    RpcTransactionSummary {
+        hash: tx.hash(),
+        block_hash,
+        block_number: Some(hex_u64(tx.block_number)),
+        transaction_index: Some(hex_u64(tx.tx_index as u64)),
+        from: tx.from,
+        to: Some(tx.to),
+        value: hex_u256(tx.value),
+        tx_type: system_tx_type_hex(tx.kind).into(),
+        has_input: tx.proof_payload.as_ref().is_some_and(|p| !p.is_empty()),
+        shell_type: Some(tx.kind.as_str().into()),
+        reward_kind: Some(tx.kind.as_str().into()),
+        reward_layer: tx.layer.map(|l| hex_u64(l as u64)),
+        reward_source_hash: Some(tx.source_hash),
+        original_size: tx.original_size.map(hex_u64),
+        compressed_size: tx.compressed_size.map(hex_u64),
     }
 }
 
@@ -885,7 +1196,7 @@ mod tests {
     use shell_core::{Block, BlockHeader, Transaction, TransactionReceipt};
     use shell_crypto::{DilithiumSigner, Signer};
     use shell_primitives::Bytes;
-    use shell_storage::{MemoryDb, WitnessStore};
+    use shell_storage::{MemoryDb, ProofAmendmentStore, WitnessStore};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     #[derive(Default)]
@@ -971,6 +1282,7 @@ mod tests {
                 witness_root: None,
             },
             transactions: vec![],
+            system_transactions: vec![],
             proposer_seal: None,
         }
     }
@@ -1010,24 +1322,6 @@ mod tests {
         let handler = setup();
         let result = EthApiServer::chain_id(&handler).await.unwrap();
         assert_eq!(result, "0x2a"); // 42
-    }
-
-    #[tokio::test]
-    async fn get_transactions_by_address_rejects_deep_pagination() {
-        let handler = setup();
-        let err = ShellApiServer::get_transactions_by_address(
-            &handler,
-            Address::from([0x33; 20]),
-            None,
-            None,
-            Some((MAX_ADDRESS_TX_HISTORY_OFFSET as u64) + 1),
-            Some(1),
-        )
-        .await
-        .unwrap_err();
-
-        assert_eq!(err.code(), -32602);
-        assert!(err.message().contains("exceeds max"));
     }
 
     #[tokio::test]
@@ -1096,6 +1390,7 @@ mod tests {
                 witness_root: None,
             },
             transactions: vec![tx1],
+            system_transactions: vec![],
             proposer_seal: None,
         };
         let block1_hash = block1.hash();
@@ -1143,6 +1438,7 @@ mod tests {
                 witness_root: None,
             },
             transactions: vec![tx2],
+            system_transactions: vec![],
             proposer_seal: None,
         };
         let block2_hash = block2.hash();
@@ -1163,6 +1459,55 @@ mod tests {
 
         assert_eq!(result["total"], 2);
         assert_eq!(result["transactions"].as_array().unwrap().len(), 1);
+        assert_eq!(result["transactions"][0]["blockNumber"], "0x2");
+    }
+
+    #[tokio::test]
+    async fn get_transactions_by_address_returns_system_rewards_with_type() {
+        let handler = setup();
+        let reward_to = test_address(b"address-history-reward");
+        let mut block = make_genesis_block();
+        block.header.proposer = reward_to;
+        let block_hash = block.hash();
+        let reward = SystemTransaction::block_gas_reward(
+            42,
+            block.number(),
+            0,
+            reward_to,
+            U256::from(10u64),
+            block.header.parent_hash,
+        );
+
+        handler.chain_store.put_block(&block).unwrap();
+        handler
+            .chain_store
+            .set_canonical(block.number(), &block_hash)
+            .unwrap();
+        handler.chain_store.set_head(&block_hash).unwrap();
+        handler
+            .chain_store
+            .put_system_transactions(&block_hash, block.number(), &[reward.clone()])
+            .unwrap();
+
+        let result = ShellApiServer::get_transactions_by_address(
+            &handler,
+            reward_to,
+            None,
+            None,
+            Some(0),
+            Some(50),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result["total"], 1);
+        assert_eq!(
+            result["transactions"][0]["hash"],
+            serde_json::json!(reward.hash())
+        );
+        assert_eq!(result["transactions"][0]["type"], "0x80");
+        assert_eq!(result["transactions"][0]["shellType"], "blockGasReward");
+        assert_eq!(result["transactions"][0]["rewardKind"], "blockGasReward");
     }
 
     #[tokio::test]
@@ -1342,6 +1687,31 @@ mod tests {
         .with_witness_store(witness_store)
     }
 
+    fn setup_with_proof_amendment() -> RpcHandler<MemoryDb> {
+        let db = Arc::new(MemoryDb::new());
+        let chain_store = Arc::new(ChainStore::new(db.clone()));
+        let world_state = Arc::new(parking_lot::RwLock::new(WorldState::new(db.clone())));
+        let proof_store = Arc::new(ProofAmendmentStore::new(db));
+        let tx_pool = Arc::new(TxPool::new(shell_mempool::MempoolConfig {
+            chain_id: 42,
+            ..shell_mempool::MempoolConfig::default()
+        }));
+        let (block_events, _) = tokio::sync::broadcast::channel(16);
+        let finalized_number = Arc::new(parking_lot::RwLock::new(0u64));
+        let finality = Arc::new(parking_lot::RwLock::new(FinalityState::new()));
+        RpcHandler::new(
+            chain_store,
+            world_state,
+            tx_pool,
+            42,
+            None,
+            block_events,
+            finalized_number,
+            finality,
+        )
+        .with_proof_amendment_store(proof_store)
+    }
+
     #[tokio::test]
     async fn shell_get_block_witnesses_no_store() {
         // Without a witness store wired in, returns an error field.
@@ -1376,6 +1746,178 @@ mod tests {
             .unwrap();
         assert_eq!(result["witnessCount"], 0);
         assert!(result["witnesses"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn shell_get_block_summary_includes_stark_metadata_without_proof_bytes() {
+        let handler = setup_with_proof_amendment();
+        let block = make_genesis_block();
+        let block_hash = block.hash();
+        handler.chain_store.put_block(&block).unwrap();
+        handler.chain_store.set_canonical(0, &block_hash).unwrap();
+        handler.chain_store.set_head(&block_hash).unwrap();
+
+        let amendment = shell_stark_prover::ProofAmendment {
+            version: shell_stark_prover::PROOF_AMENDMENT_VERSION,
+            block_hash,
+            block_number: 0,
+            start_block: Some(0),
+            proof: shell_stark_prover::SigBatchProof {
+                version: shell_stark_prover::SIG_BATCH_PROOF_VERSION,
+                batch_root_bytes: [7; 16],
+                n_sigs: 1,
+                proof_bytes: vec![1, 2, 3, 4, 5],
+            },
+            prover: test_address(b"summary-prover"),
+            prover_signature: Bytes::from_static(b"sig"),
+            layer: 2,
+            source_hashes: vec![block_hash],
+            original_size: Some(100),
+            compressed_size: Some(5),
+            settlement_tx_hash: None,
+        };
+        handler
+            .proof_amendment_store
+            .as_ref()
+            .unwrap()
+            .put_amendment(&block_hash, &amendment.to_json().unwrap())
+            .unwrap();
+
+        let rpc = ShellApiServer::shell_get_block_by_number(
+            &handler,
+            "0x0".into(),
+            Some("summary".into()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(rpc.compression_layer, 2);
+        assert_eq!(rpc.pruning_status, "pruned");
+        assert_eq!(rpc.sig_aggregate_proof_size, Some(5));
+        assert!(rpc.sig_aggregate_proof.is_none());
+    }
+
+    #[tokio::test]
+    async fn shell_get_proof_amendment_exposes_stark_proof_stats() {
+        let handler = setup_with_proof_amendment();
+        let block = make_genesis_block();
+        let block_hash = block.hash();
+        let amendment = shell_stark_prover::ProofAmendment {
+            version: shell_stark_prover::PROOF_AMENDMENT_VERSION,
+            block_hash,
+            block_number: 0,
+            start_block: Some(0),
+            proof: shell_stark_prover::SigBatchProof {
+                version: shell_stark_prover::SIG_BATCH_PROOF_VERSION,
+                batch_root_bytes: [7; 16],
+                n_sigs: 512,
+                proof_bytes: vec![1, 2, 3, 4, 5],
+            },
+            prover: test_address(b"proof-stats-prover"),
+            prover_signature: Bytes::from_static(b"sig"),
+            layer: 1,
+            source_hashes: vec![block_hash],
+            original_size: Some(100),
+            compressed_size: Some(5),
+            settlement_tx_hash: None,
+        };
+        handler
+            .proof_amendment_store
+            .as_ref()
+            .unwrap()
+            .put_amendment(&block_hash, &amendment.to_json().unwrap())
+            .unwrap();
+
+        let rpc = ShellApiServer::get_proof_amendment(&handler, block_hash.to_string())
+            .await
+            .unwrap();
+
+        assert_eq!(rpc["source_count"], 1);
+        assert_eq!(rpc["layer"], 1);
+        assert_eq!(rpc["proof_entries"], 512);
+        assert_eq!(rpc["original_size"], 100);
+        assert_eq!(rpc["compressed_size"], 5);
+        assert_eq!(rpc["proof"], "0x0102030405");
+    }
+
+    #[tokio::test]
+    async fn shell_get_block_summary_places_reward_txs_first_with_distinct_types() {
+        let handler = setup();
+        let signer = DilithiumSigner::generate();
+        let from = signer_address(&signer);
+        let to = test_address(b"reward-order-to");
+        let user_tx = SignedTransaction::new(
+            from,
+            Transaction {
+                chain_id: 42,
+                nonce: 0,
+                max_priority_fee_per_gas: 1,
+                max_fee_per_gas: 1_000_000_000,
+                gas_limit: 21_000,
+                to: Some(to),
+                value: U256::from(7u64),
+                data: Bytes::default(),
+                access_list: None,
+                tx_type: 2,
+                max_fee_per_blob_gas: None,
+                blob_versioned_hashes: None,
+            },
+            signer.sign(b"reward-order-user-tx").unwrap(),
+        );
+        let mut block = make_genesis_block();
+        block.transactions = vec![user_tx.clone()];
+        let block_hash = block.hash();
+        let block_reward = SystemTransaction::block_gas_reward(
+            42,
+            block.number(),
+            block.transactions.len() as u32,
+            block.header.proposer,
+            U256::from(10u64),
+            block.header.parent_hash,
+        );
+        let stark_reward = SystemTransaction::stark_reward(shell_core::StarkRewardParams {
+            chain_id: 42,
+            block_number: block.number(),
+            tx_index: block.transactions.len() as u32 + 1,
+            recipient: test_address(b"stark-reward-to"),
+            value: U256::from(20u64),
+            source_hash: ShellHash::from([0x44; 32]),
+            layer: 1,
+            original_size: 100,
+            compressed_size: 40,
+            proof_payload: Bytes::from_static(b"proof"),
+        });
+
+        handler.chain_store.put_block(&block).unwrap();
+        handler.chain_store.set_canonical(0, &block_hash).unwrap();
+        handler.chain_store.set_head(&block_hash).unwrap();
+        handler
+            .chain_store
+            .put_system_transactions(
+                &block_hash,
+                block.number(),
+                &[stark_reward.clone(), block_reward.clone()],
+            )
+            .unwrap();
+
+        let rpc = ShellApiServer::shell_get_block_by_number(
+            &handler,
+            "0x0".into(),
+            Some("summary".into()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let txs = rpc.transactions.as_array().unwrap();
+
+        assert_eq!(txs[0]["hash"], serde_json::json!(block_reward.hash()));
+        assert_eq!(txs[0]["type"], "0x80");
+        assert_eq!(txs[0]["rewardKind"], "blockGasReward");
+        assert_eq!(txs[1]["hash"], serde_json::json!(stark_reward.hash()));
+        assert_eq!(txs[1]["type"], "0x81");
+        assert_eq!(txs[1]["rewardKind"], "starkReward");
+        assert_eq!(txs[2]["hash"], serde_json::json!(user_tx.hash()));
     }
 
     #[tokio::test]
@@ -1952,6 +2494,7 @@ mod tests {
                 witness_root: None,
             },
             transactions: vec![],
+            system_transactions: vec![],
             proposer_seal: None,
         };
         let hash = block.hash();
@@ -2204,6 +2747,11 @@ mod tests {
 
         // Register pubkey so mempool signature verification passes.
         handler.chain_store.put_pubkey(&addr, &pubkey).unwrap();
+        handler
+            .world_state
+            .write()
+            .add_balance(&addr, U256::from(1_000_000_000_000_000_000u64))
+            .unwrap();
 
         (handler, signer, addr)
     }
@@ -2252,6 +2800,7 @@ mod tests {
         assert_eq!(pending[0].tx.value, U256::ZERO);
         assert_eq!(pending[0].tx.chain_id, 42);
         assert_eq!(pending[0].tx.nonce, 0);
+        assert_eq!(pending[0].tx.max_fee_per_gas, INITIAL_BASE_FEE);
     }
 
     #[tokio::test]
@@ -2721,6 +3270,7 @@ mod tests {
                 witness_root: None,
             },
             transactions: vec![],
+            system_transactions: vec![],
             proposer_seal: None,
         };
         let hash1 = block1.hash();
@@ -2734,6 +3284,83 @@ mod tests {
         assert_eq!(result["avgBlockTime"], 3.0);
         assert_eq!(result["gasUsedTotal"], "0x5208"); // 21000
         assert!(result["latestBaseFee"].is_string());
+    }
+
+    #[tokio::test]
+    async fn get_chain_stats_rebuilds_full_chain_totals() {
+        let handler = setup();
+
+        let genesis = make_genesis_block();
+        let genesis_hash = genesis.hash();
+        handler.chain_store.put_block(&genesis).unwrap();
+        handler.chain_store.set_canonical(0, &genesis_hash).unwrap();
+        handler.chain_store.set_head(&genesis_hash).unwrap();
+
+        let from = test_address(b"chain-stats-from");
+        let tx = SignedTransaction::new(
+            from,
+            Transaction {
+                chain_id: 42,
+                nonce: 0,
+                max_priority_fee_per_gas: 0,
+                max_fee_per_gas: 0,
+                gas_limit: 21_000,
+                to: Some(test_address(b"chain-stats-to")),
+                value: U256::from(1u64),
+                data: Bytes::default(),
+                access_list: None,
+                tx_type: 2,
+                max_fee_per_blob_gas: None,
+                blob_versioned_hashes: None,
+            },
+            shell_crypto::PQSignature::new(shell_crypto::SignatureType::Dilithium3, vec![]),
+        );
+
+        let mut parent_hash = genesis_hash;
+        for number in 1..=1002u64 {
+            let block = Block {
+                header: BlockHeader {
+                    parent_hash,
+                    state_root: ShellHash::default(),
+                    transactions_root: ShellHash::default(),
+                    receipts_root: ShellHash::default(),
+                    logs_bloom: Bytes::default(),
+                    number,
+                    gas_limit: 30_000_000,
+                    gas_used: 1,
+                    timestamp: genesis.header.timestamp + number,
+                    extra_data: Bytes::default(),
+                    proposer: test_address(b"proposer-key-data"),
+                    sig_aggregate_proof: None,
+                    base_fee_per_gas: 1_000_000_000,
+                    withdrawals_root: ShellHash::ZERO,
+                    parent_beacon_block_root: ShellHash::ZERO,
+                    blob_gas_used: 0,
+                    excess_blob_gas: 0,
+                    witness_root: None,
+                },
+                transactions: if number == 1 {
+                    vec![tx.clone()]
+                } else {
+                    vec![]
+                },
+                system_transactions: vec![],
+                proposer_seal: None,
+            };
+            let block_hash = block.hash();
+            handler.chain_store.put_block(&block).unwrap();
+            handler
+                .chain_store
+                .set_canonical(number, &block_hash)
+                .unwrap();
+            handler.chain_store.set_head(&block_hash).unwrap();
+            parent_hash = block_hash;
+        }
+
+        let result = ShellApiServer::get_chain_stats(&handler).await.unwrap();
+        assert_eq!(result["blockHeight"], 1002);
+        assert_eq!(result["totalTransactions"], 1);
+        assert_eq!(result["gasUsedTotal"], "0x3ea");
     }
 
     // ── F-072: RpcBlock new Ethereum fields ──────────────────────────
@@ -2796,6 +3423,7 @@ mod tests {
                 witness_root: None,
             },
             transactions: vec![],
+            system_transactions: vec![],
             proposer_seal: None,
         };
         let hash = block.hash();
@@ -3035,6 +3663,7 @@ mod tests {
                 ..make_genesis_block().header
             },
             transactions: vec![],
+            system_transactions: vec![],
             proposer_seal: None,
         };
         let hash1 = block1.hash();
@@ -3197,6 +3826,7 @@ mod tests {
                 witness_root: None,
             },
             transactions: vec![signed],
+            system_transactions: vec![],
             proposer_seal: None,
         };
         let block_hash = block.hash();
@@ -4051,6 +4681,7 @@ mod tests {
         let block = Block {
             header,
             transactions: vec![signed],
+            system_transactions: vec![],
             proposer_seal: None,
         };
         let block_hash = block.hash();

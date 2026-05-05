@@ -1,0 +1,8 @@
+[alias]
+check-core = "check -p shell-primitives -p shell-core -p shell-storage -p shell-consensus -p shell-genesis"
+check-node = "check -p shell-node --lib"
+check-rpc = "check -p shell-rpc -p shell-cli"
+check-fast = "check -p shell-node -p shell-cli -p shell-rpc -p shell-mempool -p shell-storage"
+test-cli-role = "test -p shell-cli role"
+test-node-readiness = "test -p shell-node readiness"
+test-node-fork = "test -p shell-node import_fork_block_at_same_height_is_stored_as_side_fork"

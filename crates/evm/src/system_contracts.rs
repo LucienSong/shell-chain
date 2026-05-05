@@ -145,6 +145,8 @@ pub enum SystemContractError {
     LastValidator,
     #[error("empty pubkey is not allowed")]
     EmptyPubkey,
+    #[error("validator pubkey is not registered: {0}")]
+    ValidatorPubkeyMissing(Address),
     #[error("invalid signature algorithm id: {0}")]
     InvalidAlgorithm(u8),
     #[error("validation code missing for hash {0}")]
@@ -185,7 +187,7 @@ pub fn execute_system_contract<S: KvStore + 'static>(
     input: &[u8],
     world_state: &mut WorldState<S>,
 ) -> Result<(Vec<u8>, u64), SystemContractError> {
-    execute_validator_registry(caller, input, world_state)
+    execute_validator_registry(caller, input, world_state, None)
 }
 
 /// Execute any native system contract and return both the ABI output and the
@@ -198,10 +200,13 @@ pub fn execute_system_contract_call<S: KvStore + 'static>(
     chain_store: &ChainStore<S>,
 ) -> Result<SystemContractOutcome, SystemContractError> {
     if *target == registry_address() {
-        let (output, gas_used) = execute_validator_registry(caller, input, world_state)?;
+        let (output, gas_used) =
+            execute_validator_registry(caller, input, world_state, Some(chain_store))?;
         let mut effects = SystemContractEffects::default();
         let selector = decode_selector(input)?;
-        if selector == ADD_VALIDATOR_SELECTOR || selector == REMOVE_VALIDATOR_SELECTOR {
+        if (selector == ADD_VALIDATOR_SELECTOR || selector == REMOVE_VALIDATOR_SELECTOR)
+            && output == encode_bool(true)
+        {
             effects.validator_set_changed = true;
         }
         return Ok(SystemContractOutcome {
@@ -222,6 +227,7 @@ fn execute_validator_registry<S: KvStore + 'static>(
     caller: &Address,
     input: &[u8],
     world_state: &mut WorldState<S>,
+    chain_store: Option<&ChainStore<S>>,
 ) -> Result<(Vec<u8>, u64), SystemContractError> {
     if input.len() < 4 {
         return Err(SystemContractError::InputTooShort);
@@ -233,15 +239,15 @@ fn execute_validator_registry<S: KvStore + 'static>(
     match selector {
         s if s == ADD_VALIDATOR_SELECTOR => {
             let addr = decode_address(params)?;
-            add_validator(caller, &addr, world_state)?;
+            let applied = add_validator(caller, &addr, world_state, chain_store)?;
             let gas = SYSTEM_CALL_BASE_GAS.saturating_add(SYSTEM_CALL_OP_GAS);
-            Ok((encode_bool(true), gas))
+            Ok((encode_bool(applied), gas))
         }
         s if s == REMOVE_VALIDATOR_SELECTOR => {
             let addr = decode_address(params)?;
-            remove_validator(caller, &addr, world_state)?;
+            let applied = remove_validator(caller, &addr, world_state)?;
             let gas = SYSTEM_CALL_BASE_GAS.saturating_add(SYSTEM_CALL_OP_GAS);
-            Ok((encode_bool(true), gas))
+            Ok((encode_bool(applied), gas))
         }
         s if s == GET_VALIDATORS_SELECTOR => {
             let validators = world_state
@@ -346,7 +352,8 @@ fn add_validator<S: KvStore + 'static>(
     caller: &Address,
     target: &Address,
     world_state: &mut WorldState<S>,
-) -> Result<(), SystemContractError> {
+    chain_store: Option<&ChainStore<S>>,
+) -> Result<bool, SystemContractError> {
     let mut validators = world_state
         .get_validators()
         .map_err(|e| SystemContractError::Storage(e.to_string()))?;
@@ -361,19 +368,42 @@ fn add_validator<S: KvStore + 'static>(
         return Err(SystemContractError::AlreadyExists(*target));
     }
 
+    if let Some(chain_store) = chain_store {
+        if chain_store
+            .get_pubkey(target)
+            .map_err(|e| SystemContractError::Storage(e.to_string()))?
+            .is_none()
+        {
+            return Err(SystemContractError::ValidatorPubkeyMissing(*target));
+        }
+    }
+
+    if !record_validator_vote(
+        world_state,
+        ValidatorRegistryOp::Add,
+        target,
+        caller,
+        &validators,
+    )? {
+        return Ok(false);
+    }
+
     validators.push(*target);
     world_state
         .set_validators(&validators)
         .map_err(|e| SystemContractError::Storage(e.to_string()))?;
+    world_state
+        .set_validator_weight(target, 1)
+        .map_err(|e| SystemContractError::Storage(e.to_string()))?;
 
-    Ok(())
+    Ok(true)
 }
 
 fn remove_validator<S: KvStore + 'static>(
     caller: &Address,
     target: &Address,
     world_state: &mut WorldState<S>,
-) -> Result<(), SystemContractError> {
+) -> Result<bool, SystemContractError> {
     let mut validators = world_state
         .get_validators()
         .map_err(|e| SystemContractError::Storage(e.to_string()))?;
@@ -393,12 +423,94 @@ fn remove_validator<S: KvStore + 'static>(
         .position(|v| v == target)
         .ok_or(SystemContractError::NotFound(*target))?;
 
+    if !record_validator_vote(
+        world_state,
+        ValidatorRegistryOp::Remove,
+        target,
+        caller,
+        &validators,
+    )? {
+        return Ok(false);
+    }
+
     validators.remove(pos);
     world_state
         .set_validators(&validators)
         .map_err(|e| SystemContractError::Storage(e.to_string()))?;
 
-    Ok(())
+    Ok(true)
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ValidatorRegistryOp {
+    Add,
+    Remove,
+}
+
+impl ValidatorRegistryOp {
+    fn label(self) -> &'static [u8] {
+        match self {
+            Self::Add => b"add",
+            Self::Remove => b"remove",
+        }
+    }
+}
+
+fn validator_vote_key(
+    op: ValidatorRegistryOp,
+    target: &Address,
+    voter: &Address,
+    validators: &[Address],
+) -> ShellHash {
+    let mut bytes = Vec::with_capacity(24 + op.label().len() + 20 + 20 + validators.len() * 20);
+    bytes.extend_from_slice(b"validator_vote:");
+    bytes.extend_from_slice(op.label());
+    bytes.extend_from_slice(b":");
+    bytes.extend_from_slice(target.as_bytes());
+    bytes.extend_from_slice(b":");
+    for validator in validators {
+        bytes.extend_from_slice(validator.as_bytes());
+    }
+    bytes.extend_from_slice(b":");
+    bytes.extend_from_slice(voter.as_bytes());
+    keccak256(&bytes)
+}
+
+fn record_validator_vote<S: KvStore + 'static>(
+    world_state: &mut WorldState<S>,
+    op: ValidatorRegistryOp,
+    target: &Address,
+    caller: &Address,
+    validators: &[Address],
+) -> Result<bool, SystemContractError> {
+    let registry = registry_address();
+    world_state
+        .set_storage(
+            &registry,
+            &validator_vote_key(op, target, caller, validators),
+            &ShellHash::from([1u8; 32]),
+        )
+        .map_err(|e| SystemContractError::Storage(e.to_string()))?;
+
+    let mut voted_weight = 0u64;
+    let mut total_weight = 0u64;
+    for validator in validators {
+        let weight = world_state
+            .get_validator_weight(validator)
+            .map_err(|e| SystemContractError::Storage(e.to_string()))?;
+        total_weight = total_weight.saturating_add(weight);
+        let value = world_state
+            .get_storage(
+                &registry,
+                &validator_vote_key(op, target, validator, validators),
+            )
+            .map_err(|e| SystemContractError::Storage(e.to_string()))?;
+        if value != ShellHash::ZERO {
+            voted_weight = voted_weight.saturating_add(weight);
+        }
+    }
+
+    Ok(voted_weight.saturating_mul(2) > total_weight)
 }
 
 fn rotate_key<S: KvStore + 'static>(
@@ -1445,22 +1557,110 @@ mod tests {
         assert!(matches!(err, SystemContractError::AlreadyExists(_)));
     }
 
+    #[test]
+    fn add_validator_requires_validator_majority() {
+        let v1 = Address::from([0x01; 20]);
+        let v2 = Address::from([0x02; 20]);
+        let v3 = Address::from([0x03; 20]);
+        let new_val = Address::from([0x04; 20]);
+        let mut ws = setup_with_validators(&[v1, v2, v3]);
+        let calldata = encode_add_validator_calldata(&new_val);
+
+        let (first_output, _) = execute_system_contract(&v1, &calldata, &mut ws).unwrap();
+        assert_eq!(first_output, encode_bool(false));
+        assert!(!ws.get_validators().unwrap().contains(&new_val));
+
+        let (second_output, _) = execute_system_contract(&v2, &calldata, &mut ws).unwrap();
+        assert_eq!(second_output, encode_bool(true));
+        assert!(ws.get_validators().unwrap().contains(&new_val));
+    }
+
+    #[test]
+    fn pending_validator_vote_does_not_report_validator_set_changed() {
+        let v1 = Address::from([0x01; 20]);
+        let v2 = Address::from([0x02; 20]);
+        let v3 = Address::from([0x03; 20]);
+        let new_val = Address::from([0x04; 20]);
+        let mut ws = setup_with_validators(&[v1, v2, v3]);
+        let cs = ChainStore::new(Arc::new(MemoryDb::new()));
+        let calldata = encode_add_validator_calldata(&new_val);
+        cs.put_pubkey(&new_val, &[0xAA; 32]).unwrap();
+
+        let outcome =
+            execute_system_contract_call(&registry_address(), &v1, &calldata, &mut ws, &cs)
+                .unwrap();
+
+        assert_eq!(outcome.output, encode_bool(false));
+        assert!(!outcome.effects.validator_set_changed);
+        assert!(!ws.get_validators().unwrap().contains(&new_val));
+    }
+
+    #[test]
+    fn add_validator_requires_registered_pubkey_on_chain_call_path() {
+        let v1 = Address::from([0x01; 20]);
+        let new_val = Address::from([0x04; 20]);
+        let mut ws = setup_with_validators(&[v1]);
+        let cs = ChainStore::new(Arc::new(MemoryDb::new()));
+        let calldata = encode_add_validator_calldata(&new_val);
+
+        let err = execute_system_contract_call(&registry_address(), &v1, &calldata, &mut ws, &cs)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            SystemContractError::ValidatorPubkeyMissing(addr) if addr == new_val
+        ));
+
+        cs.put_pubkey(&new_val, &[0xAA; 32]).unwrap();
+        let outcome =
+            execute_system_contract_call(&registry_address(), &v1, &calldata, &mut ws, &cs)
+                .unwrap();
+        assert_eq!(outcome.output, encode_bool(true));
+        assert!(outcome.effects.validator_set_changed);
+        assert!(ws.get_validators().unwrap().contains(&new_val));
+    }
+
+    #[test]
+    fn validator_quorum_uses_stored_weights() {
+        let v1 = Address::from([0x01; 20]);
+        let v2 = Address::from([0x02; 20]);
+        let v3 = Address::from([0x03; 20]);
+        let new_val = Address::from([0x04; 20]);
+        let mut ws = setup_with_validators(&[v1, v2, v3]);
+        ws.set_validator_weights(&[v1, v2, v3], &[3, 1, 1]).unwrap();
+        let calldata = encode_add_validator_calldata(&new_val);
+
+        let (first_output, _) = execute_system_contract(&v2, &calldata, &mut ws).unwrap();
+        assert_eq!(first_output, encode_bool(false));
+        let (second_output, _) = execute_system_contract(&v3, &calldata, &mut ws).unwrap();
+        assert_eq!(second_output, encode_bool(false));
+        assert!(!ws.get_validators().unwrap().contains(&new_val));
+
+        let (third_output, _) = execute_system_contract(&v1, &calldata, &mut ws).unwrap();
+        assert_eq!(third_output, encode_bool(true));
+        assert!(ws.get_validators().unwrap().contains(&new_val));
+        assert_eq!(ws.get_validator_weight(&new_val).unwrap(), 1);
+    }
+
     // ── removeValidator ────────────────────────────────────────
 
     #[test]
     fn remove_validator_success() {
         let v1 = Address::from([0x01; 20]);
         let v2 = Address::from([0x02; 20]);
-        let mut ws = setup_with_validators(&[v1, v2]);
+        let v3 = Address::from([0x03; 20]);
+        let mut ws = setup_with_validators(&[v1, v2, v3]);
 
         let calldata = encode_remove_validator_calldata(&v2);
-        let (output, gas) = execute_system_contract(&v1, &calldata, &mut ws).unwrap();
+        let (first_output, gas) = execute_system_contract(&v1, &calldata, &mut ws).unwrap();
+        assert_eq!(first_output, encode_bool(false));
+        assert_eq!(ws.get_validators().unwrap(), vec![v1, v2, v3]);
 
+        let (output, _) = execute_system_contract(&v3, &calldata, &mut ws).unwrap();
         assert_eq!(output, encode_bool(true));
         assert_eq!(gas, SYSTEM_CALL_BASE_GAS + SYSTEM_CALL_OP_GAS);
 
         let validators = ws.get_validators().unwrap();
-        assert_eq!(validators, vec![v1]);
+        assert_eq!(validators, vec![v1, v3]);
     }
 
     #[test]
@@ -1853,23 +2053,28 @@ mod tests {
 
         // v2 adds v3
         let calldata = encode_add_validator_calldata(&v3);
+        execute_system_contract(&v1, &calldata, &mut ws).unwrap();
         execute_system_contract(&v2, &calldata, &mut ws).unwrap();
         assert_eq!(ws.get_validators().unwrap().len(), 3);
 
         // v3 adds v4
         let calldata = encode_add_validator_calldata(&v4);
+        execute_system_contract(&v1, &calldata, &mut ws).unwrap();
         execute_system_contract(&v3, &calldata, &mut ws).unwrap();
         assert_eq!(ws.get_validators().unwrap().len(), 4);
 
         // v1 removes v2
         let calldata = encode_remove_validator_calldata(&v2);
         execute_system_contract(&v1, &calldata, &mut ws).unwrap();
+        execute_system_contract(&v3, &calldata, &mut ws).unwrap();
+        execute_system_contract(&v4, &calldata, &mut ws).unwrap();
         let validators = ws.get_validators().unwrap();
         assert_eq!(validators.len(), 3);
         assert!(!validators.contains(&v2));
 
         // v3 removes v4
         let calldata = encode_remove_validator_calldata(&v4);
+        execute_system_contract(&v1, &calldata, &mut ws).unwrap();
         execute_system_contract(&v3, &calldata, &mut ws).unwrap();
         let validators = ws.get_validators().unwrap();
         assert_eq!(validators.len(), 2);
@@ -1881,18 +2086,21 @@ mod tests {
     fn add_remove_then_re_add_same_validator() {
         let v1 = Address::from([0x01; 20]);
         let v2 = Address::from([0x02; 20]);
-        let mut ws = setup_with_validators(&[v1, v2]);
+        let v3 = Address::from([0x03; 20]);
+        let mut ws = setup_with_validators(&[v1, v2, v3]);
 
         // Remove v2
         let calldata = encode_remove_validator_calldata(&v2);
         execute_system_contract(&v1, &calldata, &mut ws).unwrap();
+        execute_system_contract(&v3, &calldata, &mut ws).unwrap();
         assert!(!ws.get_validators().unwrap().contains(&v2));
 
         // Re-add v2
         let calldata = encode_add_validator_calldata(&v2);
         execute_system_contract(&v1, &calldata, &mut ws).unwrap();
+        execute_system_contract(&v3, &calldata, &mut ws).unwrap();
         assert!(ws.get_validators().unwrap().contains(&v2));
-        assert_eq!(ws.get_validators().unwrap().len(), 2);
+        assert_eq!(ws.get_validators().unwrap().len(), 3);
     }
 
     // ── Event encoding correctness ─────────────────────────────

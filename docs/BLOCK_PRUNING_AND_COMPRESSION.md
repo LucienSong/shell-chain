@@ -29,7 +29,7 @@ its own deletion trigger.
 |---|---|---|---|---|
 | **TX Detail** | `b/<block_hash>` | `StrippedBlock` — header + `Vec<StrippedTransaction>` (from/to/value/nonce/gas/input) | ~7 KB | Profile-dependent (see below) |
 | **Witness Bundle** | `w/<block_hash>` | `WitnessBundle` — one `TxWitness` per tx (Dilithium3 sig + optional pubkey) | ~180 KB | Deleted after STARK proof arrives |
-| **STARK Proof** | `pa/<block_hash>` | `ProofAmendment` — Winterfell aggregate proof covering all sigs in block | ~15 KB | **Forever** |
+| **STARK Proof** | `pa/<block_hash>` | `ProofAmendment` — Winterfell aggregate proof or pointer metadata for a contiguous source range | ~15 KB for full proof, tiny for pointer | **Forever** |
 
 ### Per-transaction witness breakdown
 
@@ -44,9 +44,11 @@ TxWitness (Dilithium3 mode):
 
 ### Aggregate STARK proof
 
-A `SigBatchProof` (Winterfell STARK) covers the entire block regardless of tx
-count. The proof size grows very slowly with batch size — empirically ~10–20 KB
-for up to 500 txs. ProofAmendment JSON wrapper adds ~2 KB overhead.
+A `SigBatchProof` (Winterfell STARK) covers a contiguous range of source blocks
+at the same layer. The proof size grows very slowly with batch size —
+empirically ~10–20 KB for hundreds of tx witnesses. The full proof bytes are
+stored once, at the final source block for the range; earlier covered blocks
+store pointer metadata that references the same settlement transaction/proof.
 
 ```
 ProofAmendment total ≈ 15 KB  (constant per block, independent of tx count)
@@ -102,13 +104,31 @@ if !bundle.is_empty() {
 reconstruct a full `Block`. When `w/<hash>` is absent (already pruned), the
 returned block has empty signature stubs — TX payload is fully intact.
 
+`ChainStore::block_availability(hash)` classifies local data before sync/RPC
+code assumes a block is complete:
+
+| Availability | Local data | Meaning |
+|---|---|---|
+| `Missing` | no header/body | canonical map points to data not present locally, or unknown hash |
+| `HeaderOnly` | `h/<hash>` only | body must be back-filled before transaction/RPC detail can be served |
+| `BodyOnly` | `b/<hash>` without `w/<hash>` | valid for empty blocks, STARK-replaced witnesses, or body-only back-fill |
+| `BodyWithWitness` | `b/<hash>` + `w/<hash>` | full local block data with PQ witness material |
+
+Historical body sync uses this classifier to request only missing stripped
+bodies. Import may execute body-only/reference transactions with empty signature
+stubs during historical catch-up; the canonical state-root check remains the
+security backstop.
+
 ### L2 — Proof replaces witness (`ProofAmendment` handler)
 
 When the node receives a valid `ProofAmendment`:
 
-1. STARK proof is verified and stored at `pa/<hash>`.
-2. After `proof_replacement_grace` blocks (default: **0**), `w/<hash>` is
-   deleted.
+1. STARK proof is verified from the `StarkReward` system transaction payload.
+   Block-level STARK settlement in header `extraData` is deprecated and rejected.
+   Normal STARK-settled blocks keep `extraData=0x`.
+2. The proof artifact must satisfy `compressed_size * 2 < original_size`.
+3. After `proof_replacement_grace` blocks (default: **0**), eligible witness
+   data is deleted.
 
 ```toml
 # node config (TOML)
@@ -118,6 +138,38 @@ proof_replacement_grace = 0   # delete immediately; set > 0 for forensic window
 
 When `enable_stark_aggregation = true`, the node automatically initialises
 `witness_retention = 0` — no manual config needed.
+
+The compression threshold is a protocol invariant for pruning and rewards:
+non-compressing proofs may be retained for verification or diagnostics, but
+they cannot replace witness data or claim STARK rewards. L1 artifacts may cover
+contiguous canonical block ranges; L2+ artifacts compress prior-layer STARK
+artifacts rather than raw witnesses.
+
+### Ordered compression frontiers
+
+Compression is accepted only at the next contiguous frontier for its layer:
+
+- **L1** compresses canonical block witness payloads from the first eligible block
+  that is not already L1-compressed. If blocks `0..=100` are L1, the next L1
+  artifact must start at block `101`; gaps and overlaps are invalid.
+- **L2+** compress prior-layer artifacts. An L2 artifact may start again from the
+  beginning of the L1 frontier, but every covered block must already have the
+  lower layer (`L-1`) and must not already have layer `L`.
+- Blocks with no witness/proof payload, such as genesis or empty heartbeat
+  blocks, are included as zero-entry sources in L1 range metadata. They do not
+  count toward the L1 minimum tx-entry threshold, but they prevent gaps: a fresh
+  chain's first L1 range starts at block `0`.
+
+Validators enforce these rules both when accepting proof amendments and when
+replaying STARK reward settlements during block import. Out-of-order, overlapping,
+or lower-layer-gap artifacts cannot prune witnesses or claim rewards.
+
+`eth_getBlockByNumber`, `eth_getBlockByHash`, and Shell block RPC responses expose:
+
+| Field | Meaning |
+|---|---|
+| `compressionLayer` | Highest STARK compression layer currently known for the block (`0` means no accepted proof artifact). |
+| `pruningStatus` | Local witness state: `unpruned`, `compressedWitnessRetained`, `pruned`, `notWitnessed`, `pending`, or `unknown`. |
 
 ### L3 — State trie pruning (experimental)
 
@@ -186,7 +238,8 @@ put_block()
                          │
                          │  ProofAmendment received + verified
                          ▼
-                  pa/<hash> ←─ SigBatchProof   ─────────────────► forever
+                  pa/<final-source-hash> ←─ SigBatchProof   ───► forever
+                  pa/<earlier-source-hash> ←─ ProofPointer ─────► forever
                          │
                          │  grace_window elapsed (default: 0 blocks)
                          ▼
@@ -211,14 +264,16 @@ at 1 block/s).
 
 **Q: Does the compression ratio hold for empty blocks?**
 
-Empty blocks have no witness bundle at all (never written), so there is nothing
-to compress. The `b/<hash>` entry is still written and retained.
+Empty blocks have no witness bundle at all (never written), but they are still
+included in ordered STARK frontier ranges as zero-entry sources. This keeps
+range metadata continuous from block `0` without changing compression accounting.
 
 **Q: Is the STARK proof itself verifiable after witness deletion?**
 
-Yes. `ProofAmendment` is self-contained — it includes `batch_root_bytes`,
-`n_sigs`, and the Winterfell proof. Any node can verify the aggregate without
-the original signatures.
+Yes. The settlement transaction input carries the full proof payload, and the
+final source block stores the full `ProofAmendment`. Pointer blocks store
+`settlement_tx_hash`, `start_block`, `end_block`, and `target_block` metadata so
+clients can find the full proof without duplicating bytes on every source block.
 
 ---
 
@@ -291,4 +346,3 @@ The bundled `docker-compose.yml` assigns:
 
 - **node1** — `archive` (serves as authoritative history source)
 - **node2 / node3** — `full` (typical validator nodes)
-

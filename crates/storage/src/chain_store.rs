@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use alloy_rlp::{Decodable, Encodable};
 use serde::{Deserialize, Serialize};
-use shell_core::{Block, BlockHeader, StrippedBlock, TransactionReceipt};
-use shell_primitives::{Address, ShellHash};
+use shell_core::{Block, BlockHeader, StrippedBlock, SystemTransaction, TransactionReceipt};
+use shell_primitives::{Address, ShellHash, U256};
 
 use crate::{KvStore, StorageError};
 
@@ -51,12 +51,6 @@ mod format_version {
     /// RLP binary format (current).
     pub const RLP: u8 = 0x02;
 }
-
-/// Maximum supported offset for address transaction history pagination.
-///
-/// Deep pagination currently relies on a prefix scan, so offsets beyond this
-/// threshold are rejected explicitly instead of degrading into unbounded work.
-pub const MAX_ADDRESS_TX_HISTORY_OFFSET: usize = 10_000;
 
 /// Encode a value to RLP with a version prefix byte.
 fn encode_rlp<T: Encodable>(value: &T) -> Vec<u8> {
@@ -125,6 +119,7 @@ mod prefix {
     pub const WITNESS_BY_HASH: &[u8] = b"w/";
     pub const HASH_BY_NUMBER: &[u8] = b"n/";
     pub const RECEIPTS_BY_HASH: &[u8] = b"r/";
+    pub const SYSTEM_TXS_BY_HASH: &[u8] = b"sr/";
     pub const TX_INDEX: &[u8] = b"t/";
     pub const HEAD_BLOCK: &[u8] = b"HEAD";
     pub const CHAIN_CONFIG: &[u8] = b"CFG";
@@ -136,6 +131,11 @@ mod prefix {
     pub const GUARDIAN_CONFIG: &[u8] = b"gc/";
     /// Active recovery proposal: key = "rp/" + address(20) → JSON-encoded RecoveryProposal
     pub const RECOVERY_PROPOSAL: &[u8] = b"rp/";
+    pub const TOTAL_TX_COUNT: &[u8] = b"TOTAL_TX_COUNT";
+    pub const TOTAL_GAS_USED: &[u8] = b"TOTAL_GAS_USED";
+    pub const TOTALS_HEAD: &[u8] = b"TOTALS_HEAD";
+    /// Side fork marker: key = "sf/" + block_number(8) + block_hash(32).
+    pub const SIDE_FORK_BY_NUMBER: &[u8] = b"sf/";
 }
 
 /// Block/receipt/transaction-index storage.
@@ -144,6 +144,26 @@ mod prefix {
 /// hash, store transaction receipts, and maintain a transaction → block index.
 pub struct ChainStore<S: KvStore> {
     store: Arc<S>,
+}
+
+/// Local availability class for a block hash.
+///
+/// Headers, stripped bodies, and PQ witnesses are stored independently so full,
+/// light, and STARK-compressed nodes can share one canonical hash space without
+/// pretending that all data is locally present.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockAvailability {
+    /// No header or body is stored for this hash.
+    Missing,
+    /// Header exists, but the stripped body is absent.
+    HeaderOnly,
+    /// Header and stripped body exist, but no witness bundle is present.
+    ///
+    /// This can be an empty block, a body back-filled without witnesses, or a
+    /// block whose witnesses were replaced by an accepted STARK proof.
+    BodyOnly,
+    /// Header, stripped body, and witness bundle are present.
+    BodyWithWitness,
 }
 
 impl<S: KvStore> ChainStore<S> {
@@ -162,6 +182,18 @@ impl<S: KvStore> ChainStore<S> {
             .try_into()
             .map_err(|_| StorageError::Codec("invalid addr index key".into()))?;
         Ok(u64::from_be_bytes(block_bytes))
+    }
+
+    fn addr_index_key_parts(prefix_len: usize, key: &[u8]) -> Result<(u64, u32), StorageError> {
+        if key.len() < prefix_len.saturating_add(12) {
+            return Err(StorageError::Codec("invalid addr index key".into()));
+        }
+        let block_number = Self::block_number_from_addr_index_key(prefix_len, key)?;
+        let tx_index_bytes: [u8; 4] = key
+            [prefix_len.saturating_add(8)..prefix_len.saturating_add(12)]
+            .try_into()
+            .map_err(|_| StorageError::Codec("invalid addr index key".into()))?;
+        Ok((block_number, u32::from_be_bytes(tx_index_bytes)))
     }
 
     /// Returns a reference to the underlying key-value store.
@@ -206,8 +238,25 @@ impl<S: KvStore> ChainStore<S> {
         [prefix::RECEIPTS_BY_HASH, block_hash.as_bytes()].concat()
     }
 
+    fn system_txs_key(block_hash: &ShellHash) -> Vec<u8> {
+        [prefix::SYSTEM_TXS_BY_HASH, block_hash.as_bytes()].concat()
+    }
+
     fn tx_index_key(tx_hash: &ShellHash) -> Vec<u8> {
         [prefix::TX_INDEX, tx_hash.as_bytes()].concat()
+    }
+
+    fn side_fork_key(number: u64, hash: &ShellHash) -> Vec<u8> {
+        [
+            prefix::SIDE_FORK_BY_NUMBER,
+            &number.to_be_bytes(),
+            hash.as_bytes(),
+        ]
+        .concat()
+    }
+
+    fn side_fork_prefix(number: u64) -> Vec<u8> {
+        [prefix::SIDE_FORK_BY_NUMBER, &number.to_be_bytes()].concat()
     }
 
     /// Key for address→tx index: "a/" + address(20) + block_number(8 BE) + tx_index(4 BE)
@@ -250,6 +299,33 @@ impl<S: KvStore> ChainStore<S> {
     /// Callers must explicitly call [`set_canonical`] and [`set_head`]
     /// to mark a block as part of the canonical chain.
     pub fn put_block(&self, block: &Block) -> Result<(), StorageError> {
+        self.put_block_parts(block, true)
+    }
+
+    /// Store a side-fork block without making it canonical and without updating
+    /// transaction/address indexes that are reserved for canonical lookup.
+    pub fn put_side_fork_block(&self, block: &Block) -> Result<(), StorageError> {
+        let block_hash = block.hash();
+        self.put_block_parts(block, false)?;
+        self.store.put(
+            &Self::side_fork_key(block.number(), &block_hash),
+            block_hash.as_bytes(),
+        )
+    }
+
+    /// Return side-fork block hashes recorded at a given block number.
+    pub fn get_side_fork_hashes(&self, number: u64) -> Result<Vec<ShellHash>, StorageError> {
+        let prefix = Self::side_fork_prefix(number);
+        self.store
+            .scan_prefix(&prefix)?
+            .into_iter()
+            .map(|(_, value)| {
+                ShellHash::try_from_slice(&value).map_err(|e| StorageError::Codec(e.to_string()))
+            })
+            .collect()
+    }
+
+    fn put_block_parts(&self, block: &Block, index_transactions: bool) -> Result<(), StorageError> {
         let block_hash = block.hash();
         let block_number = block.number();
 
@@ -273,27 +349,29 @@ impl<S: KvStore> ChainStore<S> {
                 .put(&Self::witness_key(&block_hash), &witness_buf)?;
         }
 
-        // Transaction → (block_hash, tx_index) mapping + address index
-        for (i, tx) in block.transactions.iter().enumerate() {
-            let tx_hash = tx.hash();
-            let mut index_value = block_hash.as_bytes().to_vec();
-            index_value.extend_from_slice(&(i as u32).to_be_bytes());
-            self.store
-                .put(&Self::tx_index_key(&tx_hash), &index_value)?;
+        if index_transactions {
+            // Transaction → (block_hash, tx_index) mapping + address index
+            for (i, tx) in block.transactions.iter().enumerate() {
+                let tx_hash = tx.hash();
+                let mut index_value = block_hash.as_bytes().to_vec();
+                index_value.extend_from_slice(&(i as u32).to_be_bytes());
+                self.store
+                    .put(&Self::tx_index_key(&tx_hash), &index_value)?;
 
-            // Address index: sender
-            let idx = i as u32;
-            self.store.put(
-                &Self::addr_tx_key(&tx.sender(), block_number, idx),
-                tx_hash.as_bytes(),
-            )?;
-            // Address index: recipient (if not contract creation)
-            if let Some(to) = tx.tx.to {
-                if to != tx.sender() {
-                    self.store.put(
-                        &Self::addr_tx_key(&to, block_number, idx),
-                        tx_hash.as_bytes(),
-                    )?;
+                // Address index: sender
+                let idx = i as u32;
+                self.store.put(
+                    &Self::addr_tx_key(&tx.sender(), block_number, idx),
+                    tx_hash.as_bytes(),
+                )?;
+                // Address index: recipient (if not contract creation)
+                if let Some(to) = tx.tx.to {
+                    if to != tx.sender() {
+                        self.store.put(
+                            &Self::addr_tx_key(&to, block_number, idx),
+                            tx_hash.as_bytes(),
+                        )?;
+                    }
                 }
             }
         }
@@ -334,11 +412,34 @@ impl<S: KvStore> ChainStore<S> {
         Ok(self.store.get(&Self::witness_key(hash))?.is_some())
     }
 
+    /// Return the stored encoded witness bundle byte length for compression accounting.
+    pub fn witness_bundle_size(&self, hash: &ShellHash) -> Result<Option<u64>, StorageError> {
+        Ok(self
+            .store
+            .get(&Self::witness_key(hash))?
+            .map(|bytes| bytes.len() as u64))
+    }
+
     /// Returns `true` if a stripped body (`b/<hash>`) is stored for the given block hash.
     ///
     /// Used by the historical body sync to detect pruned blocks.
     pub fn has_body(&self, hash: &ShellHash) -> Result<bool, StorageError> {
         Ok(self.store.get(&Self::body_key(hash))?.is_some())
+    }
+
+    /// Classify which block components are available locally for a hash.
+    pub fn block_availability(&self, hash: &ShellHash) -> Result<BlockAvailability, StorageError> {
+        let has_header = self.store.get(&Self::header_key(hash))?.is_some();
+        let has_body = self.store.get(&Self::body_key(hash))?.is_some();
+        let has_witness = self.store.get(&Self::witness_key(hash))?.is_some();
+
+        Ok(match (has_header, has_body, has_witness) {
+            (false, false, false) => BlockAvailability::Missing,
+            (true, false, _) => BlockAvailability::HeaderOnly,
+            (_, true, false) => BlockAvailability::BodyOnly,
+            (_, true, true) => BlockAvailability::BodyWithWitness,
+            (false, false, true) => BlockAvailability::Missing,
+        })
     }
 
     /// Store only the stripped body portion of a block (without witness bundle).
@@ -510,6 +611,62 @@ impl<S: KvStore> ChainStore<S> {
         self.store.put(&Self::receipts_key(block_hash), &data)
     }
 
+    /// Store deterministic system transactions for a canonical block and index
+    /// them by tx hash/address so RPC and explorers can treat rewards as
+    /// first-class tx-like records.
+    pub fn put_system_transactions(
+        &self,
+        block_hash: &ShellHash,
+        block_number: u64,
+        system_txs: &[SystemTransaction],
+    ) -> Result<(), StorageError> {
+        let data = serde_json::to_vec(system_txs)
+            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        self.store.put(&Self::system_txs_key(block_hash), &data)?;
+
+        for tx in system_txs {
+            let tx_hash = tx.hash();
+            let mut index_value = block_hash.as_bytes().to_vec();
+            index_value.extend_from_slice(&tx.tx_index.to_be_bytes());
+            self.store
+                .put(&Self::tx_index_key(&tx_hash), &index_value)?;
+            self.store.put(
+                &Self::addr_tx_key(&tx.to, block_number, tx.tx_index),
+                tx_hash.as_bytes(),
+            )?;
+        }
+
+        Ok(())
+    }
+
+    /// Return system transactions attached to a block hash.
+    pub fn get_system_transactions(
+        &self,
+        block_hash: &ShellHash,
+    ) -> Result<Vec<SystemTransaction>, StorageError> {
+        match self.store.get(&Self::system_txs_key(block_hash))? {
+            Some(data) => {
+                serde_json::from_slice(&data).map_err(|e| StorageError::Codec(e.to_string()))
+            }
+            None => Ok(vec![]),
+        }
+    }
+
+    /// Return a system transaction by tx hash using the shared tx index.
+    pub fn get_system_transaction_by_hash(
+        &self,
+        tx_hash: &ShellHash,
+    ) -> Result<Option<SystemTransaction>, StorageError> {
+        let (block_hash, tx_idx) = match self.get_tx_location(tx_hash)? {
+            Some(loc) => loc,
+            None => return Ok(None),
+        };
+        Ok(self
+            .get_system_transactions(&block_hash)?
+            .into_iter()
+            .find(|tx| tx.tx_index == tx_idx && tx.hash() == *tx_hash))
+    }
+
     /// Get receipts for a block by block hash.
     pub fn get_receipts(
         &self,
@@ -593,7 +750,7 @@ impl<S: KvStore> ChainStore<S> {
     /// Get transaction hashes involving a given address, with pagination.
     ///
     /// Scans the address→tx index for `address` within the specified block range.
-    /// Returns tx hashes in ascending block order, paginated by `offset` and `limit`.
+    /// Returns tx hashes newest-first by block number, paginated by `offset` and `limit`.
     pub fn get_txs_by_address(
         &self,
         address: &Address,
@@ -602,13 +759,6 @@ impl<S: KvStore> ChainStore<S> {
         offset: usize,
         limit: usize,
     ) -> Result<Vec<ShellHash>, StorageError> {
-        if offset > MAX_ADDRESS_TX_HISTORY_OFFSET {
-            return Err(StorageError::InvalidInput(format!(
-                "transaction history offset {offset} exceeds max {}",
-                MAX_ADDRESS_TX_HISTORY_OFFSET
-            )));
-        }
-
         if limit == 0 {
             return Ok(Vec::new());
         }
@@ -616,32 +766,29 @@ impl<S: KvStore> ChainStore<S> {
         let prefix = Self::addr_tx_prefix(address);
         let entries = self.store.scan_prefix(&prefix)?;
 
-        let mut tx_hashes = Vec::with_capacity(limit);
-        let mut matched = 0usize;
-        for (key, value) in &entries {
-            let Ok(block_number) = Self::block_number_from_addr_index_key(prefix.len(), key) else {
+        let mut matches = Vec::new();
+        for (key, value) in entries {
+            let Ok((block_number, tx_index)) = Self::addr_index_key_parts(prefix.len(), &key)
+            else {
                 continue;
             };
             if block_number < from_block || block_number > to_block {
                 continue;
             }
             if value.len() == 32 {
-                if matched < offset {
-                    matched = matched.saturating_add(1);
-                    continue;
-                }
-
-                let hash = ShellHash::try_from_slice(value)
+                let hash = ShellHash::try_from_slice(&value)
                     .map_err(|e| StorageError::Codec(e.to_string()))?;
-                tx_hashes.push(hash);
-                matched = matched.saturating_add(1);
-                if tx_hashes.len() == limit {
-                    break;
-                }
+                matches.push((block_number, tx_index, hash));
             }
         }
 
-        Ok(tx_hashes)
+        matches.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        Ok(matches
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .map(|(_, _, hash)| hash)
+            .collect())
     }
 
     /// Count transactions involving a given address within the specified block range.
@@ -906,22 +1053,28 @@ impl<S: KvStore> ChainStore<S> {
         self.store.get(&key)
     }
 
-    /// Store the total transaction count across all blocks.
+    /// Store the total transaction count across all canonical blocks.
     pub fn set_total_tx_count(&self, count: u64) -> Result<(), StorageError> {
-        self.store.put(b"TOTAL_TX_COUNT", &count.to_be_bytes())
+        self.store.put(prefix::TOTAL_TX_COUNT, &count.to_be_bytes())
     }
 
-    /// Get the total transaction count across all blocks.
-    pub fn get_total_tx_count(&self) -> Result<u64, StorageError> {
-        match self.store.get(b"TOTAL_TX_COUNT")? {
+    /// Get the total transaction count across all canonical blocks, if stored.
+    pub fn get_total_tx_count_opt(&self) -> Result<Option<u64>, StorageError> {
+        match self.store.get(prefix::TOTAL_TX_COUNT)? {
             Some(bytes) if bytes.len() == 8 => {
                 let arr: [u8; 8] = bytes
                     .try_into()
                     .map_err(|_| StorageError::Codec("invalid tx count encoding".into()))?;
-                Ok(u64::from_be_bytes(arr))
+                Ok(Some(u64::from_be_bytes(arr)))
             }
-            _ => Ok(0),
+            Some(_) => Err(StorageError::Codec("invalid tx count encoding".into())),
+            None => Ok(None),
         }
+    }
+
+    /// Get the total transaction count across all canonical blocks.
+    pub fn get_total_tx_count(&self) -> Result<u64, StorageError> {
+        Ok(self.get_total_tx_count_opt()?.unwrap_or(0))
     }
 
     /// Increment the total transaction count by `delta` and persist.
@@ -930,6 +1083,126 @@ impl<S: KvStore> ChainStore<S> {
         let new_count = current.saturating_add(delta);
         self.set_total_tx_count(new_count)?;
         Ok(new_count)
+    }
+
+    /// Store cumulative gas used across all canonical blocks.
+    pub fn set_total_gas_used(&self, total: U256) -> Result<(), StorageError> {
+        self.store
+            .put(prefix::TOTAL_GAS_USED, &total.to_be_bytes::<32>())
+    }
+
+    /// Get cumulative gas used across all canonical blocks, if stored.
+    pub fn get_total_gas_used_opt(&self) -> Result<Option<U256>, StorageError> {
+        match self.store.get(prefix::TOTAL_GAS_USED)? {
+            Some(bytes) if bytes.len() == 32 => Ok(Some(U256::from_be_slice(&bytes))),
+            Some(_) => Err(StorageError::Codec("invalid total gas encoding".into())),
+            None => Ok(None),
+        }
+    }
+
+    /// Get cumulative gas used across all canonical blocks.
+    pub fn get_total_gas_used(&self) -> Result<U256, StorageError> {
+        Ok(self.get_total_gas_used_opt()?.unwrap_or(U256::ZERO))
+    }
+
+    /// Store the canonical head covered by the persisted aggregate counters.
+    pub fn set_chain_totals_head(&self, head_number: u64) -> Result<(), StorageError> {
+        self.store
+            .put(prefix::TOTALS_HEAD, &head_number.to_be_bytes())
+    }
+
+    /// Get the canonical head covered by the persisted aggregate counters.
+    pub fn get_chain_totals_head(&self) -> Result<Option<u64>, StorageError> {
+        match self.store.get(prefix::TOTALS_HEAD)? {
+            Some(bytes) if bytes.len() == 8 => {
+                let arr: [u8; 8] = bytes
+                    .try_into()
+                    .map_err(|_| StorageError::Codec("invalid totals head encoding".into()))?;
+                Ok(Some(u64::from_be_bytes(arr)))
+            }
+            Some(_) => Err(StorageError::Codec("invalid totals head encoding".into())),
+            None => Ok(None),
+        }
+    }
+
+    /// Rebuild canonical aggregate counters by scanning block 0 through `head_number`.
+    pub fn rebuild_chain_totals(&self, head_number: u64) -> Result<(u64, U256), StorageError> {
+        let fallback_tx_count = self.get_total_tx_count_opt()?;
+        let mut scanned_txs = Some(0u64);
+        let mut total_gas = U256::ZERO;
+        for number in 0..=head_number {
+            let hash = self.get_block_hash_by_number(number)?.ok_or_else(|| {
+                StorageError::Codec(format!(
+                    "missing canonical block #{number} while rebuilding chain totals"
+                ))
+            })?;
+            let header = self.get_header_by_hash(&hash)?.ok_or_else(|| {
+                StorageError::Codec(format!(
+                    "missing header for canonical block #{number} while rebuilding chain totals"
+                ))
+            })?;
+            total_gas = total_gas.saturating_add(U256::from(header.gas_used));
+
+            match (scanned_txs.as_mut(), self.get_block_by_hash(&hash)?) {
+                (Some(total), Some(block)) => {
+                    *total = total.saturating_add(block.transactions.len() as u64);
+                }
+                (Some(_), None) => {
+                    scanned_txs = None;
+                }
+                (None, _) => {}
+            }
+        }
+        let total_txs = match scanned_txs {
+            Some(total) => total,
+            None => fallback_tx_count.ok_or_else(|| {
+                StorageError::Codec(
+                    "cannot rebuild transaction total because canonical block bodies are pruned"
+                        .into(),
+                )
+            })?,
+        };
+        self.set_total_tx_count(total_txs)?;
+        self.set_total_gas_used(total_gas)?;
+        self.set_chain_totals_head(head_number)?;
+        Ok((total_txs, total_gas))
+    }
+
+    /// Return canonical aggregate counters, rebuilding once if legacy counters are missing or stale.
+    pub fn get_chain_totals(&self, head_number: u64) -> Result<(u64, U256), StorageError> {
+        let totals_head = self.get_chain_totals_head()?;
+        let tx_count = self.get_total_tx_count_opt()?;
+        let gas_used = self.get_total_gas_used_opt()?;
+        match (totals_head, tx_count, gas_used) {
+            (Some(marked_head), Some(txs), Some(gas)) if marked_head == head_number => {
+                Ok((txs, gas))
+            }
+            _ => self.rebuild_chain_totals(head_number),
+        }
+    }
+
+    /// Add a newly canonical block to aggregate counters, rebuilding if the previous state is stale.
+    pub fn add_canonical_block_to_totals(
+        &self,
+        block_number: u64,
+        tx_count: u64,
+        gas_used: u64,
+    ) -> Result<(u64, U256), StorageError> {
+        let expected_previous = block_number.checked_sub(1);
+        if self.get_chain_totals_head()? == expected_previous
+            && self.get_total_tx_count_opt()?.is_some()
+            && self.get_total_gas_used_opt()?.is_some()
+        {
+            let total_txs = self.increment_tx_count(tx_count)?;
+            let total_gas = self
+                .get_total_gas_used()?
+                .saturating_add(U256::from(gas_used));
+            self.set_total_gas_used(total_gas)?;
+            self.set_chain_totals_head(block_number)?;
+            Ok((total_txs, total_gas))
+        } else {
+            self.rebuild_chain_totals(block_number)
+        }
     }
 }
 
@@ -989,6 +1262,14 @@ impl<S: KvStore> WitnessStore<S> {
     /// Returns `true` if a witness bundle exists for the given block hash.
     pub fn has_bundle(&self, block_hash: &ShellHash) -> Result<bool, StorageError> {
         Ok(self.store.get(&Self::key(block_hash))?.is_some())
+    }
+
+    /// Return the encoded witness bundle byte length for compression accounting.
+    pub fn bundle_size(&self, block_hash: &ShellHash) -> Result<Option<u64>, StorageError> {
+        Ok(self
+            .store
+            .get(&Self::key(block_hash))?
+            .map(|bytes| bytes.len() as u64))
     }
 }
 
@@ -1086,6 +1367,7 @@ mod tests {
                 witness_root: None,
             },
             transactions: vec![],
+            system_transactions: vec![],
             proposer_seal: None,
         }
     }
@@ -1133,6 +1415,22 @@ mod tests {
     }
 
     #[test]
+    fn side_fork_block_is_recorded_but_not_canonical() {
+        let store = Arc::new(MemoryDb::new());
+        let cs = ChainStore::new(store);
+        let mut block = empty_block(7);
+        block.header.timestamp += 1;
+        let hash = block.hash();
+
+        cs.put_side_fork_block(&block).unwrap();
+
+        assert_eq!(cs.get_side_fork_hashes(7).unwrap(), vec![hash]);
+        assert_eq!(cs.get_block_by_hash(&hash).unwrap().unwrap().hash(), hash);
+        assert!(cs.get_block_by_number(7).unwrap().is_none());
+        assert!(cs.get_head_hash().unwrap().is_none());
+    }
+
+    #[test]
     fn set_canonical_and_get_by_number() {
         let store = Arc::new(MemoryDb::new());
         let cs = ChainStore::new(store);
@@ -1163,6 +1461,39 @@ mod tests {
         let cs = ChainStore::new(store);
         assert!(cs.get_block_by_number(999).unwrap().is_none());
         assert!(cs.get_block_by_hash(&ShellHash::ZERO).unwrap().is_none());
+    }
+
+    #[test]
+    fn block_availability_classifies_header_body_witness_components() {
+        let store = Arc::new(MemoryDb::new());
+        let cs = ChainStore::new(store);
+        let block = empty_block(9);
+        let hash = block.hash();
+
+        assert_eq!(
+            cs.block_availability(&hash).unwrap(),
+            BlockAvailability::Missing
+        );
+
+        cs.put_block(&block).unwrap();
+        assert_eq!(
+            cs.block_availability(&hash).unwrap(),
+            BlockAvailability::BodyOnly
+        );
+
+        cs.store()
+            .put(&ChainStore::<MemoryDb>::witness_key(&hash), b"present")
+            .unwrap();
+        assert_eq!(
+            cs.block_availability(&hash).unwrap(),
+            BlockAvailability::BodyWithWitness
+        );
+
+        cs.delete_body(&hash).unwrap();
+        assert_eq!(
+            cs.block_availability(&hash).unwrap(),
+            BlockAvailability::HeaderOnly
+        );
     }
 
     #[test]
@@ -1531,18 +1862,27 @@ mod tests {
         }
 
         let page = cs.get_txs_by_address(&address, 2, 3, 1, 1).unwrap();
-        assert_eq!(page, vec![ShellHash::from([3u8; 32])]);
+        assert_eq!(page, vec![ShellHash::from([2u8; 32])]);
     }
 
     #[test]
-    fn test_get_txs_by_address_rejects_deep_offset() {
+    fn test_get_txs_by_address_allows_deep_offset() {
         let store = Arc::new(MemoryDb::new());
-        let cs = ChainStore::new(store);
+        let cs = ChainStore::new(Arc::clone(&store));
         let address = Address::from([0x22; 20]);
 
-        let result =
-            cs.get_txs_by_address(&address, 0, u64::MAX, MAX_ADDRESS_TX_HISTORY_OFFSET + 1, 1);
-        assert!(matches!(result, Err(StorageError::InvalidInput(_))));
+        for idx in 0..3u32 {
+            let hash = ShellHash::from([(idx as u8) + 1; 32]);
+            store
+                .put(
+                    &ChainStore::<MemoryDb>::addr_tx_key(&address, idx as u64, idx),
+                    hash.as_bytes(),
+                )
+                .unwrap();
+        }
+
+        let page = cs.get_txs_by_address(&address, 0, u64::MAX, 20_000, 50);
+        assert_eq!(page.unwrap(), Vec::<ShellHash>::new());
     }
 
     #[test]
@@ -1994,6 +2334,7 @@ mod tests {
                 witness_root: None,
             },
             transactions: vec![signed],
+            system_transactions: vec![],
             proposer_seal: None,
         }
     }

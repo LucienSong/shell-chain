@@ -16,7 +16,7 @@ pub enum NetworkType {
     /// Local development: 30 s blocks, relaxed validation, slashing disabled.
     #[default]
     Dev,
-    /// Public test network: 30 s blocks, full validation.
+    /// Public test network: 2 s transaction-driven blocks, full validation.
     Testnet,
     /// Production main network: 2 s blocks, strict parameters.
     Mainnet,
@@ -25,12 +25,12 @@ pub enum NetworkType {
 impl NetworkType {
     /// Target block time in milliseconds for this network profile.
     ///
-    /// - Dev / Testnet: **30 000 ms** (saves ~15× resources vs mainnet).
-    /// - Mainnet: **2 000 ms**.
+    /// - Dev: **30 000 ms**.
+    /// - Testnet / Mainnet: **2 000 ms**.
     pub fn default_block_time_ms(self) -> u64 {
         match self {
-            NetworkType::Dev | NetworkType::Testnet => 30_000,
-            NetworkType::Mainnet => 2_000,
+            NetworkType::Dev => 30_000,
+            NetworkType::Testnet | NetworkType::Mainnet => 2_000,
         }
     }
 
@@ -52,7 +52,7 @@ impl NetworkType {
                 proof_challenge_window: 10,
             },
             NetworkType::Testnet => NetworkParams {
-                block_time_ms: 30_000,
+                block_time_ms: 2_000,
                 max_tx_per_block: 500,
                 stark_aggregation: true,
                 async_prover: true,
@@ -270,6 +270,22 @@ impl ConsensusConfig {
     pub fn epoch_length(&self) -> u64 {
         match self {
             Self::PoA { epoch_length, .. } | Self::WPoA { epoch_length, .. } => *epoch_length,
+        }
+    }
+
+    /// Return validator weights aligned with `authorities`.
+    ///
+    /// PoA authorities and missing/zero wPoA weights default to 1.
+    pub fn authority_weights(&self) -> Vec<u64> {
+        match self {
+            Self::PoA { authorities, .. } => vec![1; authorities.len()],
+            Self::WPoA {
+                authorities,
+                weights,
+                ..
+            } => (0..authorities.len())
+                .map(|idx| weights.get(idx).copied().unwrap_or(1).max(1))
+                .collect(),
         }
     }
 }
@@ -570,8 +586,8 @@ mod tests {
 
     #[test]
     fn network_type_testnet_block_time() {
-        assert_eq!(NetworkType::Testnet.default_block_time_ms(), 30_000);
-        assert_eq!(NetworkType::Testnet.default_block_time_secs(), 30);
+        assert_eq!(NetworkType::Testnet.default_block_time_ms(), 2_000);
+        assert_eq!(NetworkType::Testnet.default_block_time_secs(), 2);
     }
 
     #[test]
@@ -595,7 +611,7 @@ mod tests {
     #[test]
     fn network_params_testnet() {
         let p = NetworkType::Testnet.default_params();
-        assert_eq!(p.block_time_ms, 30_000);
+        assert_eq!(p.block_time_ms, 2_000);
         assert!(p.stark_aggregation);
         assert!(p.async_prover);
         assert!(p.slashing_enabled);
@@ -685,7 +701,7 @@ mod tests {
             "consensus": {"engine": "poa", "authorities": [], "block_time_secs": 0}
         }"#;
         let config = GenesisConfig::from_json(json).unwrap();
-        assert_eq!(config.effective_block_time_secs(), 30); // Testnet default
+        assert_eq!(config.effective_block_time_secs(), 2); // Testnet default
     }
 
     #[test]
@@ -731,10 +747,10 @@ mod tests {
 
     #[test]
     fn validate_consistency_testnet_close_value_ok() {
-        // 20s on testnet (expected 30s) is within 50% tolerance → ok
+        // 3s on testnet (expected 2s) is within 50% tolerance -> ok
         let json = r#"{
             "chain_id": 1338, "network_type": "Testnet", "timestamp": 0,
-            "consensus": {"engine": "poa", "authorities": [], "block_time_secs": 20}
+            "consensus": {"engine": "poa", "authorities": [], "block_time_secs": 3}
         }"#;
         let config = GenesisConfig::from_json(json).unwrap();
         assert!(config.validate_network_consistency().is_ok());

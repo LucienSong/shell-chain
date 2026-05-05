@@ -182,10 +182,7 @@ impl TxPool {
                 .unwrap_or(0);
             let bump = self.config.replacement_fee_bump_pct;
             // required = old_fee * (100 + bump) / 100, rounded up
-            let required = old_fee
-                .checked_mul(100 + bump)
-                .map(|v| v / 100)
-                .unwrap_or(u64::MAX);
+            let required = replacement_fee_required(old_fee, bump);
             if priority_fee < required {
                 return Err(MempoolError::ReplacementFeeTooLow {
                     got: priority_fee,
@@ -270,6 +267,29 @@ impl TxPool {
         }
     }
 
+    /// Remove transactions whose nonce is below canonical state.
+    ///
+    /// Imported blocks can advance an account nonce even when the exact stale
+    /// transaction was not in the block (for example, a lower-fee duplicate that
+    /// arrived late). Pruning here prevents invalid nonce-too-low transactions
+    /// from being selected or rebroadcast indefinitely.
+    pub fn prune_nonce_too_low<S: KvStore + 'static>(&self, world_state: &WorldState<S>) -> usize {
+        let mut inner = self.inner.write();
+        let stale_hashes: Vec<ShellHash> = inner
+            .by_hash
+            .iter()
+            .filter_map(|(hash, entry)| {
+                let canonical_nonce = world_state.get_nonce(&entry.tx.from).ok()?;
+                (entry.tx.tx.nonce < canonical_nonce).then_some(*hash)
+            })
+            .collect();
+        let pruned = stale_hashes.len();
+        for hash in stale_hashes {
+            Self::remove_entry(&mut inner, &hash);
+        }
+        pruned
+    }
+
     /// Remove all transactions from the pool.
     pub fn clear(&self) {
         let mut inner = self.inner.write();
@@ -321,6 +341,54 @@ impl TxPool {
                 result.push(entry.tx.clone());
             }
         }
+        result
+    }
+
+    /// Collect transactions for block production while preserving per-sender
+    /// nonce contiguity.
+    ///
+    /// The general [`pending`] view is globally priority ordered and is useful
+    /// for RPC inspection. Block production must be stricter: for any sender,
+    /// nonce `N + 1` must not be returned before nonce `N`, even if `N + 1`
+    /// pays a higher priority fee.
+    pub fn pending_for_block(&self, limit: usize) -> Vec<SignedTransaction> {
+        let inner = self.inner.read();
+        let mut result = Vec::with_capacity(limit.min(inner.by_hash.len()));
+        let mut ready: BTreeMap<PriorityKey, (Address, ShellHash)> = BTreeMap::new();
+
+        for (sender, queue) in &inner.by_sender {
+            if let Some((_nonce, hash)) = queue.first_key_value() {
+                if let Some(entry) = inner.by_hash.get(hash) {
+                    ready.insert(entry.priority_key, (*sender, *hash));
+                }
+            }
+        }
+
+        while result.len() < limit {
+            let Some((priority_key, (sender, hash))) = ready.pop_first() else {
+                break;
+            };
+
+            let Some(entry) = inner.by_hash.get(&hash) else {
+                continue;
+            };
+            let nonce = entry.tx.tx.nonce;
+            result.push(entry.tx.clone());
+
+            if let Some(sender_queue) = inner.by_sender.get(&sender) {
+                let next_nonce = nonce.saturating_add(1);
+                if let Some((queued_nonce, next_hash)) = sender_queue.range(next_nonce..).next() {
+                    if *queued_nonce == next_nonce {
+                        if let Some(next_entry) = inner.by_hash.get(next_hash) {
+                            if next_entry.priority_key != priority_key {
+                                ready.insert(next_entry.priority_key, (sender, *next_hash));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         result
     }
 
@@ -466,6 +534,12 @@ fn next_expected_nonce(sender_q: Option<&BTreeMap<u64, ShellHash>>, chain_nonce:
         }
     }
     expected
+}
+
+fn replacement_fee_required(old_fee: u64, bump_pct: u64) -> u64 {
+    let numerator = u128::from(old_fee).saturating_mul(u128::from(100u64.saturating_add(bump_pct)));
+    let rounded = numerator.saturating_add(99) / 100;
+    rounded.min(u128::from(u64::MAX)) as u64
 }
 
 #[cfg(test)]
@@ -875,6 +949,26 @@ mod tests {
     }
 
     #[test]
+    fn prune_nonce_too_low_removes_stale_transactions() {
+        let pool = TxPool::new(make_config());
+        let verifier = DilithiumVerifier;
+        let (mut ws, cs) = setup_validation_ctx();
+        let signer = DilithiumSigner::generate();
+        let pubkey = signer.public_key().to_vec();
+        let from = test_address(&pubkey);
+
+        let tx0 = make_signed_tx_with_signer(&signer, &pubkey, 0, 100);
+        let tx1 = make_signed_tx_with_signer(&signer, &pubkey, 1, 90);
+        let h0 = insert_rich(&pool, tx0, &verifier, &mut ws, &cs).unwrap();
+        let h1 = insert_rich(&pool, tx1, &verifier, &mut ws, &cs).unwrap();
+
+        ws.increment_nonce(&from).unwrap();
+        assert_eq!(pool.prune_nonce_too_low(&ws), 1);
+        assert!(!pool.contains(&h0));
+        assert!(pool.contains(&h1));
+    }
+
+    #[test]
     fn pending_ordered_by_priority_fee() {
         let pool = TxPool::new(make_config());
         let verifier = DilithiumVerifier;
@@ -894,6 +988,39 @@ mod tests {
         assert_eq!(pending[0].tx.max_priority_fee_per_gas, 100);
         assert_eq!(pending[1].tx.max_priority_fee_per_gas, 50);
         assert_eq!(pending[2].tx.max_priority_fee_per_gas, 10);
+    }
+
+    #[test]
+    fn pending_for_block_preserves_sender_nonce_contiguity() {
+        let pool = TxPool::new(make_config());
+        let verifier = DilithiumVerifier;
+        let (mut ws, cs) = setup_validation_ctx();
+
+        let signer = DilithiumSigner::generate();
+        let pubkey = signer.public_key().to_vec();
+        let sender_tx0 = make_signed_tx_with_signer(&signer, &pubkey, 0, 10);
+        let sender_tx1 = make_signed_tx_with_signer(&signer, &pubkey, 1, 100);
+        let sender_tx0_hash = sender_tx0.hash();
+        let sender_tx1_hash = sender_tx1.hash();
+        let (other_tx, _) = make_signed_tx(0, 50);
+        let other_hash = other_tx.hash();
+
+        insert_rich(&pool, sender_tx0, &verifier, &mut ws, &cs).unwrap();
+        insert_rich(&pool, sender_tx1, &verifier, &mut ws, &cs).unwrap();
+        insert_rich(&pool, other_tx, &verifier, &mut ws, &cs).unwrap();
+
+        let priority_view: Vec<_> = pool.pending(10).into_iter().map(|tx| tx.hash()).collect();
+        assert_eq!(priority_view[0], sender_tx1_hash);
+
+        let block_view: Vec<_> = pool
+            .pending_for_block(10)
+            .into_iter()
+            .map(|tx| tx.hash())
+            .collect();
+        assert_eq!(
+            block_view,
+            vec![other_hash, sender_tx0_hash, sender_tx1_hash]
+        );
     }
 
     #[test]
@@ -1117,6 +1244,13 @@ mod tests {
         let err = insert_rich(&pool, tx_new, &verifier, &mut ws, &cs).unwrap_err();
         assert!(matches!(err, MempoolError::ReplacementFeeTooLow { .. }));
         assert_eq!(pool.len(), 1); // old tx still there
+    }
+
+    #[test]
+    fn rbf_fee_bump_rounds_up_for_small_fees() {
+        assert_eq!(replacement_fee_required(1, 10), 2);
+        assert_eq!(replacement_fee_required(10, 10), 11);
+        assert_eq!(replacement_fee_required(101, 10), 112);
     }
 
     #[test]

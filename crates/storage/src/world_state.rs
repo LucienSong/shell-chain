@@ -299,6 +299,13 @@ impl<S: KvStore + 'static> WorldState<S> {
         keccak256(label.as_bytes())
     }
 
+    fn validator_weight_key(address: &Address) -> ShellHash {
+        let mut bytes = Vec::with_capacity(b"validator_weight:".len() + 20);
+        bytes.extend_from_slice(b"validator_weight:");
+        bytes.extend_from_slice(address.as_bytes());
+        keccak256(&bytes)
+    }
+
     /// Read the current validator set from the validator registry in world state.
     pub fn get_validators(&self) -> Result<Vec<Address>, StorageError> {
         let registry = validator_registry_addr();
@@ -369,6 +376,52 @@ impl<S: KvStore + 'static> WorldState<S> {
             &ShellHash::from(count_bytes),
         )?;
 
+        Ok(())
+    }
+
+    /// Return the validator's canonical voting/proposer weight.
+    ///
+    /// Missing or zero weights normalize to 1 so legacy genesis files remain
+    /// valid and newly added validators have safe default weight.
+    pub fn get_validator_weight(&self, validator: &Address) -> Result<u64, StorageError> {
+        let registry = validator_registry_addr();
+        let raw = self.get_storage(&registry, &Self::validator_weight_key(validator))?;
+        if raw == ShellHash::ZERO {
+            return Ok(1);
+        }
+        let weight = u64::from_be_bytes(
+            raw.as_bytes()[24..32]
+                .try_into()
+                .map_err(|e: std::array::TryFromSliceError| StorageError::Codec(e.to_string()))?,
+        );
+        Ok(weight.max(1))
+    }
+
+    /// Set one validator's canonical weight. A zero input is normalized to 1.
+    pub fn set_validator_weight(
+        &mut self,
+        validator: &Address,
+        weight: u64,
+    ) -> Result<(), StorageError> {
+        let registry = validator_registry_addr();
+        let mut bytes = [0u8; 32];
+        bytes[24..32].copy_from_slice(&weight.max(1).to_be_bytes());
+        self.set_storage(
+            &registry,
+            &Self::validator_weight_key(validator),
+            &ShellHash::from(bytes),
+        )
+    }
+
+    /// Set validator weights aligned with `validators`; missing weights default to 1.
+    pub fn set_validator_weights(
+        &mut self,
+        validators: &[Address],
+        weights: &[u64],
+    ) -> Result<(), StorageError> {
+        for (idx, validator) in validators.iter().enumerate() {
+            self.set_validator_weight(validator, weights.get(idx).copied().unwrap_or(1))?;
+        }
         Ok(())
     }
 
@@ -639,6 +692,42 @@ mod tests {
 
         let ws2 = WorldState::at_root(store, &root).unwrap();
         assert_eq!(ws2.get_validators().unwrap(), validators);
+    }
+
+    #[test]
+    fn validator_registry_survives_unrelated_account_updates() {
+        let store = test_store();
+        let mut ws = WorldState::new(Arc::clone(&store));
+
+        let validators = vec![Address::from([0x11; 20])];
+        ws.set_validators(&validators).unwrap();
+        ws.set_validator_weight(&validators[0], 1).unwrap();
+        ws.add_balance(&Address::from([0xAA; 20]), U256::from(1_000))
+            .unwrap();
+        ws.add_balance(&Address::from([0xBB; 20]), U256::from(2_000))
+            .unwrap();
+        let root = ws.state_root().unwrap();
+
+        let ws2 = WorldState::at_root(store, &root).unwrap();
+        assert_eq!(ws2.get_validators().unwrap(), validators);
+        assert_eq!(ws2.get_validator_weight(&validators[0]).unwrap(), 1);
+    }
+
+    #[test]
+    fn validator_weights_roundtrip_and_default_to_one() {
+        let store = test_store();
+        let mut ws = WorldState::new(Arc::clone(&store));
+        let v1 = Address::from([0x11; 20]);
+        let v2 = Address::from([0x22; 20]);
+
+        assert_eq!(ws.get_validator_weight(&v1).unwrap(), 1);
+        ws.set_validator_weight(&v1, 3).unwrap();
+        ws.set_validator_weight(&v2, 0).unwrap();
+
+        let root = ws.state_root().unwrap();
+        let ws2 = WorldState::at_root(store, &root).unwrap();
+        assert_eq!(ws2.get_validator_weight(&v1).unwrap(), 3);
+        assert_eq!(ws2.get_validator_weight(&v2).unwrap(), 1);
     }
 
     #[test]

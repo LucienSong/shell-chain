@@ -22,13 +22,14 @@
 
 use std::sync::Arc;
 
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use tracing::{debug, error, info, warn};
 
 use parking_lot::Mutex;
 use shell_primitives::{Bytes, ShellHash};
 use shell_stark_prover::{
-    prove_sig_batch, ProofAmendment, ProofBacklog, ProofTask, PROOF_AMENDMENT_VERSION,
+    prove_sig_batch, ProofAmendment, ProofBacklog, ProofTask, DEFAULT_MAX_L1_RANGE_SOURCES,
+    MIN_L1_STARK_TXS, PROOF_AMENDMENT_VERSION,
 };
 use shell_storage::{KvStore, ProofAmendmentStore};
 
@@ -95,6 +96,8 @@ impl ProverServiceHandle {
 pub struct ProverService<S: KvStore + Send + Sync + 'static> {
     backlog: Arc<Mutex<ProofBacklog>>,
     amendment_store: ProofAmendmentStore<S>,
+    settlement_queue: Option<Arc<Mutex<Vec<ProofAmendment>>>>,
+    amendment_tx: Option<mpsc::UnboundedSender<ProofAmendment>>,
     config: ProverConfig,
     /// The node's own address, used as `prover` field in [`ProofAmendment`].
     prover_address: shell_primitives::Address,
@@ -111,9 +114,31 @@ impl<S: KvStore + Send + Sync + 'static> ProverService<S> {
         Self {
             backlog,
             amendment_store,
+            settlement_queue: None,
+            amendment_tx: None,
             config,
             prover_address,
         }
+    }
+
+    /// Queue locally generated amendments for settlement by validator-prover
+    /// nodes. Pure prover nodes may omit this and only persist/broadcast proofs.
+    pub fn with_settlement_queue(
+        mut self,
+        settlement_queue: Arc<Mutex<Vec<ProofAmendment>>>,
+    ) -> Self {
+        self.settlement_queue = Some(settlement_queue);
+        self
+    }
+
+    /// Send locally generated amendments back to the node event loop for P2P
+    /// broadcast after they are durably stored.
+    pub fn with_amendment_sender(
+        mut self,
+        amendment_tx: mpsc::UnboundedSender<ProofAmendment>,
+    ) -> Self {
+        self.amendment_tx = Some(amendment_tx);
+        self
     }
 
     /// Spawn the prover service as a background tokio task.
@@ -151,9 +176,15 @@ impl<S: KvStore + Send + Sync + 'static> ProverService<S> {
                     // For now, pop from front (sequential) — LatestFirst
                     // reordering requires a more complex priority queue and is
                     // deferred to a future optimization pass.
-                    backlog.pop()
+                    backlog.pop_contiguous_with_min_entries(
+                        DEFAULT_MAX_L1_RANGE_SOURCES,
+                        MIN_L1_STARK_TXS,
+                    )
                 } else {
-                    backlog.pop()
+                    backlog.pop_contiguous_with_min_entries(
+                        DEFAULT_MAX_L1_RANGE_SOURCES,
+                        MIN_L1_STARK_TXS,
+                    )
                 }
             };
 
@@ -180,9 +211,10 @@ impl<S: KvStore + Send + Sync + 'static> ProverService<S> {
         let block_hash = task.block_hash;
         let block_number = task.block_number;
         debug!(
-            "ProverService: proving block #{} ({} entries)",
+            "ProverService: proving range ending at block #{} ({} entries, {} source hashes)",
             block_number,
-            task.entries.len()
+            task.entries.len(),
+            task.source_hashes.len()
         );
 
         // Run the CPU-intensive proof generation on a blocking thread so the
@@ -201,34 +233,67 @@ impl<S: KvStore + Send + Sync + 'static> ProverService<S> {
             }
             Ok(Ok(proof)) => {
                 let block_hash_shell: ShellHash = block_hash.into();
-                let amendment = ProofAmendment {
+                let mut amendment = ProofAmendment {
                     version: PROOF_AMENDMENT_VERSION,
                     block_hash: block_hash_shell,
                     block_number,
+                    start_block: block_number.checked_add(1).and_then(|end_plus_one| {
+                        end_plus_one.checked_sub(task.source_hashes.len().max(1) as u64)
+                    }),
                     proof,
                     prover_signature: Bytes::new(),
                     prover: self.prover_address,
+                    layer: task.layer,
+                    source_hashes: if task.source_hashes.is_empty() {
+                        vec![block_hash_shell]
+                    } else {
+                        task.source_hashes.clone()
+                    },
+                    original_size: task.original_size,
+                    compressed_size: None,
+                    settlement_tx_hash: None,
                 };
+                if amendment.compressed_size.is_none() {
+                    amendment.compressed_size = Some(amendment.size_bytes() as u64);
+                }
 
-                // Serialize and persist the amendment.
-                match serde_json::to_vec(&amendment) {
+                // Serialize and persist the amendment artifacts.
+                match amendment.storage_artifacts() {
                     Err(e) => {
-                        error!("ProverService: failed to serialize amendment for block #{block_number}: {e}");
+                        error!(
+                            "ProverService: failed to serialize amendment artifacts for block #{block_number}: {e}"
+                        );
                     }
-                    Ok(bytes) => {
-                        match self
-                            .amendment_store
-                            .put_amendment(&block_hash_shell, &bytes)
-                        {
-                            Ok(()) => {
+                    Ok(artifacts) => {
+                        let mut stored = 0usize;
+                        for (source_hash, artifact) in artifacts {
+                            match self.amendment_store.put_amendment(&source_hash, &artifact) {
+                                Ok(()) => {
+                                    stored += 1;
+                                }
+                                Err(e) => {
+                                    error!(
+                                        "ProverService: failed to store amendment for source {source_hash}: {e}"
+                                    );
+                                }
+                            }
+                        }
+                        if stored > 0 {
+                            info!(
+                                "ProverService: proof amendment stored for range ending at block #{block_number} ({stored} source hashes)"
+                            );
+                            if let Some(queue) = &self.settlement_queue {
+                                queue.lock().push(amendment.clone());
                                 info!(
-                                    "ProverService: proof amendment stored for block #{block_number}"
+                                    "ProverService: proof amendment queued for STARK reward settlement at block #{block_number}"
                                 );
                             }
-                            Err(e) => {
-                                error!(
-                                    "ProverService: failed to store amendment for block #{block_number}: {e}"
-                                );
+                            if let Some(tx) = &self.amendment_tx {
+                                if tx.send(amendment).is_err() {
+                                    warn!(
+                                        "ProverService: proof amendment broadcast channel closed for block #{block_number}"
+                                    );
+                                }
                             }
                         }
                     }
@@ -293,21 +358,58 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn service_processes_task_with_empty_entries() {
+    async fn service_waits_for_l1_minimum_entries() {
         let (service, backlog) = make_service();
-        // A task with no entries should be provable (trivial batch).
         {
             let mut b = backlog.lock();
             b.push(ProofTask::new([0u8; 32], 1, vec![]));
         }
         let handle = service.start();
-        // Give the service time to process the task.
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
         handle.shutdown().await;
-        // Backlog should now be empty.
         let b = backlog.lock();
-        assert!(b.is_empty());
-        assert_eq!(b.total_completed(), 1);
+        assert_eq!(b.len(), 1);
+        assert_eq!(b.total_completed(), 0);
+    }
+
+    #[tokio::test]
+    async fn service_stores_full_proof_only_at_range_end() {
+        let (service, _backlog) = make_service();
+        let first_hash = ShellHash::from([1u8; 32]);
+        let end_hash = ShellHash::from([2u8; 32]);
+        let task = ProofTask::with_sources(
+            [2u8; 32],
+            11,
+            vec![shell_stark_prover::SigBatchEntry {
+                msg_hash: [3u8; 32],
+                pk_hash: [4u8; 32],
+            }],
+            2,
+            vec![first_hash, end_hash],
+            Some(10_000),
+        );
+
+        service.process_task(task).await;
+
+        let pointer_bytes = service
+            .amendment_store
+            .get_amendment(&first_hash)
+            .expect("pointer read")
+            .expect("pointer stored");
+        assert!(matches!(
+            shell_stark_prover::StoredProofArtifact::from_json(&pointer_bytes).expect("pointer"),
+            shell_stark_prover::StoredProofArtifact::Pointer(_)
+        ));
+
+        let full_bytes = service
+            .amendment_store
+            .get_amendment(&end_hash)
+            .expect("amendment read")
+            .expect("full amendment stored");
+        assert!(matches!(
+            shell_stark_prover::StoredProofArtifact::from_json(&full_bytes).expect("amendment"),
+            shell_stark_prover::StoredProofArtifact::Amendment(_)
+        ));
     }
 
     #[test]

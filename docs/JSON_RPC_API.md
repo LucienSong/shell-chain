@@ -197,11 +197,11 @@ curl -s http://localhost:8545 \
 
 ### eth_syncing
 
-Returns sync status. Shell-chain has no sync protocol — always returns `false`.
+Returns sync status. A node may temporarily report syncing while block range catch-up is in flight; otherwise it returns `false`.
 
 **Parameters:** None
 
-**Returns:** `Boolean` — Always `false`.
+**Returns:** `Boolean | Object` — `false` when not syncing, or a sync progress object when the node is catching up.
 
 ```bash
 curl -s http://localhost:8545 \
@@ -411,10 +411,21 @@ curl -s http://localhost:8545 \
     "timestamp": "0x65a5f200",
     "gasLimit": "0x1c9c380",
     "gasUsed": "0x0",
+    "compressionLayer": 1,
+    "pruningStatus": "pruned",
     "transactions": []
   }
 }
 ```
+
+Shell block responses include STARK storage metadata in addition to Ethereum
+compatibility fields. `compressionLayer` is the highest accepted compression
+layer currently known for the block, including pointer blocks in a contiguous
+range. `pruningStatus` reports the local witness state (`unpruned`,
+`compressedWitnessRetained`, `pruned`, `notWitnessed`, `pending`, or `unknown`).
+STARK proof bytes are no longer carried in block header `extraData`; canonical
+settlements use a `StarkReward` system transaction whose `input` contains the
+proof payload, while source blocks expose full-proof or pointer metadata.
 
 ---
 
@@ -435,6 +446,8 @@ Returns a block by hash.
 ### eth_getTransactionByHash
 
 Returns a transaction by hash. Checks the mempool first, then on-chain storage.
+Shell reward records are first-class system transactions, so block gas rewards
+and STARK rewards are also discoverable by deterministic transaction hash.
 
 **Parameters:**
 | # | Type | Required | Description |
@@ -442,6 +455,16 @@ Returns a transaction by hash. Checks the mempool first, then on-chain storage.
 | 1 | `String` | Yes | Transaction hash (0x-prefixed, 32 bytes) |
 
 **Returns:** `Object|null` — Transaction object or `null`.
+
+Shell-specific transaction metadata:
+
+| Field | Description |
+|---|---|
+| `shellType` | Product-readable type: `transfer`, `contractCreate`, `contractCall`, `aaBatch`, `blockGasReward`, or `starkReward` |
+| `rewardKind` | Present for reward system transactions: `blockGasReward` or `starkReward` |
+| `rewardLayer` | STARK layer for prover rewards, hex encoded |
+| `rewardSourceHash` | Parent block, source range, or artifact hash used to derive the reward |
+| `originalSize` / `compressedSize` | STARK compression accounting, hex byte counts |
 
 ```bash
 curl -s http://localhost:8545 \
@@ -460,7 +483,7 @@ Returns the receipt of a mined transaction.
 |---|------|----------|-------------|
 | 1 | `String` | Yes | Transaction hash |
 
-**Returns:** `Object|null` — Receipt object (includes `status`, `gasUsed`, `logs`, `blockNumber`, etc.) or `null` if not yet mined.
+**Returns:** `Object|null` — Receipt object (includes `status`, `gasUsed`, `logs`, `blockNumber`, `shellType`, `rewardKind`, etc.) or `null` if not yet mined.
 
 ---
 
@@ -1009,7 +1032,9 @@ Returns P2P network statistics.
 
 ### shell_getChainStats
 
-Returns aggregate chain statistics (scans the last 1,000 blocks).
+Returns aggregate chain statistics. `totalTransactions` and `gasUsedTotal`
+cover the canonical chain from block 0 through the current head; `avgBlockTime`
+is computed from the most recent block-time window.
 
 **Parameters:** None
 
@@ -1201,7 +1226,10 @@ curl -s http://localhost:8545 -H "Content-Type: application/json" \
 
 ### shell_getTransactionsByAddress
 
-Returns transactions sent from or received by an address. Supports pagination.
+Returns transactions sent from or received by an address. Supports pagination
+and inclusive block-range filters. There is no artificial deep-offset cap; under
+live load, clients should pin `toBlock` from the first page and reuse it for
+older pages to avoid gaps or duplicates while new blocks arrive.
 
 **Parameters:**
 
@@ -1213,7 +1241,17 @@ Returns transactions sent from or received by an address. Supports pagination.
 | `page` | number \| null | Page index, 0-based (default 0) |
 | `limit` | number \| null | Results per page (default 20) |
 
-**Response:** Array of transaction objects (same format as `eth_getTransactionByHash`).
+**Response:** paginated object:
+
+| Field | Type | Description |
+|------|------|-------------|
+| `address` | string | Queried `pq1...` address |
+| `fromBlock` | string | Effective inclusive lower block bound, hex encoded |
+| `toBlock` | string | Effective inclusive upper block snapshot, hex encoded |
+| `page` | number | Page index, 0-based |
+| `limit` | number | Page size |
+| `total` | number | Total matches in the requested range |
+| `transactions` | array | Transaction summaries, including `shellType`/reward metadata when present |
 
 ```bash
 curl -s http://localhost:8545 -H "Content-Type: application/json" \
@@ -1395,7 +1433,7 @@ curl -s http://localhost:8545 \
 |-----------|--------|--------|-------------|
 | eth_ | `eth_blockNumber` | — | Current block height |
 | eth_ | `eth_chainId` | — | Chain ID |
-| eth_ | `eth_syncing` | — | Sync status (always false) |
+| eth_ | `eth_syncing` | — | Sync status |
 | eth_ | `eth_mining` | — | Is validator active |
 | eth_ | `eth_hashrate` | — | Always 0x0 |
 | eth_ | `eth_accounts` | — | Always [] |

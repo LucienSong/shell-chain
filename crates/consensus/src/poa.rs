@@ -176,6 +176,7 @@ impl PoaConfig {
             !new_authorities.is_empty(),
             "authority set must not be empty"
         );
+        self.authority_weights.clear();
         self.authorities = new_authorities;
     }
 }
@@ -555,6 +556,7 @@ mod tests {
         let mut block = Block {
             header,
             transactions: vec![],
+            system_transactions: vec![],
             proposer_seal: None,
         };
 
@@ -700,6 +702,17 @@ mod tests {
     }
 
     #[test]
+    fn set_authorities_clears_stale_weights() {
+        let addrs = make_addrs(2);
+        let mut config = PoaConfig::new(addrs, 1).with_weights(vec![3, 1]);
+
+        let new_addrs = make_addrs(2);
+        config.set_authorities(new_addrs);
+
+        assert!(config.authority_weights.is_empty());
+    }
+
+    #[test]
     #[should_panic(expected = "authority set must not be empty")]
     fn set_authorities_panics_on_empty() {
         let mut config = PoaConfig::new(make_addrs(1), 1);
@@ -769,6 +782,7 @@ mod tests {
         let mut block = Block {
             header,
             transactions: vec![],
+            system_transactions: vec![],
             proposer_seal: None,
         };
 
@@ -797,6 +811,7 @@ mod tests {
         let mut block = Block {
             header,
             transactions: vec![],
+            system_transactions: vec![],
             proposer_seal: None,
         };
 
@@ -830,6 +845,7 @@ mod tests {
         let mut block = Block {
             header,
             transactions: vec![],
+            system_transactions: vec![],
             proposer_seal: None,
         };
 
@@ -849,6 +865,7 @@ mod tests {
         let mut block = Block {
             header: child_header,
             transactions: vec![],
+            system_transactions: vec![],
             proposer_seal: None,
         };
         engine.sign_block(&mut block, &signer).unwrap();
@@ -930,6 +947,7 @@ mod tests {
         let mut block = Block {
             header: h,
             transactions: vec![],
+            system_transactions: vec![],
             proposer_seal: None,
         };
         let config = PoaConfig::new(vec![addr], 1);

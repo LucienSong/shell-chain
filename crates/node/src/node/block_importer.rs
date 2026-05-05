@@ -17,52 +17,73 @@ impl<S: KvStore + 'static> Node<S> {
             .get_head_block()?
             .ok_or(NodeError::NoGenesis)?;
 
-        let expected = head.number() + 1;
         let incoming = block.number();
+        let incoming_hash = block.hash();
+        let canonical_hash_at_incoming = self.chain_store.get_block_hash_by_number(incoming)?;
+        let finalized_number = self.finality.read().last_finalized_number();
+        let transition = ChainStateMachine::classify_import(
+            head.number(),
+            head.hash(),
+            incoming,
+            incoming_hash,
+            block.header.parent_hash,
+            finalized_number,
+            canonical_hash_at_incoming,
+        )?;
 
-        // FF.4: Reject blocks that conflict with the finalized chain.
-        // Once a block is finalized it can never be replaced.
-        {
-            let finality = self.finality.read();
-            let fin_number = finality.last_finalized_number();
-            if fin_number > 0 && incoming <= fin_number {
-                // A finalized block at this height exists in chain_store — check if incoming differs.
-                if let Ok(Some(canonical)) = self.chain_store.get_block_by_number(incoming) {
-                    if canonical.hash() != block.hash() {
-                        warn!(
-                            incoming,
-                            fin_number,
-                            canonical_hash = %canonical.hash(),
-                            incoming_hash = %block.hash(),
-                            "FF.4: block conflicts with finalized chain — rejecting"
-                        );
-                        return Err(NodeError::ConflictsWithFinalized {
-                            incoming,
-                            fin_number,
-                        });
-                    }
-                }
-            }
-        }
-
-        // Fork detection: same height, different hash.
-        if incoming == head.number() && block.hash() != head.hash() {
+        // Fork detection: same height, different hash. Keep the side block so
+        // fork-choice/reorg can inspect it later instead of dropping evidence.
+        if transition == BlockImportTransition::SameHeightFork {
+            self.consensus.read().verify_header(&block.header)?;
+            let remote_hash = incoming_hash;
+            self.chain_store.put_side_fork_block(&block)?;
+            self.register_fork_choice_block(remote_hash, block.header.parent_hash, incoming);
+            let side_forks = self
+                .chain_store
+                .get_side_fork_hashes(incoming)
+                .map(|hashes| hashes.len())
+                .unwrap_or(0);
             warn!(
                 number = incoming,
                 local_hash = %head.hash(),
-                remote_hash = %block.hash(),
-                "potential fork detected at same height, skipping import"
+                %remote_hash,
+                side_forks,
+                "potential fork detected at same height; stored as side fork"
             );
             return Ok(());
         }
 
         // Duplicate or stale block — already have it. Must check BEFORE equivocation
         // detection to avoid false-positive double-sign events from re-gossipped blocks.
-        if incoming <= head.number() {
+        if transition == BlockImportTransition::DuplicateOrStale {
             debug!(
                 incoming,
                 head = head.number(),
                 "ignoring block at or below current head"
+            );
+            return Ok(());
+        }
+
+        // Height is next, but the block does not extend our current head.
+        // Keep it as a fork candidate instead of corrupting the canonical
+        // number->hash mapping with a disconnected block.
+        if transition == BlockImportTransition::NextHeightFork {
+            self.consensus.read().verify_header(&block.header)?;
+            let remote_hash = incoming_hash;
+            self.chain_store.put_side_fork_block(&block)?;
+            self.register_fork_choice_block(remote_hash, block.header.parent_hash, incoming);
+            let side_forks = self
+                .chain_store
+                .get_side_fork_hashes(incoming)
+                .map(|hashes| hashes.len())
+                .unwrap_or(0);
+            warn!(
+                number = incoming,
+                expected_parent = %head.hash(),
+                got_parent = %block.header.parent_hash,
+                %remote_hash,
+                side_forks,
+                "fork block does not extend local head; stored as side fork"
             );
             return Ok(());
         }
@@ -91,7 +112,7 @@ impl<S: KvStore + 'static> Node<S> {
         }
 
         // Gap detection: block is too far ahead.
-        if incoming > expected {
+        if let BlockImportTransition::Gap { incoming, expected } = transition {
             warn!(
                 incoming,
                 expected,
@@ -197,7 +218,57 @@ impl<S: KvStore + 'static> Node<S> {
         // computed state_root matches the block header.
         let mut receipts = Vec::new();
         let mut new_pubkeys: HashMap<Address, Vec<u8>> = HashMap::new();
-        let imported_state_root = if !block.transactions.is_empty() {
+        if !Self::decode_system_extra(&block.header.extra_data)?.is_empty() {
+            return Err(NodeError::Startup(format!(
+                "block {} uses deprecated block-level STARK settlement extra_data; settlements must be carried by StarkReward transactions",
+                block.number()
+            )));
+        }
+        let mut system_txs = Vec::new();
+        let stark_settlements: Vec<ProofAmendment> = block
+            .system_transactions
+            .iter()
+            .filter(|tx| tx.kind == SystemTxKind::StarkReward)
+            .map(|tx| {
+                let payload = tx.proof_payload.as_ref().ok_or_else(|| {
+                    NodeError::Startup(format!(
+                        "block {} STARK reward tx {} missing proof payload",
+                        block.number(),
+                        tx.hash()
+                    ))
+                })?;
+                let amendment = ProofAmendment::from_json(payload.as_ref()).map_err(|e| {
+                    NodeError::Startup(format!(
+                        "block {} STARK reward tx {} proof payload decode failed: {e}",
+                        block.number(),
+                        tx.hash()
+                    ))
+                })?;
+                if tx.source_hash != amendment.block_hash {
+                    return Err(NodeError::Startup(format!(
+                        "block {} STARK reward tx {} source hash {} does not match proof end hash {}",
+                        block.number(),
+                        tx.hash(),
+                        tx.source_hash,
+                        amendment.block_hash
+                    )));
+                }
+                if tx.layer != Some(amendment.layer)
+                    || tx.original_size != amendment.original_size
+                    || tx.compressed_size != amendment.compressed_size
+                {
+                    return Err(NodeError::Startup(format!(
+                        "block {} STARK reward tx {} metadata does not match proof payload",
+                        block.number(),
+                        tx.hash()
+                    )));
+                }
+                Ok(amendment)
+            })
+            .collect::<Result<Vec<_>, NodeError>>()?;
+        self.validate_stark_settlement_sequence(&stark_settlements)?;
+        let imported_state_root = if !block.transactions.is_empty() || !stark_settlements.is_empty()
+        {
             // Validate all transactions before execution (F-181):
             // security-critical checks (sig, algorithm, access list, pubkey)
             // are enforced during block import, not just mempool.
@@ -263,7 +334,7 @@ impl<S: KvStore + 'static> Node<S> {
                 .iter()
                 .enumerate()
                 .filter_map(|(i, tx)| {
-                    if resolved_pks[i].is_empty() {
+                    if resolved_pks[i].is_empty() || tx.signature.data.is_empty() {
                         None
                     } else {
                         Some(VerifyItem {
@@ -309,7 +380,7 @@ impl<S: KvStore + 'static> Node<S> {
                 // Skip full validation for txs whose pubkey could not be
                 // resolved (unresolvable Reference-mode from historical blocks).
                 // Correctness is guaranteed by the state-root check below.
-                if resolved_pks[idx].is_empty() {
+                if resolved_pks[idx].is_empty() || tx.signature.data.is_empty() {
                     continue;
                 }
 
@@ -342,6 +413,7 @@ impl<S: KvStore + 'static> Node<S> {
                 }
             }
             let mut cumulative_gas: u64 = 0;
+            let mut total_effective_fees = U256::ZERO;
 
             for (idx, tx) in block.transactions.iter().enumerate() {
                 let exec_result = if tx.is_aa_bundle() {
@@ -352,6 +424,14 @@ impl<S: KvStore + 'static> Node<S> {
                 match exec_result {
                     Ok(result) => {
                         cumulative_gas += result.gas_used;
+                        let price = effective_gas_price(
+                            tx.tx.max_fee_per_gas,
+                            tx.tx.max_priority_fee_per_gas,
+                            block.header.base_fee_per_gas,
+                        );
+                        total_effective_fees = total_effective_fees.saturating_add(
+                            U256::from(result.gas_used).saturating_mul(U256::from(price)),
+                        );
                         receipts.push(result.receipt);
 
                         if tx.is_aa_bundle() {
@@ -378,8 +458,68 @@ impl<S: KvStore + 'static> Node<S> {
                     }
                 }
             }
+            let producer_reward = total_effective_fees / U256::from(2u8);
+            if producer_reward > U256::ZERO {
+                evm.state_db_mut()
+                    .world_state_mut()
+                    .add_balance(&block.header.proposer, producer_reward)?;
+                let tx_index = block.transactions.len() as u32;
+                let reward_tx = SystemTransaction::block_gas_reward(
+                    self.config.chain_id,
+                    block.number(),
+                    tx_index,
+                    block.header.proposer,
+                    producer_reward,
+                    block.header.parent_hash,
+                );
+                receipts.push(TransactionReceipt {
+                    tx_hash: reward_tx.hash(),
+                    block_number: block.number(),
+                    tx_index,
+                    status: 1,
+                    gas_used: 0,
+                    cumulative_gas_used: cumulative_gas,
+                    contract_address: None,
+                    logs_bloom: Bytes::default(),
+                    logs: vec![],
+                });
+                system_txs.push(reward_tx);
+            }
+            for amendment in &stark_settlements {
+                let tx_index = block.transactions.len().saturating_add(system_txs.len()) as u32;
+                let reward_tx = self.build_stark_reward_tx(block.number(), tx_index, amendment)?;
+                evm.state_db_mut()
+                    .world_state_mut()
+                    .add_balance(&reward_tx.to, reward_tx.value)?;
+                receipts.push(TransactionReceipt {
+                    tx_hash: reward_tx.hash(),
+                    block_number: block.number(),
+                    tx_index,
+                    status: 1,
+                    gas_used: 0,
+                    cumulative_gas_used: cumulative_gas,
+                    contract_address: None,
+                    logs_bloom: Bytes::default(),
+                    logs: vec![],
+                });
+                system_txs.push(reward_tx);
+            }
+            if system_txs != block.system_transactions {
+                return Err(NodeError::Startup(format!(
+                    "block {} system transactions mismatch: expected {:?}, got {:?}",
+                    block.number(),
+                    system_txs,
+                    block.system_transactions
+                )));
+            }
             evm.state_db_mut().world_state_mut().state_root()?
         } else {
+            if !block.system_transactions.is_empty() {
+                return Err(NodeError::Startup(format!(
+                    "block {} carries unexpected system transactions",
+                    block.number()
+                )));
+            }
             current_root
         };
         if imported_state_root != block.header.state_root {
@@ -438,9 +578,38 @@ impl<S: KvStore + 'static> Node<S> {
         if !receipts.is_empty() {
             self.chain_store.put_receipts(&block_hash, &receipts)?;
         }
+        self.chain_store.put_system_transactions(
+            &block_hash,
+            block.number(),
+            &block.system_transactions,
+        )?;
         self.chain_store
             .set_canonical(block.number(), &block_hash)?;
         self.chain_store.set_head(&block_hash)?;
+        let settlement_hashes: Vec<ShellHash> = block
+            .system_transactions
+            .iter()
+            .filter(|tx| tx.kind == SystemTxKind::StarkReward)
+            .map(|tx| tx.hash())
+            .collect();
+        for (amendment, settlement_tx_hash) in stark_settlements.iter().zip(settlement_hashes) {
+            let stored = self.store_stark_artifacts(amendment, Some(settlement_tx_hash))?;
+            debug!(
+                block = block.number(),
+                layer = amendment.layer,
+                stored,
+                "materialized canonical STARK proof artifacts from imported block"
+            );
+        }
+        self.settled_stark_sources
+            .lock()
+            .extend(stark_settlements.iter().flat_map(|amendment| {
+                amendment
+                    .covered_hashes()
+                    .into_iter()
+                    .map(move |source| (amendment.layer, source))
+            }));
+        self.register_fork_choice_block(block_hash, block.header.parent_hash, block.number());
         for (address, pubkey) in new_pubkeys {
             self.chain_store.put_pubkey(&address, &pubkey)?;
         }
@@ -468,15 +637,29 @@ impl<S: KvStore + 'static> Node<S> {
         // Remove any included transactions from our mempool.
         let tx_hashes: Vec<ShellHash> = block.transactions.iter().map(|tx| tx.hash()).collect();
         self.tx_pool.remove_batch(&tx_hashes);
+        let pruned = {
+            let ws = self.world_state.read();
+            self.tx_pool.prune_nonce_too_low(&ws)
+        };
+        if pruned > 0 {
+            debug!(
+                count = pruned,
+                "pruned stale nonce-too-low transactions after import"
+            );
+        }
 
-        // Update global transaction counter for shell_transactionCount RPC.
-        let imported_tx_count = block.transactions.len() as u64;
-        if imported_tx_count > 0 {
-            let _ = self.chain_store.increment_tx_count(imported_tx_count);
+        // Update canonical aggregate counters for shell_* stats RPCs.
+        if let Err(e) = self.chain_store.add_canonical_block_to_totals(
+            block.number(),
+            block.transactions.len() as u64,
+            block.header.gas_used,
+        ) {
+            warn!(block = block.number(), "failed to update chain totals: {e}");
         }
 
         // Track the imported state root for pruning decisions.
         self.record_finalized_state_root(block.number(), block.header.state_root);
+        self.reload_authorities_if_boundary(block.number())?;
 
         // I4: Advance the proof window manager to the new block height.
         // This expires any stale claim timeouts and updates prover reliability counters.
@@ -511,18 +694,29 @@ impl<S: KvStore + 'static> Node<S> {
                     }
                 })
                 .collect();
-            if !entries.is_empty() {
-                let n = entries.len();
-                let task = ProofTask {
-                    block_hash: *block_hash.0,
-                    block_number,
-                    entries,
-                };
-                self.proof_backlog.lock().push(task);
+            let n = entries.len();
+            let original_size =
+                self.stark_source_original_size(&block_hash, &block, entries.len())?;
+            let task = ProofTask::with_sources(
+                *block_hash.0,
+                block_number,
+                entries,
+                1,
+                vec![block_hash],
+                original_size,
+            );
+            self.proof_backlog.lock().push(task);
+            debug!(
+                block = block_number,
+                n_entries = n,
+                "H4: Pushed proof task for standalone prover"
+            );
+            let queued = self.enqueue_stark_frontier_backlog(64)?;
+            if queued > 0 {
                 debug!(
+                    queued,
                     block = block_number,
-                    n_entries = n,
-                    "H4: Pushed proof task for standalone prover"
+                    "queued ordered STARK frontier proof tasks after block import"
                 );
             }
         }

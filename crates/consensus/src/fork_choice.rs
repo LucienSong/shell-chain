@@ -12,7 +12,7 @@ pub struct BlockScore {
     pub attestation_count: usize,
     /// Block number (height). Higher = better.
     pub block_number: u64,
-    /// Block hash used as tiebreaker (higher hash bytes = preferred).
+    /// Block hash used as deterministic tiebreaker (lower hash bytes = preferred).
     pub block_hash: ShellHash,
 }
 
@@ -28,7 +28,9 @@ impl Ord for BlockScore {
             .cmp(&other.is_finalized)
             .then(self.attestation_count.cmp(&other.attestation_count))
             .then(self.block_number.cmp(&other.block_number))
-            .then(self.block_hash.as_bytes().cmp(other.block_hash.as_bytes()))
+            // Lower hash wins the deterministic final tiebreaker. Because higher
+            // BlockScore is preferred, invert the comparison here.
+            .then_with(|| other.block_hash.as_bytes().cmp(self.block_hash.as_bytes()))
     }
 }
 
@@ -38,7 +40,7 @@ impl Ord for BlockScore {
 /// 1. Finalized chain always wins
 /// 2. More attestations = preferred
 /// 3. Higher block number = preferred
-/// 4. Higher block hash = tiebreaker
+/// 4. Lower block hash = deterministic tiebreaker
 pub struct ForkChoice {
     /// Maps block hash to parent hash for tree traversal.
     parent_map: HashMap<ShellHash, ShellHash>,
@@ -107,14 +109,14 @@ impl ForkChoice {
             score.attestation_count = new_count;
             let updated_score = score.clone();
 
+            if block_hash == &self.head {
+                self.head_score = updated_score;
+                return false;
+            }
             if updated_score > self.head_score {
                 self.head = *block_hash;
                 self.head_score = updated_score;
                 return true;
-            }
-            // Re-check in case the current head's score was updated
-            if block_hash == &self.head {
-                self.head_score = updated_score;
             }
         }
         false
@@ -126,13 +128,14 @@ impl ForkChoice {
             score.is_finalized = 1;
             let updated_score = score.clone();
 
+            if block_hash == &self.head {
+                self.head_score = updated_score;
+                return false;
+            }
             if updated_score > self.head_score {
                 self.head = *block_hash;
                 self.head_score = updated_score;
                 return true;
-            }
-            if block_hash == &self.head {
-                self.head_score = updated_score;
             }
         }
         false
@@ -282,14 +285,13 @@ mod tests {
     }
 
     #[test]
-    fn test_fork_higher_block_wins() {
+    fn test_equal_score_low_hash_wins() {
         let mut fc = ForkChoice::new(hash(0));
         fc.add_block(hash(1), hash(0), 1, 0, false);
-        // Fork at genesis: block 2 is also at height 1 but with higher hash
+        // Fork at genesis: block 2 is also at height 1 but loses the low-hash tiebreaker.
         let became_head = fc.add_block(hash(2), hash(0), 1, 0, false);
-        // hash(2) > hash(1) as tiebreaker
-        assert!(became_head);
-        assert_eq!(fc.head(), &hash(2));
+        assert!(!became_head);
+        assert_eq!(fc.head(), &hash(1));
     }
 
     #[test]
@@ -314,10 +316,10 @@ mod tests {
         let mut fc = ForkChoice::new(hash(0));
         fc.add_block(hash(1), hash(0), 1, 0, false);
         fc.add_block(hash(2), hash(0), 1, 0, false);
-        // hash(2) > hash(1) as bytes, so hash(2) is head
-        assert_eq!(fc.head(), &hash(2));
+        // hash(1) < hash(2) as bytes, so hash(1) is head.
+        assert_eq!(fc.head(), &hash(1));
         let changed = fc.update_attestations(&hash(1), 5);
-        assert!(changed);
+        assert!(!changed);
         assert_eq!(fc.head(), &hash(1));
     }
 
@@ -459,8 +461,8 @@ mod tests {
         fc.add_block(hash(10), hash(0), 1, 3, false);
         fc.add_block(hash(20), hash(0), 1, 3, false);
 
-        // hash(20) > hash(10) as bytes, so hash(20) wins
-        assert_eq!(fc.head(), &hash(20));
+        // hash(10) < hash(20) as bytes, so hash(10) wins
+        assert_eq!(fc.head(), &hash(10));
     }
 
     #[test]

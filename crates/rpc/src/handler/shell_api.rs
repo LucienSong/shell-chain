@@ -14,6 +14,64 @@ impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
         Ok(hex_u64(self.tx_pool.len() as u64))
     }
 
+    async fn shell_get_block_by_number(
+        &self,
+        number: String,
+        tx_detail: Option<String>,
+    ) -> Result<Option<RpcBlock>, ErrorObjectOwned> {
+        let detail = parse_block_tx_detail(tx_detail.as_deref())?;
+        let tag = parse_block_tag(&number)?;
+        let block = match tag {
+            BlockTag::Finalized => {
+                let n = *self.finalized_number.read();
+                self.chain_store
+                    .get_block_by_number(n)
+                    .map_err(internal_err)?
+            }
+            BlockTag::Number(n) => self
+                .chain_store
+                .get_block_by_number(n)
+                .map_err(internal_err)?,
+            BlockTag::Latest | BlockTag::Pending => {
+                self.chain_store.get_head_block().map_err(internal_err)?
+            }
+        };
+
+        Ok(block.as_ref().map(|b| {
+            let mut rpc = block_to_rpc_with_detail(b, detail);
+            if detail.include_stark_proof() {
+                self.fill_stark_proof(&b.hash(), &mut rpc);
+            } else {
+                self.fill_stark_metadata(&b.hash(), &mut rpc);
+            }
+            self.attach_system_txs(b, &mut rpc, detail);
+            rpc
+        }))
+    }
+
+    async fn shell_get_block_by_hash(
+        &self,
+        hash: ShellHash,
+        tx_detail: Option<String>,
+    ) -> Result<Option<RpcBlock>, ErrorObjectOwned> {
+        let detail = parse_block_tx_detail(tx_detail.as_deref())?;
+        let block = self
+            .chain_store
+            .get_block_by_hash(&hash)
+            .map_err(internal_err)?;
+
+        Ok(block.as_ref().map(|b| {
+            let mut rpc = block_to_rpc_with_detail(b, detail);
+            if detail.include_stark_proof() {
+                self.fill_stark_proof(&hash, &mut rpc);
+            } else {
+                self.fill_stark_metadata(&hash, &mut rpc);
+            }
+            self.attach_system_txs(b, &mut rpc, detail);
+            rpc
+        }))
+    }
+
     async fn send_transaction(&self, tx: SignedTransaction) -> Result<ShellHash, ErrorObjectOwned> {
         self.submit_tx(tx)
     }
@@ -149,22 +207,16 @@ impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
             _ => shell_core::INITIAL_BASE_FEE,
         };
 
-        let mut total_txs: u64 = 0;
-        let mut gas_used_total = U256::ZERO;
         let mut avg_block_time: f64 = 0.0;
-
-        // Cap scan to last 1000 blocks to prevent O(N) DoS on large chains.
-        const MAX_SCAN: u64 = 1000;
-        let scan_start = block_height.saturating_sub(MAX_SCAN);
+        let (total_txs, gas_used_total) = match head {
+            Some(_) => self
+                .chain_store
+                .get_chain_totals(block_height)
+                .map_err(internal_err)?,
+            None => (0, U256::ZERO),
+        };
 
         if block_height > 0 {
-            for n in scan_start..=block_height {
-                if let Ok(Some(blk)) = self.chain_store.get_block_by_number(n) {
-                    total_txs = total_txs.saturating_add(blk.transactions.len() as u64);
-                    gas_used_total = gas_used_total.saturating_add(U256::from(blk.header.gas_used));
-                }
-            }
-
             let window = std::cmp::min(block_height, 10);
             if window >= 1 {
                 if let (Ok(Some(recent)), Ok(Some(older))) = (
@@ -322,10 +374,16 @@ impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
     }
 
     async fn transaction_count(&self) -> Result<String, ErrorObjectOwned> {
-        let count = self
-            .chain_store
-            .get_total_tx_count()
-            .map_err(internal_err)?;
+        let head = self.chain_store.get_head_block().map_err(internal_err)?;
+        let count = match head {
+            Some(head) => {
+                self.chain_store
+                    .get_chain_totals(head.number())
+                    .map_err(internal_err)?
+                    .0
+            }
+            None => 0,
+        };
         Ok(hex_u64(count))
     }
 
@@ -351,12 +409,6 @@ impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
         let offset = page
             .checked_mul(limit)
             .ok_or_else(|| invalid_params_err("page * limit overflow"))?;
-        if offset > MAX_ADDRESS_TX_HISTORY_OFFSET as u64 {
-            return Err(invalid_params_err(format!(
-                "page/limit offset {} exceeds max {} entries",
-                offset, MAX_ADDRESS_TX_HISTORY_OFFSET
-            )));
-        }
         let total = self
             .chain_store
             .count_txs_by_address(&address, from, to)
@@ -367,7 +419,7 @@ impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
             .get_txs_by_address(&address, from, to, offset as usize, limit as usize)
             .map_err(internal_err)?;
 
-        // Resolve each tx hash to a full RPC transaction
+        // Resolve each tx hash to a full RPC transaction.
         let mut txs = Vec::with_capacity(tx_hashes.len());
         for hash in &tx_hashes {
             let location = self
@@ -380,19 +432,32 @@ impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
                     .get_block_by_hash(&block_hash)
                     .map_err(internal_err)?;
                 if let Some(block) = block {
-                    if let Some(tx) = block.transactions.get(tx_index as usize) {
-                        txs.push(serde_json::json!({
-                            "hash": hash,
-                            "blockNumber": hex_u64(block.number()),
-                            "blockHash": block_hash,
-                            "transactionIndex": hex_u64(tx_index as u64),
-                            "from": tx.sender(),
-                            "to": tx.tx.to,
-                            "value": hex_u256(tx.tx.value),
-                            "gasLimit": hex_u64(tx.tx.gas_limit),
-                            "nonce": hex_u64(tx.tx.nonce),
-                        }));
+                    let mut value = if let Some(tx) = block.transactions.get(tx_index as usize) {
+                        serde_json::to_value(tx_to_rpc(
+                            tx,
+                            Some(block_hash),
+                            Some(block.number()),
+                            Some(tx_index),
+                            Some(block.header.base_fee_per_gas),
+                        ))
+                        .map_err(|e| internal_err(format!("serialize tx: {e}")))?
+                    } else if let Some(system_tx) = self
+                        .chain_store
+                        .get_system_transaction_by_hash(hash)
+                        .map_err(internal_err)?
+                    {
+                        serde_json::to_value(system_tx_to_rpc(&system_tx, Some(block_hash)))
+                            .map_err(|e| internal_err(format!("serialize system tx: {e}")))?
+                    } else {
+                        continue;
+                    };
+                    if let serde_json::Value::Object(ref mut object) = value {
+                        object.insert(
+                            "timestamp".into(),
+                            serde_json::json!(hex_u64(block.header.timestamp)),
+                        );
                     }
+                    txs.push(value);
                 }
             }
         }
@@ -751,19 +816,44 @@ impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
             None => return Ok(serde_json::Value::Null),
         };
 
-        let amendment = shell_stark_prover::ProofAmendment::from_json(&bytes)
+        let artifact = shell_stark_prover::StoredProofArtifact::from_json(&bytes)
             .map_err(|e| server_error(format!("failed to decode proof amendment: {e}")))?;
 
         self.stark_amendments_queried_total
             .fetch_add(1, Ordering::Relaxed);
 
-        Ok(serde_json::json!({
-            "block_hash": amendment.block_hash.to_string(),
-            "block_number": amendment.block_number,
-            "proof_version": amendment.version,
-            "prover": amendment.prover,
-            "proof": hex_bytes(&amendment.proof.proof_bytes),
-        }))
+        match artifact {
+            shell_stark_prover::StoredProofArtifact::Amendment(amendment) => {
+                let source_count = amendment.covered_hashes().len();
+                Ok(serde_json::json!({
+                    "block_hash": amendment.block_hash.to_string(),
+                    "block_number": amendment.block_number,
+                    "start_block": amendment.range_start_block(),
+                    "end_block": amendment.range_end_block(),
+                    "source_count": source_count,
+                    "layer": amendment.layer,
+                    "proof_entries": amendment.proof.n_sigs,
+                    "original_size": amendment.original_size,
+                    "compressed_size": amendment.compressed_size,
+                    "proof_version": amendment.version,
+                    "prover": amendment.prover,
+                    "settlement_tx_hash": amendment.settlement_tx_hash.map(|hash| hash.to_string()),
+                    "proof": hex_bytes(&amendment.proof.proof_bytes),
+                }))
+            }
+            shell_stark_prover::StoredProofArtifact::Pointer(pointer) => Ok(serde_json::json!({
+                "source_hash": pointer.source_hash.to_string(),
+                "source_block": pointer.source_block,
+                "target_hash": pointer.target_hash.to_string(),
+                "target_block": pointer.target_block,
+                "start_block": pointer.start_block,
+                "end_block": pointer.end_block,
+                "source_count": pointer.end_block.saturating_sub(pointer.start_block).saturating_add(1),
+                "layer": pointer.layer,
+                "settlement_tx_hash": pointer.settlement_tx_hash.map(|hash| hash.to_string()),
+                "proof": serde_json::Value::Null,
+            })),
+        }
     }
 }
 

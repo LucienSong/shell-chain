@@ -31,6 +31,7 @@ fn make_block(number: u64, proposer: Address) -> Block {
             ..BlockHeader::default()
         },
         transactions: vec![],
+        system_transactions: vec![],
         proposer_seal: None,
     }
 }

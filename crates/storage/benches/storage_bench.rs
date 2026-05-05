@@ -56,6 +56,7 @@ fn sample_block() -> Block {
     Block {
         header: sample_header(),
         transactions: txs,
+        system_transactions: vec![],
         proposer_seal: None,
     }
 }

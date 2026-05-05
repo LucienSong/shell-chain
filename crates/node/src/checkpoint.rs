@@ -233,6 +233,7 @@ mod tests {
                 witness_root: None,
             },
             transactions: vec![],
+            system_transactions: vec![],
             proposer_seal: None,
         };
         let hash = block.hash();
@@ -274,6 +275,7 @@ mod tests {
                 witness_root: None,
             },
             transactions: vec![],
+            system_transactions: vec![],
             proposer_seal: None,
         };
         let hash = block.hash();

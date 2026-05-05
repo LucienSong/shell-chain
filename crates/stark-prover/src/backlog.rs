@@ -7,6 +7,8 @@
 
 use std::collections::VecDeque;
 
+use shell_primitives::ShellHash;
+
 use crate::prover::SigBatchEntry;
 
 // ── ProofTask ─────────────────────────────────────────────────────────────────
@@ -20,6 +22,12 @@ pub struct ProofTask {
     pub block_number: u64,
     /// Signature batch entries from the block — inputs to the STARK prover.
     pub entries: Vec<SigBatchEntry>,
+    /// STARK layer. L1 covers canonical block witnesses; L2+ covers lower-layer artifacts.
+    pub layer: u32,
+    /// Source block/artifact hashes covered by this task.
+    pub source_hashes: Vec<ShellHash>,
+    /// Total source payload size in bytes, when known.
+    pub original_size: Option<u64>,
 }
 
 impl ProofTask {
@@ -29,6 +37,28 @@ impl ProofTask {
             block_hash,
             block_number,
             entries,
+            layer: 1,
+            source_hashes: vec![ShellHash::from(block_hash)],
+            original_size: None,
+        }
+    }
+
+    /// Create a cross-block or recursive proving task with explicit source metadata.
+    pub fn with_sources(
+        block_hash: [u8; 32],
+        block_number: u64,
+        entries: Vec<SigBatchEntry>,
+        layer: u32,
+        source_hashes: Vec<ShellHash>,
+        original_size: Option<u64>,
+    ) -> Self {
+        Self {
+            block_hash,
+            block_number,
+            entries,
+            layer: layer.max(1),
+            source_hashes,
+            original_size,
         }
     }
 
@@ -42,6 +72,11 @@ impl ProofTask {
 
 /// Default high-watermark: warn when the backlog exceeds this many tasks.
 pub const DEFAULT_WATERMARK_THRESHOLD: usize = 64;
+/// Minimum L1 witness entries before the prover may seal an L1 compression range.
+pub const MIN_L1_STARK_TXS: usize = 512;
+/// Maximum source blocks to coalesce into one L1 range while waiting for the
+/// minimum entry threshold.
+pub const DEFAULT_MAX_L1_RANGE_SOURCES: usize = 1024;
 
 /// Async proof backlog — a bounded work queue for the background prover.
 ///
@@ -90,6 +125,25 @@ impl ProofBacklog {
         self.total_enqueued += 1;
     }
 
+    /// Push a proving task onto the front of the queue.
+    pub fn push_front(&mut self, task: ProofTask) {
+        self.pending.push_front(task);
+        self.total_enqueued += 1;
+    }
+
+    /// Returns true when a pending task already covers `source_hash` at `layer`.
+    pub fn contains_source(&self, layer: u32, source_hash: &ShellHash) -> bool {
+        self.pending.iter().any(|task| {
+            task.layer == layer
+                && (task
+                    .source_hashes
+                    .iter()
+                    .any(|source| source == source_hash)
+                    || (task.source_hashes.is_empty()
+                        && ShellHash::from(task.block_hash) == *source_hash))
+        })
+    }
+
     /// Pop the next task from the front of the queue (FIFO).
     ///
     /// Returns `None` when the backlog is empty.
@@ -97,6 +151,58 @@ impl ProofBacklog {
         let task = self.pending.pop_front()?;
         self.total_completed += 1;
         Some(task)
+    }
+
+    /// Pop the first task plus following contiguous-height tasks, merging them
+    /// into one range proof task.
+    pub fn pop_contiguous(&mut self, max_sources: usize) -> Option<ProofTask> {
+        self.pop_contiguous_with_min_entries(max_sources, 0)
+    }
+
+    /// Pop a contiguous range only when the first range satisfies the configured
+    /// L1 minimum entry threshold. L2+ ranges are not threshold-gated.
+    pub fn pop_contiguous_with_min_entries(
+        &mut self,
+        max_sources: usize,
+        min_l1_entries: usize,
+    ) -> Option<ProofTask> {
+        let max_sources = max_sources.max(1);
+        let first = self.pending.front()?;
+        let layer = first.layer;
+        let mut take = 1usize;
+        let mut entries = first.entries.len();
+        let mut end_block = first.block_number;
+
+        while take < max_sources {
+            let Some(next) = self.pending.get(take) else {
+                break;
+            };
+            if next.layer != layer || next.block_number != end_block.saturating_add(1) {
+                break;
+            }
+            entries = entries.saturating_add(next.entries.len());
+            end_block = next.block_number;
+            take += 1;
+        }
+
+        if layer == 1 && min_l1_entries > 0 && entries < min_l1_entries && take < max_sources {
+            return None;
+        }
+
+        let mut merged = self.pop()?;
+        for _ in 1..take {
+            let next = self.pending.pop_front().expect("take checked above");
+            self.total_completed += 1;
+            merged.block_hash = next.block_hash;
+            merged.block_number = next.block_number;
+            merged.entries.extend(next.entries);
+            merged.source_hashes.extend(next.source_hashes);
+            merged.original_size = match (merged.original_size, next.original_size) {
+                (Some(a), Some(b)) => Some(a.saturating_add(b)),
+                _ => None,
+            };
+        }
+        Some(merged)
     }
 
     /// Peek at the next task without removing it.
@@ -171,6 +277,13 @@ mod tests {
         ProofTask::new([n as u8; 32], n, vec![])
     }
 
+    fn make_entry(n: u8) -> SigBatchEntry {
+        SigBatchEntry {
+            msg_hash: [n; 32],
+            pk_hash: [n.wrapping_add(1); 32],
+        }
+    }
+
     #[test]
     fn new_backlog_is_empty() {
         let b = ProofBacklog::new();
@@ -189,6 +302,31 @@ mod tests {
     }
 
     #[test]
+    fn push_front_takes_priority() {
+        let mut b = ProofBacklog::new();
+        b.push(make_task(2));
+        b.push_front(make_task(1));
+        assert_eq!(b.pop().unwrap().block_number, 1);
+        assert_eq!(b.pop().unwrap().block_number, 2);
+    }
+
+    #[test]
+    fn contains_source_detects_pending_source_hash() {
+        let mut b = ProofBacklog::new();
+        let hash = ShellHash::from([7u8; 32]);
+        b.push(ProofTask::with_sources(
+            [1u8; 32],
+            10,
+            vec![],
+            1,
+            vec![hash],
+            Some(1),
+        ));
+        assert!(b.contains_source(1, &hash));
+        assert!(!b.contains_source(2, &hash));
+    }
+
+    #[test]
     fn pop_returns_fifo_order() {
         let mut b = ProofBacklog::new();
         b.push(make_task(10));
@@ -199,6 +337,84 @@ mod tests {
         assert_eq!(b.pop().unwrap().block_number, 20);
         assert_eq!(b.pop().unwrap().block_number, 30);
         assert!(b.pop().is_none());
+    }
+
+    #[test]
+    fn pop_contiguous_merges_adjacent_range() {
+        let mut b = ProofBacklog::new();
+        let mut t1 = make_task(10);
+        t1.original_size = Some(100);
+        let mut t2 = make_task(11);
+        t2.original_size = Some(200);
+        let mut t4 = make_task(13);
+        t4.original_size = Some(400);
+        b.push(t1);
+        b.push(t2);
+        b.push(t4);
+
+        let merged = b.pop_contiguous(8).unwrap();
+        assert_eq!(merged.block_number, 11);
+        assert_eq!(merged.source_hashes.len(), 2);
+        assert_eq!(merged.original_size, Some(300));
+        assert_eq!(b.len(), 1);
+        assert_eq!(b.peek().unwrap().block_number, 13);
+    }
+
+    #[test]
+    fn l1_pop_waits_for_minimum_entries() {
+        let mut b = ProofBacklog::new();
+        b.push(ProofTask::new([1u8; 32], 1, vec![make_entry(1); 100]));
+        b.push(ProofTask::new([2u8; 32], 2, vec![make_entry(2); 200]));
+
+        assert!(b
+            .pop_contiguous_with_min_entries(DEFAULT_MAX_L1_RANGE_SOURCES, MIN_L1_STARK_TXS)
+            .is_none());
+        assert_eq!(b.len(), 2);
+
+        b.push(ProofTask::new([3u8; 32], 3, vec![make_entry(3); 212]));
+        let merged = b
+            .pop_contiguous_with_min_entries(DEFAULT_MAX_L1_RANGE_SOURCES, MIN_L1_STARK_TXS)
+            .expect("L1 range reaches 512 entries");
+        assert_eq!(merged.block_number, 3);
+        assert_eq!(merged.entries.len(), MIN_L1_STARK_TXS);
+    }
+
+    #[test]
+    fn l1_pop_advances_when_max_sources_reached_below_minimum() {
+        let mut b = ProofBacklog::new();
+        for block_number in 1..=DEFAULT_MAX_L1_RANGE_SOURCES as u64 {
+            b.push(ProofTask::new(
+                [block_number as u8; 32],
+                block_number,
+                vec![],
+            ));
+        }
+
+        let merged = b
+            .pop_contiguous_with_min_entries(DEFAULT_MAX_L1_RANGE_SOURCES, MIN_L1_STARK_TXS)
+            .expect("max source window must make forward progress");
+        assert_eq!(merged.block_number, DEFAULT_MAX_L1_RANGE_SOURCES as u64);
+        assert!(merged.entries.is_empty());
+        assert!(b.is_empty());
+    }
+
+    #[test]
+    fn l2_pop_does_not_require_l1_minimum() {
+        let mut b = ProofBacklog::new();
+        b.push(ProofTask::with_sources(
+            [1u8; 32],
+            1,
+            vec![make_entry(1)],
+            2,
+            vec![ShellHash::from([1u8; 32])],
+            Some(100),
+        ));
+
+        let merged = b
+            .pop_contiguous_with_min_entries(DEFAULT_MAX_L1_RANGE_SOURCES, MIN_L1_STARK_TXS)
+            .expect("L2 range is not threshold-gated");
+        assert_eq!(merged.layer, 2);
+        assert_eq!(merged.entries.len(), 1);
     }
 
     #[test]

@@ -24,55 +24,24 @@ impl<S: KvStore + 'static> Node<S> {
             return Err(NodeError::NotProposer);
         }
 
-        // Guard against double-production: if we already have a canonical block at
-        // next_number (can happen if a peer's block arrived between timer tick and here),
-        // abort to avoid equivocation.
-        if self.chain_store.get_block_by_number(next_number)?.is_some() {
-            debug!(
-                next_number,
-                "canonical block already exists, skipping production"
-            );
-            return Err(NodeError::NotProposer);
-        }
-
-        // FF.5: Refuse to build on a parent that conflicts with the finalized chain.
-        // If the current head is below the last finalized number, or diverges from the
-        // finalized hash at that height, producing on top of it would create a fork off
-        // the finalized chain — reject to preserve safety.
-        {
+        let (finalized_number, finalized_hash) = {
             let finality = self.finality.read();
-            let fin_number = finality.last_finalized_number();
-            if fin_number > 0 {
-                let head_number = head.number();
-                if head_number < fin_number {
-                    warn!(
-                        head_number,
-                        fin_number,
-                        "FF.5: head is below finalized number, refusing to produce block"
-                    );
-                    return Err(NodeError::ConflictsWithFinalized {
-                        incoming: head_number,
-                        fin_number,
-                    });
-                }
-                // If head is exactly at the finalized height, verify the hashes match.
-                if head_number == fin_number && head_hash != *finality.last_finalized_hash() {
-                    warn!(
-                        head_number,
-                        %head_hash,
-                        fin_hash = %finality.last_finalized_hash(),
-                        "FF.5: head hash diverges from finalized hash, refusing to produce block"
-                    );
-                    return Err(NodeError::ConflictsWithFinalized {
-                        incoming: head_number,
-                        fin_number,
-                    });
-                }
-            }
-        }
+            (
+                finality.last_finalized_number(),
+                *finality.last_finalized_hash(),
+            )
+        };
+        ChainStateMachine::ensure_production_parent(
+            head.number(),
+            head_hash,
+            next_number,
+            self.chain_store.get_block_by_number(next_number)?.is_some(),
+            finalized_number,
+            finalized_hash,
+        )?;
 
         // Collect pending transactions from mempool.
-        let candidates = self.tx_pool.pending(max_txs);
+        let candidates = self.tx_pool.pending_for_block(max_txs);
 
         // Create an isolated EVM instance at the current state root.
         let current_root = {
@@ -118,6 +87,7 @@ impl<S: KvStore + 'static> Node<S> {
         let mut included_txs: Vec<SignedTransaction> = Vec::new();
         let mut receipts = Vec::new();
         let mut cumulative_gas: u64 = 0;
+        let mut total_effective_fees = U256::ZERO;
 
         for (idx, tx) in candidates.iter().enumerate() {
             // EIP-1559: skip transactions that cannot afford the base fee.
@@ -155,6 +125,14 @@ impl<S: KvStore + 'static> Node<S> {
             match exec_result {
                 Ok(result) => {
                     cumulative_gas += result.gas_used;
+                    let price = effective_gas_price(
+                        tx.tx.max_fee_per_gas,
+                        tx.tx.max_priority_fee_per_gas,
+                        base_fee,
+                    );
+                    total_effective_fees = total_effective_fees.saturating_add(
+                        U256::from(result.gas_used).saturating_mul(U256::from(price)),
+                    );
                     receipts.push(result.receipt);
                     included_txs.push(tx.clone());
 
@@ -200,6 +178,128 @@ impl<S: KvStore + 'static> Node<S> {
 
         header.gas_used = cumulative_gas;
 
+        let mut system_txs = Vec::new();
+        let producer_reward = total_effective_fees / U256::from(2u8);
+        if !included_txs.is_empty() && producer_reward > U256::ZERO {
+            evm.state_db_mut()
+                .world_state_mut()
+                .add_balance(&proposer_addr, producer_reward)?;
+            {
+                let mut ws = self.world_state.write();
+                ws.add_balance(&proposer_addr, producer_reward)?;
+            }
+            let tx_index = included_txs.len() as u32;
+            let reward_tx = SystemTransaction::block_gas_reward(
+                self.config.chain_id,
+                next_number,
+                tx_index,
+                proposer_addr,
+                producer_reward,
+                head_hash,
+            );
+            receipts.push(TransactionReceipt {
+                tx_hash: reward_tx.hash(),
+                block_number: next_number,
+                tx_index,
+                status: 1,
+                gas_used: 0,
+                cumulative_gas_used: cumulative_gas,
+                contract_address: None,
+                logs_bloom: Bytes::default(),
+                logs: vec![],
+            });
+            system_txs.push(reward_tx);
+        }
+
+        let mut pending_stark_settlements = {
+            let mut pending = self.pending_stark_settlements.lock();
+            std::mem::take(&mut *pending)
+        };
+        pending_stark_settlements.sort_by(|a, b| {
+            (
+                a.layer,
+                a.block_number,
+                a.block_hash.as_bytes(),
+                a.prover.0.as_slice(),
+            )
+                .cmp(&(
+                    b.layer,
+                    b.block_number,
+                    b.block_hash.as_bytes(),
+                    b.prover.0.as_slice(),
+                ))
+        });
+        let mut settled_stark_proofs = Vec::new();
+        let mut settled_stark_artifacts = Vec::new();
+        let mut seen_stark_sources = HashSet::new();
+        for amendment in pending_stark_settlements {
+            let settlement_keys: Vec<(u32, ShellHash)> = amendment
+                .covered_hashes()
+                .into_iter()
+                .map(|source| (amendment.layer, source))
+                .collect();
+            if settlement_keys
+                .iter()
+                .any(|key| seen_stark_sources.contains(key))
+            {
+                continue;
+            }
+            if settlement_keys
+                .iter()
+                .any(|key| self.settled_stark_sources.lock().contains(key))
+            {
+                continue;
+            }
+            let mut candidate_settlements = settled_stark_proofs.clone();
+            candidate_settlements.push(amendment.clone());
+            if let Err(e) = self.validate_stark_settlement_sequence(&candidate_settlements) {
+                warn!(
+                    block = next_number,
+                    source = %amendment.block_hash,
+                    layer = amendment.layer,
+                    "skipping out-of-order STARK reward settlement: {e}"
+                );
+                continue;
+            }
+            seen_stark_sources.extend(settlement_keys.iter().copied());
+            let tx_index = included_txs.len().saturating_add(system_txs.len()) as u32;
+            let reward_tx = match self.build_stark_reward_tx(next_number, tx_index, &amendment) {
+                Ok(tx) if tx.value > U256::ZERO => tx,
+                Ok(_) => continue,
+                Err(e) => {
+                    warn!(
+                        block = next_number,
+                        source = %amendment.block_hash,
+                        "skipping invalid STARK reward settlement: {e}"
+                    );
+                    continue;
+                }
+            };
+            evm.state_db_mut()
+                .world_state_mut()
+                .add_balance(&reward_tx.to, reward_tx.value)?;
+            {
+                let mut ws = self.world_state.write();
+                ws.add_balance(&reward_tx.to, reward_tx.value)?;
+            }
+            receipts.push(TransactionReceipt {
+                tx_hash: reward_tx.hash(),
+                block_number: next_number,
+                tx_index,
+                status: 1,
+                gas_used: 0,
+                cumulative_gas_used: cumulative_gas,
+                contract_address: None,
+                logs_bloom: Bytes::default(),
+                logs: vec![],
+            });
+            let reward_hash = reward_tx.hash();
+            system_txs.push(reward_tx);
+            settled_stark_artifacts.push((amendment.clone(), reward_hash));
+            settled_stark_proofs.push(amendment);
+        }
+        header.extra_data = Bytes::default();
+
         // Compute block-level logs bloom by OR-ing all receipt blooms.
         {
             let receipt_blooms: Vec<shell_evm::bloom::Bloom> = receipts
@@ -219,12 +319,13 @@ impl<S: KvStore + 'static> Node<S> {
         // Compute state root from the updated world state.
         {
             let mut ws = self.world_state.write();
-            header.state_root = ws.state_root().unwrap_or_default();
+            header.state_root = ws.state_root()?;
         }
 
         let mut block = Block {
             header,
             transactions: included_txs.clone(),
+            system_transactions: system_txs.clone(),
             proposer_seal: None,
         };
 
@@ -253,11 +354,7 @@ impl<S: KvStore + 'static> Node<S> {
                     SigBatchEntry { msg_hash, pk_hash }
                 })
                 .collect();
-            if entries.is_empty() {
-                None
-            } else {
-                Some(entries)
-            }
+            Some(entries)
         } else {
             None
         };
@@ -271,35 +368,89 @@ impl<S: KvStore + 'static> Node<S> {
         // Commit to storage.
         let block_hash = block.hash();
 
-        // G4: Push proof task with real block hash (now available after signing).
+        self.chain_store.put_block(&block)?;
+        // G4: Push proof task with real block hash and stored witness size.
         if let Some(entries) = stark_entries {
             let block_num = block.header.number;
             let hash_bytes: [u8; 32] = *block_hash.as_bytes();
+            let original_size =
+                self.stark_source_original_size(&block_hash, &block, entries.len())?;
             let mut backlog = self.proof_backlog.lock();
-            backlog.push(ProofTask::new(hash_bytes, block_num, entries));
+            backlog.push(ProofTask::with_sources(
+                hash_bytes,
+                block_num,
+                entries,
+                1,
+                vec![block_hash],
+                original_size,
+            ));
             debug!(
                 block = block_num,
-                "G4: proof task queued in backlog (async proving)"
+                original_size, "G4: proof task queued in backlog (async proving)"
             );
         }
-        self.chain_store.put_block(&block)?;
+        let queued = self.enqueue_stark_frontier_backlog(64)?;
+        if queued > 0 {
+            debug!(
+                queued,
+                "queued additional historical STARK frontier proof tasks after block production"
+            );
+        }
         self.chain_store.put_receipts(&block_hash, &receipts)?;
+        self.chain_store.put_system_transactions(
+            &block_hash,
+            block.number(),
+            &block.system_transactions,
+        )?;
         self.chain_store
             .set_canonical(block.number(), &block_hash)?;
         self.chain_store.set_head(&block_hash)?;
+        for (amendment, settlement_tx_hash) in &settled_stark_artifacts {
+            self.store_stark_artifacts(amendment, Some(*settlement_tx_hash))?;
+        }
+        self.settled_stark_sources
+            .lock()
+            .extend(settled_stark_proofs.iter().flat_map(|amendment| {
+                amendment
+                    .covered_hashes()
+                    .into_iter()
+                    .map(move |source| (amendment.layer, source))
+            }));
+        self.register_fork_choice_block(block_hash, block.header.parent_hash, block.number());
 
         // Remove included transactions from mempool.
         let tx_hashes: Vec<ShellHash> = included_txs.iter().map(|tx| tx.hash()).collect();
         self.tx_pool.remove_batch(&tx_hashes);
-
-        // Update global transaction counter for shell_transactionCount RPC.
-        let new_tx_count = included_txs.len() as u64;
-        if new_tx_count > 0 {
-            self.chain_store.increment_tx_count(new_tx_count)?;
+        let pruned = {
+            let ws = self.world_state.read();
+            self.tx_pool.prune_nonce_too_low(&ws)
+        };
+        if pruned > 0 {
+            debug!(
+                count = pruned,
+                "pruned stale nonce-too-low transactions after production"
+            );
         }
+
+        // Update canonical aggregate counters for shell_* stats RPCs.
+        self.chain_store.add_canonical_block_to_totals(
+            block.number(),
+            included_txs.len() as u64,
+            block.header.gas_used,
+        )?;
 
         // Track the new state root for pruning decisions.
         self.record_finalized_state_root(block.number(), block.header.state_root);
+        self.reload_authorities_if_boundary(block.number())?;
+        if self.config.node_role.runs_prover() {
+            let queued = self.enqueue_stark_frontier_backlog(8)?;
+            if queued > 0 {
+                debug!(
+                    queued,
+                    "queued ordered STARK frontier proof tasks after block production"
+                );
+            }
+        }
 
         Ok(block)
     }

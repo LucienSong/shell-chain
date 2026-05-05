@@ -49,9 +49,15 @@ pub mod recursive_air;
 pub mod scheduler;
 pub mod state_machine;
 
-pub use amendment::{amendment_key, ProofAmendment, AMENDMENT_KEY_PREFIX, PROOF_AMENDMENT_VERSION};
+pub use amendment::{
+    amendment_key, ProofAmendment, ProofPointer, ProofRange, StoredProofArtifact,
+    AMENDMENT_KEY_PREFIX, PROOF_AMENDMENT_VERSION, PROOF_POINTER_VERSION,
+};
 pub use availability::{AvailabilityConfig, ProofAvailability, ProofAvailabilityTracker};
-pub use backlog::{ProofBacklog, ProofTask, DEFAULT_WATERMARK_THRESHOLD};
+pub use backlog::{
+    ProofBacklog, ProofTask, DEFAULT_MAX_L1_RANGE_SOURCES, DEFAULT_WATERMARK_THRESHOLD,
+    MIN_L1_STARK_TXS,
+};
 pub use metadata::{
     proof_metadata_key, ProofLevel, ProofMetadata, PROOF_METADATA_KEY_PREFIX,
     PROOF_METADATA_VERSION,

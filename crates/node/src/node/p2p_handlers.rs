@@ -73,31 +73,43 @@ impl<S: KvStore + 'static> Node<S> {
             ));
         }
 
-        // Check for equivocation.
-        let mut finality = self.finality.write();
-        if let Some(conflicting) =
-            finality.detect_equivocation(&block_hash, block_number, &validator)
-        {
-            tracing::error!(
-                %validator,
-                %block_hash,
-                %conflicting,
-                height = block_number,
-                "equivocation detected — rejecting attestation"
-            );
-            return Err(NodeError::Startup(format!(
-                "equivocation: validator {validator:?} already attested to {conflicting:?} at height {block_number}"
-            )));
-        }
-
-        // Record the attestation.
-        if !finality.record_attestation(attestation) {
-            return Ok(()); // duplicate, already recorded
-        }
-
-        // Check if this block reached finality.
         let total_validators = self.consensus.read().poa_config().authorities.len();
-        if finality.check_finality(&block_hash, block_number, total_validators) {
+        let (attestation_count, finalized) = {
+            // Check for equivocation, record the attestation, and evaluate
+            // finality under one finality write lock to avoid lock-order cycles
+            // with fork_choice.
+            let mut finality = self.finality.write();
+            if let Some(conflicting) =
+                finality.detect_equivocation(&block_hash, block_number, &validator)
+            {
+                tracing::error!(
+                    %validator,
+                    %block_hash,
+                    %conflicting,
+                    height = block_number,
+                    "equivocation detected — rejecting attestation"
+                );
+                return Err(NodeError::Startup(format!(
+                    "equivocation: validator {validator:?} already attested to {conflicting:?} at height {block_number}"
+                )));
+            }
+
+            // Record the attestation.
+            if !finality.record_attestation(attestation) {
+                return Ok(()); // duplicate, already recorded
+            }
+            let attestation_count = finality.attestation_count(&block_hash);
+            let finalized = finality.check_finality(&block_hash, block_number, total_validators);
+            (attestation_count, finalized)
+        };
+
+        if self.fork_choice.read().contains(&block_hash) {
+            self.fork_choice
+                .write()
+                .update_attestations(&block_hash, attestation_count);
+        }
+
+        if finalized {
             tracing::info!(
                 block = block_number,
                 hash = %block_hash,

@@ -120,8 +120,8 @@ pub struct NodeConfig {
     pub chain_id: u64,
     /// Network profile this node is operating on.
     ///
-    /// Drives sensible defaults: Dev/Testnet use 30 s blocks to save
-    /// resources; Mainnet uses 2 s blocks.
+    /// Drives sensible defaults: Dev uses slower blocks for local work;
+    /// Testnet/Mainnet use 2 s transaction-driven blocks.
     pub network_type: NetworkType,
     /// Consensus engine configuration.
     pub consensus: ConsensusEngineConfig,
@@ -136,8 +136,8 @@ pub struct NodeConfig {
     /// Block production interval in milliseconds.
     ///
     /// When building from genesis, prefer deriving this from
-    /// [`NetworkType::default_block_time_ms`] so that Dev/Testnet
-    /// automatically get 30 s blocks and Mainnet gets 2 s blocks.
+    /// [`NetworkType::default_block_time_ms`] so that Testnet/Mainnet
+    /// get 2 s blocks and Dev keeps its local-friendly default.
     pub block_time_ms: u64,
     /// Data directory for persistent storage.
     pub data_dir: String,
@@ -150,7 +150,7 @@ pub struct NodeConfig {
     /// this threshold, an empty heartbeat block is produced to keep the chain
     /// alive (sync, light clients, timestamp monotonicity).
     /// `0` disables idle-skip and produces a block on every tick (legacy).
-    /// Default: `60_000` (60 s) — skip empty blocks but heartbeat once a minute.
+    /// Default: `600_000` (600 s) — skip empty blocks but heartbeat every 10 minutes.
     pub max_idle_interval_ms: u64,
     /// Account cache size in MiB for the world state LRU trie cache.
     /// Default: 64 MiB.  Higher values reduce state trie decode overhead.
@@ -214,7 +214,7 @@ impl NodeConfig {
             data_dir: "shell-data".into(),
             pruning,
             metrics: MetricsConfig::default(),
-            max_idle_interval_ms: 60_000,
+            max_idle_interval_ms: 600_000,
             state_cache_size_mb: 64,
             parallel_evm: ParallelEvmConfig::default(),
             enable_stark_aggregation: params.stark_aggregation,
@@ -304,9 +304,9 @@ mod tests {
     }
 
     #[test]
-    fn testnet_config_block_time_is_30s() {
+    fn testnet_config_block_time_is_2s() {
         let cfg = NodeConfig::for_network(Address::ZERO, NetworkType::Testnet);
-        assert_eq!(cfg.block_time_ms, 30_000);
+        assert_eq!(cfg.block_time_ms, 2_000);
     }
 
     #[test]
