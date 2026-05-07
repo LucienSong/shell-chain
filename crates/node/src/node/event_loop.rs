@@ -184,7 +184,12 @@ impl<S: KvStore + 'static> Node<S> {
 
         // H3: Start background prover service if this node is configured to run proving.
         if self.config.node_role.runs_prover() {
-            let seeded = self.enqueue_stark_frontier_backlog(8)?;
+            // Seed enough frontier blocks to form a provable batch (≥ MIN_L1_STARK_TXS entries).
+            // Using a single block or very few blocks risks seeding a batch that passes the
+            // backlog pop but then fails the n_sigs ≥ 512 settlement check.  Seeding up to
+            // DEFAULT_MAX_L1_RANGE_SOURCES ensures the initial batch is large enough while
+            // still respecting the prover's maximum range size.
+            let seeded = self.enqueue_stark_frontier_backlog(DEFAULT_MAX_L1_RANGE_SOURCES)?;
             if seeded > 0 {
                 info!(
                     seeded,
@@ -997,11 +1002,29 @@ impl<S: KvStore + 'static> Node<S> {
                                     }
                                     let already_settled = {
                                         let settled = self.settled_stark_sources.lock();
-                                        amendment.covered_hashes().into_iter().any(|source| {
-                                            settled.contains(&(amendment.layer, source))
+                                        covered_hashes.iter().any(|source| {
+                                            settled.contains(&(amendment.layer, *source))
                                         })
                                     };
-                                    if already_settled {
+                                    // Also check the pending queue to prevent duplicate settlements
+                                    // from concurrent proof-amendment messages for the same sources.
+                                    let pending_dup = if !already_settled {
+                                        // Build a set once for O(1) membership checks against
+                                        // each queued entry's covered_hashes (avoids O(n²) scans).
+                                        let covered_set: std::collections::HashSet<_> =
+                                            covered_hashes.iter().copied().collect();
+                                        let pending = self.pending_stark_settlements.lock();
+                                        pending.iter().any(|queued| {
+                                            queued.layer == amendment.layer
+                                                && queued
+                                                    .covered_hashes()
+                                                    .iter()
+                                                    .any(|s| covered_set.contains(s))
+                                        })
+                                    } else {
+                                        false
+                                    };
+                                    if already_settled || pending_dup {
                                         debug!(
                                             block = block_number,
                                             source = %amendment.block_hash,
@@ -1077,7 +1100,7 @@ impl<S: KvStore + 'static> Node<S> {
                                             block_number = equivocation.header_a.number,
                                             "I1: equivocation evidence verified (slashing deferred — epoch-boundary not implemented)"
                                         );
-                                        // TODO: apply slash_authority only at epoch boundary
+                                        // TODO(shell-chain#31): apply slash_authority only at epoch boundary
                                         // once ValidatorSet epoch transitions are in place.
                                     } else {
                                         warn!(%peer, "I1: received invalid equivocation evidence, ignoring");
@@ -1655,13 +1678,23 @@ impl<S: KvStore + 'static> Node<S> {
         }
         if !tasks.is_empty() {
             let mut backlog = self.proof_backlog.lock();
-            for task in tasks.into_iter().rev() {
-                if !task
-                    .source_hashes
-                    .iter()
-                    .any(|source| backlog.contains_source(task.layer, source))
-                {
-                    backlog.push_front(task);
+            // Guard against starvation: if the backlog already contains tasks at a
+            // LOWER block number than what we're about to push_front, adding our tasks
+            // would displace the actual frontier and cause the prover to loop over
+            // already-cached ranges while the true frontier is never reached.
+            // Skip this seeding pass — the frontier blocks will be processed on the
+            // next prover iteration, and we'll re-seed on the following call.
+            let first_new_block = tasks[0].block_number;
+            let min_existing = backlog.min_block_number_for_layer(tasks[0].layer);
+            if min_existing.is_none_or(|min| first_new_block <= min) {
+                for task in tasks.into_iter().rev() {
+                    if !task
+                        .source_hashes
+                        .iter()
+                        .any(|source| backlog.contains_source(task.layer, source))
+                    {
+                        backlog.push_front(task);
+                    }
                 }
             }
         }
