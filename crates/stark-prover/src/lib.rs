@@ -55,21 +55,35 @@ pub use amendment::{
 };
 pub use availability::{AvailabilityConfig, ProofAvailability, ProofAvailabilityTracker};
 pub use backlog::{
-    ProofBacklog, ProofTask, DEFAULT_MAX_L1_RANGE_SOURCES, DEFAULT_WATERMARK_THRESHOLD,
-    MIN_L1_STARK_TXS,
+    L2ProverTask, ProofBacklog, ProofTask, ProverTask, DEFAULT_MAX_L1_RANGE_SOURCES,
+    DEFAULT_WATERMARK_THRESHOLD, MIN_L1_STARK_TXS,
 };
 pub use metadata::{
     proof_metadata_key, ProofLevel, ProofMetadata, PROOF_METADATA_KEY_PREFIX,
     PROOF_METADATA_VERSION,
 };
 pub use proof::{SigBatchProof, SIG_BATCH_PROOF_VERSION};
-pub use prover::{prove_sig_batch, verify_sig_batch, SigBatchEntry};
+pub use prover::{compute_batch_root, prove_sig_batch, verify_sig_batch, SigBatchEntry};
 pub use prover_health::{HealthStatus, ProverHealth, ProverHealthConfig};
 pub use recursive_air::{
-    compute_aggregate_root, AggregationJob, RecursivePublicInputs, RecursiveVerifierAir,
-    REC_COL_ACC, REC_COL_ROOT, REC_TRACE_WIDTH,
+    compute_aggregate_root,
+    get_recursive_prover,
+    AggregationJob,
+    // Boundary types
+    RecursiveProof,
+    RecursiveProver,
+    RecursiveProverError,
+    RecursivePublicInputs,
+    RecursiveVerifierAir,
+    ScaffoldRecursiveProver,
+    REC_COL_ACC,
+    REC_COL_ROOT,
+    REC_TRACE_WIDTH,
 };
-pub use scheduler::{AggregationConfig, AggregationScheduler, AggregationTrigger, TriggerReason};
+pub use scheduler::{
+    AggregationConfig, AggregationScheduler, AggregationTrigger, L1Gap, SettledL1Input,
+    TriggerReason,
+};
 pub use state_machine::{BlockProofState, BlockStateMachine, InvalidTransition};
 
 /// Current protocol version for [`SigBatchProof`] serialization.

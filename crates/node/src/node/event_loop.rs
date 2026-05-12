@@ -246,7 +246,9 @@ impl<S: KvStore + 'static> Node<S> {
                 prover_config,
                 prover_address,
             )
-            .with_amendment_sender(prover_amendment_tx);
+            .with_amendment_sender(prover_amendment_tx)
+            .with_drain_frontier(Arc::clone(&self.stark_drain_frontier))
+            .with_l2_mode(self.config.l2_stark_mode);
             let handle = service.start();
             task_lifecycle.attach_prover_service(handle);
             info!(
@@ -298,12 +300,34 @@ impl<S: KvStore + 'static> Node<S> {
         loop {
             tokio::select! {
                 Some(amendment) = prover_amendment_rx.recv() => {
+                    if amendment.layer > 1 {
+                        self.metrics.stark_l2_proofs_generated.inc();
+                    } else {
+                        self.metrics.stark_proofs_generated.inc();
+                    }
                     if let Err(e) = self.validate_stark_amendment_ordering(&amendment) {
-                        debug!(
+                        warn!(
                             block = amendment.block_number,
                             layer = amendment.layer,
-                            "local STARK proof is stored but not settlement-ready: {e}"
+                            "local STARK proof ordering check failed; discarding stored amendment: {e}"
                         );
+                        // Delete all stored artifacts for this proof range so the source
+                        // blocks are re-seeded as fresh tasks once the frontier catches up.
+                        // Without this deletion, the next seed pass re-loads the failing
+                        // amendment, creates new backlog tasks for the same tip range, the
+                        // prover regenerates the same out-of-order proof, and the rejection
+                        // counter spins indefinitely.
+                        for source_hash in amendment.covered_hashes() {
+                            if let Err(del_err) =
+                                self.amendment_store.delete_amendment(&source_hash)
+                            {
+                                warn!(
+                                    block = amendment.block_number,
+                                    %source_hash,
+                                    "failed to delete out-of-order amendment artifact: {del_err}"
+                                );
+                            }
+                        }
                         continue;
                     }
                     if can_produce_blocks {
@@ -348,6 +372,32 @@ impl<S: KvStore + 'static> Node<S> {
                     }
                 }
                 _ = block_timer.tick() => {
+                    // Periodically reseed the STARK backlog so the prover is never
+                    // starved of historical tasks.  Reseed when:
+                    //   a) the backlog is completely empty, OR
+                    //   b) the front of the backlog has a contiguous run whose total
+                    //      entries fall below the proving threshold (prover consumed
+                    //      most of the previously-seeded window; needs more history).
+                    if self.config.node_role.runs_prover() {
+                        let needs_reseed = {
+                            let backlog = self.proof_backlog.lock();
+                            if backlog.is_empty() {
+                                true
+                            } else {
+                                // If the contiguous front run has fewer entries than
+                                // the minimum, the prover is stalled — seed more.
+                                matches!(
+                                    backlog.diagnose_stall(DEFAULT_MAX_L1_RANGE_SOURCES, MIN_L1_STARK_TXS),
+                                    Some((entries, _, _)) if entries < MIN_L1_STARK_TXS
+                                )
+                            }
+                        };
+                        if needs_reseed {
+                            if let Err(e) = self.enqueue_stark_frontier_backlog(DEFAULT_MAX_L1_RANGE_SOURCES) {
+                                warn!("failed to reseed STARK backlog on timer: {e}");
+                            }
+                        }
+                    }
                     if can_produce_blocks {
                         let peers = network.peer_count().await;
                         production_readiness.refresh(
@@ -1093,6 +1143,14 @@ impl<S: KvStore + 'static> Node<S> {
                                          );
                                          continue;
                                      }
+                                     if let Err(e) = self.validate_stark_proof_source_binding(&amendment) {
+                                         warn!(
+                                             block = block_number,
+                                             layer = amendment.layer,
+                                             "STARK proof rejected by proof-source binding check: {e}"
+                                         );
+                                         continue;
+                                     }
                                     match self.store_stark_artifacts(&amendment, None) {
                                         Ok(stored) => {
                                             info!(
@@ -1563,34 +1621,22 @@ impl<S: KvStore + 'static> Node<S> {
     }
 
     pub(crate) fn rebuild_settled_stark_sources_from_chain(&self) -> Result<usize, NodeError> {
-        // Fast path: load from the persistent index if it has been populated.
-        let index_entries = self.settled_source_index.all_entries()?;
-        if !index_entries.is_empty() {
-            let mut settled = self.settled_stark_sources.lock();
-            settled.clear();
-            let count = index_entries.len();
-            let l1_count = index_entries.iter().filter(|(l, _)| *l == 1).count() as i64;
-            settled.extend(index_entries);
-            let head = self
-                .chain_store
-                .get_head_block()?
-                .map(|block| block.number())
-                .unwrap_or(0);
-            let lag = (head as i64 + 1).saturating_sub(l1_count).max(0);
-            self.metrics.stark_frontier_lag.set(lag);
-            return Ok(count);
-        }
-
-        // Slow path: rebuild by scanning every block (first run / index missing).
-        // Backfill the index as we go so subsequent restarts use the fast path.
+        // Always do a canonical scan so the persistent index cannot diverge from
+        // the canonical chain after a reorg.  We collect all settled sources from
+        // canonical StarkReward system-txs first, then reconcile the durable
+        // `ss/` index by removing stale entries and back-filling missing ones.
         let head = self
             .chain_store
             .get_head_block()?
             .map(|block| block.number())
             .unwrap_or(0);
-        let mut rebuilt = 0usize;
-        let mut settled = self.settled_stark_sources.lock();
-        settled.clear();
+
+        // ── Step 1: build the canonical settled set from chain ────────────────
+        let mut canonical: std::collections::HashSet<(u32, ShellHash)> =
+            std::collections::HashSet::new();
+        // Track L1 final source hashes for l2i/ reconcile (one per L1 amendment).
+        let mut canonical_l1_finals: std::collections::HashSet<ShellHash> =
+            std::collections::HashSet::new();
         for number in 0..=head {
             let Some(block) = self.chain_store.get_block_by_number(number)? else {
                 continue;
@@ -1612,17 +1658,144 @@ impl<S: KvStore + 'static> Node<S> {
             {
                 self.store_stark_artifacts(&amendment, settlement_tx_hash)?;
                 for source in amendment.covered_hashes() {
-                    if settled.insert((amendment.layer, source)) {
-                        let _ = self.settled_source_index.put(amendment.layer, &source);
-                        rebuilt += 1;
-                    }
+                    canonical.insert((amendment.layer, source));
+                }
+                // Collect L1 final source hashes for l2i/ reconcile.
+                if amendment.layer == 1 {
+                    canonical_l1_finals.insert(amendment.block_hash);
                 }
             }
         }
-        let l1_count = settled.iter().filter(|(l, _)| *l == 1).count() as i64;
+
+        // ── Step 2: reconcile the persistent `ss/` index ─────────────────────
+        // Remove stale entries that no longer exist on the canonical chain.
+        let index_entries = self.settled_source_index.all_entries()?;
+        let mut removed = 0usize;
+        for (layer, hash) in &index_entries {
+            if !canonical.contains(&(*layer, *hash)) {
+                if let Err(e) = self.settled_source_index.delete(*layer, hash) {
+                    warn!("rebuild_settled: failed to delete stale index entry ({layer}, {hash}): {e}");
+                } else {
+                    removed += 1;
+                }
+            }
+        }
+
+        // Add missing canonical entries to the index.
+        let index_set: std::collections::HashSet<(u32, ShellHash)> =
+            index_entries.into_iter().collect();
+        for (layer, hash) in &canonical {
+            if !index_set.contains(&(*layer, *hash)) {
+                let _ = self.settled_source_index.put(*layer, hash);
+            }
+        }
+
+        if !self.config.l2_stark_mode.is_enabled() {
+            self.metrics.stark_l2_blocked_gap_start.set(0);
+            self.metrics.stark_l2_last_trigger_block.set(0);
+            self.metrics.stark_l2_pending_inputs.set(0);
+            self.metrics.stark_l2_ready_jobs.set(0);
+        } else {
+            // ── Step 2b: reconcile the `l2i/` L2 input index ─────────────────────
+            // Mirrors Step 2 but tracks final-source hashes of L1 amendments.
+            let l2i_entries = self.l2_input_index.all_hashes()?;
+            let mut l2i_removed = 0usize;
+            for hash in &l2i_entries {
+                if !canonical_l1_finals.contains(hash) {
+                    if let Err(e) = self.l2_input_index.delete(hash) {
+                        warn!("rebuild_settled: failed to delete stale l2i/ entry ({hash}): {e}");
+                    } else {
+                        l2i_removed += 1;
+                    }
+                }
+            }
+            let l2i_set: std::collections::HashSet<ShellHash> = l2i_entries.into_iter().collect();
+            for hash in &canonical_l1_finals {
+                if !l2i_set.contains(hash) {
+                    let _ = self.l2_input_index.put(hash);
+                }
+            }
+            if l2i_removed > 0 {
+                info!(
+                    "rebuild_settled: removed {l2i_removed} stale `l2i/` index entries after reorg"
+                );
+            }
+
+            // ── Step 2c: reconcile the `l2j/` L2 job store ───────────────────────
+            // Any L2 job whose source L1 hashes were orphaned by a reorg must be
+            // reset to PendingInputs so it can re-accumulate canonical inputs rather
+            // than attempting to prove with stale/phantom L1 roots.
+            let all_l2_jobs = self.l2_job_store.all_jobs()?;
+            let mut l2j_reset = 0usize;
+            for job in &all_l2_jobs {
+                // PendingInputs and FailedPermanent don't need to be touched.
+                if matches!(
+                    job.status,
+                    L2JobStatus::PendingInputs | L2JobStatus::FailedPermanent
+                ) {
+                    continue;
+                }
+                let sources_canonical = job
+                    .l1_source_hashes
+                    .iter()
+                    .all(|h| canonical_l1_finals.contains(h));
+                if !sources_canonical {
+                    // One or more source L1 amendments were orphaned — reset the job.
+                    let updated = L2AggregationJob {
+                        status: L2JobStatus::PendingInputs,
+                        retry_count: job.retry_count,
+                        last_error: Some(
+                            "reset after reorg: source L1 amendment(s) no longer canonical".into(),
+                        ),
+                        updated_at_block: head,
+                        ..job.clone()
+                    };
+                    if let Err(e) = self.l2_job_store.put(&updated) {
+                        warn!("rebuild_settled: failed to reset L2 job {}: {e}", job.id);
+                    } else {
+                        l2j_reset += 1;
+                    }
+                }
+            }
+            if l2j_reset > 0 {
+                warn!("rebuild_settled: reset {l2j_reset} L2 jobs to PendingInputs after reorg");
+            }
+
+            // ── Step 2d: update L2 observability metrics ─────────────────────────
+            {
+                let pending_inputs = all_l2_jobs
+                    .iter()
+                    .filter(|j| matches!(j.status, L2JobStatus::PendingInputs))
+                    .count() as i64;
+                let ready_jobs = all_l2_jobs
+                    .iter()
+                    .filter(|j| matches!(j.status, L2JobStatus::Ready))
+                    .count() as i64;
+                self.metrics.stark_l2_pending_inputs.set(pending_inputs);
+                self.metrics.stark_l2_ready_jobs.set(ready_jobs);
+            }
+        }
+
+        // ── Step 3: update the in-memory settled set ──────────────────────────
+        let count = canonical.len();
+        let mut settled = self.settled_stark_sources.lock();
+        settled.clear();
+        settled.extend(canonical);
+        drop(settled);
+
+        let l1_count = self
+            .settled_stark_sources
+            .lock()
+            .iter()
+            .filter(|(l, _)| *l == 1)
+            .count() as i64;
         let lag = (head as i64 + 1).saturating_sub(l1_count).max(0);
         self.metrics.stark_frontier_lag.set(lag);
-        Ok(rebuilt)
+
+        if removed > 0 {
+            info!("rebuild_settled: removed {removed} stale `ss/` index entries after reorg");
+        }
+        Ok(count)
     }
 
     pub(crate) fn enqueue_stark_frontier_backlog(
@@ -1632,18 +1805,104 @@ impl<S: KvStore + 'static> Node<S> {
         if max_blocks == 0 || !self.config.node_role.runs_prover() {
             return Ok(0);
         }
-        if !self.pending_stark_settlements.lock().is_empty() {
-            return Ok(0);
-        }
+        // Note: we intentionally do NOT skip when pending_stark_settlements is
+        // non-empty.  The inner loop already skips blocks that are covered by a
+        // pending settlement, so the early-return here would incorrectly prevent
+        // seeding frontier blocks that come *after* the already-proved range.
         let head = self
             .chain_store
             .get_head_block()?
             .map(|block| block.number())
             .unwrap_or(0);
         let mut queued = 0usize;
+        // `pending_covered_sum` tracks blocks contributed to `queued` by old
+        // amendments pushed to `pending_stark_settlements`. Used to recompute
+        // `queued` after tasks.retain() removes covered source blocks.
+        let mut pending_covered_sum = 0usize;
         let mut tasks = Vec::new();
-        for number in 0..=head {
-            if queued >= max_blocks {
+        // Scan past max_blocks until the backlog contains enough source entries
+        // to satisfy the L1 minimum (MIN_L1_STARK_TXS). Without this, a chain
+        // with a long 0-tx prefix (e.g. pre-tx-worker genesis) would seed only
+        // empty blocks and the prover would produce a proof with too few entries
+        // (e.g. 2 < 512), which passes local storage but fails settlement
+        // validation (n_sigs and embedded-compression checks).
+        // Hard cap = 4 × max_blocks (at least DEFAULT_MAX_L1_RANGE_SOURCES × 4)
+        // to bound startup cost.
+        let hard_cap = max_blocks
+            .saturating_mul(4)
+            .max(DEFAULT_MAX_L1_RANGE_SOURCES * 4);
+        let mut seeded_entries = 0usize;
+
+        // Fast-path: compute an approximate scan start block so we skip over
+        // already-settled blocks without issuing a DB read per block.
+        //
+        // * Settled L1 source count ≈ frontier block number (sources are
+        //   sequential, one per canonical block from genesis).
+        // * We also check the highest block_number in pending_stark_settlements
+        //   so that we start seeding after the already-proved-but-unsettled range.
+        //
+        // A small lookback (16 blocks) guards against off-by-one or gap cases.
+        let settled_l1_count = self
+            .settled_stark_sources
+            .lock()
+            .iter()
+            .filter(|(l, _)| *l == 1)
+            .count() as u64;
+        // Compute the *contiguous* pending frontier: how far L1 pending amendments
+        // extend from the settled frontier WITHOUT gaps.  Using the raw
+        // `pending_max_block` would cause scan_start to jump past gap-pending proofs
+        // (proofs generated for tip blocks before the historical gap is filled),
+        // making the prover repeatedly generate tip proofs that fail ordering —
+        // a rejection-counter spin-loop.
+        let contiguous_pending_end = {
+            let pending = self.pending_stark_settlements.lock();
+            let mut ranges: Vec<(u64, u64)> = pending
+                .iter()
+                .filter(|a| a.layer == 1)
+                .filter_map(|a| {
+                    let start = a.range_start_block()?;
+                    Some((start, a.block_number))
+                })
+                .collect();
+            // Sort by range start so we can walk the chain in order.
+            ranges.sort_by_key(|(start, _)| *start);
+            let mut frontier = settled_l1_count;
+            for (start, end) in &ranges {
+                if *start <= frontier {
+                    // This amendment overlaps or immediately follows the current frontier.
+                    frontier = frontier.max(end.saturating_add(1));
+                } else {
+                    // Gap found — stop extending; don't jump past it.
+                    break;
+                }
+            }
+            frontier
+        };
+        // Anchor scan at the contiguous frontier (settled + gapless pending),
+        // NOT at backlog_max_block or raw pending_max_block.
+        // The inner loop's contains_source() check deduplicates overlap with
+        // blocks already in the backlog or settled.
+        //
+        // Also clamp to the drain frontier: if the prover drained tasks before a
+        // permanent gap, we must not re-seed those blocks — they can never
+        // accumulate enough entries to form a valid proof and would cause a
+        // drain-reseed infinite loop.
+        let drain_floor = self
+            .stark_drain_frontier
+            .load(std::sync::atomic::Ordering::Acquire);
+        let scan_start = contiguous_pending_end
+            .saturating_sub(16)  // small lookback for safety
+            .max(drain_floor);
+        info!(
+            settled_l1_count,
+            contiguous_pending_end, drain_floor, scan_start, head, "STARK seeding: scan parameters"
+        );
+
+        for number in scan_start..=head {
+            if queued >= max_blocks && seeded_entries >= MIN_L1_STARK_TXS {
+                break;
+            }
+            if queued >= hard_cap {
                 break;
             }
             let Some(hash) = self.chain_store.get_block_hash_by_number(number)? else {
@@ -1672,9 +1931,32 @@ impl<S: KvStore + 'static> Node<S> {
             if let Some(bytes) = self.amendment_store.get_amendment(&hash)? {
                 if let Ok(amendment) = ProofAmendment::from_json(&bytes) {
                     if self.validate_stark_amendment_ordering(&amendment).is_ok() {
-                        let covered = amendment.covered_hashes().len().max(1);
+                        let covered_hashes = amendment.covered_hashes();
+                        let covered_count = covered_hashes.len().max(1);
+                        let start = amendment.range_start_block().unwrap_or(0);
+                        info!(
+                            block = amendment.block_number,
+                            start_block = start,
+                            sources = covered_count,
+                            n_sigs = amendment.proof.n_sigs,
+                            "STARK seeding: existing amendment passes ordering; skipping covered range"
+                        );
+                        // Remove any source blocks already queued in `tasks` that
+                        // are covered by this amendment. Without this, the source
+                        // blocks inserted before we reach the end block create a
+                        // gap in the contiguous backlog run, causing
+                        // `pop_contiguous_with_min_entries` to return None.
+                        let covered_set: std::collections::HashSet<_> =
+                            covered_hashes.into_iter().collect();
+                        tasks.retain(|t: &ProofTask| {
+                            !t.source_hashes.iter().any(|s| covered_set.contains(s))
+                        });
+                        // Recompute seeded_entries from the retained tasks.
+                        seeded_entries = tasks.iter().map(|t| t.entries.len()).sum();
+                        // Recompute queued: retained regular tasks + all pending covered blocks.
+                        pending_covered_sum = pending_covered_sum.saturating_add(covered_count);
+                        queued = tasks.len().saturating_add(pending_covered_sum);
                         self.pending_stark_settlements.lock().push(amendment);
-                        queued = queued.saturating_add(covered);
                         continue;
                     }
                 }
@@ -1685,31 +1967,13 @@ impl<S: KvStore + 'static> Node<S> {
             let Some(block) = self.chain_store.get_block_by_hash(&hash)? else {
                 continue;
             };
-            let entries: Vec<SigBatchEntry> = block
-                .transactions
-                .iter()
-                .map(|tx| {
-                    let mut msg_hash = [0u8; 32];
-                    msg_hash.copy_from_slice(tx.hash().as_bytes());
-                    let pk_hash = match &tx.pubkey_mode {
-                        shell_core::PubkeyMode::Embedded(pk) => {
-                            let mut h = [0u8; 32];
-                            let copy_len = pk.len().min(32);
-                            h[..copy_len].copy_from_slice(&pk[..copy_len]);
-                            h
-                        }
-                        shell_core::PubkeyMode::Reference => {
-                            let mut h = [0u8; 32];
-                            h[..20].copy_from_slice(tx.from.0.as_slice());
-                            h
-                        }
-                    };
-                    SigBatchEntry { msg_hash, pk_hash }
-                })
-                .collect();
+            let entries: Vec<SigBatchEntry> = stark_sources::block_to_sig_batch_entries(&block);
             let mut hash_bytes = [0u8; 32];
             hash_bytes.copy_from_slice(hash.as_bytes());
             let original_size = self.stark_source_original_size(&hash, &block, entries.len())?;
+            if !entries.is_empty() {
+                seeded_entries = seeded_entries.saturating_add(entries.len());
+            }
             tasks.push(ProofTask::with_sources(
                 hash_bytes,
                 number,
@@ -1721,15 +1985,28 @@ impl<S: KvStore + 'static> Node<S> {
             queued += 1;
         }
         if !tasks.is_empty() {
+            let tasks_count = tasks.len();
+            let tasks_entries: usize = tasks.iter().map(|t| t.entries.len()).sum();
+            let tasks_first = tasks.first().map(|t| t.block_number).unwrap_or(0);
+            let tasks_last = tasks.last().map(|t| t.block_number).unwrap_or(0);
             let mut backlog = self.proof_backlog.lock();
-            // Guard against starvation: if the backlog already contains tasks at a
-            // LOWER block number than what we're about to push_front, adding our tasks
-            // would displace the actual frontier and cause the prover to loop over
-            // already-cached ranges while the true frontier is never reached.
-            // Skip this seeding pass — the frontier blocks will be processed on the
-            // next prover iteration, and we'll re-seed on the following call.
             let first_new_block = tasks[0].block_number;
-            let min_existing = backlog.min_block_number_for_layer(tasks[0].layer);
+            let layer = tasks[0].layer;
+            let min_existing = backlog.min_block_number_for_layer(layer);
+            let max_existing = backlog.max_block_number_for_layer(layer);
+            info!(
+                tasks = tasks_count,
+                entries = tasks_entries,
+                first_block = tasks_first,
+                last_block = tasks_last,
+                backlog_min = min_existing,
+                backlog_max = max_existing,
+                "STARK seeding: inserting tasks into backlog"
+            );
+
+            // Case 1: backlog is empty, or new tasks are at/before the existing
+            // minimum → insert at the front so the prover processes the lowest
+            // numbered block next (priority frontier catch-up).
             if min_existing.is_none_or(|min| first_new_block <= min) {
                 for task in tasks.into_iter().rev() {
                     if !task
@@ -1740,7 +2017,28 @@ impl<S: KvStore + 'static> Node<S> {
                         backlog.push_front(task);
                     }
                 }
+            } else if max_existing.is_some_and(|max| first_new_block == max + 1) {
+                // Case 2: new tasks start immediately after the backlog tail →
+                // append to the back. This is contiguous extension: the prover
+                // will process the existing window first, then pick up these
+                // blocks without any ordering inversion. Crucially, this is
+                // what breaks the deadlock when blocks 1-1024 are all empty
+                // and block 1025+ contains the first transactions: the
+                // pop_contiguous extension scan can see block 1025 at
+                // pending[1024] and extend the window past max_sources.
+                for task in tasks.into_iter() {
+                    if !task
+                        .source_hashes
+                        .iter()
+                        .any(|source| backlog.contains_source(task.layer, source))
+                    {
+                        backlog.push(task);
+                    }
+                }
             }
+            // Case 3: new tasks jump the frontier (first_new_block > min + gap)
+            // → skip this seeding pass; the next prover iteration will advance
+            // the frontier and re-seed correctly.
         }
         Ok(queued)
     }

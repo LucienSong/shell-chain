@@ -192,18 +192,17 @@ impl<S: KvStore + 'static> Node<S> {
 
         let mut drained_stark_settlements = prover.take_pending_stark_settlements();
         drained_stark_settlements.sort_by(|a, b| {
-            (
-                a.layer,
-                a.block_number,
-                a.block_hash.as_bytes(),
-                a.prover.0.as_slice(),
-            )
-                .cmp(&(
-                    b.layer,
-                    b.block_number,
-                    b.block_hash.as_bytes(),
-                    b.prover.0.as_slice(),
-                ))
+            let a_start = a.range_start_block().unwrap_or(a.block_number);
+            let b_start = b.range_start_block().unwrap_or(b.block_number);
+            a.layer
+                .cmp(&b.layer)
+                .then_with(|| a_start.cmp(&b_start))
+                // If multiple proofs cover the same frontier start, settle the
+                // widest range first so short overlapping proofs cannot starve
+                // historical catch-up.
+                .then_with(|| b.block_number.cmp(&a.block_number))
+                .then_with(|| a.block_hash.as_bytes().cmp(b.block_hash.as_bytes()))
+                .then_with(|| a.prover.0.as_slice().cmp(b.prover.0.as_slice()))
         });
         let mut settled_stark_proofs = Vec::new();
         let mut settled_stark_artifacts = Vec::new();
@@ -305,29 +304,7 @@ impl<S: KvStore + 'static> Node<S> {
         // C3: If STARK aggregation is enabled, collect sig batch entries now.
         // G4: ProofTask pushed to backlog AFTER signing so we have the real block hash.
         let stark_entries: Option<Vec<SigBatchEntry>> = if self.stark_aggregation {
-            let entries: Vec<SigBatchEntry> = included_txs
-                .iter()
-                .map(|tx| {
-                    let mut msg_hash = [0u8; 32];
-                    msg_hash.copy_from_slice(tx.hash().as_bytes());
-                    let pk_hash = match &tx.pubkey_mode {
-                        shell_core::PubkeyMode::Embedded(ref pk) => {
-                            let mut h = [0u8; 32];
-                            let copy_len = pk.len().min(32);
-                            h[..copy_len].copy_from_slice(&pk[..copy_len]);
-                            h
-                        }
-                        shell_core::PubkeyMode::Reference => {
-                            // Use sender address bytes as pk identifier for Reference-mode txs.
-                            let mut h = [0u8; 32];
-                            h[..20].copy_from_slice(tx.from.0.as_slice());
-                            h
-                        }
-                    };
-                    SigBatchEntry { msg_hash, pk_hash }
-                })
-                .collect();
-            Some(entries)
+            Some(stark_sources::entries_from_txs(&included_txs))
         } else {
             None
         };
@@ -392,6 +369,17 @@ impl<S: KvStore + 'static> Node<S> {
             self.store_stark_artifacts(amendment, Some(*settlement_tx_hash))?;
         }
         prover.record_settled_sources(&settled_stark_proofs);
+        if !settled_stark_proofs.is_empty() {
+            let l1_count = self
+                .settled_stark_sources
+                .lock()
+                .iter()
+                .filter(|(l, _)| *l == 1)
+                .count() as i64;
+            let lag = (block.number() as i64 + 1).saturating_sub(l1_count).max(0);
+            self.metrics.stark_frontier_lag.set(lag);
+        }
+        self.feed_l2_scheduler_from_settlements(&settled_stark_proofs, block.number());
         consensus.register_fork_choice_block(block_hash, block.header.parent_hash, block.number());
 
         // Remove included transactions from mempool.

@@ -61,25 +61,32 @@ impl<S: KvStore + 'static> Node<S> {
         }
 
         let covered_hashes = amendment.covered_hashes();
-        let source_count = covered_hashes.len().max(1);
         let mut mint = U256::from(BASE_STARK_MINT_WEI);
         for _ in 0..amendment.layer {
             mint /= U256::from(2u8);
         }
-        mint = mint.saturating_mul(U256::from(source_count));
 
         let mut gas_share = U256::ZERO;
+        let source_count;
         if amendment.layer == 1 {
+            // For L1 proofs, base mint counts only covered source blocks that have
+            // user transactions.  0tx canonical blocks are included in source_hashes
+            // for continuity but must not inflate the reward — they contribute no
+            // witness entries and earn no base mint multiplier.
+            let mut non_empty_count = 0usize;
             let mut total_effective_fees = U256::ZERO;
-            for source_hash in covered_hashes {
-                let Some(source_block) = self.chain_store.get_block_by_hash(&source_hash)? else {
+            for source_hash in &covered_hashes {
+                let Some(source_block) = self.chain_store.get_block_by_hash(source_hash)? else {
                     return Err(NodeError::Startup(format!(
                         "STARK reward source block not found: {source_hash}"
                     )));
                 };
+                if !source_block.transactions.is_empty() {
+                    non_empty_count += 1;
+                }
                 let receipts = self
                     .chain_store
-                    .get_receipts(&source_hash)?
+                    .get_receipts(source_hash)?
                     .unwrap_or_default();
                 for (idx, tx) in source_block.transactions.iter().enumerate() {
                     let gas_used = receipts.get(idx).map(|r| r.gas_used).unwrap_or(0);
@@ -93,8 +100,16 @@ impl<S: KvStore + 'static> Node<S> {
                 }
             }
             gas_share = total_effective_fees / U256::from(2u8);
+            // At least 1 so a qualifying proof (n_sigs >= MIN_L1_STARK_TXS) always
+            // earns some base mint even if all tx blocks are covered by a single block.
+            source_count = non_empty_count.max(1);
+        } else {
+            // For L2+ proofs, source_hashes are lower-layer proof artifacts, not
+            // raw block hashes.  Count all covered sources for the base mint.
+            source_count = covered_hashes.len().max(1);
         }
 
+        mint = mint.saturating_mul(U256::from(source_count));
         Ok(mint.saturating_add(gas_share))
     }
 
@@ -166,11 +181,236 @@ impl<S: KvStore + 'static> Node<S> {
         ))
     }
 
+    /// Cryptographically verify that a [`ProofAmendment`] is bound to the
+    /// canonical source entries it claims to cover.
+    ///
+    /// This is a **separate, more expensive check** from
+    /// [`validate_stark_amendment_ordering`].  Call it after ordering passes,
+    /// at gossip-receipt and settlement-import time (not for locally-generated
+    /// proofs, which are already valid by construction).
+    ///
+    /// For L1 amendments the check reconstructs every [`SigBatchEntry`] from
+    /// the covered source blocks and verifies:
+    ///
+    /// 1. `proof.n_sigs == entries.len()` — declared entry count matches
+    ///    canonical transaction count in the covered range.
+    /// 2. `proof.batch_root_bytes == compute_batch_root(entries)` — the
+    ///    declared batch root is the true accumulator for those entries.
+    /// 3. `verify_sig_batch(&proof)` — the Winterfell STARK proof is valid
+    ///    for the declared (batch_root, n_sigs) public inputs.
+    ///
+    /// For L2 amendments the check:
+    ///
+    /// 1. Loads each covered source L1 [`ProofAmendment`] from the amendment
+    ///    store.
+    /// 2. Verifies every source is a settled L1 amendment (`layer == 1`).
+    /// 3. Computes `expected_aggregate_root = compute_aggregate_root(l1_roots)`
+    ///    and compares to `amendment.proof.batch_root_bytes`.
+    /// 4. Verifies `amendment.proof.n_sigs == l1_source_count`.
+    /// 5. Attempts recursive proof verification via [`get_recursive_prover()`].
+    ///    Until the recursive feature is enabled this returns a clear log that
+    ///    verification was skipped rather than silently accepting.
+    pub(crate) fn validate_stark_proof_source_binding(
+        &self,
+        amendment: &ProofAmendment,
+    ) -> Result<(), NodeError> {
+        if amendment.layer == 1 {
+            return self.validate_l1_proof_source_binding(amendment);
+        }
+        if amendment.layer == 2 {
+            return self.validate_l2_proof_source_binding(amendment);
+        }
+        // layer > 2: not yet defined — reject rather than silently accept.
+        Err(NodeError::Startup(format!(
+            "STARK amendment layer {} is not supported (max layer == 2)",
+            amendment.layer
+        )))
+    }
+
+    fn validate_l1_proof_source_binding(
+        &self,
+        amendment: &ProofAmendment,
+    ) -> Result<(), NodeError> {
+        // Reconstruct canonical entries from all covered source blocks.
+        let covered = amendment.covered_hashes();
+        let mut all_entries: Vec<shell_stark_prover::prover::SigBatchEntry> = Vec::new();
+        for source_hash in &covered {
+            let block = self
+                .chain_store
+                .get_block_by_hash(source_hash)?
+                .ok_or_else(|| {
+                    NodeError::Startup(format!(
+                        "STARK proof binding: source block {source_hash} not found"
+                    ))
+                })?;
+            all_entries.extend(stark_sources::block_to_sig_batch_entries(&block));
+        }
+
+        // Check 1: declared n_sigs must match the actual canonical entry count.
+        if all_entries.len() != amendment.proof.n_sigs {
+            self.metrics.stark_settlements_rejected.inc();
+            return Err(NodeError::Startup(format!(
+                "STARK proof n_sigs {} does not match reconstructed entry count {} \
+                 for source range #{}..=#{}",
+                amendment.proof.n_sigs,
+                all_entries.len(),
+                amendment
+                    .range_start_block()
+                    .unwrap_or(amendment.block_number),
+                amendment.block_number,
+            )));
+        }
+
+        // Check 2: recompute the batch root and compare.
+        let expected_root = shell_stark_prover::prover::compute_batch_root(&all_entries);
+        if expected_root != amendment.proof.batch_root_bytes {
+            self.metrics.stark_settlements_rejected.inc();
+            return Err(NodeError::Startup(format!(
+                "STARK proof batch_root_bytes mismatch for source range #{}..=#{}",
+                amendment
+                    .range_start_block()
+                    .unwrap_or(amendment.block_number),
+                amendment.block_number,
+            )));
+        }
+
+        // Check 3: full Winterfell STARK verification.
+        verify_sig_batch(&amendment.proof).map_err(|e| {
+            self.metrics.stark_settlements_rejected.inc();
+            NodeError::Startup(format!(
+                "STARK proof verification failed for block #{}: {e}",
+                amendment.block_number
+            ))
+        })?;
+
+        Ok(())
+    }
+
+    fn validate_l2_proof_source_binding(
+        &self,
+        amendment: &ProofAmendment,
+    ) -> Result<(), NodeError> {
+        debug_assert_eq!(amendment.layer, 2);
+
+        let covered = amendment.covered_hashes();
+
+        // Load each source L1 amendment and collect batch roots.
+        let mut l1_roots: Vec<u128> = Vec::with_capacity(covered.len());
+        for source_hash in &covered {
+            let bytes = self
+                .amendment_store
+                .get_amendment(source_hash)?
+                .ok_or_else(|| {
+                    NodeError::Startup(format!(
+                        "STARK L2 proof binding: source L1 amendment for {source_hash} not found"
+                    ))
+                })?;
+            let source_amendment: ProofAmendment = serde_json::from_slice(&bytes).map_err(|e| {
+                NodeError::Startup(format!(
+                    "STARK L2 proof binding: failed to deserialise source amendment \
+                         for {source_hash}: {e}"
+                ))
+            })?;
+
+            // Every source must be a settled L1 amendment.
+            // TODO: also verify canonical/settled status via settled_source_index
+            // or l2_input_index once L2 paths are fully wired (currently only
+            // `layer == 1` is enforced; un-settled L1 amendments are not rejected).
+            if source_amendment.layer != 1 {
+                self.metrics.stark_settlements_rejected.inc();
+                return Err(NodeError::Startup(format!(
+                    "STARK L2 amendment source {source_hash} is layer {} (expected L1)",
+                    source_amendment.layer
+                )));
+            }
+
+            // Extract the L1 batch root as a u128 for aggregate computation.
+            let root_bytes = source_amendment.proof.batch_root_bytes;
+            let root = u128::from_le_bytes(root_bytes);
+            l1_roots.push(root);
+        }
+
+        // Check 1: declared n_sigs (= number of L1 proofs) must match.
+        if amendment.proof.n_sigs != l1_roots.len() {
+            self.metrics.stark_settlements_rejected.inc();
+            return Err(NodeError::Startup(format!(
+                "STARK L2 amendment n_sigs {} does not match source L1 proof count {}",
+                amendment.proof.n_sigs,
+                l1_roots.len()
+            )));
+        }
+
+        // Check 2: aggregate root must match compute_aggregate_root(l1_roots).
+        let expected_agg_root =
+            shell_stark_prover::recursive_air::compute_aggregate_root(&l1_roots);
+        let declared_agg_root = u128::from_le_bytes(amendment.proof.batch_root_bytes);
+        if expected_agg_root != declared_agg_root {
+            self.metrics.stark_settlements_rejected.inc();
+            return Err(NodeError::Startup(format!(
+                "STARK L2 amendment aggregate_root mismatch: expected {expected_agg_root}, \
+                 got {declared_agg_root}"
+            )));
+        }
+
+        // Check 3: recursive proof verification.
+        let pub_inputs = shell_stark_prover::RecursivePublicInputs {
+            l1_roots,
+            aggregate_root: expected_agg_root,
+            start_block: amendment
+                .range_start_block()
+                .unwrap_or(amendment.block_number),
+            end_block: amendment.block_number,
+        };
+        let prover = shell_stark_prover::get_recursive_prover();
+        // Decode the recursive proof from amendment.proof.proof_bytes.
+        let rec_proof = serde_json::from_slice::<shell_stark_prover::RecursiveProof>(
+            &amendment.proof.proof_bytes,
+        )
+        .map_err(|e| {
+            NodeError::Startup(format!(
+                "STARK L2 amendment: failed to decode recursive proof bytes: {e}"
+            ))
+        })?;
+        match prover.verify_aggregation(&rec_proof, &pub_inputs) {
+            Ok(()) => {}
+            Err(shell_stark_prover::RecursiveProverError::NotImplemented) => {
+                // Scaffold: verification is not yet active.  Log clearly and
+                // reject L2 settlements until the real verifier is in place.
+                self.metrics.stark_settlements_rejected.inc();
+                return Err(NodeError::Startup(
+                    "STARK L2 amendment rejected: recursive proof verifier is not yet \
+                     implemented (feature = \"recursive\" not enabled)"
+                        .into(),
+                ));
+            }
+            Err(e) => {
+                self.metrics.stark_settlements_rejected.inc();
+                return Err(NodeError::Startup(format!(
+                    "STARK L2 recursive proof verification failed: {e}"
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
     pub(crate) fn validate_stark_amendment_ordering(
         &self,
         amendment: &ProofAmendment,
     ) -> Result<(), NodeError> {
-        self.validate_stark_amendment_ordering_with_overlay(amendment, &HashMap::new())
+        // Include pending (queued-but-unsettled) settlements in the overlay so that
+        // consecutive amendments pass the frontier ordering check even when the
+        // preceding range hasn't yet been mined into a canonical block.
+        let mut overlay: HashMap<ShellHash, u32> = HashMap::new();
+        {
+            let pending = self.pending_stark_settlements.lock();
+            for pending_amendment in pending.iter() {
+                for source in pending_amendment.covered_hashes() {
+                    overlay.insert(source, pending_amendment.layer);
+                }
+            }
+        }
+        self.validate_stark_amendment_ordering_with_overlay(amendment, &overlay)
             .inspect_err(|_| self.metrics.stark_settlements_rejected.inc())
     }
 
@@ -187,6 +427,170 @@ impl<S: KvStore + 'static> Node<S> {
             }
         }
         Ok(())
+    }
+
+    /// Feed canonical L1 STARK settlements into the L2 aggregation scheduler.
+    ///
+    /// Called after each block's settlements are committed and recorded.
+    /// For each L1 amendment in `settlements`:
+    ///  - builds a [`SettledL1Input`] and feeds it to `aggregation_scheduler`;
+    ///  - if the amendment creates a gap, logs it and updates the gap metric;
+    ///  - after all amendments, ticks the scheduler's block clock with
+    ///    `on_block(current_block)` to check interval / epoch triggers.
+    ///
+    /// When any trigger fires, creates and durably stores an [`L2AggregationJob`]
+    /// so restart safety and observability are immediate.
+    pub(crate) fn feed_l2_scheduler_from_settlements(
+        &self,
+        settlements: &[ProofAmendment],
+        current_block: u64,
+    ) {
+        if !self.config.l2_stark_mode.is_enabled() {
+            self.metrics.stark_l2_blocked_gap_start.set(0);
+            self.metrics.stark_l2_pending_inputs.set(0);
+            self.metrics.stark_l2_ready_jobs.set(0);
+            return;
+        }
+
+        let l1_amendments: Vec<&ProofAmendment> =
+            settlements.iter().filter(|a| a.layer == 1).collect();
+
+        if l1_amendments.is_empty() {
+            // Still tick on_block so interval/epoch triggers can fire.
+            let trigger = self.aggregation_scheduler.lock().on_block(current_block);
+            if let Some(t) = trigger {
+                self.create_l2_job_from_trigger(t, current_block);
+            }
+            return;
+        }
+
+        for amendment in &l1_amendments {
+            let start_block = amendment
+                .range_start_block()
+                .unwrap_or(amendment.block_number);
+            let batch_root = u128::from_le_bytes(amendment.proof.batch_root_bytes);
+            let input = SettledL1Input {
+                start_block,
+                end_block: amendment.block_number,
+                batch_root,
+                source_hash: *amendment.block_hash.as_bytes(),
+            };
+
+            match self
+                .aggregation_scheduler
+                .lock()
+                .on_settled_l1_amendment(input)
+            {
+                Ok(()) => {
+                    // Input accepted; no trigger yet (trigger fires on on_block).
+                    self.metrics.stark_l2_blocked_gap_start.set(0);
+                }
+                Err(gap) => {
+                    warn!(
+                        expected = gap.expected_start,
+                        received = gap.received_start,
+                        "L2 scheduler blocked: L1 proof gap detected; waiting for source"
+                    );
+                    self.metrics
+                        .stark_l2_blocked_gap_start
+                        .set(gap.expected_start as i64);
+                }
+            }
+        }
+
+        // Tick block clock for interval / epoch triggers.
+        let trigger = self.aggregation_scheduler.lock().on_block(current_block);
+        if let Some(t) = trigger {
+            self.metrics
+                .stark_l2_last_trigger_block
+                .set(current_block as i64);
+            self.create_l2_job_from_trigger(t, current_block);
+        }
+
+        // Update pending-inputs metric.
+        let pending = self.aggregation_scheduler.lock().pending_proof_count() as i64;
+        self.metrics.stark_l2_pending_inputs.set(pending);
+    }
+
+    fn create_l2_job_from_trigger(&self, trigger: AggregationTrigger, current_block: u64) {
+        let l1_source_hashes: Vec<ShellHash> = trigger
+            .inputs
+            .iter()
+            .map(|i| ShellHash::from(i.source_hash))
+            .collect();
+        let l1_batch_roots: Vec<[u8; 32]> = trigger
+            .inputs
+            .iter()
+            .map(|i| {
+                let mut arr = [0u8; 32];
+                arr[..16].copy_from_slice(&i.batch_root.to_le_bytes());
+                arr
+            })
+            .collect();
+        let start_block = trigger
+            .inputs
+            .first()
+            .map(|i| i.start_block)
+            .unwrap_or(current_block);
+        let end_block = trigger
+            .inputs
+            .last()
+            .map(|i| i.end_block)
+            .unwrap_or(current_block);
+
+        let id = L2AggregationJob::compute_id(&l1_source_hashes);
+
+        // Skip if a job with this ID already exists (idempotent).
+        match self.l2_job_store.get(&id) {
+            Ok(Some(existing)) => {
+                debug!(
+                    job_id = %id,
+                    status = ?existing.status,
+                    "L2 scheduler trigger: job already exists, skipping"
+                );
+                return;
+            }
+            Err(e) => {
+                warn!("L2 scheduler trigger: failed to check existing job {id}: {e}");
+                return;
+            }
+            Ok(None) => {}
+        }
+
+        let job = L2AggregationJob {
+            id,
+            status: L2JobStatus::Ready,
+            l1_source_hashes,
+            start_block,
+            end_block,
+            l1_batch_roots,
+            aggregate_root: None,
+            retry_count: 0,
+            last_error: None,
+            created_at_block: current_block,
+            updated_at_block: current_block,
+        };
+
+        if let Err(e) = self.l2_job_store.put(&job) {
+            warn!("L2 scheduler trigger: failed to store job {}: {e}", job.id);
+            return;
+        }
+
+        // Update ready-jobs metric.
+        let ready = self
+            .l2_job_store
+            .jobs_with_status(L2JobStatus::Ready)
+            .map(|v| v.len())
+            .unwrap_or(0) as i64;
+        self.metrics.stark_l2_ready_jobs.set(ready);
+
+        info!(
+            job_id = %job.id,
+            start_block = job.start_block,
+            end_block = job.end_block,
+            n_l1_proofs = job.l1_batch_roots.len(),
+            "L2 aggregation job created and stored"
+        );
     }
 
     pub(crate) fn store_stark_artifacts(
@@ -328,7 +732,26 @@ impl<S: KvStore + 'static> Node<S> {
             .get_head_block()?
             .map(|block| block.number())
             .unwrap_or(0);
-        for number in 0..=head {
+
+        // Fast-path: estimate the frontier to avoid an O(n) scan from genesis.
+        //
+        // The number of L1-settled sources in `settled_stark_sources` ≈ the block
+        // number of the canonical settlement frontier (one source per canonical block
+        // from genesis in normal operation).  The overlay contains pending-but-unsettled
+        // sources that have already passed validation and are queued for inclusion.
+        //
+        // Combined count - small lookback ≈ the first unsettled block, so we only
+        // need to scan a handful of blocks rather than the entire chain.
+        let settled_count = {
+            let lock = self.settled_stark_sources.lock();
+            lock.iter().filter(|(l, _)| *l == layer).count() as u64
+        };
+        let overlay_count = overlay_layers.values().filter(|&&l| l >= layer).count() as u64;
+        let scan_start = settled_count
+            .saturating_add(overlay_count)
+            .saturating_sub(16); // small lookback to guard against gaps
+
+        for number in scan_start..=head {
             let Some(hash) = self.chain_store.get_block_hash_by_number(number)? else {
                 continue;
             };

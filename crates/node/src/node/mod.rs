@@ -8,6 +8,7 @@ mod event_loop;
 mod invariants;
 mod p2p_handlers;
 mod readiness;
+pub(crate) mod stark_sources;
 mod system_rewards;
 
 pub(crate) use std::collections::{BTreeMap, HashMap, HashSet};
@@ -36,8 +37,9 @@ pub(crate) use shell_network::{NetworkMessage, NetworkService};
 pub(crate) use shell_primitives::{Address, Bytes, ShellHash, U256};
 pub(crate) use shell_rpc::DevRpcControl;
 pub(crate) use shell_storage::{
-    validator_registry_addr, BodyPruner, ChainStore, KvStore, ProofAmendmentStore,
-    SettledSourceIndex, StatePruner, WitnessPruner, WitnessStore, WorldState,
+    validator_registry_addr, BodyPruner, ChainStore, KvStore, L2AggregationJob, L2InputIndex,
+    L2JobStatus, L2JobStore, ProofAmendmentStore, SettledSourceIndex, StatePruner, WitnessPruner,
+    WitnessStore, WorldState,
 };
 
 pub(crate) use crate::config::NodeConfig;
@@ -50,7 +52,8 @@ pub(crate) use readiness::{ProductionReadiness, ProductionReadinessState};
 
 pub(crate) use shell_stark_prover::{
     prover::{verify_sig_batch, SigBatchEntry},
-    ProofAmendment, ProofBacklog, ProofTask, DEFAULT_MAX_L1_RANGE_SOURCES, MIN_L1_STARK_TXS,
+    AggregationConfig, AggregationScheduler, AggregationTrigger, ProofAmendment, ProofBacklog,
+    ProofTask, SettledL1Input, DEFAULT_MAX_L1_RANGE_SOURCES, MIN_L1_STARK_TXS,
 };
 
 /// A running shell-chain node.
@@ -87,6 +90,17 @@ pub struct Node<S: KvStore + 'static> {
     /// Persistent index of settled (layer, source_hash) pairs. Written on every
     /// settlement; loaded at startup to skip the O(n-blocks) chain rebuild.
     settled_source_index: SettledSourceIndex<S>,
+    /// Durable index of canonical L1 amendments available as L2 aggregation inputs.
+    /// Keyed by the amendment's final source hash (`l2i/` prefix in KV).
+    /// Only populated from canonical `StarkReward` system txs during
+    /// `rebuild_settled_stark_sources_from_chain` and `record_settled_sources`.
+    pub(crate) l2_input_index: L2InputIndex<S>,
+    /// Durable store for L2 recursive aggregation jobs (`l2j/` prefix in KV).
+    /// Keyed by deterministic job ID (blake3 of sorted L1 source hashes).
+    pub(crate) l2_job_store: L2JobStore<S>,
+    /// L2 aggregation scheduler — fed canonical settled L1 proofs and emits
+    /// triggers when a contiguous window is ready for recursive proving.
+    aggregation_scheduler: parking_lot::Mutex<AggregationScheduler>,
     /// Compression-valid STARK proof amendments waiting to be settled in the
     /// next locally produced block.
     pending_stark_settlements: Arc<parking_lot::Mutex<Vec<ProofAmendment>>>,
@@ -127,6 +141,13 @@ pub struct Node<S: KvStore + 'static> {
     /// Recent tx gossip timestamps used to avoid rebroadcasting the same large
     /// PQ-signed transactions too frequently.
     tx_rebroadcast_seen: parking_lot::Mutex<HashMap<ShellHash, std::time::Instant>>,
+    /// Drain frontier: the highest gap-at-block seen across all prover drain
+    /// operations in this process lifetime.  Shared with ProverService so the
+    /// seeding function can skip blocks that were already drained (and therefore
+    /// can never accumulate enough entries to form a valid proof on their own).
+    /// This prevents the drain-reseed infinite loop where drained sparse blocks
+    /// are immediately re-inserted at the backlog front by the seeder.
+    pub(crate) stark_drain_frontier: Arc<std::sync::atomic::AtomicU64>,
 }
 
 const SYNC_RETRY_BASE_INTERVAL_SECS: u64 = 5;
@@ -387,6 +408,9 @@ struct ProverOrchestratorBoundary<'a, S: KvStore + 'static> {
     pending_stark_settlements: &'a Arc<parking_lot::Mutex<Vec<ProofAmendment>>>,
     settled_stark_sources: &'a parking_lot::Mutex<HashSet<(u32, ShellHash)>>,
     settled_source_index: &'a SettledSourceIndex<S>,
+    l2_input_index: &'a L2InputIndex<S>,
+    #[allow(dead_code)] // scaffolded for future L2 orchestration
+    l2_job_store: &'a L2JobStore<S>,
     metrics: &'a Arc<Metrics>,
 }
 
@@ -431,6 +455,10 @@ impl<'a, S: KvStore + 'static> ProverOrchestratorBoundary<'a, S> {
         for amendment in amendments {
             for source in amendment.covered_hashes() {
                 let _ = self.settled_source_index.put(amendment.layer, &source);
+            }
+            // Record the final source of each L1 amendment as a canonical L2 input.
+            if amendment.layer == 1 {
+                let _ = self.l2_input_index.put(&amendment.block_hash);
             }
         }
     }
@@ -542,6 +570,10 @@ impl<S: KvStore + 'static> Node<S> {
         let metrics = Arc::new(Metrics::new().expect("failed to register Prometheus metrics"));
         let amendment_store = ProofAmendmentStore::new(store.clone());
         let settled_source_index = SettledSourceIndex::new(store.clone());
+        let l2_input_index = L2InputIndex::new(store.clone());
+        let l2_job_store = L2JobStore::new(store.clone());
+        let aggregation_scheduler =
+            parking_lot::Mutex::new(AggregationScheduler::new(AggregationConfig::default(), 0));
 
         // F-094: Recover finalized state from persistent storage on restart.
         let (fin_number, fin_hash) = {
@@ -593,6 +625,9 @@ impl<S: KvStore + 'static> Node<S> {
             proof_backlog: Arc::new(parking_lot::Mutex::new(ProofBacklog::new())),
             amendment_store,
             settled_source_index,
+            l2_input_index,
+            l2_job_store,
+            aggregation_scheduler,
             pending_stark_settlements: Arc::new(parking_lot::Mutex::new(Vec::new())),
             settled_stark_sources: parking_lot::Mutex::new(HashSet::new()),
             equivocation_queue: parking_lot::Mutex::new(Vec::new()),
@@ -618,6 +653,7 @@ impl<S: KvStore + 'static> Node<S> {
                 std::time::Duration::from_secs(300),
             )),
             tx_rebroadcast_seen: parking_lot::Mutex::new(HashMap::new()),
+            stark_drain_frontier: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
@@ -647,6 +683,8 @@ impl<S: KvStore + 'static> Node<S> {
             pending_stark_settlements: &self.pending_stark_settlements,
             settled_stark_sources: &self.settled_stark_sources,
             settled_source_index: &self.settled_source_index,
+            l2_input_index: &self.l2_input_index,
+            l2_job_store: &self.l2_job_store,
             metrics: &self.metrics,
         }
     }
@@ -1116,7 +1154,21 @@ impl<S: KvStore + 'static> Node<S> {
         {
             let mut wpruner = self.witness_pruner.write();
             if !wpruner.is_archive() {
-                match wpruner.prune_before(block_number, &self.chain_store, &self.witness_store) {
+                // Guard: never prune witnesses for blocks that have not yet been
+                // STARK-proved.  The frontier is the count of settled L1 sources,
+                // i.e. the first unproved block number.
+                let stark_frontier = self
+                    .settled_stark_sources
+                    .lock()
+                    .iter()
+                    .filter(|(l, _)| *l == 1)
+                    .count() as u64;
+                match wpruner.prune_before(
+                    block_number,
+                    stark_frontier,
+                    &self.chain_store,
+                    &self.witness_store,
+                ) {
                     Ok(result) => {
                         if result.pruned_count > 0 {
                             tracing::info!(
@@ -1828,6 +1880,39 @@ mod tests {
     }
 
     #[test]
+    fn stark_settlement_prefers_widest_same_start_range() {
+        let (node, signer) = setup_node();
+        store_genesis(&node);
+        let genesis_hash = node
+            .chain_store
+            .get_block_hash_by_number(0)
+            .unwrap()
+            .expect("genesis hash");
+        let hashes = produce_witnessed_blocks(&node, &signer, 3);
+
+        let short = dummy_ordered_amendment(1, vec![genesis_hash, hashes[0]], 1);
+        let wide =
+            dummy_ordered_amendment(1, vec![genesis_hash, hashes[0], hashes[1], hashes[2]], 3);
+
+        node.pending_stark_settlements.lock().extend([short, wide]);
+        let settlement_block = node.produce_block(&signer, 100).unwrap();
+
+        assert_eq!(
+            settlement_block
+                .system_transactions
+                .iter()
+                .filter(|tx| tx.kind == SystemTxKind::StarkReward)
+                .count(),
+            1,
+            "overlapping same-start proofs should produce only one reward settlement"
+        );
+        assert!(
+            node.settled_stark_sources.lock().contains(&(1, hashes[2])),
+            "the widest same-start proof should be settled first"
+        );
+    }
+
+    #[test]
     fn import_invalid_stark_settlement_does_not_poison_settled_index() {
         let (leader, signer) = setup_node();
         store_genesis(&leader);
@@ -1934,6 +2019,35 @@ mod tests {
     }
 
     #[test]
+    fn disabled_l2_mode_does_not_feed_scheduler_or_create_jobs() {
+        let (node, _signer) = setup_node();
+        assert_eq!(
+            node.config.l2_stark_mode,
+            crate::config::L2StarkMode::Disabled
+        );
+
+        node.metrics.stark_l2_blocked_gap_start.set(123);
+        node.metrics.stark_l2_pending_inputs.set(456);
+        node.metrics.stark_l2_ready_jobs.set(789);
+
+        let settlements: Vec<ProofAmendment> = (10u64..18)
+            .map(|block| {
+                dummy_ordered_amendment(1, vec![ShellHash::from([block as u8; 32])], block)
+            })
+            .collect();
+        node.feed_l2_scheduler_from_settlements(&settlements, 100);
+
+        assert_eq!(node.metrics.stark_l2_blocked_gap_start.get(), 0);
+        assert_eq!(node.metrics.stark_l2_pending_inputs.get(), 0);
+        assert_eq!(node.metrics.stark_l2_ready_jobs.get(), 0);
+        assert_eq!(node.aggregation_scheduler.lock().pending_proof_count(), 0);
+        assert!(
+            node.l2_job_store.all_jobs().unwrap().is_empty(),
+            "disabled mode must not create L2 jobs"
+        );
+    }
+
+    #[test]
     fn stark_settled_index_survives_simulated_restart() {
         let (node, signer) = setup_node();
         store_genesis(&node);
@@ -2014,6 +2128,66 @@ mod tests {
         assert!(
             dup_err.is_err(),
             "duplicate settlement should be rejected, got: {dup_err:?}"
+        );
+    }
+
+    /// Simulate a reorg: a stale `ss/` index entry (from an old fork) must be
+    /// purged by `rebuild_settled_stark_sources_from_chain` so it cannot
+    /// incorrectly block the new canonical frontier.
+    #[test]
+    fn rebuild_settled_removes_stale_index_entries_after_reorg() {
+        let (node, signer) = setup_node();
+        store_genesis(&node);
+        let genesis_hash = node
+            .chain_store
+            .get_block_hash_by_number(0)
+            .unwrap()
+            .expect("genesis hash");
+        let hashes = produce_witnessed_blocks(&node, &signer, 1);
+
+        // Inject a stale `ss/` entry for a hash that is NOT on the canonical
+        // chain (simulates a block that existed on a fork before a reorg).
+        let stale_hash = ShellHash::from([0xDE; 32]);
+        node.settled_source_index.put(1, &stale_hash).unwrap();
+
+        // Also add a legitimate canonical settlement for genesis so the index
+        // is "populated" (previously this triggered the fast path that trusted
+        // the index blindly).
+        node.settled_source_index.put(1, &genesis_hash).unwrap();
+        node.settled_source_index.put(1, &hashes[0]).unwrap();
+
+        // Settle genesis + block 1 on the canonical chain so the slow scan
+        // finds them.
+        let amendment = dummy_ordered_amendment(1, vec![genesis_hash, hashes[0]], 1);
+        node.pending_stark_settlements
+            .lock()
+            .push(amendment.clone());
+        node.produce_block(&signer, 100).unwrap();
+
+        // Now rebuild: canonical scan should find genesis+block1, remove stale_hash.
+        node.settled_stark_sources.lock().clear();
+        let count = node.rebuild_settled_stark_sources_from_chain().unwrap();
+
+        // Only the two canonical sources should survive.
+        assert_eq!(count, 2, "only canonical settled sources should remain");
+        assert!(
+            node.settled_stark_sources
+                .lock()
+                .contains(&(1, genesis_hash)),
+            "genesis still settled"
+        );
+        assert!(
+            node.settled_stark_sources.lock().contains(&(1, hashes[0])),
+            "block 1 still settled"
+        );
+        assert!(
+            !node.settled_stark_sources.lock().contains(&(1, stale_hash)),
+            "stale fork entry must be removed"
+        );
+        // The persistent index must also be clean.
+        assert!(
+            !node.settled_source_index.has(1, &stale_hash).unwrap(),
+            "stale `ss/` index entry must be deleted"
         );
     }
 
@@ -2155,6 +2329,230 @@ mod tests {
             other => panic!("expected full proof, got {other:?}"),
         }
     }
+
+    // ── stark-add-empty-range-tests ─────────────────────────────────────────
+
+    /// `validate_stark_proof_source_binding` must reject an amendment whose
+    /// declared `n_sigs` does not match the reconstructed entry count for the
+    /// covered canonical source blocks.
+    #[test]
+    fn source_binding_rejects_wrong_n_sigs() {
+        let (node, signer) = setup_node();
+        store_genesis(&node);
+        let genesis_hash = node
+            .chain_store
+            .get_block_hash_by_number(0)
+            .unwrap()
+            .expect("genesis hash");
+        // Two 0-tx blocks → reconstructed entry count = 0.
+        let hashes = produce_witnessed_blocks(&node, &signer, 2);
+
+        let bad = ProofAmendment {
+            version: shell_stark_prover::amendment::PROOF_AMENDMENT_VERSION,
+            block_hash: hashes[1],
+            block_number: 2,
+            start_block: Some(0),
+            proof: shell_stark_prover::proof::SigBatchProof {
+                version: shell_stark_prover::proof::SIG_BATCH_PROOF_VERSION,
+                batch_root_bytes: [0u8; 16],
+                n_sigs: 999, // wrong — actual canonical entry count is 0
+                proof_bytes: vec![0x33; 128],
+            },
+            prover: Address::from([0x44; 20]),
+            prover_signature: Bytes::from(vec![0x55; 8]),
+            layer: 1,
+            source_hashes: vec![genesis_hash, hashes[0], hashes[1]],
+            original_size: Some(0),
+            compressed_size: Some(128),
+            settlement_tx_hash: None,
+        };
+
+        let err = node.validate_stark_proof_source_binding(&bad).unwrap_err();
+        assert!(
+            err.to_string().contains("n_sigs"),
+            "expected n_sigs mismatch error, got: {err}"
+        );
+    }
+
+    /// `validate_stark_proof_source_binding` must reject an amendment whose
+    /// `batch_root_bytes` does not match the root recomputed from canonical
+    /// source entries (even when `n_sigs` is correct).
+    #[test]
+    fn source_binding_rejects_wrong_batch_root() {
+        let (node, signer) = setup_node();
+        store_genesis(&node);
+        let genesis_hash = node
+            .chain_store
+            .get_block_hash_by_number(0)
+            .unwrap()
+            .expect("genesis hash");
+        // One 0-tx block → reconstructed entries = [], n_sigs must be 0.
+        let hashes = produce_witnessed_blocks(&node, &signer, 1);
+
+        // Compute the correct root for an empty entry set, then flip a byte.
+        let correct_root = shell_stark_prover::compute_batch_root(&[]);
+        let mut wrong_root = correct_root;
+        wrong_root[0] ^= 0xFF;
+
+        let bad = ProofAmendment {
+            version: shell_stark_prover::amendment::PROOF_AMENDMENT_VERSION,
+            block_hash: hashes[0],
+            block_number: 1,
+            start_block: Some(0),
+            proof: shell_stark_prover::proof::SigBatchProof {
+                version: shell_stark_prover::proof::SIG_BATCH_PROOF_VERSION,
+                batch_root_bytes: wrong_root, // wrong root
+                n_sigs: 0,                    // correct count for 0-tx blocks
+                proof_bytes: vec![0x33; 128],
+            },
+            prover: Address::from([0x44; 20]),
+            prover_signature: Bytes::from(vec![0x55; 8]),
+            layer: 1,
+            source_hashes: vec![genesis_hash, hashes[0]],
+            original_size: Some(0),
+            compressed_size: Some(128),
+            settlement_tx_hash: None,
+        };
+
+        let err = node.validate_stark_proof_source_binding(&bad).unwrap_err();
+        assert!(
+            err.to_string().contains("batch_root_bytes"),
+            "expected batch_root_bytes mismatch error, got: {err}"
+        );
+    }
+
+    /// The ordering validator must reject an amendment whose `source_hashes`
+    /// skips a canonical empty block (i.e., the declared range is not contiguous
+    /// with the actual canonical chain).
+    #[test]
+    fn ordering_rejects_amendment_skipping_empty_canonical_block() {
+        let (node, signer) = setup_node();
+        store_genesis(&node);
+        let genesis_hash = node
+            .chain_store
+            .get_block_hash_by_number(0)
+            .unwrap()
+            .expect("genesis hash");
+        // Produce 3 empty blocks: B1 (#1), B2 (#2), B3 (#3).
+        let hashes = produce_witnessed_blocks(&node, &signer, 3);
+
+        // Build amendment that claims to cover blocks 0..=2 but skips B2 (#2)
+        // and substitutes B3 (#3) instead.  The canonical hash for block #2 is
+        // B2, not B3, so the contiguity check must fail.
+        let skip_b2 = dummy_ordered_amendment(
+            1,
+            vec![genesis_hash, hashes[0], hashes[2]], // skips hashes[1] = B2
+            2,
+        );
+
+        let err = node
+            .validate_stark_amendment_ordering(&skip_b2)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("not canonical"),
+            "expected 'not canonical' rejection for skipped block, got: {err}"
+        );
+    }
+
+    /// The ordering validator must accept an amendment that correctly covers a
+    /// contiguous range of empty (0-tx) canonical blocks.  Empty blocks are
+    /// valid compression sources via the header-existence check in
+    /// `is_stark_compression_source`, so they must be includable in any range.
+    #[test]
+    fn ordering_accepts_range_with_empty_leading_blocks() {
+        let (node, signer) = setup_node();
+        store_genesis(&node);
+        let genesis_hash = node
+            .chain_store
+            .get_block_hash_by_number(0)
+            .unwrap()
+            .expect("genesis hash");
+        // Two more 0-tx blocks so the range is [genesis(0tx), B1(0tx), B2(0tx)].
+        let hashes = produce_witnessed_blocks(&node, &signer, 2);
+
+        // `dummy_ordered_amendment` sets n_sigs = MIN_L1_STARK_TXS which
+        // satisfies the layer-1 threshold; source_hashes are contiguous canonical.
+        let amendment = dummy_ordered_amendment(1, vec![genesis_hash, hashes[0], hashes[1]], 2);
+
+        node.validate_stark_amendment_ordering(&amendment)
+            .expect("ordering should accept a contiguous range of empty canonical blocks");
+    }
+
+    /// A STARK L1 reward that covers only 0-tx canonical blocks must return the
+    /// minimum base-mint reward (1 source × mint), not a multiple proportional
+    /// to the number of empty blocks in the range.
+    #[test]
+    fn stark_reward_value_empty_source_blocks_get_minimum_reward() {
+        let (node, signer) = setup_node();
+        store_genesis(&node);
+        let genesis_hash = node
+            .chain_store
+            .get_block_hash_by_number(0)
+            .unwrap()
+            .expect("genesis hash");
+        // 4 more 0-tx blocks.
+        let hashes = produce_witnessed_blocks(&node, &signer, 4);
+
+        let amendment = dummy_ordered_amendment(
+            1,
+            vec![genesis_hash, hashes[0], hashes[1], hashes[2], hashes[3]],
+            4,
+        );
+
+        let reward = node.stark_reward_value(4, &amendment).unwrap();
+        // All 5 sources are 0-tx → non_empty_count=0 → source_count=1 (min).
+        // Layer-1 mint = BASE_STARK_MINT_WEI / 2¹.
+        const BASE: u128 = 100_000_000_000_000_000_000;
+        assert_eq!(
+            reward,
+            U256::from(BASE / 2),
+            "all-empty range must return minimum reward (1 × L1 mint), got {reward}"
+        );
+    }
+
+    /// Empty (0-tx) canonical blocks must NOT appear in `settled_stark_sources`
+    /// before a StarkReward is accepted, but MUST appear after the settlement
+    /// block is produced.  This ensures the seeding loop never skips empty
+    /// frontier blocks prematurely.
+    #[test]
+    fn empty_canonical_blocks_not_settled_until_stark_reward_accepted() {
+        let (node, signer) = setup_node();
+        store_genesis(&node);
+        let genesis_hash = node
+            .chain_store
+            .get_block_hash_by_number(0)
+            .unwrap()
+            .expect("genesis hash");
+        let hashes = produce_witnessed_blocks(&node, &signer, 3);
+
+        // Before any settlement, no block should be in settled_stark_sources.
+        {
+            let settled = node.settled_stark_sources.lock();
+            for hash in [genesis_hash, hashes[0], hashes[1], hashes[2]] {
+                assert!(
+                    !settled.contains(&(1, hash)),
+                    "block {hash:?} should not be settled before proof acceptance"
+                );
+            }
+        }
+
+        // Accept a StarkReward that covers all 4 empty blocks.
+        let amendment =
+            dummy_ordered_amendment(1, vec![genesis_hash, hashes[0], hashes[1], hashes[2]], 3);
+        node.pending_stark_settlements.lock().push(amendment);
+        node.produce_block(&signer, 100).unwrap();
+
+        // After settlement, all 4 empty-gap blocks must be marked settled.
+        let settled = node.settled_stark_sources.lock();
+        for hash in [genesis_hash, hashes[0], hashes[1], hashes[2]] {
+            assert!(
+                settled.contains(&(1, hash)),
+                "empty block {hash:?} must be settled after StarkReward accepted"
+            );
+        }
+    }
+
+    // ── end stark-add-empty-range-tests ─────────────────────────────────────
 
     #[test]
     fn produce_empty_block() {
@@ -4764,15 +5162,14 @@ mod tests {
             "fallback size must not undercount to stub witness bytes"
         );
     }
-    /// STARK compression: verify ProverService proves isolated L1 runs immediately
-    /// even when the tx-entry count is below the minimum threshold.
+    /// STARK compression: verify ProverService correctly waits when the
+    /// accumulated entry count is below MIN_L1_STARK_TXS (512).
     ///
-    /// The min-entry threshold is only enforced while the backlog holds a
-    /// contiguous successor task (the run can still grow). Isolated ranges
-    /// are proved right away to avoid permanent starvation of historical or
-    /// sparse ranges.
+    /// With the strict threshold policy the prover must not drain the backlog
+    /// until enough entries accumulate — generating an under-threshold proof
+    /// wastes work and would always be rejected by settlement.
     #[tokio::test]
-    async fn stark_prover_service_proves_isolated_l1_run() {
+    async fn stark_prover_service_waits_when_entries_below_l1_threshold() {
         use crate::prover_service::{ProverConfig, ProverService};
         use shell_storage::ProofAmendmentStore;
 
@@ -4794,10 +5191,7 @@ mod tests {
         }
 
         // Produce block 1 → 5 embedded txs, plus the empty genesis frontier task.
-        let block = node.produce_block(&proposer_signer, 20).unwrap();
-
-        // produce_block pushes a ProofTask with the real post-seal block hash.
-        let block_hash = block.hash();
+        node.produce_block(&proposer_signer, 20).unwrap();
 
         assert_eq!(
             node.proof_backlog.lock().len(),
@@ -4805,10 +5199,10 @@ mod tests {
             "expected genesis + block proof tasks after producing 1 block with {TXS} embedded txs"
         );
 
-        // Start ProverService to process the backlog.
+        // Start ProverService; 5 entries < MIN_L1_STARK_TXS (512) so both tasks
+        // must remain in the backlog — the prover waits for more blocks.
         let db = node.store.clone();
         let amendment_store = ProofAmendmentStore::new(db);
-        let settlement_queue = Arc::new(parking_lot::Mutex::new(Vec::new()));
         let (amendment_tx, mut amendment_rx) = tokio::sync::mpsc::unbounded_channel();
         let svc = ProverService::new(
             Arc::clone(&node.proof_backlog),
@@ -4816,31 +5210,20 @@ mod tests {
             ProverConfig::default(),
             node.config.proposer_address.unwrap_or_default(),
         )
-        .with_amendment_sender(amendment_tx)
-        .with_settlement_queue(Arc::clone(&settlement_queue));
+        .with_amendment_sender(amendment_tx);
         let handle = svc.start();
 
-        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
         handle.shutdown().await;
 
-        // Isolated runs (no contiguous successor) are proved immediately regardless
-        // of the min-entry threshold — both tasks must be gone from the backlog.
         assert_eq!(
             node.proof_backlog.lock().len(),
-            0,
-            "ProverService must prove isolated L1 runs immediately to avoid starvation"
-        );
-        // At least one proof amendment should have been generated and broadcast.
-        assert!(
-            amendment_rx.try_recv().is_ok(),
-            "at least one proof amendment must be broadcast for isolated L1 run"
+            2,
+            "below-threshold backlog must not be drained: prover waits for MIN_L1_STARK_TXS"
         );
         assert!(
-            amendment_store
-                .get_amendment(&block_hash)
-                .unwrap()
-                .is_some(),
-            "amendment for block_hash must be stored"
+            amendment_rx.try_recv().is_err(),
+            "no proof amendment must be broadcast when entries are below threshold"
         );
     }
 

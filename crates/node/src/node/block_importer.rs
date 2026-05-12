@@ -249,6 +249,14 @@ impl<S: KvStore + 'static> Node<S> {
             })
             .collect::<Result<Vec<_>, NodeError>>()?;
         self.validate_stark_settlement_sequence(&stark_settlements)?;
+        // Note: `validate_stark_proof_source_binding` (full STARK cryptographic
+        // verification) is intentionally skipped here.  During block import we
+        // trust that the settlement was validated at gossip time before the PoA
+        // proposer included it.  Re-verifying the full STARK proof on every
+        // import would be prohibitively expensive for chain sync and is
+        // redundant for a PoA chain.  The lightweight ordering and sequence
+        // checks above are still enforced.
+
         let imported_state_root = if !block.transactions.is_empty() || !stark_settlements.is_empty()
         {
             // Validate all transactions before execution (F-181):
@@ -567,6 +575,7 @@ impl<S: KvStore + 'static> Node<S> {
             );
         }
         prover.record_settled_sources(&stark_settlements);
+        self.feed_l2_scheduler_from_settlements(&stark_settlements, block.number());
         consensus.register_fork_choice_block(block_hash, block.header.parent_hash, block.number());
         for (address, pubkey) in new_pubkeys {
             block_store.store_pubkey(&address, &pubkey)?;
@@ -617,20 +626,7 @@ impl<S: KvStore + 'static> Node<S> {
         if self.config.node_role.runs_prover() {
             let block_number = block.number();
             let block_hash = block.hash();
-            let entries: Vec<shell_stark_prover::prover::SigBatchEntry> = block
-                .transactions
-                .iter()
-                .map(|tx| {
-                    let tx_hash = tx.hash();
-                    let sender = tx.sender();
-                    let mut pk_hash = [0u8; 32];
-                    pk_hash[..20].copy_from_slice(sender.0.as_slice());
-                    shell_stark_prover::prover::SigBatchEntry {
-                        msg_hash: *tx_hash.0,
-                        pk_hash,
-                    }
-                })
-                .collect();
+            let entries = stark_sources::block_to_sig_batch_entries(&block);
             let n = entries.len();
             let original_size =
                 self.stark_source_original_size(&block_hash, &block, entries.len())?;
