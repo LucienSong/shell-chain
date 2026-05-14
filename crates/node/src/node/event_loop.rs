@@ -795,15 +795,21 @@ impl<S: KvStore + 'static> Node<S> {
                                         }
                                         Err(e) => {
                                             // MempoolError::Duplicate and nonce-gap errors are
-                                            // high-frequency under load; suppress them to avoid
-                                            // blocking the event loop with eprintln! syscalls.
-                                            let msg = format!("{e}");
-                                            if !msg.contains("duplicate")
-                                                && !msg.contains("Duplicate")
-                                                && !msg.contains("nonce gap")
-                                                && !msg.contains("nonce too low")
-                                            {
-                                                eprintln!("⚠  Tx handling error: {e}");
+                                            // high-frequency under load; suppress them to keep
+                                            // logs quiet during normal operation.
+                                            // handle_incoming_tx() wraps mempool errors as
+                                            // NodeError::Startup(<kind_str>) — match directly
+                                            // to avoid a heap allocation and any risk of
+                                            // account-state values reaching the log sink.
+                                            if let NodeError::Startup(kind) = &e {
+                                                if kind != "duplicate"
+                                                    && kind != "nonce_gap"
+                                                    && kind != "nonce_too_low"
+                                                {
+                                                    warn!(kind = kind.as_str(), "mempool rejection");
+                                                }
+                                            } else {
+                                                warn!(error = %e, "incoming tx error");
                                             }
                                         }
                                     }

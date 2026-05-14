@@ -102,6 +102,42 @@ pub enum TxValidationError {
     AaValidation(String),
 }
 
+impl TxValidationError {
+    /// Returns a short, static label for this error variant that contains no
+    /// account-state values (nonce, balance, addresses).  Use this for
+    /// structured logging to avoid leaking account data into log files.
+    pub fn kind_str(&self) -> &'static str {
+        match self {
+            Self::PubkeyNotFound => "pubkey_not_found",
+            Self::AddressMismatch { .. } => "address_mismatch",
+            Self::SignatureInvalid => "signature_invalid",
+            Self::NonceMismatch { .. } => "nonce_mismatch",
+            Self::InsufficientBalance { .. } => "insufficient_balance",
+            Self::ChainIdMismatch { .. } => "chain_id_mismatch",
+            Self::GasTooLow(_) => "gas_too_low",
+            Self::PubkeyConflict => "pubkey_conflict",
+            Self::DisallowedAlgorithm(_) => "disallowed_algorithm",
+            Self::Crypto(_) => "crypto_error",
+            Self::Storage(_) => "storage_error",
+            Self::InvalidAccessList(_) => "invalid_access_list",
+            Self::InvalidBlobTx(_) => "invalid_blob_tx",
+            Self::InvalidAaBundle(_) => "invalid_aa_bundle",
+            Self::PaymasterPubkeyNotFound(_) => "paymaster_pubkey_not_found",
+            Self::PaymasterSignatureInvalid => "paymaster_signature_invalid",
+            Self::PaymasterInsufficientBalance { .. } => "paymaster_insufficient_balance",
+            Self::PaymasterRejected => "paymaster_rejected",
+            Self::PaymasterValidationFailed(_) => "paymaster_validation_failed",
+            Self::SessionKeyExpired { .. } => "session_key_expired",
+            Self::SessionValueCapExceeded => "session_value_cap_exceeded",
+            Self::SessionTargetMismatch => "session_target_mismatch",
+            Self::SessionRootSignatureInvalid => "session_root_signature_invalid",
+            Self::SessionKeySignatureInvalid => "session_key_signature_invalid",
+            Self::SessionKeyDisallowedAlgorithm(_) => "session_key_disallowed_algorithm",
+            Self::AaValidation(_) => "aa_validation_failed",
+        }
+    }
+}
+
 /// Minimum gas for a plain transfer (no data).
 const INTRINSIC_GAS_TX: u64 = 21_000;
 /// Per-byte cost for non-zero calldata.
@@ -1286,5 +1322,91 @@ mod tests {
         let verifier = DilithiumVerifier;
         let res = validate_tx(&signed, &mut ws, &cs, &verifier, test_chain_id());
         assert!(matches!(res, Err(TxValidationError::SignatureInvalid)));
+    }
+
+    // --- kind_str() tests: assert static labels contain no account-state values.
+
+    #[test]
+    fn kind_str_sensitive_variants_have_no_values() {
+        let cases: &[(&str, TxValidationError)] = &[
+            (
+                "nonce_mismatch",
+                TxValidationError::NonceMismatch {
+                    expected: 5,
+                    got: 3,
+                },
+            ),
+            (
+                "insufficient_balance",
+                TxValidationError::InsufficientBalance {
+                    needed: U256::from(1000u64),
+                    have: U256::from(0u64),
+                },
+            ),
+            (
+                "address_mismatch",
+                TxValidationError::AddressMismatch {
+                    from: Address::ZERO,
+                    derived: Address::ZERO,
+                },
+            ),
+            (
+                "paymaster_insufficient_balance",
+                TxValidationError::PaymasterInsufficientBalance {
+                    paymaster: Address::ZERO,
+                    needed: U256::from(50u64),
+                    have: U256::from(10u64),
+                },
+            ),
+        ];
+        for (expected_label, err) in cases {
+            let label = err.kind_str();
+            assert_eq!(label, *expected_label, "wrong label for {err:?}");
+            assert!(
+                !label.chars().any(|c| c.is_ascii_digit()),
+                "kind_str label '{label}' must not contain numeric data"
+            );
+        }
+    }
+
+    #[test]
+    fn kind_str_all_variants_are_non_empty() {
+        let variants: &[TxValidationError] = &[
+            TxValidationError::PubkeyNotFound,
+            TxValidationError::AddressMismatch {
+                from: Address::ZERO,
+                derived: Address::ZERO,
+            },
+            TxValidationError::SignatureInvalid,
+            TxValidationError::NonceMismatch {
+                expected: 1,
+                got: 0,
+            },
+            TxValidationError::InsufficientBalance {
+                needed: U256::from(1u64),
+                have: U256::ZERO,
+            },
+            TxValidationError::ChainIdMismatch {
+                expected: 1,
+                got: 2,
+            },
+            TxValidationError::GasTooLow(21_000),
+            TxValidationError::PubkeyConflict,
+            TxValidationError::InvalidAccessList("x".into()),
+            TxValidationError::InvalidBlobTx("x".into()),
+            TxValidationError::InvalidAaBundle("x".into()),
+            TxValidationError::PaymasterSignatureInvalid,
+            TxValidationError::PaymasterRejected,
+            TxValidationError::PaymasterValidationFailed("x".into()),
+            TxValidationError::SessionValueCapExceeded,
+            TxValidationError::SessionTargetMismatch,
+            TxValidationError::SessionRootSignatureInvalid,
+            TxValidationError::SessionKeySignatureInvalid,
+            TxValidationError::SessionKeyDisallowedAlgorithm(0),
+            TxValidationError::AaValidation("x".into()),
+        ];
+        for err in variants {
+            assert!(!err.kind_str().is_empty(), "kind_str() empty for {err:?}");
+        }
     }
 }
