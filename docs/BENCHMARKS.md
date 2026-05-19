@@ -52,6 +52,7 @@ The `ProofBacklog` depth stabilised at ≤ 12 tasks under 10-tx batching.
 
 ---
 
+## A1: RocksDB Zstd Compression
 
 ### Methodology
 

@@ -26,7 +26,7 @@ Shell-Chain is fully EVM-compatible (Cancun spec). Any contract written in Solid
 | Network | RPC URL | Chain ID |
 |---------|---------|----------|
 | **Local** | `http://localhost:8545` | 1337 |
-| **Alpha Testnet** | `http://testnet.shell.xyz` | 1337 |
+| **Alpha Testnet** | `http://testnet.shell.xyz` | 10 |
 
 The local endpoint is the default JSON-RPC server started by `shell-node run`. The alpha testnet endpoint is served via nginx reverse proxy (see [Testnet Operator Guide](TESTNET_OPERATOR_GUIDE.md)).
 
@@ -56,7 +56,7 @@ module.exports = {
     },
     shellAlpha: {
       url: "http://testnet.shell.xyz",
-      chainId: 1337,
+      chainId: 10,
     }
   }
 };
@@ -94,7 +94,7 @@ forge create --rpc-url http://localhost:8545 --chain-id 1337 src/Counter.sol:Cou
 For the alpha testnet:
 
 ```bash
-forge create --rpc-url http://testnet.shell.xyz --chain-id 1337 src/Counter.sol:Counter
+forge create --rpc-url http://testnet.shell.xyz --chain-id 10 src/Counter.sol:Counter
 ```
 
 ---

@@ -292,9 +292,15 @@ SPHINCS+ keystores use `"key_type": "sphincs-sha2-256f"` and are managed with th
 
 The `MultiVerifier` automatically detects the algorithm from the signature's embedded type tag, enabling mixed validator sets where some validators use Dilithium3 and others use SPHINCS+.
 
-### ML-DSA-65 (Planned)
+### ML-DSA-65 (Available)
 
-The `SignatureType` enum includes a reserved variant for **ML-DSA-65** (FIPS 204), the finalized NIST standard based on Dilithium. Shell-chain will add ML-DSA-65 support when stable implementations are available in the Rust ecosystem. This will be a non-breaking upgrade — existing Dilithium3 keys and signatures remain valid.
+**ML-DSA-65** (FIPS 204) is now supported alongside Dilithium3. Generate ML-DSA-65 keys with:
+
+```bash
+shell-node key generate --algorithm mldsa65 --output keystore.json
+```
+
+Existing Dilithium3 keys remain fully valid. The `MultiVerifier` dispatches to the correct algorithm at runtime using the embedded `sig_type` tag.
 
 ### Hybrid Schemes (Research)
 
@@ -332,4 +338,4 @@ Shell-chain is quantum-ready today. No migration will be needed when quantum com
 
 ---
 
-*Last updated: 2025*
+*Last updated: 2026-05-20*

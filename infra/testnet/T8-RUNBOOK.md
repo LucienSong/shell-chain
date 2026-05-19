@@ -10,7 +10,7 @@ Bring up the 3-validator wPoA testnet (chain_id=10) and observe stable block pro
 - [ ] Ports open: 30303/tcp (P2P), 8545/tcp (RPC), 9090/tcp (metrics)
 - [ ] DNS configured: `rpc.testnet.shell.network` → node1 IP
 - [ ] Keystores for all 3 validators generated and backed up
-- [ ] `SHELL_IMAGE=ghcr.io/shelldao/shell-chain:0.21.0` available or built locally
+- [ ] `SHELL_IMAGE=ghcr.io/shelldao/shell-chain:0.22.2` available or built locally
 
 ## Step-by-Step Bring-Up
 
@@ -33,7 +33,7 @@ cp /path/to/node1-validator.key keys/node1.key
 
 # Configure
 cat > .env << 'EOF'
-SHELL_IMAGE=ghcr.io/shelldao/shell-chain:0.21.0
+SHELL_IMAGE=ghcr.io/shelldao/shell-chain:0.22.2
 NODE1_KEY_PATH=./keys/node1.key
 KEY_PASSWORD=<secure-password>
 EXTERNAL_IP=<node1-public-ip>
@@ -61,7 +61,7 @@ docker compose up -d node3   # on node3 VM
 ### Faucet
 
 ```bash
-cd /path/to/shell-dev/agents/faucet
+cd /path/to/shell-chain/tools/faucet
 cp .env.example .env
 # Edit .env: FAUCET_PRIVATE_KEY=<funded-key>, RPC_URL=http://rpc.testnet.shell.network:8545
 npm install && npm run build

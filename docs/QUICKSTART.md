@@ -220,7 +220,7 @@ docker compose -f docker-compose.alpha.yml up -d
 
 ```bash
 curl http://localhost:9090/health
-# {"status":"ok","version":"0.21.0","block_height":...}
+# {"status":"ok","version":"0.22.2","block_height":...}
 
 curl http://localhost:9090/ready
 # {"ready":true} or {"ready":false,"reason":"..."}
@@ -243,4 +243,4 @@ For more details on alpha testnet operations, see the [Testnet Operator Guide](T
 
 ---
 
-*Last updated: 2026-04-20*
+*Last updated: 2026-05-20*

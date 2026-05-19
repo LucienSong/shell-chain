@@ -24,7 +24,7 @@ mkdir -p keys
 # … copy node1.key, node2.key, node3.key here
 
 # 3. Set environment
-export SHELL_IMAGE=ghcr.io/shelldao/shell-chain:0.21.0
+export SHELL_IMAGE=ghcr.io/shelldao/shell-chain:0.22.2
 export NODE1_KEY_PATH=./keys/node1.key
 export NODE2_KEY_PATH=./keys/node2.key
 export NODE3_KEY_PATH=./keys/node3.key
@@ -37,7 +37,7 @@ docker compose up -d
 # 5. Check health
 docker compose ps
 curl http://localhost:8545 \
-  -d '{"jsonrpc":"2.0","method":"shell_blockNumber","params":[],"id":1}' \
+  -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' \
   -H 'Content-Type: application/json'
 ```
 
