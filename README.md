@@ -17,7 +17,7 @@ Shell-Chain follows [Vitalik Buterin's vision](https://ethresear.ch/t/how-to-har
 - 🏗️ **Native Account Abstraction** — protocol-level smart accounts with built-in PQ validation, key rotation, and custom validator hooks
 - 🧩 **PQ Precompile Suite** — 6 on-chain precompiles at `0x0001`–`0x0006`: ML-DSA-65 verify, SLH-DSA-SHA2-256f verify, ML-DSA-65 batch verify, BLAKE3-256, BLAKE3-512, PQAddr derive
 - ⚖️ **wPoA Consensus** — Weighted Proof-of-Authority with stake-weighted proposer selection, slashing, and finality tracking
-- ⚡ **STARK Sig-Aggregation** — Winterfell STARK proofs compress Dilithium3 signatures **7× per block**; 157 proofs/sec sustained throughput. v0.22.x introduces multi-layer (L1/L2/L3) recursive STARK compression for further on-chain data reduction.
+- ⚡ **STARK Sig-Aggregation** — Winterfell STARK proofs compress Dilithium3 signatures **7× per block**; 157 proofs/sec sustained throughput. v0.23.0 ships multi-layer (L1/L2/L3) recursive STARK compression for further on-chain data reduction.
 - 🗄️ **Storage Profiles** — `--storage-profile archive|full|light` controls data retention; nodes auto-backfill missing history from richer peers via P2P
 - 🛠️ **Developer Ecosystem** — TypeScript SDK (`shell-sdk`) with viem-based PQ signers and AA transaction builders
 - 🌐 **P2P Networking** — libp2p with GossipSub, Kademlia DHT, peer scoring, and message signature verification
@@ -45,8 +45,15 @@ For production deployments with Docker, see the [Operator Guide](docs/TESTNET_OP
 ## Native Account Abstraction
 
 Shell-Chain's long-term account model is **native AA**.
-Externally, accounts are identified by `0x`-prefixed 32-byte hex addresses (BLAKE3 derivation);
-internally, the EVM uses the last 20 bytes for compatibility.
+Accounts are identified by `0x`-prefixed 64-character lowercase hex addresses —
+the full 32-byte BLAKE3 hash of `algo_id ‖ public_key`.
+
+At the **canonical layer** (RPC, storage, consensus, signing), addresses are always
+the full 32 bytes. At the **EVM execution boundary**, Shell-Chain maintains a
+20-byte mapping layer: `Address::to_alloy()` takes the last 20 bytes of the 32-byte
+canonical address for use with revm, and `Address::from_alloy()` zero-pads left
+back to 32 bytes. This boundary is internal — external callers (SDK, CLI, explorer)
+always see and submit the full 32-byte `0x`+64-hex form.
 
 Transaction validation follows three protocol-level paths:
 
