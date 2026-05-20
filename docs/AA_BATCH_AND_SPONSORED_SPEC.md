@@ -1,6 +1,6 @@
 # Native AA Phase 1 — Batch Tx & Sponsored Gas (v0.18.0)
 
-> Status: design spec for v0.18.0. Implementation lives behind branch
+> Status: design spec for v0.18.0 (see CHANGELOG for implementation status in current v0.22.2). Implementation lives behind branch
 > `feat/v0.18.0-dev`. Builds on the existing native AA infrastructure already
 > on `main` (Layer 1/2/3 validators, AccountManager, AA validation
 > dispatcher).

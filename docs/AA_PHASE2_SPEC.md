@@ -1,6 +1,6 @@
 # Native AA Phase 2 — Contract Paymaster + Session Keys + Guardian Recovery
 
-> **Status**: Design Spec · Target: v0.19.0
+> **Status**: Design Spec · Target: v0.19.0 (see CHANGELOG for implementation status in current v0.22.2)
 >
 > Builds on Phase 1 (v0.18.0): `AaBundle`, EOA paymaster, batch inner-calls.
 > See [`AA_BATCH_AND_SPONSORED_SPEC.md`](AA_BATCH_AND_SPONSORED_SPEC.md) and

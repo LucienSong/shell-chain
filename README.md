@@ -12,11 +12,11 @@ Shell-Chain follows [Vitalik Buterin's vision](https://ethresear.ch/t/how-to-har
 
 ### Key Features
 
-- 🔐 **Post-Quantum Signatures** — CRYSTALS-Dilithium (NIST standard) as default, SPHINCS+ as conservative fallback
+- 🔐 **Post-Quantum Signatures** — Dilithium3 as default; ML-DSA-65 (FIPS 204) available as optional FIPS path; SPHINCS+ as conservative hash-based fallback
 - ⚙️ **EVM Compatible** — Cancun-spec EVM; run Solidity contracts with familiar tooling (Hardhat, ethers.js, MetaMask)
 - 🏗️ **Native Account Abstraction** — protocol-level smart accounts with built-in PQ validation, key rotation, and custom validator hooks
-- 🧩 **PQ Precompiles** — on-chain Dilithium/SPHINCS+ verification, Kyber decapsulation, STARK proof verification
-- ⚖️ **wPoA Consensus** — Weighted Proof-of-Authority with stake-weighted proposer selection, slashing, and finality tracking
+- 🧩 **PQ Precompile** — `PQ_DILITHIUM_VERIFY` (0x0100): native Dilithium3 signature verification callable from Solidity; `ecrecover` (0x01) disabled to enforce PQ migration
+- ⚖️ **PoA / wPoA Consensus** — Proof-of-Authority by default; optional Weighted PoA extension (`engine = "wpoa"`) adds stake-weighted proposer selection, BFT attestation finality, and slashing
 - ⚡ **STARK Sig-Aggregation** — Winterfell STARK proofs compress Dilithium3 signatures **7× per block**; 157 proofs/sec sustained throughput
 - 🗄️ **Storage Profiles** — `--storage-profile archive|full|light` controls data retention; nodes auto-backfill missing history from richer peers via P2P
 - 🛠️ **Developer Ecosystem** — TypeScript SDK (`shell-sdk`) with viem-based PQ signers and AA transaction builders
@@ -85,10 +85,10 @@ For the full design and current implementation status, see
 | Crate | Description |
 |-------|-------------|
 | `shell-primitives` | Foundational types: Keccak-256, BLAKE3, H256, Address, U256, Bytes |
-| `shell-crypto` | CRYSTALS-Dilithium & SPHINCS+ signing, multi-algorithm Signer/Verifier traits |
+| `shell-crypto` | Dilithium3 (default) & ML-DSA-65 (optional FIPS 204) & SPHINCS+ signing, multi-algorithm Signer/Verifier traits |
 | `shell-core` | Block, Transaction (AA-native), Account, Receipt, EIP-1559 gas model |
 | `shell-storage` | RocksDB backend, Merkle Patricia Trie, RLP serialization, state pruning, storage profiles |
-| `shell-consensus` | Weighted PoA (wPoA) engine, finality tracker, fork choice rule, dynamic validator set, slashing |
+| `shell-consensus` | PoA engine (default); optional wPoA extension: weight-based fork choice, BFT finality, slashing |
 | `shell-evm` | revm integration (Cancun spec), PQ precompiles, EIP-2930/4844, system contracts |
 | `shell-mempool` | Transaction pool with PQ validation, fee-priority ordering, Replace-by-Fee |
 | `shell-network` | libp2p P2P: GossipSub, Kademlia DHT, NAT traversal, peer scoring, tx gossip |
@@ -127,12 +127,13 @@ shell-chain/
 
 ## Post-Quantum Cryptography
 
-| Algorithm | Type | Use Case | Security Level |
-|-----------|------|----------|----------------|
-| **CRYSTALS-Dilithium** (ML-DSA) | Lattice-based | Transaction signing (default) | NIST Level 3 |
-| **SPHINCS+** (SLH-DSA) | Hash-based | High-security accounts (optional) | NIST Level 3 |
-| **CRYSTALS-Kyber** (ML-KEM) | Lattice-based | P2P transport encryption | NIST Level 3 |
-| **STARKs** | Hash-based proofs | Signature aggregation, light clients | Quantum-safe |
+| Algorithm | Type | Use Case | Status |
+|-----------|------|----------|--------|
+| **Dilithium3** | Lattice-based | Transaction signing (default) | Deployed — NIST Level 3 |
+| **ML-DSA-65** (FIPS 204) | Lattice-based | Transaction signing (optional FIPS path) | Deployed — optional |
+| **SPHINCS+** (SLH-DSA) | Hash-based | High-security accounts (optional) | Deployed — NIST Level 5 |
+| **STARKs** | Hash-based proofs | Signature aggregation, storage compression | Deployed (optional, off by default in dev) |
+| **Kyber / ML-KEM** (P2P) | KEM | Validator transport (future) | **Not yet deployed** — classical libp2p Noise/XX is current |
 
 Addresses are derived as `blake3(version || algo_id || pq_public_key)[0..20]`
 and encoded externally as Bech32m `pq1...`.
