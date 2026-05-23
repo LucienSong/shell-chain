@@ -2,7 +2,8 @@
 
 Shell-Chain ships two native system contracts. They live at well-known addresses
 and are executed as native Rust code — no Solidity bytecode, no compiler needed.
-The EVM executor intercepts calls to these addresses before running the EVM.
+The PQVM/revm execution adapter intercepts calls to these addresses before
+running bytecode.
 
 ---
 
@@ -10,8 +11,8 @@ The EVM executor intercepts calls to these addresses before running the EVM.
 
 | Contract | Address | Description |
 |----------|---------|-------------|
-| `ValidatorRegistry` | `0x0000000000000000000000000000000000000001` | Manages the active validator set |
-| `AccountManager` | `0x0000000000000000000000000000000000000002` | Per-account PQ key rotation and custom validation code |
+| `ValidatorRegistry` | `0x0000000000000000000000000000000000000000000000000000000000000001` | Manages the active validator set |
+| `AccountManager` | `0x0000000000000000000000000000000000000000000000000000000000000002` | Per-account PQ key rotation and custom validation code |
 
 ---
 
@@ -30,6 +31,9 @@ interface IValidatorRegistry {
     // ── Write (validator-only) ──────────────────────────────────────────────
     function addValidator(address validator) external;
     function removeValidator(address validator) external;
+    function setValidatorWeight(address validator, uint64 weight) external;
+    function proposeAlgorithmActivation(uint8 algo) external;
+    function deprecateAlgorithm(uint8 algo) external;
 
     // ── Read (anyone) ───────────────────────────────────────────────────────
     function getValidators() external view returns (address[] memory);
@@ -39,14 +43,21 @@ interface IValidatorRegistry {
 
 ### Function selectors
 
-| Function | Selector (keccak256) | Access |
-|----------|---------------------|--------|
-| `addValidator(address)` | computed at compile time | validators only |
-| `removeValidator(address)` | computed at compile time | validators only |
-| `getValidators()` | computed at compile time | anyone |
-| `isValidator(address)` | computed at compile time | anyone |
+| Function | Selector | Access |
+|----------|----------|--------|
+| `addValidator(address)` | `0x4d238c8e` | validators only |
+| `removeValidator(address)` | `0x40a141ff` | validators only |
+| `setValidatorWeight(address,uint64)` | `0xa6d5d626` | validators only |
+| `proposeAlgorithmActivation(uint8)` | `0x487aee59` | validators only |
+| `deprecateAlgorithm(uint8)` | `0xa4b88278` | validators only |
+| `getValidators()` | `0xb7ab4db5` | anyone |
+| `isValidator(address)` | `0xfacd743b` | anyone |
 
 ### Calling from Solidity
+
+Shell-Chain system contracts live in the native 32-byte address space. When calling
+from Solidity tooling that still models `address` as 20 bytes, use the alloy/EVM shim:
+the last 20 bytes of the native 32-byte address are passed into the contract constant below.
 
 ```solidity
 // SPDX-License-Identifier: MIT
@@ -58,8 +69,9 @@ interface IValidatorRegistry {
 }
 
 contract ValidatorCheck {
+    // Shell-Chain addresses are 32 bytes; use the last 20 bytes for the alloy/EVM shim
     IValidatorRegistry constant REGISTRY =
-        IValidatorRegistry(0x0000000000000000000000000000000000000001);
+        IValidatorRegistry(0x0000000000000000000000000000000001);
 
     function currentValidators() external view returns (address[] memory) {
         return REGISTRY.getValidators();
@@ -95,6 +107,24 @@ Writes are governed by weighted majority of the current active validator set:
   in chain storage, so a newly legal validator can immediately verify/produce
   proposer seals;
 - `removeValidator` cannot remove the last remaining validator.
+- `setValidatorWeight` updates the in-memory and persisted validator weights used by wPoA proposer selection, finality, and slash-weight accounting.
+- `proposeAlgorithmActivation` / `deprecateAlgorithm` update the runtime algorithm registry; clients can read the live state via `shell_getAlgorithmRegistry`.
+
+### Algorithm Governance Protocol
+
+Algorithm registry changes require a $\lceil 2N/3 \rceil$ weighted validator quorum.
+The quorum must be met using **ML-DSA-65 or SLH-DSA-SHA2-256f** signatures only —
+this dual-algorithm bootstrap safety rule ensures the governance process itself is
+not bound to Dilithium3 even if Dilithium3 is later deprecated.
+
+Each proposal has a unique ID derived as:
+```text
+proposal_id = BLAKE3(algo_id ‖ spec_bytes ‖ activation_height ‖ proposer_pk)
+```
+
+The minimum delay between proposal and activation is **Δ_min = 30 days** (approximately
+1,296,000 blocks at 2 s/block). This prevents rapid algorithm switches that could
+destabilise the network.
 
 ---
 
@@ -113,9 +143,15 @@ Allows accounts to:
 ```solidity
 interface IAccountManager {
     /// Rotate the caller's PQ public key.
-    /// pubkey: raw Dilithium3 or SPHINCS+ public key bytes
-    /// algo:   0 = Dilithium3, 1 = SPHINCS+-SHA2-256f
+    /// pubkey: raw Dilithium3, ML-DSA-65, or SPHINCS+ public key bytes
+    /// algo:   0 = Dilithium3, 1 = ML-DSA-65, 2 = SPHINCS+-SHA2-256f
     function rotateKey(bytes calldata pubkey, uint8 algo) external;
+
+    /// Configure guardian-based account recovery.
+    function setGuardians(address[] calldata guardians, uint8 thresholdPct, uint64 timelockSecs) external;
+    function submitRecovery(address target, bytes calldata signature, uint8 algo) external;
+    function executeRecovery(address target) external;
+    function cancelRecovery(address target) external;
 
     /// Set a custom validator contract for this account.
     /// validationCodeHash: keccak256 hash of the deployed validator bytecode.
@@ -129,11 +165,15 @@ interface IAccountManager {
 
 ### Function selectors
 
-| Function | Access |
-|----------|--------|
-| `rotateKey(bytes,uint8)` | self only (`msg.sender == tx.origin account`) |
-| `setValidationCode(bytes32)` | self only |
-| `clearValidationCode()` | self only |
+| Function | Selector | Access |
+|----------|----------|--------|
+| `rotateKey(bytes,uint8)` | `0xb746c079` | self only (`msg.sender == tx.origin account`) |
+| `setValidationCode(bytes32)` | `0x0e3cf096` | self only |
+| `clearValidationCode()` | `0xd1c4b175` | self only |
+| `setGuardians(address[],uint8,uint64)` | computed at compile time | self only |
+| `submitRecovery(address,bytes,uint8)` | computed at compile time | guardian only |
+| `executeRecovery(address)` | computed at compile time | anyone (after timelock) |
+| `cancelRecovery(address)` | computed at compile time | self only |
 
 ### Key rotation example
 
@@ -147,8 +187,8 @@ curl -s http://localhost:8545 -H "Content-Type: application/json" \
     "jsonrpc":"2.0",
     "method":"shell_sendTransaction",
     "params":[{
-      "from": "pq1MYADDRESS",
-      "to":   "0x0000000000000000000000000000000000000002",
+      "from": "0xMYADDRESS",
+      "to":   "0x0000000000000000000000000000000000000000000000000000000000000002",
       "data": "0x<rotateKey calldata>",
       "gas":  "0x186a0"
     }],
@@ -156,7 +196,7 @@ curl -s http://localhost:8545 -H "Content-Type: application/json" \
   }'
 ```
 
-After the transaction is included, future transactions from `pq1MYADDRESS` are
+After the transaction is included, future transactions from `0xMYADDRESS` are
 validated using the new key. The old key is invalidated immediately.
 
 ### Custom validation code
@@ -197,7 +237,7 @@ System contract calls use a flat base gas charge:
 
 ## Implementation notes
 
-- System contracts are **intercepted by the EVM executor** before EVM bytecode
+- System contracts are **intercepted by the PQVM/revm execution adapter** before bytecode
   execution. There is no bytecode at these addresses — `eth_getCode` returns an
   empty result.
 - Both contracts produce standard EVM-style `logs` (topics + data) that appear

@@ -6,12 +6,14 @@
 //! - [`ShellStateDb`]: implements `revm::Database` over WorldState + ChainStore
 //! - [`ShellEvm`]: transaction executor (Shanghai spec)
 //! - [`ShellPrecompiles`]: PQ precompile provider (6-precompile suite at 0x0001-0x0006)
+//! - [`pqvm_opcodes`]: Native PQ opcodes (0xB0 PQVERIFY, 0xB1 PQHASH, 0xB2 PQADDR)
 //! - [`validate_tx`]: PQ signature verification + hybrid pubkey registration
 
 mod aa_validation;
 pub mod bloom;
 mod executor;
 mod parallel;
+pub mod pqvm_opcodes;
 mod precompiles;
 mod rwset;
 mod state_db;
@@ -27,6 +29,7 @@ pub use parallel::{
     ConflictMetric, ConflictReason, ExecutionWave, ParallelEvmConfig, ParallelExecutionPlan,
     ParallelScheduler, TxConflict, TxConflictGraph,
 };
+pub use pqvm_opcodes::{OPCODE_PQADDR, OPCODE_PQHASH, OPCODE_PQVERIFY};
 pub use precompiles::{
     ShellPrecompiles, BLAKE3_BASE_GAS, BLAKE3_WORD_GAS, PQ_ADDR_DERIVE_GAS,
     PQ_MLDSA65_BATCH_VERIFY_GAS_PER_SIG, PQ_MLDSA65_VERIFY_GAS, PQ_SLHDSA_VERIFY_GAS,
@@ -34,12 +37,14 @@ pub use precompiles::{
 pub use rwset::{HeuristicRwSetExtractor, ReadWriteSetExtractor, TxAccessPath, TxReadWriteSet};
 pub use state_db::{ShellStateDb, StateDbError};
 pub use system_contracts::{
-    account_manager_address, account_manager_code_hash, encode_add_validator_calldata,
-    encode_clear_validation_code_calldata, encode_remove_validator_calldata,
-    encode_rotate_key_calldata, encode_set_validation_code_calldata, execute_system_contract,
-    execute_system_contract_call, is_system_contract, registry_address, system_contract_code_hash,
-    SystemContractEffects, SystemContractError, SystemContractOutcome, ACCOUNT_MANAGER_ADDR,
-    SYSTEM_CALL_BASE_GAS, SYSTEM_CALL_OP_GAS, VALIDATOR_REGISTRY_ADDR,
+    account_manager_address, account_manager_code_hash, decode_address_u64,
+    encode_add_validator_calldata, encode_clear_validation_code_calldata,
+    encode_remove_validator_calldata, encode_rotate_key_calldata,
+    encode_set_validation_code_calldata, encode_set_validator_weight_calldata,
+    execute_system_contract, execute_system_contract_call, is_system_contract, registry_address,
+    system_contract_code_hash, SystemContractEffects, SystemContractError, SystemContractOutcome,
+    ACCOUNT_MANAGER_ADDR, SET_VALIDATOR_WEIGHT_SELECTOR, SYSTEM_CALL_BASE_GAS, SYSTEM_CALL_OP_GAS,
+    VALIDATOR_REGISTRY_ADDR,
 };
 pub use tracer::{decode_revert_reason, CallFrame, TraceResult};
 pub use tx_validation::{

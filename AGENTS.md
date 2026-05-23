@@ -8,8 +8,9 @@ this submodule.
 
 The post-quantum-native Layer 1 node implementation:
 
-- Cancun-EVM compatible (revm-based executor)
-- PQ signatures: Dilithium3 (NIST FIPS 204 / ML-DSA-65 path), SPHINCS+
+- PQVM-native execution, currently through a revm-backed adapter for retained
+  Cancun-style arithmetic, memory, storage, and control-flow semantics
+- PQ signatures: ML-DSA-65 primary (FIPS 204), Dilithium3 legacy-compatible active path, SPHINCS+ fallback
 - wPoA consensus engine
 - STARK transaction-level settlement (system tx, no `extra_data`)
 - Account Abstraction natively in protocol (tx type `0x7E`)
@@ -23,9 +24,10 @@ This repository ships a public, self-contained agent SSoT (this file).
 Operators may also maintain a private `docs/agents/` subtree locally
 (gitignored, not distributed) containing CONSTITUTION, ARCHITECTURE,
 ADRs, learnings, and per-crate feature specs. If that subtree is
-present in your working copy, prefer it as the highest-authority source
-and read it in this order: `CONSTITUTION.md` → `ARCHITECTURE.md` →
-`learnings.md` → relevant `features/<crate>/spec.md` → relevant ADR.
+present in your working copy, treat the white paper as the target
+protocol authority and use the local docs as derived operational
+invariants: `CONSTITUTION.md` → `ARCHITECTURE.md` → `learnings.md` →
+relevant `features/<crate>/spec.md` → relevant ADR.
 
 If `docs/agents/` is not present, this file plus `CHANGELOG.md`,
 `docs/CONSENSUS_DETAILS.md`, `docs/stark-aggregation.md`,
@@ -52,12 +54,12 @@ Toolchain uses the `stable` channel via `rust-toolchain.toml` (+ rustfmt + clipp
 | Crate | Role |
 |---|---|
 | `primitives` | Core types (ShellHash, Address, U256) |
-| `crypto` | PQ signature stack (Dilithium3 / ML-DSA-65 / SPHINCS+) |
+| `crypto` | PQ signature stack (ML-DSA-65 primary / Dilithium3 legacy-compatible / SPHINCS+ fallback) |
 | `core` | Shared trait definitions, transaction model |
 | `storage` | KvStore, witness pruner, settled-source index |
 | `consensus` | wPoA engine, validator set, slashing |
 | `genesis` | Genesis block construction |
-| `evm` | revm wrapper, parallel scheduler |
+| `evm` | revm-backed PQVM execution adapter, parallel scheduler |
 | `mempool` | Transaction pool |
 | `network` | libp2p gossipsub |
 | `rpc` | JSON-RPC, TLS, three-RPC fanout |
@@ -75,10 +77,10 @@ For navigating `crates/node/` specifically, see
 
 ## Cardinal rules
 
-- **CONSTITUTION precedence**: if an operator-local
-  `docs/agents/CONSTITUTION.md` is present, it is the highest authority
-  on protocol/consensus/RPC/security invariants — flag drift, do not
-  silently reconcile.
+- **White paper precedence**: target protocol behavior is defined by the
+  Shell-Chain white paper. If an operator-local `docs/agents/CONSTITUTION.md`
+  is present, treat it as derived operational invariants — flag drift,
+  do not silently reconcile.
 - **All PQ signatures verified at mempool entry.**
 - **STARK proof settlements**: only via the `StarkReward` system
   transaction. `BlockHeader::extra_data` is permanently deprecated as a
@@ -88,8 +90,8 @@ For navigating `crates/node/` specifically, see
 - **Drain-frontier** is an `Arc<AtomicU64>` that is monotonic per process;
   the seeder must clamp `scan_start` to
   `max(contiguous_pending_end - 16, drain_frontier)`.
-- **`L2StarkMode::Active` is FORBIDDEN** until explicitly promoted by
-  the Constitution.
+- **`L2StarkMode::Active` is allowed only when the deployment explicitly
+  opts into the white-paper STARK target path and its operational gates.**
 
 ## Quality gates (local mirror of CI)
 

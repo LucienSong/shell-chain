@@ -62,21 +62,35 @@ impl<S: KvStore + 'static> Node<S> {
 
         // Verify the attestation signature.
         let msg = Attestation::signing_message(&block_hash, block_number);
-        let sig = shell_crypto::PQSignature::new(
-            shell_crypto::SignatureType::Dilithium3,
-            attestation.signature.clone(),
-        );
+        let sig_type = shell_crypto::infer_signature_type_from_address(pubkey, &validator)
+            .ok_or_else(|| {
+                NodeError::Startup(format!(
+                    "unknown attestation signature algorithm for validator {validator:?}"
+                ))
+            })?;
+        if !shell_crypto::is_algorithm_allowed(sig_type) {
+            return Err(NodeError::Startup(format!(
+                "attestation signature algorithm {sig_type:?} not allowed"
+            )));
+        }
+        let sig = shell_crypto::PQSignature::new(sig_type, attestation.signature.clone());
         let valid = verifier
             .verify(pubkey, &msg, &sig)
-            .map_err(|_| NodeError::Startup("invalid attestation signature".into()))?;
+            .map_err(|e| NodeError::Startup(format!("invalid attestation signature: {e}")))?;
         if !valid {
             return Err(NodeError::Startup(
                 "attestation signature verification failed".into(),
             ));
         }
 
-        let total_validators = self.consensus.read().poa_config().authorities.len();
-        let (attestation_count, finalized) = {
+        let validator_weights = self.consensus.read().validator_weights();
+        let attester_weight = validator_weights.get(&validator).copied().ok_or_else(|| {
+            NodeError::Startup(format!(
+                "unknown active attestation validator: {validator:?}"
+            ))
+        })?;
+        let total_weight: u64 = validator_weights.values().copied().sum();
+        let (attested_weight, finalized) = {
             // Check for equivocation, record the attestation, and evaluate
             // finality under one finality write lock to avoid lock-order cycles
             // with fork_choice.
@@ -97,18 +111,19 @@ impl<S: KvStore + 'static> Node<S> {
             }
 
             // Record the attestation.
-            if !finality.record_attestation(attestation) {
+            if !finality.record_attestation_weighted(attestation, attester_weight) {
                 return Ok(()); // duplicate, already recorded
             }
-            let attestation_count = finality.attestation_count(&block_hash);
-            let finalized = finality.check_finality(&block_hash, block_number, total_validators);
-            (attestation_count, finalized)
+            let attested_weight = finality.attested_weight(&block_hash);
+            let finalized =
+                finality.check_finality_weighted(&block_hash, block_number, total_weight);
+            (attested_weight, finalized)
         };
 
         if self.fork_choice.read().contains(&block_hash) {
             self.fork_choice
                 .write()
-                .update_attestations(&block_hash, attestation_count);
+                .update_attested_weight(&block_hash, attested_weight);
         }
 
         if finalized {
@@ -483,22 +498,70 @@ impl<S: KvStore + 'static> Node<S> {
         }
     }
 
-    /// W.5: Handle an incoming wPoA view-change vote from a peer.
-    ///
-    /// Records the vote and logs when quorum for the view change is reached.
-    pub fn handle_wpoa_view_change(&self, voter: Address, new_view: u64, block_number: u64) {
-        let mut guard = self.wpoa_round.lock();
-        if let Some(ref mut round) = *guard {
-            if round.block_number != block_number {
-                return;
-            }
-            let events = round.on_view_change_vote(voter, new_view);
-            for event in events {
-                if let WPoaEvent::ViewChangeReady { new_view } = event {
-                    tracing::info!(new_view, "W.5: view change ready — advancing round");
-                    round.round = new_view;
-                }
-            }
+    /// W.5: Handle an incoming signed wPoA view-change message from a peer.
+    pub fn handle_wpoa_view_change(
+        &self,
+        msg: ViewChangeMessage,
+        verifier: &dyn Verifier,
+    ) -> Result<bool, NodeError> {
+        // Reject view-change messages for heights other than the current
+        // timed-out height (head + 1) to prevent stale / replayed messages
+        // from incorrectly rotating proposer selection.
+        let expected_block = self
+            .chain_store
+            .get_head_block()
+            .ok()
+            .flatten()
+            .map(|b| b.number() + 1)
+            .unwrap_or(1);
+        if msg.block_number != expected_block {
+            return Err(NodeError::Startup(format!(
+                "view-change block_number {} does not match expected height {}",
+                msg.block_number, expected_block
+            )));
         }
+
+        let known = self.known_authorities.read();
+        let pubkey = known.get(&msg.validator).ok_or_else(|| {
+            NodeError::Startup(format!(
+                "unknown view-change validator: {:?}",
+                msg.validator
+            ))
+        })?;
+
+        let signing_message = ViewChangeMessage::signing_message(msg.view, msg.block_number);
+        let sig_type = shell_crypto::infer_signature_type_from_address(pubkey, &msg.validator)
+            .ok_or_else(|| {
+                NodeError::Startup(format!(
+                    "unknown view-change signature algorithm for validator {}",
+                    msg.validator
+                ))
+            })?;
+        if !shell_crypto::is_algorithm_allowed(sig_type) {
+            return Err(NodeError::Startup(format!(
+                "view-change signature algorithm {sig_type:?} not allowed"
+            )));
+        }
+        let sig = shell_crypto::PQSignature::new(sig_type, msg.signature.clone());
+        let valid = verifier
+            .verify(pubkey, &signing_message, &sig)
+            .map_err(|e| NodeError::Startup(format!("invalid view-change signature: {e}")))?;
+        if !valid {
+            return Err(NodeError::Startup(
+                "view-change signature verification failed".into(),
+            ));
+        }
+
+        let total_weight: u64 = self
+            .consensus
+            .read()
+            .validator_weights()
+            .values()
+            .copied()
+            .sum();
+        Ok(self
+            .consensus
+            .write()
+            .handle_view_change_message(msg, total_weight))
     }
 }

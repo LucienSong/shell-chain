@@ -1,15 +1,20 @@
 //! State-root pruning: track recent state roots and mark old ones for eviction.
 //!
 //! The tracker records `(block_number, state_root)` pairs after each block is
-//! finalised.  When the history exceeds [`PruningConfig::keep_recent`], the
-//! oldest entries are evicted and logged.  Actual trie-node deletion is deferred
-//! to a future milestone (requires reference-counting).
+//! finalised. When the history exceeds [`PruningConfig::keep_recent`], rolling
+//! storage profiles prune trie snapshots that fall outside the retention window
+//! while preserving nodes still reachable from retained state roots.
+
+use std::collections::{HashSet, VecDeque};
+use std::str::FromStr;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use shell_primitives::ShellHash;
-use shell_storage::{DEFAULT_BODY_RETENTION, DEFAULT_WITNESS_RETENTION};
-use std::collections::VecDeque;
-use std::str::FromStr;
+use shell_storage::{
+    ChainStore, KvStore, StorageError, WorldState, DEFAULT_BODY_RETENTION,
+    DEFAULT_WITNESS_RETENTION,
+};
 
 /// High-level node storage classification.
 ///
@@ -17,11 +22,14 @@ use std::str::FromStr;
 /// CLI flag sets the active profile; individual flags (`--body-retention`, etc.) can
 /// still override individual fields after the profile defaults are applied.
 ///
-/// | Profile   | body_retention | witness_retention | proof_replacement_grace | keep_recent |
-/// |-----------|---------------|------------------|------------------------|-------------|
-/// | Archive   | 0 (forever)   | 0 (forever)      | u64::MAX (never)       | 0 (forever) |
-/// | Full      | 0 (forever)   | 128              | 0 (immediate)          | 0 (forever) |
-/// | Light     | 4 096         | 64               | 0 (immediate)          | 4 096       |
+/// White-paper canonical names are `Archive`, `Full`, and `Pruned (Rolling)`.
+/// `Light` is an accepted alias for `Pruned` (backwards compatible).
+///
+/// | Profile (WP name)       | body_retention | witness_retention | proof_replacement_grace | keep_recent |
+/// |-------------------------|---------------|------------------|------------------------|-------------|
+/// | Archive                 | 0 (forever)   | 0 (forever)      | u64::MAX (never)       | 0 (forever) |
+/// | Full                    | 0 (forever)   | 128              | 0 (immediate)          | 0 (forever) |
+/// | Pruned / Rolling / Light| 4 096         | 64               | 0 (immediate)          | 4 096       |
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum StorageProfile {
@@ -32,7 +40,9 @@ pub enum StorageProfile {
     /// by STARK proofs once the proof lands (disk-efficient).
     #[default]
     Full,
-    /// Lightweight rolling window: only the most recent ~2.3 h of data is retained.
+    /// Rolling/pruned window: only the most recent ~2.3 h of data is retained.
+    ///
+    /// White-paper names: `Pruned` or `Rolling`.  Accepted CLI alias: `light`.
     Light,
 }
 
@@ -43,6 +53,22 @@ impl StorageProfile {
             Self::Archive => "archive",
             Self::Full => "full",
             Self::Light => "light",
+        }
+    }
+
+    /// Returns the white-paper canonical name for this profile.
+    ///
+    /// Prefer this method when surfacing the profile externally (e.g. RPC response,
+    /// metrics labels) so clients receive the white-paper standard name.
+    ///
+    /// - `Archive` → `"archive"`
+    /// - `Full`    → `"full"`
+    /// - `Light`   → `"pruned"` (white-paper name for the rolling window profile)
+    pub fn whitepaper_name(self) -> &'static str {
+        match self {
+            Self::Archive => "archive",
+            Self::Full => "full",
+            Self::Light => "pruned",
         }
     }
 
@@ -107,9 +133,11 @@ impl FromStr for StorageProfile {
         match s.to_lowercase().as_str() {
             "archive" => Ok(Self::Archive),
             "full" => Ok(Self::Full),
-            "light" => Ok(Self::Light),
+            // White-paper names ("pruned", "rolling") and legacy alias ("light")
+            // all map to the same rolling-window profile.
+            "light" | "pruned" | "rolling" => Ok(Self::Light),
             other => Err(format!(
-                "unknown storage profile '{other}'; valid values: archive, full, light"
+                "unknown storage profile '{other}'; valid values: archive, full, pruned (aliases: rolling, light)"
             )),
         }
     }
@@ -136,13 +164,12 @@ pub struct PruningConfig {
     /// A non-zero value keeps signatures available for that many extra blocks
     /// (useful for forensic / audit windows in production).
     pub proof_replacement_grace: u64,
-    /// Enable experimental state-trie pruning (L3).
+    /// Legacy compatibility flag for the original experimental trie-pruning
+    /// rollout.
     ///
-    /// When `false` (default), state roots are tracked in memory but no trie
-    /// nodes are physically deleted on eviction — archive mode for trie data.
-    /// When `true`, evicted state roots trigger reference-count decrements and
-    /// zero-ref trie nodes are deleted from storage. **Experimental** — only
-    /// enable after thorough testing; a bug here can corrupt the state trie.
+    /// Rolling/pruned storage profiles now prune old trie snapshots
+    /// automatically. The field is kept for backwards-compatible config/RPC
+    /// serialisation and no longer gates snapshot deletion.
     pub state_pruning_experimental: bool,
 }
 
@@ -250,12 +277,176 @@ impl StateRootTracker {
     }
 }
 
+/// Summary of a state-trie prune pass.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct StateTriePruneResult {
+    pub pruned_roots: u64,
+    pub deleted_nodes: u64,
+    pub skipped_roots: u64,
+}
+
+/// Delete hashed trie nodes for canonical state snapshots older than
+/// `keep_below_block`, while preserving any nodes still reachable from retained
+/// state roots.
+pub fn prune_state_trie<S: KvStore + 'static>(
+    store: Arc<S>,
+    keep_below_block: u64,
+    profile: StorageProfile,
+) -> Result<StateTriePruneResult, StorageError> {
+    if keep_below_block == 0 || !matches!(profile, StorageProfile::Light) {
+        return Ok(StateTriePruneResult::default());
+    }
+
+    let chain_store = ChainStore::new(Arc::clone(&store));
+    let Some(head) = chain_store.get_head_block()? else {
+        return Ok(StateTriePruneResult::default());
+    };
+
+    let mut old_roots = Vec::new();
+    let mut retained_roots = HashSet::new();
+
+    // Only walk the retention window for retained roots — avoids O(chain_height)
+    // per call which would become O(N²) over the chain's lifetime.
+    let window_start = keep_below_block.min(head.number());
+    for block_number in window_start..=head.number() {
+        let Some(block_hash) = chain_store.get_block_hash_by_number(block_number)? else {
+            continue;
+        };
+        let Some(header) = chain_store.get_header_by_hash(&block_hash)? else {
+            continue;
+        };
+        retained_roots.insert(header.state_root);
+    }
+
+    // Collect roots to evict: all blocks strictly below the retention boundary.
+    // In steady-state operation this window stays small because each block
+    // advances keep_below_block by 1; on first-run or catch-up it is bounded by
+    // the retention window size, not total chain height.
+    for block_number in 0..keep_below_block {
+        let Some(block_hash) = chain_store.get_block_hash_by_number(block_number)? else {
+            continue;
+        };
+        let Some(header) = chain_store.get_header_by_hash(&block_hash)? else {
+            continue;
+        };
+        old_roots.push(header.state_root);
+    }
+
+    let mut protected_nodes = HashSet::new();
+    for root in retained_roots {
+        protected_nodes.extend(WorldState::<S>::collect_snapshot_node_hashes(
+            store.as_ref(),
+            root,
+        )?);
+    }
+
+    let mut result = StateTriePruneResult::default();
+    let mut seen_old_roots = HashSet::new();
+    for root in old_roots {
+        if !seen_old_roots.insert(root) {
+            continue;
+        }
+        let deleted =
+            WorldState::<S>::delete_state_snapshot(store.as_ref(), root, &protected_nodes)?;
+        if deleted > 0 {
+            result.pruned_roots = result.pruned_roots.saturating_add(1);
+            result.deleted_nodes = result.deleted_nodes.saturating_add(deleted);
+        } else {
+            result.skipped_roots = result.skipped_roots.saturating_add(1);
+        }
+    }
+
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    use shell_core::{Block, BlockHeader};
+    use shell_primitives::{Address, Bytes, U256};
+    use shell_storage::{ChainConfig, MemoryDb};
+
     fn dummy_root(n: u8) -> ShellHash {
         ShellHash::from([n; 32])
+    }
+
+    fn make_block(number: u64, parent_hash: ShellHash, state_root: ShellHash) -> Block {
+        Block {
+            header: BlockHeader {
+                parent_hash,
+                state_root,
+                transactions_root: ShellHash::ZERO,
+                receipts_root: ShellHash::ZERO,
+                logs_bloom: Bytes::default(),
+                number,
+                gas_limit: 30_000_000,
+                gas_used: 0,
+                timestamp: 1_000_000 + number,
+                extra_data: Bytes::default(),
+                proposer: Address::from([number as u8; 20]),
+                sig_aggregate_proof: None,
+                base_fee_per_gas: 0,
+                withdrawals_root: ShellHash::ZERO,
+                parent_beacon_block_root: ShellHash::ZERO,
+                blob_gas_used: 0,
+                excess_blob_gas: 0,
+                witness_root: None,
+            },
+            transactions: vec![],
+            system_transactions: vec![],
+            proposer_seal: None,
+        }
+    }
+
+    fn sample_address(seed: u8) -> Address {
+        Address::from([seed; 20])
+    }
+
+    fn populate_state_chain() -> (Arc<MemoryDb>, Vec<ShellHash>, Vec<Address>) {
+        let store = Arc::new(MemoryDb::new());
+        let chain_store = ChainStore::new(Arc::clone(&store));
+        let mut roots = Vec::new();
+        let mut addresses = Vec::new();
+        let mut parent_hash = ShellHash::ZERO;
+
+        for block_number in 0..3u64 {
+            let mut world_state = WorldState::new(Arc::clone(&store));
+            let address = sample_address(block_number as u8 + 1);
+            world_state
+                .add_balance(&address, U256::from(block_number + 1))
+                .unwrap();
+            let state_root = world_state.state_root().unwrap();
+            roots.push(state_root);
+            addresses.push(address);
+
+            let block = make_block(block_number, parent_hash, state_root);
+            parent_hash = block.hash();
+            if block_number == 0 {
+                chain_store
+                    .commit_genesis_block(
+                        &block,
+                        &ChainConfig {
+                            chain_id: 1337,
+                            genesis_hash: block.hash(),
+                        },
+                    )
+                    .unwrap();
+            } else {
+                chain_store.commit_canonical_block(&block, None).unwrap();
+            }
+        }
+
+        (store, roots, addresses)
+    }
+
+    fn root_balance(
+        store: &Arc<MemoryDb>,
+        root: ShellHash,
+        address: Address,
+    ) -> Result<U256, StorageError> {
+        let snapshot = WorldState::at_root(Arc::clone(store), &root)?;
+        snapshot.get_balance(&address)
     }
 
     #[test]
@@ -381,5 +572,100 @@ mod tests {
         assert_eq!(cfg.witness_retention, 0);
         assert_eq!(cfg.keep_recent, 0);
         assert_eq!(cfg.proof_replacement_grace, u64::MAX);
+    }
+
+    #[test]
+    fn pruned_profile_triggers_trie_deletion() {
+        let (store, roots, addresses) = populate_state_chain();
+
+        let result = prune_state_trie(Arc::clone(&store), 2, StorageProfile::Light).unwrap();
+
+        assert!(result.deleted_nodes > 0);
+        assert!(result.pruned_roots > 0);
+        assert!(root_balance(&store, roots[0], addresses[0]).is_err());
+        assert_eq!(
+            root_balance(&store, roots[2], addresses[2]).unwrap(),
+            U256::from(3u64)
+        );
+    }
+
+    #[test]
+    fn archive_profile_does_not_delete_trie_nodes() {
+        let (store, roots, addresses) = populate_state_chain();
+
+        let result = prune_state_trie(Arc::clone(&store), 2, StorageProfile::Archive).unwrap();
+
+        assert_eq!(result, StateTriePruneResult::default());
+        assert_eq!(
+            root_balance(&store, roots[0], addresses[0]).unwrap(),
+            U256::from(1u64)
+        );
+        assert_eq!(
+            root_balance(&store, roots[2], addresses[2]).unwrap(),
+            U256::from(3u64)
+        );
+    }
+
+    #[test]
+    fn pruned_block_state_root_becomes_inaccessible_after_prune() {
+        let (store, roots, addresses) = populate_state_chain();
+
+        assert_eq!(
+            root_balance(&store, roots[1], addresses[1]).unwrap(),
+            U256::from(2u64)
+        );
+        prune_state_trie(Arc::clone(&store), 2, StorageProfile::Light).unwrap();
+
+        assert!(root_balance(&store, roots[1], addresses[1]).is_err());
+        assert_eq!(
+            root_balance(&store, roots[2], addresses[2]).unwrap(),
+            U256::from(3u64)
+        );
+    }
+
+    // ── White-paper alias tests ───────────────────────────────────────────────
+
+    #[test]
+    fn storage_profile_pruned_alias_parses() {
+        assert_eq!(
+            StorageProfile::from_str("pruned").unwrap(),
+            StorageProfile::Light
+        );
+        assert_eq!(
+            StorageProfile::from_str("PRUNED").unwrap(),
+            StorageProfile::Light
+        );
+    }
+
+    #[test]
+    fn storage_profile_rolling_alias_parses() {
+        assert_eq!(
+            StorageProfile::from_str("rolling").unwrap(),
+            StorageProfile::Light
+        );
+        assert_eq!(
+            StorageProfile::from_str("Rolling").unwrap(),
+            StorageProfile::Light
+        );
+    }
+
+    #[test]
+    fn storage_profile_whitepaper_name_light_is_pruned() {
+        assert_eq!(StorageProfile::Light.whitepaper_name(), "pruned");
+    }
+
+    #[test]
+    fn storage_profile_whitepaper_names_archive_and_full_unchanged() {
+        assert_eq!(StorageProfile::Archive.whitepaper_name(), "archive");
+        assert_eq!(StorageProfile::Full.whitepaper_name(), "full");
+    }
+
+    #[test]
+    fn storage_profile_unknown_error_mentions_aliases() {
+        let err = StorageProfile::from_str("bad_profile").unwrap_err();
+        // Error message should guide users to both canonical and alias names.
+        assert!(err.contains("archive"), "error should mention archive");
+        assert!(err.contains("full"), "error should mention full");
+        assert!(err.contains("pruned"), "error should mention pruned");
     }
 }

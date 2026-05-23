@@ -3,7 +3,7 @@
 //! - AccountManager at address 0x0000…0002
 //!
 //! Instead of deploying Solidity bytecode, this contract is intercepted by the
-//! EVM executor and executed as native Rust code. This avoids the need for a
+//! PQVM/revm execution adapter and executed as native Rust code. This avoids the need for a
 //! Solidity compiler and ensures deterministic, efficient validator management.
 //!
 //! # Supported Functions
@@ -12,6 +12,9 @@
 //! |----------|-----------|--------|
 //! | ValidatorRegistry | `addValidator(address)` | validators |
 //! | ValidatorRegistry | `removeValidator(address)` | validators |
+//! | ValidatorRegistry | `setValidatorWeight(address,uint64)` | validators |
+//! | ValidatorRegistry | `proposeAlgorithmActivation(uint8)` | validators |
+//! | ValidatorRegistry | `deprecateAlgorithm(uint8)` | validators |
 //! | ValidatorRegistry | `getValidators()` | anyone |
 //! | ValidatorRegistry | `isValidator(address)` | anyone |
 //! | AccountManager | `rotateKey(bytes,uint8)` | self |
@@ -23,7 +26,7 @@
 //! | AccountManager | `cancelRecovery(address)` | account owner |
 
 use shell_core::Account;
-use shell_crypto::SignatureType;
+use shell_crypto::{AlgorithmRegistry, AlgorithmStatus, SignatureType};
 use shell_primitives::{blake3_hash, keccak256, Address, ShellHash, U256};
 use shell_storage::{
     ChainStore, GuardianConfig, KvStore, RecoveryProposal, WorldState, MAX_GUARDIANS,
@@ -66,6 +69,14 @@ pub fn is_system_contract(address: &Address) -> bool {
 pub const ADD_VALIDATOR_SELECTOR: [u8; 4] = compute_selector(b"addValidator(address)");
 /// keccak256("removeValidator(address)")[..4]
 pub const REMOVE_VALIDATOR_SELECTOR: [u8; 4] = compute_selector(b"removeValidator(address)");
+/// keccak256("setValidatorWeight(address,uint64)")[..4]
+pub const SET_VALIDATOR_WEIGHT_SELECTOR: [u8; 4] =
+    compute_selector(b"setValidatorWeight(address,uint64)");
+/// keccak256("proposeAlgorithmActivation(uint8)")[..4]
+pub const PROPOSE_ALGORITHM_ACTIVATION_SELECTOR: [u8; 4] =
+    compute_selector(b"proposeAlgorithmActivation(uint8)");
+/// keccak256("deprecateAlgorithm(uint8)")[..4]
+pub const DEPRECATE_ALGORITHM_SELECTOR: [u8; 4] = compute_selector(b"deprecateAlgorithm(uint8)");
 /// keccak256("getValidators()")[..4]
 pub const GET_VALIDATORS_SELECTOR: [u8; 4] = compute_selector(b"getValidators()");
 /// keccak256("isValidator(address)")[..4]
@@ -187,7 +198,8 @@ pub fn execute_system_contract<S: KvStore + 'static>(
     input: &[u8],
     world_state: &mut WorldState<S>,
 ) -> Result<(Vec<u8>, u64), SystemContractError> {
-    execute_validator_registry(caller, input, world_state, None)
+    let mut registry = AlgorithmRegistry::global_mut();
+    execute_validator_registry_with_registry(caller, input, world_state, None, &mut registry)
 }
 
 /// Execute any native system contract and return both the ABI output and the
@@ -200,11 +212,19 @@ pub fn execute_system_contract_call<S: KvStore + 'static>(
     chain_store: &ChainStore<S>,
 ) -> Result<SystemContractOutcome, SystemContractError> {
     if *target == registry_address() {
-        let (output, gas_used) =
-            execute_validator_registry(caller, input, world_state, Some(chain_store))?;
+        let mut registry = AlgorithmRegistry::global_mut();
+        let (output, gas_used) = execute_validator_registry_with_registry(
+            caller,
+            input,
+            world_state,
+            Some(chain_store),
+            &mut registry,
+        )?;
         let mut effects = SystemContractEffects::default();
         let selector = decode_selector(input)?;
-        if (selector == ADD_VALIDATOR_SELECTOR || selector == REMOVE_VALIDATOR_SELECTOR)
+        if (selector == ADD_VALIDATOR_SELECTOR
+            || selector == REMOVE_VALIDATOR_SELECTOR
+            || selector == SET_VALIDATOR_WEIGHT_SELECTOR)
             && output == encode_bool(true)
         {
             effects.validator_set_changed = true;
@@ -223,11 +243,12 @@ pub fn execute_system_contract_call<S: KvStore + 'static>(
     Err(SystemContractError::UnknownSystemContract(*target))
 }
 
-fn execute_validator_registry<S: KvStore + 'static>(
+fn execute_validator_registry_with_registry<S: KvStore + 'static>(
     caller: &Address,
     input: &[u8],
     world_state: &mut WorldState<S>,
     chain_store: Option<&ChainStore<S>>,
+    registry: &mut AlgorithmRegistry,
 ) -> Result<(Vec<u8>, u64), SystemContractError> {
     if input.len() < 4 {
         return Err(SystemContractError::InputTooShort);
@@ -246,6 +267,24 @@ fn execute_validator_registry<S: KvStore + 'static>(
         s if s == REMOVE_VALIDATOR_SELECTOR => {
             let addr = decode_address(params)?;
             let applied = remove_validator(caller, &addr, world_state)?;
+            let gas = SYSTEM_CALL_BASE_GAS.saturating_add(SYSTEM_CALL_OP_GAS);
+            Ok((encode_bool(applied), gas))
+        }
+        s if s == SET_VALIDATOR_WEIGHT_SELECTOR => {
+            let (addr, weight) = decode_address_u64(params)?;
+            let applied = set_validator_weight_op(caller, &addr, weight, world_state)?;
+            let gas = SYSTEM_CALL_BASE_GAS.saturating_add(SYSTEM_CALL_OP_GAS);
+            Ok((encode_bool(applied), gas))
+        }
+        s if s == PROPOSE_ALGORITHM_ACTIVATION_SELECTOR => {
+            let algo = decode_signature_type(params)?;
+            let applied = propose_algorithm_activation_op(caller, algo, world_state, registry)?;
+            let gas = SYSTEM_CALL_BASE_GAS.saturating_add(SYSTEM_CALL_OP_GAS);
+            Ok((encode_bool(applied), gas))
+        }
+        s if s == DEPRECATE_ALGORITHM_SELECTOR => {
+            let algo = decode_signature_type(params)?;
+            let applied = deprecate_algorithm_op(caller, algo, world_state, registry)?;
             let gas = SYSTEM_CALL_BASE_GAS.saturating_add(SYSTEM_CALL_OP_GAS);
             Ok((encode_bool(applied), gas))
         }
@@ -441,10 +480,122 @@ fn remove_validator<S: KvStore + 'static>(
     Ok(true)
 }
 
+/// Governance-driven validator weight update (white paper §5.3 — F-039/F-040).
+///
+/// Requires a weighted quorum (> 2/3 of total voting weight) to take effect.
+/// Weight changes are logged but not stored back to the permanent validator list;
+/// they are applied immediately to `world_state` via `set_validator_weight`.
+fn set_validator_weight_op<S: KvStore + 'static>(
+    caller: &Address,
+    target: &Address,
+    new_weight: u64,
+    world_state: &mut WorldState<S>,
+) -> Result<bool, SystemContractError> {
+    let validators = world_state
+        .get_validators()
+        .map_err(|e| SystemContractError::Storage(e.to_string()))?;
+
+    // Authorization: caller must be an existing validator.
+    if !validators.contains(caller) {
+        return Err(SystemContractError::Unauthorized);
+    }
+
+    // Target must be an existing validator; you cannot pre-assign weight.
+    if !validators.contains(target) {
+        return Err(SystemContractError::NotFound(*target));
+    }
+
+    // Reject zero-weight — would silently de-activate a validator.
+    if new_weight == 0 {
+        return Err(SystemContractError::AbiDecode(
+            "validator weight must be at least 1".into(),
+        ));
+    }
+
+    // Record vote; proceed only when weighted majority is reached.
+    if !record_validator_vote(
+        world_state,
+        ValidatorRegistryOp::SetWeight(new_weight),
+        target,
+        caller,
+        &validators,
+    )? {
+        return Ok(false);
+    }
+
+    world_state
+        .set_validator_weight(target, new_weight)
+        .map_err(|e| SystemContractError::Storage(e.to_string()))?;
+
+    Ok(true)
+}
+
+fn propose_algorithm_activation_op<S: KvStore + 'static>(
+    caller: &Address,
+    algo: SignatureType,
+    world_state: &mut WorldState<S>,
+    registry: &mut AlgorithmRegistry,
+) -> Result<bool, SystemContractError> {
+    let validators = world_state
+        .get_validators()
+        .map_err(|e| SystemContractError::Storage(e.to_string()))?;
+
+    if !validators.contains(caller) {
+        return Err(SystemContractError::Unauthorized);
+    }
+
+    registry.propose_activation(algo);
+    store_algorithm_status(world_state, algo, AlgorithmStatus::PendingActivation)?;
+
+    if !record_algorithm_vote(
+        world_state,
+        AlgorithmGovernanceOp::ProposeActivation,
+        algo,
+        caller,
+        &validators,
+    )? {
+        return Ok(false);
+    }
+
+    registry.activate(algo);
+    store_algorithm_status(world_state, algo, AlgorithmStatus::Active)?;
+    Ok(true)
+}
+
+fn deprecate_algorithm_op<S: KvStore + 'static>(
+    caller: &Address,
+    algo: SignatureType,
+    world_state: &mut WorldState<S>,
+    registry: &mut AlgorithmRegistry,
+) -> Result<bool, SystemContractError> {
+    let validators = world_state
+        .get_validators()
+        .map_err(|e| SystemContractError::Storage(e.to_string()))?;
+
+    if !validators.contains(caller) {
+        return Err(SystemContractError::Unauthorized);
+    }
+
+    if !record_algorithm_vote(
+        world_state,
+        AlgorithmGovernanceOp::Deprecate,
+        algo,
+        caller,
+        &validators,
+    )? {
+        return Ok(false);
+    }
+
+    registry.deprecate(algo);
+    store_algorithm_status(world_state, algo, AlgorithmStatus::Deprecated)?;
+    Ok(true)
+}
+
 #[derive(Debug, Clone, Copy)]
 enum ValidatorRegistryOp {
     Add,
     Remove,
+    SetWeight(u64),
 }
 
 impl ValidatorRegistryOp {
@@ -452,6 +603,28 @@ impl ValidatorRegistryOp {
         match self {
             Self::Add => b"add",
             Self::Remove => b"remove",
+            Self::SetWeight(_) => b"set_weight",
+        }
+    }
+
+    fn write_context(self, bytes: &mut Vec<u8>) {
+        if let Self::SetWeight(weight) = self {
+            bytes.extend_from_slice(&weight.to_be_bytes());
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum AlgorithmGovernanceOp {
+    ProposeActivation,
+    Deprecate,
+}
+
+impl AlgorithmGovernanceOp {
+    fn label(self) -> &'static [u8] {
+        match self {
+            Self::ProposeActivation => b"propose_activation",
+            Self::Deprecate => b"deprecate",
         }
     }
 }
@@ -462,9 +635,11 @@ fn validator_vote_key(
     voter: &Address,
     validators: &[Address],
 ) -> ShellHash {
-    let mut bytes = Vec::with_capacity(24 + op.label().len() + 20 + 20 + validators.len() * 20);
+    let mut bytes = Vec::with_capacity(32 + op.label().len() + 8 + 32 + 32 + validators.len() * 32);
     bytes.extend_from_slice(b"validator_vote:");
     bytes.extend_from_slice(op.label());
+    bytes.extend_from_slice(b":");
+    op.write_context(&mut bytes);
     bytes.extend_from_slice(b":");
     bytes.extend_from_slice(target.as_bytes());
     bytes.extend_from_slice(b":");
@@ -474,6 +649,43 @@ fn validator_vote_key(
     bytes.extend_from_slice(b":");
     bytes.extend_from_slice(voter.as_bytes());
     keccak256(&bytes)
+}
+
+fn algorithm_vote_key(
+    op: AlgorithmGovernanceOp,
+    algo: SignatureType,
+    voter: &Address,
+    validators: &[Address],
+) -> ShellHash {
+    let mut bytes = Vec::with_capacity(40 + op.label().len() + 1 + 32 + validators.len() * 32);
+    bytes.extend_from_slice(b"algorithm_vote:");
+    bytes.extend_from_slice(op.label());
+    bytes.extend_from_slice(b":");
+    bytes.push(algo.as_u8());
+    bytes.extend_from_slice(b":");
+    for validator in validators {
+        bytes.extend_from_slice(validator.as_bytes());
+    }
+    bytes.extend_from_slice(b":");
+    bytes.extend_from_slice(voter.as_bytes());
+    keccak256(&bytes)
+}
+
+fn algorithm_status_key(algo: SignatureType) -> ShellHash {
+    let mut bytes = Vec::with_capacity(20);
+    bytes.extend_from_slice(b"algorithm_status:");
+    bytes.push(algo.as_u8());
+    keccak256(&bytes)
+}
+
+fn encode_algorithm_status(status: AlgorithmStatus) -> ShellHash {
+    let mut bytes = [0u8; 32];
+    bytes[31] = match status {
+        AlgorithmStatus::Active => 1,
+        AlgorithmStatus::Deprecated => 2,
+        AlgorithmStatus::PendingActivation => 3,
+    };
+    ShellHash::from(bytes)
 }
 
 fn record_validator_vote<S: KvStore + 'static>(
@@ -511,6 +723,57 @@ fn record_validator_vote<S: KvStore + 'static>(
     }
 
     Ok(voted_weight.saturating_mul(2) > total_weight)
+}
+
+fn record_algorithm_vote<S: KvStore + 'static>(
+    world_state: &mut WorldState<S>,
+    op: AlgorithmGovernanceOp,
+    algo: SignatureType,
+    caller: &Address,
+    validators: &[Address],
+) -> Result<bool, SystemContractError> {
+    let registry = registry_address();
+    world_state
+        .set_storage(
+            &registry,
+            &algorithm_vote_key(op, algo, caller, validators),
+            &ShellHash::from([1u8; 32]),
+        )
+        .map_err(|e| SystemContractError::Storage(e.to_string()))?;
+
+    let mut voted_weight = 0u64;
+    let mut total_weight = 0u64;
+    for validator in validators {
+        let weight = world_state
+            .get_validator_weight(validator)
+            .map_err(|e| SystemContractError::Storage(e.to_string()))?;
+        total_weight = total_weight.saturating_add(weight);
+        let value = world_state
+            .get_storage(
+                &registry,
+                &algorithm_vote_key(op, algo, validator, validators),
+            )
+            .map_err(|e| SystemContractError::Storage(e.to_string()))?;
+        if value != ShellHash::ZERO {
+            voted_weight = voted_weight.saturating_add(weight);
+        }
+    }
+
+    Ok(voted_weight.saturating_mul(2) > total_weight)
+}
+
+fn store_algorithm_status<S: KvStore + 'static>(
+    world_state: &mut WorldState<S>,
+    algo: SignatureType,
+    status: AlgorithmStatus,
+) -> Result<(), SystemContractError> {
+    world_state
+        .set_storage(
+            &registry_address(),
+            &algorithm_status_key(algo),
+            &encode_algorithm_status(status),
+        )
+        .map_err(|e| SystemContractError::Storage(e.to_string()))
 }
 
 fn rotate_key<S: KvStore + 'static>(
@@ -975,6 +1238,11 @@ fn decode_u8(input: &[u8]) -> Result<u8, SystemContractError> {
         .ok_or_else(|| SystemContractError::AbiDecode("uint8 word too short".into()))
 }
 
+fn decode_signature_type(input: &[u8]) -> Result<SignatureType, SystemContractError> {
+    let algo_id = decode_u8(input)?;
+    SignatureType::from_u8(algo_id).ok_or(SystemContractError::InvalidAlgorithm(algo_id))
+}
+
 fn decode_u64(input: &[u8]) -> Result<u64, SystemContractError> {
     if input.len() < 32 {
         return Err(SystemContractError::AbiDecode(format!(
@@ -1168,6 +1436,57 @@ pub fn encode_remove_validator_calldata(address: &Address) -> Vec<u8> {
     word.copy_from_slice(address.as_bytes());
     data.extend_from_slice(&word);
     data
+}
+
+/// Encode calldata for `setValidatorWeight(address,uint64)`.
+///
+/// ABI layout: selector (4) + address (32) + uint64 (32, big-endian right-aligned).
+pub fn encode_set_validator_weight_calldata(address: &Address, weight: u64) -> Vec<u8> {
+    let mut data = Vec::with_capacity(4usize.saturating_add(64));
+    data.extend_from_slice(&SET_VALIDATOR_WEIGHT_SELECTOR);
+    let mut addr_word = [0u8; 32];
+    addr_word.copy_from_slice(address.as_bytes());
+    data.extend_from_slice(&addr_word);
+    let mut weight_word = [0u8; 32];
+    weight_word[24..32].copy_from_slice(&weight.to_be_bytes());
+    data.extend_from_slice(&weight_word);
+    data
+}
+
+/// Encode calldata for `proposeAlgorithmActivation(uint8)`.
+pub fn encode_propose_algorithm_activation_calldata(algo: SignatureType) -> Vec<u8> {
+    let mut data = Vec::with_capacity(4usize.saturating_add(32));
+    data.extend_from_slice(&PROPOSE_ALGORITHM_ACTIVATION_SELECTOR);
+    data.extend_from_slice(&encode_u8_word(algo.as_u8()));
+    data
+}
+
+/// Encode calldata for `deprecateAlgorithm(uint8)`.
+pub fn encode_deprecate_algorithm_calldata(algo: SignatureType) -> Vec<u8> {
+    let mut data = Vec::with_capacity(4usize.saturating_add(32));
+    data.extend_from_slice(&DEPRECATE_ALGORITHM_SELECTOR);
+    data.extend_from_slice(&encode_u8_word(algo.as_u8()));
+    data
+}
+
+/// Decode `(address, uint64)` from ABI-encoded params (2 × 32-byte words).
+pub fn decode_address_u64(input: &[u8]) -> Result<(Address, u64), SystemContractError> {
+    if input.len() < 64 {
+        return Err(SystemContractError::AbiDecode(format!(
+            "expected 64 bytes for (address, uint64), got {}",
+            input.len()
+        )));
+    }
+    let raw32: [u8; 32] = input[0..32]
+        .try_into()
+        .map_err(|_| SystemContractError::AbiDecode("bad address word".into()))?;
+    let addr = Address::from(raw32);
+    let weight = u64::from_be_bytes(
+        input[56..64]
+            .try_into()
+            .map_err(|_| SystemContractError::AbiDecode("bad uint64 word".into()))?,
+    );
+    Ok((addr, weight))
 }
 
 /// Encode calldata for `setGuardians(address[],uint8,uint64)`.
@@ -1503,6 +1822,20 @@ mod tests {
     }
 
     #[test]
+    fn selector_propose_algorithm_activation() {
+        let hash = keccak256(b"proposeAlgorithmActivation(uint8)");
+        let expected = &hash.as_bytes()[..4];
+        assert_eq!(&PROPOSE_ALGORITHM_ACTIVATION_SELECTOR, expected);
+    }
+
+    #[test]
+    fn selector_deprecate_algorithm() {
+        let hash = keccak256(b"deprecateAlgorithm(uint8)");
+        let expected = &hash.as_bytes()[..4];
+        assert_eq!(&DEPRECATE_ALGORITHM_SELECTOR, expected);
+    }
+
+    #[test]
     fn selector_clear_validation_code() {
         let hash = keccak256(b"clearValidationCode()");
         let expected = &hash.as_bytes()[..4];
@@ -1632,6 +1965,82 @@ mod tests {
         assert_eq!(third_output, encode_bool(true));
         assert!(ws.get_validators().unwrap().contains(&new_val));
         assert_eq!(ws.get_validator_weight(&new_val).unwrap(), 1);
+    }
+
+    #[test]
+    fn propose_algorithm_activation_requires_validator_quorum() {
+        let v1 = Address::from([0x01; 20]);
+        let v2 = Address::from([0x02; 20]);
+        let v3 = Address::from([0x03; 20]);
+        let mut ws = setup_with_validators(&[v1, v2, v3]);
+        let mut registry = AlgorithmRegistry::default();
+        registry.deprecate(SignatureType::MlDsa65);
+        let calldata = encode_propose_algorithm_activation_calldata(SignatureType::MlDsa65);
+
+        let (first_output, _) =
+            execute_validator_registry_with_registry(&v1, &calldata, &mut ws, None, &mut registry)
+                .unwrap();
+        assert_eq!(first_output, encode_bool(false));
+        assert_eq!(
+            registry
+                .get_all_entries()
+                .iter()
+                .find(|entry| entry.algo == SignatureType::MlDsa65)
+                .map(|entry| entry.status),
+            Some(AlgorithmStatus::PendingActivation)
+        );
+        assert_eq!(
+            ws.get_storage(
+                &registry_address(),
+                &algorithm_status_key(SignatureType::MlDsa65)
+            )
+            .unwrap(),
+            encode_algorithm_status(AlgorithmStatus::PendingActivation)
+        );
+
+        let (second_output, _) =
+            execute_validator_registry_with_registry(&v2, &calldata, &mut ws, None, &mut registry)
+                .unwrap();
+        assert_eq!(second_output, encode_bool(true));
+        assert!(registry.is_allowed(SignatureType::MlDsa65));
+        assert_eq!(
+            ws.get_storage(
+                &registry_address(),
+                &algorithm_status_key(SignatureType::MlDsa65)
+            )
+            .unwrap(),
+            encode_algorithm_status(AlgorithmStatus::Active)
+        );
+    }
+
+    #[test]
+    fn deprecate_algorithm_route_updates_registry_on_quorum() {
+        let v1 = Address::from([0x11; 20]);
+        let v2 = Address::from([0x12; 20]);
+        let v3 = Address::from([0x13; 20]);
+        let mut ws = setup_with_validators(&[v1, v2, v3]);
+        let mut registry = AlgorithmRegistry::default();
+        let calldata = encode_deprecate_algorithm_calldata(SignatureType::SphincsSha2256f);
+
+        let (first_output, _) =
+            execute_validator_registry_with_registry(&v1, &calldata, &mut ws, None, &mut registry)
+                .unwrap();
+        assert_eq!(first_output, encode_bool(false));
+        assert!(registry.is_allowed(SignatureType::SphincsSha2256f));
+
+        let (second_output, _) =
+            execute_validator_registry_with_registry(&v2, &calldata, &mut ws, None, &mut registry)
+                .unwrap();
+        assert_eq!(second_output, encode_bool(true));
+        assert!(!registry.is_allowed(SignatureType::SphincsSha2256f));
+        assert_eq!(
+            ws.get_storage(
+                &registry_address(),
+                &algorithm_status_key(SignatureType::SphincsSha2256f),
+            )
+            .unwrap(),
+            encode_algorithm_status(AlgorithmStatus::Deprecated)
+        );
     }
 
     // ── removeValidator ────────────────────────────────────────
@@ -1978,6 +2387,30 @@ mod tests {
         assert_eq!(&calldata[..4], &REMOVE_VALIDATOR_SELECTOR);
         let decoded = decode_address(&calldata[4..]).unwrap();
         assert_eq!(decoded, addr);
+    }
+
+    #[test]
+    fn encode_calldata_propose_algorithm_activation() {
+        let calldata = encode_propose_algorithm_activation_calldata(SignatureType::MlDsa65);
+
+        assert_eq!(calldata.len(), 36);
+        assert_eq!(&calldata[..4], &PROPOSE_ALGORITHM_ACTIVATION_SELECTOR);
+        assert_eq!(
+            decode_signature_type(&calldata[4..]).unwrap(),
+            SignatureType::MlDsa65
+        );
+    }
+
+    #[test]
+    fn encode_calldata_deprecate_algorithm() {
+        let calldata = encode_deprecate_algorithm_calldata(SignatureType::Dilithium3);
+
+        assert_eq!(calldata.len(), 36);
+        assert_eq!(&calldata[..4], &DEPRECATE_ALGORITHM_SELECTOR);
+        assert_eq!(
+            decode_signature_type(&calldata[4..]).unwrap(),
+            SignatureType::Dilithium3
+        );
     }
 
     // ── Edge cases ─────────────────────────────────────────────

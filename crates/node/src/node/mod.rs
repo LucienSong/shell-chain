@@ -3,6 +3,7 @@
 mod block_importer;
 mod block_producer;
 mod chain_state_machine;
+mod challenge_lifecycle;
 mod dev_rpc;
 mod event_loop;
 mod invariants;
@@ -20,9 +21,10 @@ pub(crate) use tokio::sync::watch;
 pub(crate) use tracing::{debug, info, warn};
 
 pub(crate) use shell_consensus::{
-    detect_double_sign, Attestation, ConsensusEngine, EngineType, EquivocationProof, FinalityState,
-    ForkChoice, PeerScorer, PeerScoringConfig, ProofWindowManager, WPoaEvent, WPoaRound,
-    WindowConfig,
+    detect_double_sign, detect_offline, Attestation, ConsensusEngine, EngineType,
+    EquivocationProof, FinalityState, ForkChoice, PeerScorer, PeerScoringConfig,
+    ProofWindowManager, SlashingConfig, ViewChangeMessage, WPoaEvent, WPoaRound, WindowConfig,
+    VIEW_CHANGE_TIMEOUT_MS,
 };
 pub(crate) use shell_core::{
     calculate_base_fee, effective_gas_price, Account, Block, BlockHeader, SignedTransaction,
@@ -46,8 +48,11 @@ pub(crate) use crate::config::NodeConfig;
 pub(crate) use crate::error::NodeError;
 pub(crate) use crate::metrics::Metrics;
 pub(crate) use crate::prover_service::{ProverConfig, ProverService, ProverServiceHandle};
-pub(crate) use crate::pruning::{StateRootTracker, StorageProfile};
+pub(crate) use crate::pruning::{prune_state_trie, StateRootTracker, StorageProfile};
 pub(crate) use chain_state_machine::{BlockImportTransition, ChainStateMachine};
+pub(crate) use challenge_lifecycle::{
+    ChallengeLifecycle, ChallengeRecord, ChallengeStatus, CHALLENGE_TIMEOUT_BLOCKS,
+};
 pub(crate) use readiness::{ProductionReadiness, ProductionReadinessState};
 
 pub(crate) use shell_stark_prover::{
@@ -130,6 +135,8 @@ pub struct Node<S: KvStore + 'static> {
     /// I4: Proof window manager — tracks claim/squatting per block.
     /// Advances on each block import; drives prover reliability scoring in wPoA era.
     pub proof_window_manager: parking_lot::Mutex<ProofWindowManager>,
+    /// White paper §7 challenge state machine for proof disputes.
+    pub(crate) challenge_lifecycle: parking_lot::Mutex<ChallengeLifecycle>,
     /// W.5: Active wPoA round state machine for the current block height.
     /// `None` when running plain PoA or no block is in-flight.
     pub wpoa_round: parking_lot::Mutex<Option<shell_consensus::wpoa_state::WPoaRound>>,
@@ -141,6 +148,10 @@ pub struct Node<S: KvStore + 'static> {
     /// Recent tx gossip timestamps used to avoid rebroadcasting the same large
     /// PQ-signed transactions too frequently.
     tx_rebroadcast_seen: parking_lot::Mutex<HashMap<ShellHash, std::time::Instant>>,
+    /// Tracks the most recent block proposed by each known validator.
+    /// Updated on every block import/production; used for offline-slash detection
+    /// at epoch boundaries (white paper §5.4 — wPoA offline enforcement).
+    pub(crate) last_proposed_by: parking_lot::Mutex<HashMap<Address, u64>>,
     /// Drain frontier: the highest gap-at-block seen across all prover drain
     /// operations in this process lifetime.  Shared with ProverService so the
     /// seeding function can skip blocks that were already drained (and therefore
@@ -353,10 +364,10 @@ impl<'a, S: KvStore + 'static> ConsensusManagerBoundary<'a, S> {
         parent_hash: ShellHash,
         block_number: u64,
     ) -> bool {
-        let (attestation_count, is_finalized) = {
+        let (attested_weight, is_finalized) = {
             let finality = self.finality.read();
             (
-                finality.attestation_count(&block_hash),
+                finality.attested_weight(&block_hash),
                 finality.last_finalized_number() >= block_number,
             )
         };
@@ -364,7 +375,7 @@ impl<'a, S: KvStore + 'static> ConsensusManagerBoundary<'a, S> {
             block_hash,
             parent_hash,
             block_number,
-            attestation_count,
+            attested_weight,
             is_finalized,
         )
     }
@@ -409,8 +420,6 @@ struct ProverOrchestratorBoundary<'a, S: KvStore + 'static> {
     settled_stark_sources: &'a parking_lot::Mutex<HashSet<(u32, ShellHash)>>,
     settled_source_index: &'a SettledSourceIndex<S>,
     l2_input_index: &'a L2InputIndex<S>,
-    #[allow(dead_code)] // scaffolded for future L2 orchestration
-    l2_job_store: &'a L2JobStore<S>,
     metrics: &'a Arc<Metrics>,
 }
 
@@ -646,6 +655,7 @@ impl<S: KvStore + 'static> Node<S> {
             proof_window_manager: parking_lot::Mutex::new(ProofWindowManager::new(
                 WindowConfig::default(),
             )),
+            challenge_lifecycle: parking_lot::Mutex::new(ChallengeLifecycle::new()),
             wpoa_round: parking_lot::Mutex::new(None),
             peer_scorer: parking_lot::Mutex::new(PeerScorer::new(PeerScoringConfig::default())),
             peer_ban_list: parking_lot::Mutex::new(shell_network::PeerBanList::new(
@@ -653,6 +663,7 @@ impl<S: KvStore + 'static> Node<S> {
                 std::time::Duration::from_secs(300),
             )),
             tx_rebroadcast_seen: parking_lot::Mutex::new(HashMap::new()),
+            last_proposed_by: parking_lot::Mutex::new(HashMap::new()),
             stark_drain_frontier: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
@@ -684,7 +695,6 @@ impl<S: KvStore + 'static> Node<S> {
             settled_stark_sources: &self.settled_stark_sources,
             settled_source_index: &self.settled_source_index,
             l2_input_index: &self.l2_input_index,
-            l2_job_store: &self.l2_job_store,
             metrics: &self.metrics,
         }
     }
@@ -707,14 +717,13 @@ impl<S: KvStore + 'static> Node<S> {
         // Use the canonical classifier so banner + P2P capability stay consistent.
         let profile_name = StorageProfile::from_pruning_config(p).as_str();
 
-        let state_mode = if p.state_pruning_experimental {
-            if p.keep_recent == 0 {
-                "archive (experimental enabled but keep_recent=0)".to_string()
-            } else {
-                format!("keep-{} (experimental)", p.keep_recent)
-            }
-        } else if p.keep_recent == 0 {
+        let state_mode = if p.keep_recent == 0 {
             "archive".to_string()
+        } else if matches!(
+            StorageProfile::from_pruning_config(p),
+            StorageProfile::Light
+        ) {
+            format!("keep-{} (pruned)", p.keep_recent)
         } else {
             format!("keep-{}", p.keep_recent)
         };
@@ -1105,23 +1114,42 @@ impl<S: KvStore + 'static> Node<S> {
 
     /// Record a finalised state root, run state pruning, and evict old entries.
     fn record_finalized_state_root(&self, block_number: u64, state_root: ShellHash) {
-        let mut tracker = self.state_root_tracker.write();
-        if let Some(evicted) = tracker.record(block_number, state_root) {
-            tracing::debug!(
-                block = evicted.block_number,
-                root = %evicted.state_root,
-                "state root eligible for pruning"
-            );
-            // L3: when experimental trie pruning is enabled, evict trie nodes
-            // for the now-unreachable state root.  Until reference-counting is
-            // fully wired into the trie writer path, this only logs intent.
-            if self.config.pruning.state_pruning_experimental {
+        let profile = StorageProfile::from_pruning_config(&self.config.pruning);
+        let keep_recent = self.config.pruning.keep_recent;
+        let mut prune_keep_below = None;
+
+        {
+            let mut tracker = self.state_root_tracker.write();
+            if let Some(evicted) = tracker.record(block_number, state_root) {
                 tracing::debug!(
                     block = evicted.block_number,
                     root = %evicted.state_root,
-                    "L3 (experimental): trie node eviction eligible — \
-                     full ref-count walk deferred until trie writer is instrumented"
+                    "state root eligible for pruning"
                 );
+                if matches!(profile, StorageProfile::Light) && keep_recent > 0 {
+                    prune_keep_below =
+                        Some(block_number.saturating_add(1).saturating_sub(keep_recent));
+                }
+            }
+        }
+
+        if let Some(keep_below_block) = prune_keep_below {
+            match prune_state_trie(Arc::clone(&self.store), keep_below_block, profile) {
+                Ok(result) => {
+                    if result.deleted_nodes > 0 {
+                        tracing::info!(
+                            keep_below_block,
+                            pruned_roots = result.pruned_roots,
+                            deleted_nodes = result.deleted_nodes,
+                            skipped_roots = result.skipped_roots,
+                            block = block_number,
+                            "state trie pruning deleted old snapshots"
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, keep_below_block, "state trie pruning pass failed");
+                }
             }
         }
 
@@ -1208,6 +1236,7 @@ impl<S: KvStore + 'static> Node<S> {
 
         // Periodic status log every 64 blocks.
         if block_number > 0 && block_number.is_multiple_of(64) {
+            let tracker = self.state_root_tracker.read();
             let oldest = tracker.oldest().map(|e| e.block_number).unwrap_or(0);
             tracing::info!(
                 tracked = tracker.len(),
@@ -1230,7 +1259,7 @@ mod tests {
     use crate::pruning::PruningConfig;
     use shell_consensus::{PoaConfig, PoaEngine, WPoaConfig, WPoaEngine};
     use shell_core::Transaction;
-    use shell_crypto::{DilithiumSigner, Signer};
+    use shell_crypto::{DilithiumSigner, MlDsaSigner, Signer};
     use shell_mempool::MempoolConfig;
     use shell_primitives::U256;
     use shell_rpc::DevRpcControl;
@@ -1285,11 +1314,7 @@ mod tests {
         }
     }
 
-    fn setup_node() -> (Node<MemoryDb>, DilithiumSigner) {
-        let signer = DilithiumSigner::generate();
-        let pubkey = signer.public_key().to_vec();
-        let authority = Address::from_public_key(&pubkey, signer.sig_type().as_u8());
-
+    fn setup_node_with_authority(authority: Address) -> Node<MemoryDb> {
         let db = Arc::new(MemoryDb::new());
         let chain_store = Arc::new(ChainStore::new(db.clone()));
         let world_state = Arc::new(RwLock::new(WorldState::new(db.clone())));
@@ -1302,7 +1327,14 @@ mod tests {
         }));
 
         let config = NodeConfig::dev(authority);
-        let node = Node::new(config, db, chain_store, world_state, tx_pool, consensus);
+        Node::new(config, db, chain_store, world_state, tx_pool, consensus)
+    }
+
+    fn setup_node() -> (Node<MemoryDb>, DilithiumSigner) {
+        let signer = DilithiumSigner::generate();
+        let pubkey = signer.public_key().to_vec();
+        let authority = Address::from_public_key(&pubkey, signer.sig_type().as_u8());
+        let node = setup_node_with_authority(authority);
         (node, signer)
     }
 
@@ -1718,6 +1750,86 @@ mod tests {
                 .contains("requires block #2 to be compressed at L1"),
             "expected mixed-layer range rejection, got {err}"
         );
+    }
+
+    /// L2 source-binding validation must reject a source whose block-hash is
+    /// NOT in `settled_stark_sources`, even if the source amendment is stored.
+    #[test]
+    fn l2_source_binding_rejects_unsettled_l1_source() {
+        let (node, signer) = setup_node();
+        store_genesis(&node);
+        let genesis_hash = node
+            .chain_store
+            .get_block_hash_by_number(0)
+            .unwrap()
+            .unwrap();
+        let hashes = produce_witnessed_blocks(&node, &signer, 2);
+
+        // Build an L1 source amendment and store it — but do NOT register it in
+        // settled_stark_sources so it is un-settled.
+        let l1_src = dummy_ordered_amendment(1, vec![genesis_hash, hashes[0]], 1);
+        let l1_src_json = serde_json::to_vec(&l1_src).unwrap();
+        node.amendment_store
+            .put_amendment(&l1_src.block_hash, &l1_src_json)
+            .unwrap();
+
+        // An L2 amendment that references the unsettled L1 source.
+        let l2 = dummy_ordered_amendment(2, vec![l1_src.block_hash, hashes[1]], 2);
+        let err = node.validate_stark_proof_source_binding(&l2).unwrap_err();
+        assert!(
+            err.to_string().contains("not yet settled"),
+            "expected not-yet-settled rejection, got: {err}"
+        );
+    }
+
+    /// L2 source-binding validation must accept a source that IS in
+    /// `settled_stark_sources` (happy path for the new canonical check).
+    #[test]
+    fn l2_source_binding_accepts_settled_l1_source() {
+        use shell_stark_prover::recursive_air::compute_aggregate_root;
+        let (node, signer) = setup_node();
+        store_genesis(&node);
+        let genesis_hash = node
+            .chain_store
+            .get_block_hash_by_number(0)
+            .unwrap()
+            .unwrap();
+        let hashes = produce_witnessed_blocks(&node, &signer, 1);
+
+        let l1_src = dummy_ordered_amendment(1, vec![genesis_hash, hashes[0]], 1);
+        let l1_src_json = serde_json::to_vec(&l1_src).unwrap();
+        node.amendment_store
+            .put_amendment(&l1_src.block_hash, &l1_src_json)
+            .unwrap();
+        // Register the L1 source as settled.
+        node.settled_stark_sources
+            .lock()
+            .insert((1, l1_src.block_hash));
+
+        // Build an L2 amendment with correct n_sigs and aggregate root.
+        let root = u128::from_le_bytes(l1_src.proof.batch_root_bytes);
+        let agg_root = compute_aggregate_root(&[root]);
+        let l2 = ProofAmendment {
+            version: shell_stark_prover::amendment::PROOF_AMENDMENT_VERSION,
+            block_hash: l1_src.block_hash,
+            block_number: 1,
+            start_block: Some(1),
+            proof: shell_stark_prover::proof::SigBatchProof {
+                version: shell_stark_prover::proof::SIG_BATCH_PROOF_VERSION,
+                batch_root_bytes: agg_root.to_le_bytes(),
+                n_sigs: 1,
+                proof_bytes: vec![0x33; 128],
+            },
+            prover: Address::from([0x44; 32]),
+            prover_signature: Bytes::from(vec![0x55; 8]),
+            layer: 2,
+            source_hashes: vec![l1_src.block_hash],
+            original_size: Some(10_000),
+            compressed_size: Some(128),
+            settlement_tx_hash: None,
+        };
+        node.validate_stark_proof_source_binding(&l2)
+            .expect("settled L1 source should be accepted by L2 source-binding validation");
     }
 
     #[test]
@@ -4740,6 +4852,32 @@ mod tests {
     }
 
     #[test]
+    fn handle_attestation_routes_mldsa65_signatures() {
+        let signer = MlDsaSigner::generate();
+        let authority = Address::from_public_key(signer.public_key(), signer.sig_type().as_u8());
+        let node = setup_node_with_authority(authority);
+        store_genesis(&node);
+        node.register_authority_pubkey(authority, signer.public_key().to_vec());
+
+        let block = node.produce_block(&signer, 100).unwrap();
+        let block_hash = block.hash();
+        let block_number = block.header.number;
+        // handle_attestation checks block existence in chain_store first.
+        node.chain_store.put_block(&block).unwrap();
+        let attestation = node
+            .create_attestation(block_hash, block_number, &signer)
+            .unwrap();
+
+        let verifier = MultiVerifier;
+        assert!(node.handle_attestation(attestation, &verifier).is_ok());
+        // With a single unit-weight validator the attestation immediately
+        // satisfies weighted quorum (1 > 2/3*1), so the block is finalized
+        // and its attestation entry is pruned by prune_below(1).
+        // Verify finalization rather than raw attestation count.
+        assert_eq!(node.finality.read().last_finalized_hash(), &block_hash);
+    }
+
+    #[test]
     fn handle_attestation_rejects_equivocation() {
         let (node, signer) = setup_node();
         store_genesis(&node);
@@ -5682,22 +5820,20 @@ mod tests {
         #[test]
         fn wpoa_network_message_wpoa_view_change_serde() {
             let voter = Address::from([0xef; 32]);
-            let msg = NetworkMessage::WPoaViewChange {
-                new_view: 3,
-                block_number: 10,
+            let msg = NetworkMessage::WPoaViewChange(Box::new(ViewChangeMessage::new(
+                3,
+                10,
                 voter,
-            };
+                vec![9, 9, 9],
+            )));
             let json = serde_json::to_string(&msg).expect("serialize failed");
             let decoded: NetworkMessage = serde_json::from_str(&json).expect("deserialize failed");
             match decoded {
-                NetworkMessage::WPoaViewChange {
-                    new_view: nv,
-                    block_number: bn,
-                    voter: v,
-                } => {
-                    assert_eq!(nv, 3);
-                    assert_eq!(bn, 10);
-                    assert_eq!(v, voter);
+                NetworkMessage::WPoaViewChange(view_change) => {
+                    assert_eq!(view_change.view, 3);
+                    assert_eq!(view_change.block_number, 10);
+                    assert_eq!(view_change.validator, voter);
+                    assert_eq!(view_change.signature, vec![9, 9, 9]);
                 }
                 _ => panic!("expected WPoaViewChange after deserialization"),
             }

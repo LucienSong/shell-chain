@@ -8,7 +8,15 @@ Deploy and interact with smart contracts on Shell-Chain.
 
 ## Overview
 
-Shell-Chain is fully EVM-compatible (Cancun spec). Any contract written in Solidity or Vyper that compiles to EVM bytecode will work on Shell-Chain without modification. Standard tooling — Hardhat, Foundry, Remix — all work out of the box.
+Shell-Chain runs the **PQVM** (Post-Quantum Virtual Machine): an execution environment that retains Cancun-style arithmetic, memory, storage, logs, and control flow while replacing Ethereum's classical cryptographic surfaces.
+
+Key differences from standard Ethereum execution:
+
+1. **`SELFDESTRUCT` and `CALLCODE` are removed** — these opcodes are unavailable in PQVM-1.
+2. **32-byte native addresses** — Shell-Chain addresses are 32-byte BLAKE3 digests (not 20-byte keccak truncations). The PQABI encoding uses a 32-byte full slot for addresses.
+3. **PQ-native authentication** — transactions use PQ signatures and PQTx semantics, not ECDSA EOAs.
+
+For retained non-cryptographic opcodes, Shell-Chain keeps EVM-familiar behavior. Standard tooling such as Hardhat, Foundry, and Remix can be used with the caveats above and Shell-aware address/signing support.
 
 ---
 
@@ -99,6 +107,34 @@ forge create --rpc-url http://testnet.shell.xyz --chain-id 10 src/Counter.sol:Co
 
 ---
 
+## PQVM Native Opcodes
+
+Shell-Chain adds three post-quantum opcodes not present in the standard EVM:
+
+| Opcode | Hex | Gas | Description |
+|--------|-----|-----|-------------|
+| `PQVERIFY` | `0xB0` | 46,000 (ML-DSA-65) | Verify a PQ signature on-chain |
+| `PQHASH` | `0xB1` | `30 + 6 × ⌈len/32⌉` | BLAKE3 hash of input data |
+| `PQADDR` | `0xB2` | 200 | Derive a 32-byte address from algo_id + pubkey |
+
+These opcodes are defined and gas-priced in the protocol; full interpreter
+dispatch wiring is in progress (see whitepaper §10 known limitations).
+
+### Precompile addresses (0x0001–0x0006)
+
+| Address | Function | Input wire format |
+|---------|----------|------------------|
+| `0x...0001` | ML-DSA-family Verify (ML-DSA-65 primary, Dilithium3 legacy) | `[4-byte pk_len][pk][4-byte msg_len][msg][sig]` |
+| `0x...0002` | SLH-DSA-SHA2-256f Verify | `[pk (64 B)][sig (49 856 B)][msg]` |
+| `0x...0003` | ML-DSA-65 Batch Verify | `[4-byte count][sig_0]...[sig_n]` |
+| `0x...0004` | BLAKE3-256 Hash | raw bytes → 32-byte digest |
+| `0x...0005` | BLAKE3-512 Hash | raw bytes → 64-byte digest |
+| `0x...0006` | PQ Address Derive | `[1-byte algo_id][pubkey]` → 32-byte address |
+
+Use the 32-byte precompile address `0x0000...000N` (31 zero bytes + 1 index byte).
+
+---
+
 ## Example: Deploy a Counter Contract
 
 ### 1. Write the contract
@@ -183,7 +219,7 @@ curl -s http://localhost:8545 \
     "jsonrpc":"2.0",
     "method":"eth_call",
     "params":[{
-      "to":"pq1YOUR_CONTRACT_ADDRESS",
+      "to":"0xYOUR_CONTRACT_ADDRESS",
       "data":"0x6d4ce63c"
     },"latest"],
     "id":1
@@ -192,10 +228,10 @@ curl -s http://localhost:8545 \
 
 Or with Hardhat:
 
-> **Compatibility note:** Shell-native EOA and contract addresses use bech32m `pq1...` format. Tooling that hardcodes 20-byte hex inputs (e.g., default Hardhat scripts) will fail at the Shell RPC boundary; use the shell-sdk pq1 helpers.
+> **Compatibility note:** Shell-native EOA and contract addresses use canonical 32-byte `0x...` format. Tooling that hardcodes 20-byte hex inputs (e.g., default Hardhat scripts) will fail at the Shell RPC boundary; use 32-byte hex addresses end-to-end.
 
 ```js
-const counter = await hre.ethers.getContractAt("Counter", "pq1...YOUR_CONTRACT_PQ1_ADDRESS");
+const counter = await hre.ethers.getContractAt("Counter", "0x...YOUR_CONTRACT_ADDRESS");
 const count = await counter.get();
 console.log("Current count:", count.toString());
 ```
@@ -219,7 +255,7 @@ curl -s http://localhost:8545 \
 Or with Hardhat:
 
 ```js
-const counter = await hre.ethers.getContractAt("Counter", "pq1...YOUR_CONTRACT_PQ1_ADDRESS");
+const counter = await hre.ethers.getContractAt("Counter", "0x...YOUR_CONTRACT_ADDRESS");
 const tx = await counter.increment();
 await tx.wait();
 console.log("Incremented! New count:", (await counter.get()).toString());
@@ -245,7 +281,7 @@ curl -s http://localhost:8545 \
     "jsonrpc":"2.0",
     "method":"shell_sendTransaction",
     "params":[{
-      "from": "pq1YOUR_ADDRESS",
+      "from": "0xYOUR_ADDRESS",
       "data": "0x608060405234801561001057600080fd5b50...",
       "gas": "0x100000",
       "maxFeePerGas": "0x5f7609",
@@ -306,13 +342,20 @@ Shell-Chain implements the **Cancun** EVM specification. Key compatibility detai
 ### Signature behavior
 
 - **`ecrecover` (0x01) is disabled.** The precompile exists at address `0x01` but is a no-op — it returns empty bytes to force PQ migration. Contracts that call `ecrecover` will receive an empty result, not `address(0)`. Do not rely on it.
-- **Use the PQ precompile instead.** See [PQ_DILITHIUM_VERIFY precompile](#pq_dilithium_verify-precompile-0x0100) below.
+- **Use the PQ precompile suite instead.** The current runtime exposes six native precompiles at `0x0001`–`0x0006`.
 
-### PQ_DILITHIUM_VERIFY precompile (`0x0100`)
+### PQ precompile suite (`0x0001`–`0x0006`)
 
-Shell-Chain exposes a native Dilithium3 signature verification precompile at address `0x0000000000000000000000000000000000000100`.
+| Address | Function | Gas model |
+|---------|----------|-----------|
+| `0x0000000000000000000000000000000000000001` | ML-DSA-family verify (ML-DSA-65 primary, Dilithium3 legacy) | flat `46,000` |
+| `0x0000000000000000000000000000000000000002` | SLH-DSA-SHA2-256f verify | flat `2,300,000` |
+| `0x0000000000000000000000000000000000000003` | ML-DSA-65 batch verify | `12,000 × sig_count` |
+| `0x0000000000000000000000000000000000000004` | BLAKE3-256 hash | `30 + 6 × ⌈len/32⌉` |
+| `0x0000000000000000000000000000000000000005` | BLAKE3-512 hash | `30 + 6 × ⌈len/32⌉` |
+| `0x0000000000000000000000000000000000000006` | PQ address derive | flat `200` |
 
-**Gas cost:** 10,000 (flat, regardless of message length)
+The verify precompile uses the ML-DSA-65/Dilithium-compatible wire format below.
 
 **Input format** (length-prefixed binary, no ABI encoding):
 ```
@@ -329,7 +372,7 @@ Shell-Chain exposes a native Dilithium3 signature verification precompile at add
 pragma solidity ^0.8.24;
 
 library PQVerify {
-    address constant PQ_PRECOMPILE = 0x0000000000000000000000000000000000000100;
+    address constant PQ_PRECOMPILE = 0x0000000000000000000000000000000000000004;
 
     /// Verify a Dilithium3 signature. Returns true on valid.
     function verify(
@@ -382,7 +425,7 @@ Shell-Chain uses the **EIP-1559** gas model:
         "jsonrpc":"2.0",
         "method":"eth_createAccessList",
         "params":[{
-         "to":"pq1YOUR_CONTRACT_ADDRESS",
+         "to":"0xYOUR_CONTRACT_ADDRESS",
          "data":"0x..."
         },"latest"],
         "id":1

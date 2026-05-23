@@ -76,7 +76,7 @@ pub trait EthApi {
         tx: serde_json::Value,
     ) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
 
-    /// Returns a list of available compilers (deprecated, always empty).
+    /// Returns a list of available compilers (always empty).
     #[method(name = "getCompilers")]
     async fn get_compilers(&self) -> Result<Vec<String>, jsonrpsee::types::ErrorObjectOwned>;
 
@@ -411,6 +411,17 @@ pub trait ShellApi {
         address: String,
     ) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
 
+    /// Propose updating a validator's governance weight via system contract transaction.
+    /// Requires the node to be configured as a validator.
+    /// Takes effect when a weighted quorum (>2/3 of total weight) supports the change.
+    /// Returns the transaction hash on success.
+    #[method(name = "proposeSetValidatorWeight")]
+    async fn propose_set_validator_weight(
+        &self,
+        address: String,
+        weight: u64,
+    ) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+
     /// Returns whether an address is currently a validator.
     #[method(name = "getValidatorStatus")]
     async fn get_validator_status(
@@ -668,5 +679,21 @@ pub trait ShellApi {
     async fn get_proof_amendment(
         &self,
         block_hash: String,
+    ) -> Result<serde_json::Value, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Returns the algorithm registry — the set of PQ signing algorithms
+    /// that are accepted, deprecated, or pending activation on this node.
+    ///
+    /// This is the RPC exposure of the white-paper §6 algorithm registry.
+    /// The returned array reflects the node's live in-memory view of on-chain
+    /// governance transitions.
+    ///
+    /// Response fields per entry:
+    /// - `algo`        — algorithm name (`"MlDsa65"`, `"Dilithium3"`, `"SphincsSha2256f"`)
+    /// - `status`      — `"active"`, `"deprecated"`, or `"pending_activation"`
+    /// - `description` — human-readable description / NIST reference
+    #[method(name = "getAlgorithmRegistry")]
+    async fn get_algorithm_registry(
+        &self,
     ) -> Result<serde_json::Value, jsonrpsee::types::ErrorObjectOwned>;
 }

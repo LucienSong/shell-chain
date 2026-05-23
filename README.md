@@ -2,9 +2,9 @@
 
 <!-- [![Build Status](https://img.shields.io/github/actions/workflow/status/LucienSong/shell-chain/ci.yml?branch=main)](https://github.com/LucienSong/shell-chain/actions) -->
 <!-- [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE) -->
-<!-- [![Version](https://img.shields.io/badge/version-0.22.2-green.svg)](CHANGELOG.md) -->
+<!-- [![Version](https://img.shields.io/badge/version-0.23.0-green.svg)](CHANGELOG.md) -->
 
-The first EVM-compatible, post-quantum blockchain — quantum-safe **before Q-Day**, no migration needed.
+The first PQVM-native, post-quantum blockchain — quantum-safe **before Q-Day**, no migration needed.
 
 ## Overview
 
@@ -12,16 +12,16 @@ Shell-Chain follows [Vitalik Buterin's vision](https://ethresear.ch/t/how-to-har
 
 ### Key Features
 
-- 🔐 **Post-Quantum Signatures** — Dilithium3 as default; ML-DSA-65 (FIPS 204) available as optional FIPS path; SPHINCS+ as conservative hash-based fallback
-- ⚙️ **EVM Compatible** — Cancun-spec EVM; run Solidity contracts with familiar tooling (Hardhat, ethers.js, MetaMask)
+- 🔐 **Post-Quantum Signatures** — ML-DSA-65 (FIPS 204) is the primary governed algorithm; Dilithium3 remains deployed for legacy compatibility, with SPHINCS+ as a conservative fallback
+- ⚙️ **PQVM Execution** — EVM-familiar Cancun-style arithmetic, memory, storage, and control flow, with native 32-byte PQ addresses, PQTx, and PQ precompiles/opcodes
 - 🏗️ **Native Account Abstraction** — protocol-level smart accounts with built-in PQ validation, key rotation, and custom validator hooks
 - 🧩 **PQ Precompile Suite** — 6 on-chain precompiles at `0x0001`–`0x0006`: ML-DSA-65 verify, SLH-DSA-SHA2-256f verify, ML-DSA-65 batch verify, BLAKE3-256, BLAKE3-512, PQAddr derive
-- ⚖️ **wPoA Consensus** — Weighted Proof-of-Authority with stake-weighted proposer selection, slashing, and finality tracking
-- ⚡ **STARK Sig-Aggregation** — Winterfell STARK proofs compress Dilithium3 signatures **7× per block**; 157 proofs/sec sustained throughput. v0.23.0 ships multi-layer (L1/L2/L3) recursive STARK compression for further on-chain data reduction.
+- ⚖️ **wPoA Consensus** — Weighted Proof-of-Authority with weighted proposer rotation, view-change fallback, offline/equivocation handling, economic slash weights, and finality tracking
+- ⚡ **STARK Sig-Aggregation** — Winterfell proofs compress PQ witness data, track challenges through `Open → Resolved/Slashed`, and in v0.23.0 ship multi-layer (L1/L2/L3) settlement plus trie-pruning integration for lighter storage profiles.
 - 🗄️ **Storage Profiles** — `--storage-profile archive|full|light` controls data retention; nodes auto-backfill missing history from richer peers via P2P
 - 🛠️ **Developer Ecosystem** — TypeScript SDK (`shell-sdk`) with viem-based PQ signers and AA transaction builders
 - 🌐 **P2P Networking** — libp2p with GossipSub, Kademlia DHT, peer scoring, and message signature verification
-- 📡 **Full JSON-RPC** — Ethereum-compatible `eth_*`, `web3_*`, `net_*`, `debug_*`, plus Shell-specific APIs, secured by TLS, rate limiting, and API keys
+- 📡 **Full JSON-RPC** — Ethereum-shaped read namespaces (`eth_*`, `web3_*`, `net_*`, `debug_*`) plus Shell-specific APIs such as `shell_getFinalityInfo` and `shell_getAlgorithmRegistry`, secured by TLS, rate limiting, and API keys
 - 🐳 **Production Ready** — Docker Compose orchestration, Prometheus/Grafana monitoring, hot backups, and TOML configuration
 - 🛡️ **Security Hardened** — 50+ audit findings addressed, Criterion benchmarks, and continuous fuzzing
 
@@ -57,7 +57,7 @@ always see and submit the full 32-byte `0x`+64-hex form.
 
 Transaction validation follows three protocol-level paths:
 
-1. **First use** — derive `tx.from` from `(version, algo_id, pubkey)` and verify the PQ signature
+1. **First use** — derive `tx.from` from `(algo_id, pubkey)` and verify the PQ signature
 2. **Default existing account** — verify `pq_pubkey_hash` and the PQ signature
 3. **Custom AA account** — call account-specific validator code through `validation_code_hash`
 
@@ -80,7 +80,8 @@ For the full design and current implementation status, see
 │       (Block, Transaction, Account)         │
 ├──────────┬──────────────┼───────────────────┤
 │ shell-evm│ shell-crypto │  shell-storage    │
-│  (revm)  │  (PQ Crypto) │   (RocksDB)      │
+│(PQVM/revm│  (PQ Crypto) │   (RocksDB)      │
+│ adapter) │              │                  │
 ├──────────┴──────────────┴───────────────────┤
 │              shell-primitives               │
 │        (Hash, Address, U256, Bytes)         │
@@ -92,11 +93,11 @@ For the full design and current implementation status, see
 | Crate | Description |
 |-------|-------------|
 | `shell-primitives` | Foundational types: Keccak-256, BLAKE3, H256, Address, U256, Bytes |
-| `shell-crypto` | Dilithium3 (default) & ML-DSA-65 (optional FIPS 204) & SPHINCS+ signing, multi-algorithm Signer/Verifier traits |
+| `shell-crypto` | ML-DSA-65 primary (FIPS 204) & Dilithium3 legacy-compatible active path & SPHINCS+ fallback signing, multi-algorithm Signer/Verifier traits |
 | `shell-core` | Block, Transaction (AA-native), Account, Receipt, EIP-1559 gas model |
 | `shell-storage` | RocksDB backend, Merkle Patricia Trie, RLP serialization, state pruning, storage profiles |
 | `shell-consensus` | PoA engine (default); optional wPoA extension: weight-based fork choice, BFT finality, slashing |
-| `shell-evm` | revm integration (Cancun spec), PQ precompiles, EIP-2930/4844, system contracts |
+| `shell-evm` | PQVM execution adapter over revm for retained Cancun-style semantics, PQ precompiles, EIP-2930/4844 fields, system contracts |
 | `shell-mempool` | Transaction pool with PQ validation, fee-priority ordering, Replace-by-Fee |
 | `shell-network` | libp2p P2P: GossipSub, Kademlia DHT, NAT traversal, peer scoring, tx gossip |
 | `shell-rpc` | JSON-RPC (HTTP + WebSocket), CORS, rate limiting, filters, subscriptions, debug/trace APIs |
@@ -116,7 +117,7 @@ shell-chain/
 │   ├── consensus/       # Weighted PoA consensus engine and slashing
 │   ├── core/            # Block, Transaction, Account
 │   ├── crypto/          # Post-quantum cryptography
-│   ├── evm/             # EVM executor and precompiles
+│   ├── evm/             # PQVM/revm execution adapter and precompiles
 │   ├── genesis/         # Genesis configuration
 │   ├── keystore/        # Encrypted key storage
 │   ├── mempool/         # Transaction pool
@@ -137,9 +138,9 @@ shell-chain/
 
 | Algorithm | Type | Use Case | Status |
 |-----------|------|----------|--------|
-| **Dilithium3** | Lattice-based | Transaction signing (default) | Deployed — NIST Level 3 |
-| **ML-DSA-65** (FIPS 204) | Lattice-based | Transaction signing (optional FIPS path) | Deployed — optional |
-| **SPHINCS+** (SLH-DSA) | Hash-based | High-security accounts (optional) | Deployed — NIST Level 5 |
+| **ML-DSA-65** (FIPS 204) | Lattice-based | Transaction signing (primary) | Deployed — NIST FIPS 204 |
+| **Dilithium3** | Lattice-based | Transaction signing (legacy-compatible active path) | Deployed — NIST Round 3 reference |
+| **SPHINCS+** (SLH-DSA) | Hash-based | High-security accounts (fallback) | Deployed — NIST Level 5 |
 | **STARKs** | Hash-based proofs | Signature aggregation, storage compression | Deployed (optional, off by default in dev) |
 | **Kyber / ML-KEM** (P2P) | KEM | Validator transport (future) | **Not yet deployed** — classical libp2p Noise/XX is current |
 

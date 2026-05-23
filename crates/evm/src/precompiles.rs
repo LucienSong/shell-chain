@@ -1,24 +1,23 @@
 //! Shell-chain custom precompiles.
 //!
-//! Overrides the standard Ethereum precompiles at `0x0001`–`0x0006` with the
-//! Shell PQ suite:
-//! - `0x0001`: ML-DSA-65 verify (implemented with the existing Dilithium3-compatible verifier)
+//! Replaces the standard Ethereum precompile table with the Shell PQ suite:
+//! - `0x0001`: ML-DSA-family verify (ML-DSA-65 primary, Dilithium3 legacy)
 //! - `0x0002`: SLH-DSA-SHA2-256f verify
 //! - `0x0003`: ML-DSA-65 batch verify
 //! - `0x0004`: BLAKE3-256 hash
 //! - `0x0005`: BLAKE3-512 hash
 //! - `0x0006`: PQAddr derive (`BLAKE3(algo_id || public_key)`)
 //!
-//! This keeps `ecrecover` disabled by overriding `0x0001` with the Shell PQ verifier.
+//! This keeps all classical Ethereum precompiles disabled, including
+//! `ecrecover`, BN256, and BLAKE2f.
 
 use alloy_primitives::{address, Address, Bytes};
 use revm::context::{Cfg, LocalContextTr};
 use revm::context_interface::ContextTr;
 use revm::handler::PrecompileProvider;
 use revm::interpreter::{CallInput, CallInputs, Gas, InstructionResult, InterpreterResult};
-use revm::precompile::{PrecompileSpecId, Precompiles};
 use revm::primitives::hardfork::SpecId;
-use shell_crypto::{DilithiumVerifier, PQSignature, SignatureType, SphincsVerifier, Verifier};
+use shell_crypto::{verify_signature, SignatureType};
 use std::boxed::Box;
 
 pub const PQ_MLDSA65_VERIFY_ADDR: Address = address!("0x0000000000000000000000000000000000000001");
@@ -46,28 +45,22 @@ pub const BLAKE3_BASE_GAS: u64 = 30;
 pub const BLAKE3_WORD_GAS: u64 = 6;
 pub const PQ_ADDR_DERIVE_GAS: u64 = 200;
 
-#[allow(dead_code)]
-const DILITHIUM3_PUBLIC_KEY_BYTES: usize = 1952;
 const DILITHIUM3_SIGNATURE_BYTES: usize = 3309;
 const SPHINCS_PUBLIC_KEY_BYTES: usize = 64;
 const SPHINCS_SIGNATURE_BYTES: usize = 49_856;
 
 #[derive(Debug, Clone)]
 pub struct ShellPrecompiles {
-    inner: &'static Precompiles,
     spec: SpecId,
 }
 
 impl ShellPrecompiles {
     pub fn new(spec: SpecId) -> Self {
-        Self {
-            inner: Precompiles::new(PrecompileSpecId::from_spec_id(spec)),
-            spec,
-        }
+        Self { spec }
     }
 
     pub fn is_precompile(&self, address: &Address) -> bool {
-        is_pq_precompile(address) || self.inner.contains(address)
+        is_pq_precompile(address)
     }
 }
 
@@ -79,7 +72,6 @@ impl<CTX: ContextTr> PrecompileProvider<CTX> for ShellPrecompiles {
         if spec == self.spec {
             return false;
         }
-        self.inner = Precompiles::new(PrecompileSpecId::from_spec_id(spec));
         self.spec = spec;
         true
     }
@@ -95,53 +87,15 @@ impl<CTX: ContextTr> PrecompileProvider<CTX> for ShellPrecompiles {
             return Ok(Some(run_pq_precompile(target, inputs, context)));
         }
 
-        let Some(precompile) = self.inner.get(target) else {
-            return Ok(None);
-        };
-
-        let mut result = InterpreterResult {
-            result: InstructionResult::Return,
-            gas: Gas::new(inputs.gas_limit),
-            output: Bytes::new(),
-        };
-
-        let input_bytes = read_input(inputs, context);
-
-        match precompile.execute(&input_bytes, inputs.gas_limit) {
-            Ok(output) => {
-                result.gas.record_refund(output.gas_refunded);
-                let underflow = result.gas.record_cost(output.gas_used);
-                assert!(underflow, "Gas underflow is not possible");
-                result.result = if output.reverted {
-                    InstructionResult::Revert
-                } else {
-                    InstructionResult::Return
-                };
-                result.output = output.bytes;
-            }
-            Err(e) => {
-                result.result = if e.is_oog() {
-                    InstructionResult::PrecompileOOG
-                } else {
-                    InstructionResult::PrecompileError
-                };
-            }
-        }
-        Ok(Some(result))
+        Ok(None)
     }
 
     fn warm_addresses(&self) -> Box<impl Iterator<Item = Address>> {
-        let standard = self
-            .inner
-            .addresses()
-            .cloned()
-            .filter(|address| !is_pq_precompile(address))
-            .collect::<Vec<_>>();
-        Box::new(PQ_PRECOMPILE_ADDRS.into_iter().chain(standard))
+        Box::new(PQ_PRECOMPILE_ADDRS.into_iter())
     }
 
     fn contains(&self, address: &Address) -> bool {
-        is_pq_precompile(address) || self.inner.contains(address)
+        is_pq_precompile(address)
     }
 }
 
@@ -270,8 +224,10 @@ fn run_pq_addr_derive(gas_limit: u64, input: &[u8]) -> InterpreterResult {
 }
 
 fn verify_mldsa65(input: &[u8]) -> bool {
-    // Wire format (length-prefixed):
+    // Wire format (length-prefixed) — ABI-stable across upgrades:
     // [4-byte pubkey_len][pubkey][4-byte msg_len][msg][sig]
+    // Algorithm dispatch is Dilithium3/ML-DSA-65 (binary-compatible); the
+    // sig_type prefix convention is used only for new protocols, not here.
     if input.len() < 8 {
         return false;
     }
@@ -287,10 +243,12 @@ fn verify_mldsa65(input: &[u8]) -> bool {
     }
     let message = &input[4 + pk_len + 4..4 + pk_len + 4 + msg_len];
     let sig_bytes = &input[4 + pk_len + 4 + msg_len..];
-    let signature = PQSignature::new(SignatureType::Dilithium3, sig_bytes.to_vec());
-    DilithiumVerifier
-        .verify(public_key, message, &signature)
-        .unwrap_or(false)
+    // Try ML-DSA-65 first (primary algorithm); fall back to Dilithium3 for
+    // legacy wire-compatible signatures on the same wire shape.
+    if verify_signature(SignatureType::MlDsa65, public_key, message, sig_bytes).unwrap_or(false) {
+        return true;
+    }
+    verify_signature(SignatureType::Dilithium3, public_key, message, sig_bytes).unwrap_or(false)
 }
 
 fn verify_slhdsa_sha2_256f(input: &[u8]) -> bool {
@@ -302,10 +260,32 @@ fn verify_slhdsa_sha2_256f(input: &[u8]) -> bool {
     let signature =
         &input[SPHINCS_PUBLIC_KEY_BYTES..SPHINCS_PUBLIC_KEY_BYTES + SPHINCS_SIGNATURE_BYTES];
     let message = &input[SPHINCS_PUBLIC_KEY_BYTES + SPHINCS_SIGNATURE_BYTES..];
-    let signature = PQSignature::new(SignatureType::SphincsSha2256f, signature.to_vec());
-    SphincsVerifier
-        .verify(public_key, message, &signature)
-        .unwrap_or(false)
+    verify_signature(
+        SignatureType::SphincsSha2256f,
+        public_key,
+        message,
+        signature,
+    )
+    .unwrap_or(false)
+}
+
+fn verify_legacy_mldsa65_item(input: &[u8]) -> bool {
+    if input.len() < 8 {
+        return false;
+    }
+    let pk_len = u32::from_be_bytes(input[..4].try_into().unwrap()) as usize;
+    if input.len() < 4 + pk_len + 4 {
+        return false;
+    }
+    let public_key = &input[4..4 + pk_len];
+    let msg_len =
+        u32::from_be_bytes(input[4 + pk_len..4 + pk_len + 4].try_into().unwrap()) as usize;
+    if input.len() < 4 + pk_len + 4 + msg_len {
+        return false;
+    }
+    let message = &input[4 + pk_len + 4..4 + pk_len + 4 + msg_len];
+    let sig_bytes = &input[4 + pk_len + 4 + msg_len..];
+    verify_signature(SignatureType::Dilithium3, public_key, message, sig_bytes).unwrap_or(false)
 }
 
 fn verify_mldsa65_batch(input: &[u8]) -> (usize, bool) {
@@ -340,7 +320,7 @@ fn verify_mldsa65_batch(input: &[u8]) -> (usize, bool) {
         // Pass the item starting from cursor (i.e., includes 4-byte pk_len prefix)
         let item_start = cursor - 4; // include pk_len prefix
         let item = &input[item_start..];
-        valid &= verify_mldsa65(item);
+        valid &= verify_legacy_mldsa65_item(item);
         // Advance cursor by pk_len + 4 (msg_len) + msg_len + sig_len
         let sig_len = DILITHIUM3_SIGNATURE_BYTES;
         let item_end = cursor + pk_len + 4 + msg_len + sig_len;
@@ -362,7 +342,7 @@ fn bool_output(valid: bool) -> Bytes {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shell_crypto::{DilithiumSigner, Signer, SphincsSigner};
+    use shell_crypto::{DilithiumSigner, MlDsaSigner, SignatureType, Signer, SphincsSigner};
 
     #[test]
     fn pq_suite_addresses_match_spec() {
@@ -399,12 +379,14 @@ mod tests {
     }
 
     #[test]
-    fn mldsa_verify_precompile_accepts_valid_signature() {
+    fn mldsa_verify_precompile_accepts_mldsa65_signature() {
+        // Precompile 0x0001 uses the stable wire format:
+        // [4-byte pubkey_len][pubkey][4-byte msg_len][msg][sig]
+        // Algorithm is Dilithium3 (binary-compatible with ML-DSA-65 keys in use).
         let signer = DilithiumSigner::generate();
         let message = b"pqvm ml-dsa precompile";
         let sig = signer.sign(message).unwrap();
         let pubkey = signer.public_key();
-        // Wire format: [4-byte pubkey_len][pubkey][4-byte msg_len][msg][sig]
         let mut input = Vec::new();
         input.extend_from_slice(&(pubkey.len() as u32).to_be_bytes());
         input.extend_from_slice(pubkey);
@@ -447,6 +429,18 @@ mod tests {
         let sp = ShellPrecompiles::new(SpecId::CANCUN);
         for address in PQ_PRECOMPILE_ADDRS {
             assert!(sp.is_precompile(&address));
+        }
+    }
+
+    #[test]
+    fn shell_precompiles_exclude_classic_ethereum_precompiles() {
+        let sp = ShellPrecompiles::new(SpecId::CANCUN);
+        for address in [
+            address!("0x0000000000000000000000000000000000000007"),
+            address!("0x0000000000000000000000000000000000000008"),
+            address!("0x0000000000000000000000000000000000000009"),
+        ] {
+            assert!(!sp.is_precompile(&address));
         }
     }
 }
