@@ -41,6 +41,8 @@ const PQ_PRECOMPILE_ADDRS: [Address; 6] = [
 pub const PQ_MLDSA65_VERIFY_GAS: u64 = 46_000;
 pub const PQ_SLHDSA_VERIFY_GAS: u64 = 2_300_000;
 pub const PQ_MLDSA65_BATCH_VERIFY_GAS_PER_SIG: u64 = 12_000;
+/// C-1: Hard cap on batch size to prevent unbounded CPU work regardless of gas.
+pub const MAX_BATCH_SIGNATURES: u32 = 256;
 pub const BLAKE3_BASE_GAS: u64 = 30;
 pub const BLAKE3_WORD_GAS: u64 = 6;
 pub const PQ_ADDR_DERIVE_GAS: u64 = 200;
@@ -171,11 +173,28 @@ fn run_slhdsa_sha2_256f_verify(gas_limit: u64, input: &[u8]) -> InterpreterResul
 
 fn run_mldsa65_batch_verify(gas_limit: u64, input: &[u8]) -> InterpreterResult {
     let mut result = base_result(gas_limit);
-    let (count, valid) = verify_mldsa65_batch(input);
-    let gas = PQ_MLDSA65_BATCH_VERIFY_GAS_PER_SIG.saturating_mul(count as u64);
-    if !charge_gas(&mut result, gas) {
+
+    // C-1: Parse count from the header BEFORE any verification work.
+    let Some(count_bytes) = input.get(..4) else {
+        result.result = InstructionResult::PrecompileError;
+        return result;
+    };
+    let count = u32::from_be_bytes(count_bytes.try_into().expect("slice length checked"));
+
+    // C-1: Reject oversized batches up-front to bound CPU work.
+    if count > MAX_BATCH_SIGNATURES {
+        result.result = InstructionResult::PrecompileError;
         return result;
     }
+
+    // C-1: Charge the full gas cost BEFORE entering the verification loop so
+    // that a caller with gas_limit = 0 receives OOG without doing any work.
+    let total_cost = PQ_MLDSA65_BATCH_VERIFY_GAS_PER_SIG.saturating_mul(count as u64);
+    if !charge_gas(&mut result, total_cost) {
+        return result;
+    }
+
+    let (_, valid) = verify_mldsa65_batch(input);
     result.output = bool_output(valid);
     result
 }
@@ -269,6 +288,11 @@ fn verify_slhdsa_sha2_256f(input: &[u8]) -> bool {
     .unwrap_or(false)
 }
 
+/// Legacy Dilithium3-only item verifier, kept for wire-format reference.
+/// No longer called from the batch path after H-3 unification; batch now
+/// delegates to `verify_mldsa65` (ML-DSA-65 primary + Dilithium3 fallback).
+/// TODO: remove once Dilithium3 legacy wires are fully retired (audit L-2).
+#[allow(dead_code)]
 fn verify_legacy_mldsa65_item(input: &[u8]) -> bool {
     if input.len() < 8 {
         return false;
@@ -317,16 +341,23 @@ fn verify_mldsa65_batch(input: &[u8]) -> (usize, bool) {
         if sig_start > input.len() {
             return (count, false);
         }
-        // Pass the item starting from cursor (i.e., includes 4-byte pk_len prefix)
-        let item_start = cursor - 4; // include pk_len prefix
-        let item = &input[item_start..];
-        valid &= verify_legacy_mldsa65_item(item);
-        // Advance cursor by pk_len + 4 (msg_len) + msg_len + sig_len
+        // Compute exact item boundaries before verifying so we pass only
+        // [item_start..item_end] to verify_mldsa65 — not an open-ended slice
+        // that would expose trailing bytes from subsequent items.
         let sig_len = DILITHIUM3_SIGNATURE_BYTES;
+        let item_start = cursor - 4; // include pk_len prefix
         let item_end = cursor + pk_len + 4 + msg_len + sig_len;
         if item_end > input.len() {
             return (count, false);
         }
+        // H-3: Use the same ML-DSA-65-first dispatch as the single-verify path
+        // (verify_mldsa65) so batch and single verification are consistent.
+        // Legacy Dilithium3-only dispatch (verify_legacy_mldsa65_item) is kept
+        // below for reference but no longer used here.
+        // TODO: once Dilithium3 legacy wires are retired, remove the fallback
+        // entirely (audit finding L-2).
+        let item = &input[item_start..item_end];
+        valid &= verify_mldsa65(item);
         cursor = item_end;
     }
 
@@ -342,7 +373,7 @@ fn bool_output(valid: bool) -> Bytes {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shell_crypto::{DilithiumSigner, MlDsaSigner, SignatureType, Signer, SphincsSigner};
+    use shell_crypto::{DilithiumSigner, Signer, SphincsSigner};
 
     #[test]
     fn pq_suite_addresses_match_spec() {
@@ -442,5 +473,112 @@ mod tests {
         ] {
             assert!(!sp.is_precompile(&address));
         }
+    }
+
+    /// C-1: gas_limit=0 with count=100 must return OOG without panicking or
+    /// performing any verification work (no reachable panic path inside the
+    /// verification loop should be triggered).
+    #[test]
+    fn batch_verify_oog_before_verification_loop() {
+        // Build a minimal input with count=100 and no actual signature data.
+        // The function must return PrecompileOOG before entering the loop.
+        let mut input = Vec::new();
+        input.extend_from_slice(&100u32.to_be_bytes()); // count = 100
+                                                        // No signature items — if the loop ran it would return false due to
+                                                        // missing data, but it must never reach there with gas_limit=0.
+
+        let result = run_mldsa65_batch_verify(0, &input);
+        assert_eq!(
+            result.result,
+            InstructionResult::PrecompileOOG,
+            "C-1: expected OOG with gas_limit=0"
+        );
+    }
+
+    /// C-1: count > MAX_BATCH_SIGNATURES must be rejected immediately.
+    #[test]
+    fn batch_verify_rejects_oversized_count() {
+        let mut input = Vec::new();
+        input.extend_from_slice(&(MAX_BATCH_SIGNATURES + 1).to_be_bytes());
+        let result = run_mldsa65_batch_verify(u64::MAX, &input);
+        assert_eq!(
+            result.result,
+            InstructionResult::PrecompileError,
+            "C-1: expected PrecompileError for count > MAX_BATCH_SIGNATURES"
+        );
+    }
+
+    /// Helper: encode one batch item as [pk_len(4)][pubkey][msg_len(4)][msg][sig].
+    fn encode_batch_item(pubkey: &[u8], message: &[u8], sig: &[u8]) -> Vec<u8> {
+        let mut item = Vec::new();
+        item.extend_from_slice(&(pubkey.len() as u32).to_be_bytes());
+        item.extend_from_slice(pubkey);
+        item.extend_from_slice(&(message.len() as u32).to_be_bytes());
+        item.extend_from_slice(message);
+        item.extend_from_slice(sig);
+        item
+    }
+
+    /// Regression test: count=2 happy path — both items must verify correctly.
+    /// Verifies the slicing fix: item_start..item_end rather than item_start..
+    #[test]
+    fn batch_verify_multi_item_happy_path() {
+        let signer1 = DilithiumSigner::generate();
+        let signer2 = DilithiumSigner::generate();
+
+        let msg1 = b"batch item one";
+        let msg2 = b"batch item two";
+        let sig1 = signer1.sign(msg1).unwrap();
+        let sig2 = signer2.sign(msg2).unwrap();
+
+        let mut input = Vec::new();
+        input.extend_from_slice(&2u32.to_be_bytes()); // count = 2
+        input.extend(encode_batch_item(signer1.public_key(), msg1, &sig1.data));
+        input.extend(encode_batch_item(signer2.public_key(), msg2, &sig2.data));
+
+        let gas = PQ_MLDSA65_BATCH_VERIFY_GAS_PER_SIG * 2 + 1_000;
+        let result = run_mldsa65_batch_verify(gas, &input);
+        let mut expected = [0u8; 32];
+        expected[31] = 1;
+        assert_eq!(
+            result.output.as_ref(),
+            &expected,
+            "count=2 batch should verify successfully"
+        );
+    }
+
+    /// Regression test: count=2 with one tampered signature must return false.
+    #[test]
+    fn batch_verify_multi_item_tampered_sig_fails() {
+        let signer1 = DilithiumSigner::generate();
+        let signer2 = DilithiumSigner::generate();
+
+        let msg1 = b"batch item one";
+        let msg2 = b"batch item two";
+        let sig1 = signer1.sign(msg1).unwrap();
+        let sig2 = signer2.sign(msg2).unwrap();
+
+        // Tamper sig2: flip a byte in the middle.
+        let mut sig2_tampered = sig2.data.clone();
+        let mid = sig2_tampered.len() / 2;
+        sig2_tampered[mid] ^= 0xFF;
+
+        let mut input = Vec::new();
+        input.extend_from_slice(&2u32.to_be_bytes()); // count = 2
+        input.extend(encode_batch_item(signer1.public_key(), msg1, &sig1.data));
+        input.extend(encode_batch_item(
+            signer2.public_key(),
+            msg2,
+            &sig2_tampered,
+        ));
+
+        let gas = PQ_MLDSA65_BATCH_VERIFY_GAS_PER_SIG * 2 + 1_000;
+        let result = run_mldsa65_batch_verify(gas, &input);
+        let expected_false = [0u8; 32];
+        assert_eq!(
+            result.output.as_ref(),
+            &expected_false,
+            "count=2 batch with tampered second sig must return false"
+        );
     }
 }
