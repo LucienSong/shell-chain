@@ -299,13 +299,26 @@ impl<S: KvStore + 'static> Node<S> {
             proposer_seal: None,
         };
 
-        // C3: If STARK aggregation is enabled, collect sig batch entries now.
-        // G4: ProofTask pushed to backlog AFTER signing so we have the real block hash.
+        // C3: If STARK aggregation is enabled, collect sig batch entries and
+        // compute the 32-byte commitment synchronously so it can be embedded
+        // in the header (and thus covered by the block hash / proposer seal).
+        // The full STARK proof is generated asynchronously; nodes that receive
+        // a commitment-only header will skip full STARK verification until a
+        // ProofAmendment arrives.
         let stark_entries: Option<Vec<SigBatchEntry>> = if self.stark_aggregation {
             Some(stark_sources::entries_from_txs(&included_txs))
         } else {
             None
         };
+
+        // Embed the batch-root commitment in the header before signing.
+        if let Some(entries) = stark_entries.as_ref() {
+            if !entries.is_empty() {
+                let batch_root = compute_batch_root(entries);
+                let commitment = SigBatchProof::commitment_only(batch_root, entries.len());
+                block.header.sig_aggregate_proof = commitment.to_json().ok().map(Into::into);
+            }
+        }
 
         // Sign the block with the proposer's key.
         consensus.sign_block(&mut block, signer)?;

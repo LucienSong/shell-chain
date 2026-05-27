@@ -4,6 +4,7 @@
 //!
 //! - [`prove_sig_batch`]: build trace from entries, generate STARK proof.
 //! - [`verify_sig_batch`]: verify a [`SigBatchProof`] against claimed public inputs.
+//! - [`compute_batch_root`]: compute the 32-byte Merkle-accumulator root without proving.
 
 use winterfell::verify;
 use winterfell::{
@@ -16,7 +17,10 @@ use winterfell::{
 };
 
 use crate::{
-    air::{SigBatchAir, SigBatchPublicInputs, COL_ACC, COL_ENTRY, TRACE_WIDTH},
+    air::{
+        SigBatchAir, SigBatchPublicInputs, COL_ACC_HI, COL_ACC_LO, COL_LEAF_HI, COL_LEAF_LO,
+        TRACE_WIDTH,
+    },
     proof::SigBatchProof,
 };
 
@@ -24,25 +28,34 @@ use crate::{
 
 /// One entry in the signature batch — derived from a verified signature.
 ///
-/// The entry value is computed by XOR-folding the first 16 bytes of
-/// `msg_hash` and `pk_hash`, then interpreting the result as a little-endian
-/// `u128` field element.
+/// The entry leaf is `BLAKE3(msg_hash ‖ pk_hash)` — a 256-bit value with
+/// full collision resistance per WP §STARK.  The leaf is split into two
+/// 128-bit f128 field elements (`lo`, `hi`) for the dual-accumulator STARK.
 #[derive(Debug, Clone)]
 pub struct SigBatchEntry {
-    /// First 32 bytes of the message hash (e.g. SHA3-256 of message bytes).
+    /// First 32 bytes of the message hash (BLAKE3 of the transaction signing bytes).
     pub msg_hash: [u8; 32],
-    /// First 32 bytes of the public key hash (e.g. SHA3-256 of serialised pubkey).
+    /// First 32 bytes of the public key hash (BLAKE3 of the serialized pubkey).
     pub pk_hash: [u8; 32],
 }
 
 impl SigBatchEntry {
-    /// Derive the field element entry value for this signature.
-    pub fn to_field_element(&self) -> BaseElement {
-        let mut bytes = [0u8; 16];
-        for (i, b) in bytes.iter_mut().enumerate() {
-            *b = self.msg_hash[i] ^ self.pk_hash[i];
-        }
-        BaseElement::new(u128::from_le_bytes(bytes))
+    /// Compute the 256-bit BLAKE3 leaf: `BLAKE3(msg_hash ‖ pk_hash)`.
+    pub fn to_leaf_bytes(&self) -> [u8; 32] {
+        let mut input = [0u8; 64];
+        input[..32].copy_from_slice(&self.msg_hash);
+        input[32..].copy_from_slice(&self.pk_hash);
+        *blake3::hash(&input).as_bytes()
+    }
+
+    /// Split the 32-byte BLAKE3 leaf into two f128 field elements (lo, hi).
+    ///
+    /// `lo = u128::from_le_bytes(leaf[0..16])`, `hi = u128::from_le_bytes(leaf[16..32])`.
+    pub fn to_field_elements(&self) -> (BaseElement, BaseElement) {
+        let leaf = self.to_leaf_bytes();
+        let lo = u128::from_le_bytes(leaf[0..16].try_into().unwrap());
+        let hi = u128::from_le_bytes(leaf[16..32].try_into().unwrap());
+        (BaseElement::new(lo), BaseElement::new(hi))
     }
 }
 
@@ -66,65 +79,79 @@ pub fn default_proof_options() -> ProofOptions {
 
 // ── Trace builder ─────────────────────────────────────────────────────────────
 
-/// Build the execution trace for the hash-chain accumulator circuit.
+/// Build the 4-column execution trace for the dual hash-chain accumulator circuit.
 ///
-/// Returns `(trace, batch_root)`.
-pub fn build_trace(entries: &[SigBatchEntry]) -> (TraceTable<BaseElement>, BaseElement) {
+/// Returns `(trace, batch_root_lo, batch_root_hi)`.
+///
+/// Columns: `[acc_lo, acc_hi, leaf_lo, leaf_hi]`
+/// Transitions: `acc_lo[t+1] = acc_lo[t]^3 + leaf_lo[t]`
+///              `acc_hi[t+1] = acc_hi[t]^3 + leaf_hi[t]`
+pub fn build_trace(
+    entries: &[SigBatchEntry],
+) -> (TraceTable<BaseElement>, BaseElement, BaseElement) {
     assert!(!entries.is_empty(), "batch must have at least one entry");
 
-    // Minimum trace length is 8 rows (Winterfell requirement); round up to
-    // next power of two.
-    //
-    // IMPORTANT: we always add +1 before rounding so there is **at least one
-    // padding row**.  The boundary assertion checks `acc[trace_len - 1] ==
-    // batch_root`, which is only true if the last row is a stable padding row
-    // where `acc` has already been updated by all real entries.  If
-    // `trace_len == n_entries` exactly (no padding), the last row would hold
-    // the intermediate accumulator before the final entry is applied — causing
-    // `InconsistentOodConstraintEvaluations` during verification.
+    // Minimum trace length is 8 rows (Winterfell requirement); always add +1
+    // to ensure at least one stable padding row at the end.
     let trace_len = ((entries.len() + 1).max(8)).next_power_of_two();
 
-    // Pre-compute all accumulator values and entry values.
-    let mut acc = BaseElement::ZERO;
-    let mut accs: Vec<BaseElement> = Vec::with_capacity(trace_len);
-    let mut entry_vals: Vec<BaseElement> = Vec::with_capacity(trace_len);
+    // Pre-compute all accumulator and leaf values.
+    let mut acc_lo = BaseElement::ZERO;
+    let mut acc_hi = BaseElement::ZERO;
+    let mut accs_lo: Vec<BaseElement> = Vec::with_capacity(trace_len);
+    let mut accs_hi: Vec<BaseElement> = Vec::with_capacity(trace_len);
+    let mut leafs_lo: Vec<BaseElement> = Vec::with_capacity(trace_len);
+    let mut leafs_hi: Vec<BaseElement> = Vec::with_capacity(trace_len);
 
     for entry in entries.iter() {
-        let fe = entry.to_field_element();
-        accs.push(acc);
-        entry_vals.push(fe);
-        acc = acc.exp(3u32.into()) + fe;
+        let (lo, hi) = entry.to_field_elements();
+        accs_lo.push(acc_lo);
+        accs_hi.push(acc_hi);
+        leafs_lo.push(lo);
+        leafs_hi.push(hi);
+        acc_lo = acc_lo.exp(3u32.into()) + lo;
+        acc_hi = acc_hi.exp(3u32.into()) + hi;
     }
 
-    // Padding rows: keep acc stable by choosing entry = acc - acc^3.
-    // This satisfies the transition: acc^3 + (acc - acc^3) = acc. ✓
+    // Padding rows: keep both accumulators stable.
+    // acc_lo^3 + pad_lo = acc_lo  =>  pad_lo = acc_lo - acc_lo^3
     for _ in entries.len()..trace_len {
-        let padding_entry = acc - acc.exp(3u32.into());
-        accs.push(acc);
-        entry_vals.push(padding_entry);
+        let pad_lo = acc_lo - acc_lo.exp(3u32.into());
+        let pad_hi = acc_hi - acc_hi.exp(3u32.into());
+        accs_lo.push(acc_lo);
+        accs_hi.push(acc_hi);
+        leafs_lo.push(pad_lo);
+        leafs_hi.push(pad_hi);
     }
 
-    let batch_root = acc;
+    let batch_root_lo = acc_lo;
+    let batch_root_hi = acc_hi;
 
     // Fill the Winterfell TraceTable.
-    let accs_clone = accs.clone();
-    let evs_clone = entry_vals.clone();
+    let al = accs_lo.clone();
+    let ah = accs_hi.clone();
+    let ll = leafs_lo.clone();
+    let lh = leafs_hi.clone();
     let mut trace = TraceTable::new(TRACE_WIDTH, trace_len);
     trace.fill(
         |state| {
-            state[COL_ACC] = accs_clone[0];
-            state[COL_ENTRY] = evs_clone[0];
+            state[COL_ACC_LO] = al[0];
+            state[COL_ACC_HI] = ah[0];
+            state[COL_LEAF_LO] = ll[0];
+            state[COL_LEAF_HI] = lh[0];
         },
         |step, state| {
             let next = step + 1;
             if next < trace_len {
-                state[COL_ACC] = accs[next];
-                state[COL_ENTRY] = entry_vals[next];
+                state[COL_ACC_LO] = accs_lo[next];
+                state[COL_ACC_HI] = accs_hi[next];
+                state[COL_LEAF_LO] = leafs_lo[next];
+                state[COL_LEAF_HI] = leafs_hi[next];
             }
         },
     );
 
-    (trace, batch_root)
+    (trace, batch_root_lo, batch_root_hi)
 }
 
 // ── Winterfell Prover impl ────────────────────────────────────────────────────
@@ -205,32 +232,38 @@ impl Prover for SigBatchProverImpl {
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
-/// Recompute the batch root for a slice of entries without building the full
-/// Winterfell execution trace.
+/// Compute the 32-byte batch root for a slice of entries without building
+/// the full Winterfell execution trace.
 ///
-/// Uses the same degree-3 accumulator as [`build_trace`]:
-/// `acc[t+1] = acc[t]^3 + entry[t]`, starting from `acc = 0`.
+/// Each entry produces a 256-bit BLAKE3 leaf `BLAKE3(msg_hash ‖ pk_hash)`.
+/// The leaf is split into (lo, hi) f128 halves, which are accumulated via:
+/// `acc_lo[t+1] = acc_lo[t]^3 + leaf_lo[t]`
+/// `acc_hi[t+1] = acc_hi[t]^3 + leaf_hi[t]`
 ///
-/// Returns 16 little-endian bytes of the final field element (identical to
-/// [`SigBatchProof::batch_root_bytes`]).  For an empty slice the result is
-/// all-zero bytes (BaseElement::ZERO).
+/// Returns the 32-byte root `acc_lo_final ‖ acc_hi_final` (16 LE bytes each).
+/// For an empty slice the result is 32 zero bytes.
 ///
 /// Callers can compare the returned bytes against `proof.batch_root_bytes` to
 /// verify that a proof covers exactly the canonical entries they expect.
-pub fn compute_batch_root(entries: &[SigBatchEntry]) -> [u8; 16] {
-    let mut acc = BaseElement::ZERO;
+pub fn compute_batch_root(entries: &[SigBatchEntry]) -> [u8; 32] {
+    let mut acc_lo = BaseElement::ZERO;
+    let mut acc_hi = BaseElement::ZERO;
     for entry in entries {
-        acc = acc.exp(3u32.into()) + entry.to_field_element();
+        let (lo, hi) = entry.to_field_elements();
+        acc_lo = acc_lo.exp(3u32.into()) + lo;
+        acc_hi = acc_hi.exp(3u32.into()) + hi;
     }
-    let mut bytes = [0u8; 16];
-    bytes.copy_from_slice(&acc.as_int().to_le_bytes());
+    let mut bytes = [0u8; 32];
+    bytes[0..16].copy_from_slice(&acc_lo.as_int().to_le_bytes());
+    bytes[16..32].copy_from_slice(&acc_hi.as_int().to_le_bytes());
     bytes
 }
 
+/// Generate a STARK proof for a slice of signature batch entries.
 ///
-/// The caller is responsible for verifying all Dilithium3 signatures natively
-/// before calling this function.  The STARK proves only that the hash-chain
-/// accumulator was correctly computed over the entries.
+/// The caller is responsible for verifying all PQ signatures natively
+/// before calling this function.  The STARK proves only that the dual
+/// hash-chain accumulator was correctly computed over the BLAKE3 entries.
 ///
 /// # Errors
 /// Returns `Err(String)` if the Winterfell prover fails.
@@ -240,11 +273,13 @@ pub fn prove_sig_batch(entries: &[SigBatchEntry]) -> Result<SigBatchProof, Strin
     }
     let n_sigs = entries.len();
     let options = default_proof_options();
-    let (trace, batch_root) = build_trace(entries);
-    let batch_root_u128 = batch_root.as_int();
-    let mut batch_root_bytes = [0u8; 16];
-    batch_root_bytes.copy_from_slice(&batch_root_u128.to_le_bytes());
-    let pub_inputs = SigBatchPublicInputs { batch_root, n_sigs };
+    let (trace, batch_root_lo, batch_root_hi) = build_trace(entries);
+    let batch_root_bytes = root_to_bytes(batch_root_lo, batch_root_hi);
+    let pub_inputs = SigBatchPublicInputs {
+        batch_root_lo,
+        batch_root_hi,
+        n_sigs,
+    };
     let prover = SigBatchProverImpl::new(options, pub_inputs);
     let proof = prover
         .prove(trace)
@@ -258,18 +293,40 @@ pub fn prove_sig_batch(entries: &[SigBatchEntry]) -> Result<SigBatchProof, Strin
 /// `n_sigs`, then runs the Winterfell verifier.
 ///
 /// # Errors
-/// Returns `Err(String)` if proof decoding or verification fails.
+/// Returns `Err(String)` if the proof is commitment-only (no STARK bytes),
+/// or if proof decoding or verification fails.
 pub fn verify_sig_batch(sig_proof: &SigBatchProof) -> Result<(), String> {
+    if !sig_proof.has_proof() {
+        // Commitment-only payloads carry no verifiable STARK proof bytes.
+        return Err(
+            "sig_aggregate_proof is commitment-only; full STARK proof not yet settled".to_string(),
+        );
+    }
     let inner = sig_proof.inner_proof()?;
-    let batch_root_u128 = u128::from_le_bytes(sig_proof.batch_root_bytes);
-    let batch_root = BaseElement::new(batch_root_u128);
+    let (batch_root_lo, batch_root_hi) = bytes_to_root(&sig_proof.batch_root_bytes);
     let pub_inputs = SigBatchPublicInputs {
-        batch_root,
+        batch_root_lo,
+        batch_root_hi,
         n_sigs: sig_proof.n_sigs,
     };
     let acceptable = AcceptableOptions::OptionSet(vec![default_proof_options()]);
     verify::<SigBatchAir, SigHasher, SigCoin, SigVC>(inner, pub_inputs, &acceptable)
         .map_err(|e| format!("verify_sig_batch failed: {:?}", e))
+}
+
+// ── Internal helpers ──────────────────────────────────────────────────────────
+
+fn root_to_bytes(lo: BaseElement, hi: BaseElement) -> [u8; 32] {
+    let mut bytes = [0u8; 32];
+    bytes[0..16].copy_from_slice(&lo.as_int().to_le_bytes());
+    bytes[16..32].copy_from_slice(&hi.as_int().to_le_bytes());
+    bytes
+}
+
+fn bytes_to_root(bytes: &[u8; 32]) -> (BaseElement, BaseElement) {
+    let lo = u128::from_le_bytes(bytes[0..16].try_into().unwrap());
+    let hi = u128::from_le_bytes(bytes[16..32].try_into().unwrap());
+    (BaseElement::new(lo), BaseElement::new(hi))
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -290,7 +347,9 @@ mod tests {
         let entries = vec![make_entry(1)];
         let proof = prove_sig_batch(&entries).expect("prove failed");
         assert_eq!(proof.n_sigs, 1);
+        assert_eq!(proof.batch_root_bytes.len(), 32);
         assert!(proof.size_bytes() > 0, "proof should have bytes");
+        assert!(proof.has_proof());
         verify_sig_batch(&proof).expect("verify failed");
     }
 
@@ -332,5 +391,37 @@ mod tests {
     #[test]
     fn empty_batch_returns_error() {
         assert!(prove_sig_batch(&[]).is_err());
+    }
+
+    #[test]
+    fn compute_batch_root_matches_prove() {
+        let entries: Vec<_> = (1u8..=4).map(make_entry).collect();
+        let proof = prove_sig_batch(&entries).expect("prove failed");
+        let root = compute_batch_root(&entries);
+        assert_eq!(root, proof.batch_root_bytes);
+    }
+
+    #[test]
+    fn commitment_only_is_not_verifiable() {
+        let entries = vec![make_entry(1)];
+        let root = compute_batch_root(&entries);
+        let commitment = SigBatchProof::commitment_only(root, 1);
+        assert!(!commitment.has_proof());
+        let result = verify_sig_batch(&commitment);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn leaf_bytes_differ_from_inputs() {
+        // BLAKE3(msg ‖ pk) must differ from just XOR-folding the inputs.
+        let e = make_entry(0xAB);
+        let leaf = e.to_leaf_bytes();
+        // The leaf should not be trivially zero or match a naive XOR of inputs.
+        assert_ne!(leaf, [0u8; 32]);
+        let mut xor_fold = [0u8; 32];
+        for (i, b) in xor_fold.iter_mut().enumerate() {
+            *b = e.msg_hash[i] ^ e.pk_hash[i];
+        }
+        assert_ne!(leaf, xor_fold, "BLAKE3 leaf must differ from raw XOR fold");
     }
 }
