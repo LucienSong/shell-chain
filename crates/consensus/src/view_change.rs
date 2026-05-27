@@ -67,7 +67,12 @@ impl ViewChangeMessage {
 
     /// Reconstruct the signing message from this message's own fields.
     pub fn own_signing_message(&self) -> Vec<u8> {
-        Self::signing_message(self.chain_id, self.block_number, self.view, &self.highest_qc_hash)
+        Self::signing_message(
+            self.chain_id,
+            self.block_number,
+            self.view,
+            &self.highest_qc_hash,
+        )
     }
 }
 

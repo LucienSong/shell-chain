@@ -95,6 +95,9 @@ impl Encodable for BlockHeader {
     }
 }
 
+/// Domain tag for the canonical block-hash encoding (WP §1489-1499).
+const BLOCK_HASH_DOMAIN: &[u8; 16] = b"SHELL_BLOCK_HDR\0";
+
 impl BlockHeader {
     fn fields_len(&self) -> usize {
         let proof_len = match &self.sig_aggregate_proof {
@@ -125,11 +128,49 @@ impl BlockHeader {
             })
     }
 
-    /// Compute the block hash (keccak256 of RLP-encoded header).
+    /// Canonical fixed-width encoding for block hash computation (WP §1489-1499).
+    ///
+    /// Variable-length fields (logs_bloom, extra_data, sig_aggregate_proof) are
+    /// committed as their BLAKE3 hash; all other hash fields are included verbatim.
+    /// The total output is always 16 + 11*32 + 7*8 = 424 bytes.
+    pub fn canonical_encode(&self) -> Vec<u8> {
+        use shell_primitives::blake3_hash;
+        // 16 domain + 11 * 32-byte fields + 7 * 8-byte u64 fields
+        let mut out = Vec::with_capacity(16 + 11 * 32 + 7 * 8);
+        out.extend_from_slice(BLOCK_HASH_DOMAIN);
+        out.extend_from_slice(self.parent_hash.as_bytes());
+        out.extend_from_slice(self.state_root.as_bytes());
+        out.extend_from_slice(self.transactions_root.as_bytes());
+        out.extend_from_slice(self.receipts_root.as_bytes());
+        // logs_bloom is variable-length: commit as BLAKE3(bytes)
+        out.extend_from_slice(blake3_hash(self.logs_bloom.as_ref()).as_bytes());
+        out.extend_from_slice(&self.number.to_le_bytes());
+        out.extend_from_slice(&self.gas_limit.to_le_bytes());
+        out.extend_from_slice(&self.gas_used.to_le_bytes());
+        out.extend_from_slice(&self.timestamp.to_le_bytes());
+        // extra_data is variable-length: commit as BLAKE3(bytes)
+        out.extend_from_slice(blake3_hash(self.extra_data.as_ref()).as_bytes());
+        out.extend_from_slice(self.proposer.0.as_slice());
+        // sig_aggregate_proof: BLAKE3(proof) or ShellHash::ZERO if absent
+        let proof_hash = match &self.sig_aggregate_proof {
+            Some(p) => blake3_hash(p.as_ref()),
+            None => ShellHash::ZERO,
+        };
+        out.extend_from_slice(proof_hash.as_bytes());
+        out.extend_from_slice(&self.base_fee_per_gas.to_le_bytes());
+        out.extend_from_slice(self.withdrawals_root.as_bytes());
+        out.extend_from_slice(self.parent_beacon_block_root.as_bytes());
+        out.extend_from_slice(&self.blob_gas_used.to_le_bytes());
+        out.extend_from_slice(&self.excess_blob_gas.to_le_bytes());
+        // witness_root: raw value or ShellHash::ZERO if absent
+        let witness = self.witness_root.unwrap_or(ShellHash::ZERO);
+        out.extend_from_slice(witness.as_bytes());
+        out
+    }
+
+    /// Compute the block hash: BLAKE3 of the canonical fixed-width encoding (WP §1489-1499).
     pub fn hash(&self) -> ShellHash {
-        let mut buf = Vec::new();
-        self.encode(&mut buf);
-        shell_primitives::keccak256(&buf)
+        shell_primitives::blake3_hash(&self.canonical_encode())
     }
 
     pub fn is_genesis(&self) -> bool {
@@ -778,9 +819,17 @@ mod tests {
         let mut buf = Vec::new();
         header.encode(&mut buf);
         assert!(!buf.is_empty());
-        // Hash from encoded bytes should be consistent
-        let hash = shell_primitives::keccak256(&buf);
-        assert_eq!(hash, header.hash());
+        // RLP encoding must be deterministic and non-empty; the block hash is
+        // BLAKE3(canonical_encode()), not keccak(rlp), so we only check that
+        // the hash is deterministic here.
+        assert_eq!(header.hash(), header.hash());
+    }
+
+    #[test]
+    fn header_canonical_encode_len() {
+        // Fixed-width: 16 domain + 11 * 32-byte fields + 7 * 8-byte u64 fields = 424 bytes
+        let header = sample_header();
+        assert_eq!(header.canonical_encode().len(), 424);
     }
 
     #[test]

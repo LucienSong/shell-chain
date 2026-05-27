@@ -163,7 +163,8 @@ impl<S: KvStore + 'static> Node<S> {
         let chain_id = self.config.chain_id;
         // round = 0 for standard PoA; wPoA round is embedded per-block in Phase 2.
         let round: u64 = 0;
-        let msg = Attestation::signing_message(chain_id, &parent_hash, &block_hash, block_number, round);
+        let msg =
+            Attestation::signing_message(chain_id, &parent_hash, &block_hash, block_number, round);
         let sig = signer
             .sign(&msg)
             .map_err(|e| NodeError::Startup(format!("failed to sign attestation: {e}")))?;

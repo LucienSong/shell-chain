@@ -411,8 +411,21 @@ mod tests {
 
     /// Test helper: build an Attestation with zero values for chain_id, parent_hash,
     /// and round. Tests that only verify quorum logic (not signature binding) use this.
-    fn make_att(block_hash: ShellHash, block_number: u64, validator: Address, sig: Vec<u8>) -> Attestation {
-        Attestation::new(0, ShellHash::ZERO, block_hash, block_number, validator, 0, sig)
+    fn make_att(
+        block_hash: ShellHash,
+        block_number: u64,
+        validator: Address,
+        sig: Vec<u8>,
+    ) -> Attestation {
+        Attestation::new(
+            0,
+            ShellHash::ZERO,
+            block_hash,
+            block_number,
+            validator,
+            0,
+            sig,
+        )
     }
 
     fn strict_quorum_weight(total_weight: u64) -> u64 {
@@ -887,7 +900,8 @@ mod tests {
         let chain_id: u64 = 0;
         let parent_hash = ShellHash::ZERO;
         let round: u64 = 0;
-        let msg = Attestation::signing_message(chain_id, &parent_hash, &block_hash, block_number, round);
+        let msg =
+            Attestation::signing_message(chain_id, &parent_hash, &block_hash, block_number, round);
         let sig = signer.sign(&msg).expect("signing must succeed");
         assert!(!sig.data.is_empty(), "signature must not be empty");
 
@@ -899,8 +913,7 @@ mod tests {
         assert!(valid, "real Dilithium signature must verify");
 
         // Record the attestation with the real signature.
-        let attestation =
-            make_att(block_hash, block_number, validator_addr, sig.data.clone());
+        let attestation = make_att(block_hash, block_number, validator_addr, sig.data.clone());
         let mut state = FinalityState::new();
         assert!(state.record_attestation(attestation));
         assert_eq!(state.attestation_count(&block_hash), 1);
@@ -917,7 +930,13 @@ mod tests {
         assert!(stored_valid, "stored attestation signature must verify");
 
         // Verify a tampered message does not pass.
-        let wrong_msg = Attestation::signing_message(chain_id, &parent_hash, &block_hash, block_number + 1, round);
+        let wrong_msg = Attestation::signing_message(
+            chain_id,
+            &parent_hash,
+            &block_hash,
+            block_number + 1,
+            round,
+        );
         let wrong_valid = verifier.verify(&pubkey, &wrong_msg, &stored_sig).unwrap();
         assert!(!wrong_valid, "signature must not verify for wrong message");
     }

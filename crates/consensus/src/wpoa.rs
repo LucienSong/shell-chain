@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use shell_core::{Block, BlockHeader};
 use shell_crypto::{PQSignature, Signer, Verifier};
-use shell_primitives::{Address, ShellHash};
+use shell_primitives::Address;
 
 use crate::poa::PoaEngine;
 use crate::validator::{ValidatorSet, ValidatorSetConfig};
@@ -409,6 +409,7 @@ mod tests {
     use super::*;
     use crate::{poa::PoaConfig, VIEW_CHANGE_TIMEOUT_MS};
     use shell_crypto::{PQSignature, SignatureType};
+    use shell_primitives::ShellHash;
 
     fn addr(n: u8) -> Address {
         Address::from([n; 20])
@@ -566,8 +567,14 @@ mod tests {
     fn view_change_quorum_advances_view() {
         let mut e = engine(vec![addr(1), addr(2), addr(3)], vec![1, 1, 1]);
 
-        assert!(!e.handle_view_change_message(ViewChangeMessage::new(0, 7, 0, ShellHash::ZERO, addr(1), vec![1]), 3,));
-        assert!(e.handle_view_change_message(ViewChangeMessage::new(0, 7, 0, ShellHash::ZERO, addr(2), vec![2]), 3,));
+        assert!(!e.handle_view_change_message(
+            ViewChangeMessage::new(0, 7, 0, ShellHash::ZERO, addr(1), vec![1]),
+            3,
+        ));
+        assert!(e.handle_view_change_message(
+            ViewChangeMessage::new(0, 7, 0, ShellHash::ZERO, addr(2), vec![2]),
+            3,
+        ));
         assert_eq!(e.current_view(), 1);
         assert_eq!(e.proposer_for_block(0), addr(2));
     }
@@ -576,8 +583,14 @@ mod tests {
     fn note_block_progress_resets_view_change_state() {
         let mut e = engine(vec![addr(1), addr(2), addr(3)], vec![1, 1, 1]);
 
-        assert!(!e.handle_view_change_message(ViewChangeMessage::new(0, 9, 0, ShellHash::ZERO, addr(1), vec![1]), 3,));
-        assert!(e.handle_view_change_message(ViewChangeMessage::new(0, 9, 0, ShellHash::ZERO, addr(2), vec![2]), 3,));
+        assert!(!e.handle_view_change_message(
+            ViewChangeMessage::new(0, 9, 0, ShellHash::ZERO, addr(1), vec![1]),
+            3,
+        ));
+        assert!(e.handle_view_change_message(
+            ViewChangeMessage::new(0, 9, 0, ShellHash::ZERO, addr(2), vec![2]),
+            3,
+        ));
         assert_eq!(e.current_view(), 1);
 
         e.note_block_progress(42);
