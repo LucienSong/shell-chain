@@ -2,29 +2,23 @@
 //!
 //! Adds three PQ-native opcodes to the revm instruction table:
 //!
-//! | Opcode | Name       | Stack in         | Stack out | Description                          |
-//! |--------|------------|------------------|-----------|--------------------------------------|
-//! | 0xB0   | `PQVERIFY` | `[offset, len]`  | `[valid]` | Verify a PQ signature from memory    |
-//! | 0xB1   | `PQHASH`   | `[offset, len]`  | `[hash]`  | BLAKE3-256 hash of memory region     |
-//! | 0xB2   | `PQADDR`   | `[aid, off, len]`| `[addr]`  | Derive PQ address: BLAKE3(aid‖pubkey)|
+//! | Opcode | Name       | Stack in (deepest→top)                                           | Stack out    | Description                          |
+//! |--------|------------|------------------------------------------------------------------|--------------|--------------------------------------|
+//! | 0xB0   | `PQVERIFY` | `algo_id, msg_ptr, msg_len, pk_len, pk_ptr, sig_len, sig_ptr`   | `[valid]`    | Verify a PQ signature from memory    |
+//! | 0xB1   | `PQHASH`   | `data_ptr, data_len, out_ptr`                                    | (side effect)| BLAKE3-256 hash written to memory    |
+//! | 0xB2   | `PQADDR`   | `algo_id, pk_ptr, pk_len`                                        | `[addr]`     | Derive PQ address: BLAKE3(aid‖pubkey)|
 //!
-//! ## PQVERIFY memory wire format
+//! ## PQVERIFY algo_id values (WP §1073)
 //!
-//! ```text
-//! [1-byte algo_id][payload...]
-//! ```
-//!
-//! `algo_id` values:
-//! - `0x01` — ML-DSA family: `[1-byte sig_type][4-byte pk_len][pk][4-byte msg_len][msg][sig]`
-//!   where `sig_type=0x01` selects ML-DSA-65 and `sig_type=0x00` keeps
-//!   legacy Dilithium3 compatibility on the same wire shape
-//! - `0x02` — SLH-DSA-SHA2-256f:      `[pk (64 B)][sig (49 856 B)][msg]`
+//! - `0x00` — Dilithium3 (legacy compatibility)
+//! - `0x01` — ML-DSA-65
+//! - `0x02` — SLH-DSA-SHA2-256f
 //!
 //! ## Gas costs
 //!
 //! | Opcode   | Gas                                                      |
 //! |----------|----------------------------------------------------------|
-//! | PQVERIFY | 46 000 (ML-DSA-65) / 2 300 000 (SLH-DSA)               |
+//! | PQVERIFY | 46 000 (ML-DSA-65 / Dilithium3) / 2 300 000 (SLH-DSA)  |
 //! | PQHASH   | 30 + 6 × ⌈len/32⌉                                       |
 //! | PQADDR   | 200                                                      |
 
@@ -50,9 +44,13 @@ pub const OPCODE_PQHASH: u8 = 0xB1;
 /// `PQADDR` — opcode 0xB2.  Derive PQ address BLAKE3(algo_id ‖ pubkey).
 pub const OPCODE_PQADDR: u8 = 0xB2;
 
-// ── algo_id constants (mirror precompile addressing) ─────────────────────────
+// ── algo_id constants (WP §1073) ─────────────────────────────────────────────
 
+/// Dilithium3 legacy compatibility algo_id for PQVERIFY.
+const ALGO_DILITHIUM3: u8 = 0x00;
+/// ML-DSA-65 algo_id for PQVERIFY and PQADDR.
 const ALGO_MLDSA65: u8 = 0x01;
+/// SLH-DSA-SHA2-256f algo_id for PQVERIFY.
 const ALGO_SLHDSA_SHA2_256F: u8 = 0x02;
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -75,57 +73,51 @@ fn u256_to_usize<WIRE: InterpreterTypes>(
 
 // ── PQVERIFY (0xB0) ──────────────────────────────────────────────────────────
 
-/// `PQVERIFY` instruction: verify a PQ signature stored in memory.
+/// `PQVERIFY` instruction: verify a PQ signature from memory (WP §1058-1079).
 ///
-/// Stack: `[offset (U256), len (U256)]` → `[valid (0 or 1)]`
+/// Stack (deepest → top): `algo_id, msg_ptr, msg_len, pk_len, pk_ptr, sig_len, sig_ptr`
+/// Output: `result (1=valid, 0=invalid)`.
 ///
-/// Reads `len` bytes from memory at `offset`.  The first byte is `algo_id`
-/// which selects the PQ scheme; the remaining bytes are the scheme-specific
-/// wire payload (same format as the PQ precompiles).
+/// Each of `sig`, `pk`, and `msg` is read from a separate memory region. The
+/// `algo_id` determines the scheme (0x00 = Dilithium3, 0x01 = ML-DSA-65,
+/// 0x02 = SLH-DSA-SHA2-256f).
 pub fn pq_verify<WIRE: InterpreterTypes, H: Host + ?Sized>(
     context: InstructionContext<'_, H, WIRE>,
 ) {
-    let Some(len_u256) = context.interpreter.stack.pop() else {
+    // Pop order matches LIFO: sig_ptr is on top.
+    let Some(sig_ptr_u256) = context.interpreter.stack.pop() else {
         context.interpreter.halt_underflow();
         return;
     };
-    let Some(offset) = context.interpreter.stack.pop() else {
+    let Some(sig_len_u256) = context.interpreter.stack.pop() else {
+        context.interpreter.halt_underflow();
+        return;
+    };
+    let Some(pk_ptr_u256) = context.interpreter.stack.pop() else {
+        context.interpreter.halt_underflow();
+        return;
+    };
+    let Some(pk_len_u256) = context.interpreter.stack.pop() else {
+        context.interpreter.halt_underflow();
+        return;
+    };
+    let Some(msg_ptr_u256) = context.interpreter.stack.pop() else {
+        context.interpreter.halt_underflow();
+        return;
+    };
+    let Some(msg_len_u256) = context.interpreter.stack.pop() else {
+        context.interpreter.halt_underflow();
+        return;
+    };
+    let Some(algo_id_u256) = context.interpreter.stack.pop() else {
         context.interpreter.halt_underflow();
         return;
     };
 
-    let len = match u256_to_usize(context.interpreter, len_u256) {
-        Some(v) => v,
-        None => return,
-    };
+    let algo_byte = algo_id_u256.as_limbs()[0] as u8;
 
-    if len == 0 {
-        if !context.interpreter.stack.push(U256::ZERO) {
-            context.interpreter.halt_overflow();
-        }
-        return;
-    }
-
-    let from = match u256_to_usize(context.interpreter, offset) {
-        Some(v) => v,
-        None => return,
-    };
-
-    let gas_params = context.host.gas_params().clone();
-    if !context.interpreter.resize_memory(&gas_params, from, len) {
-        return; // resize_memory already called halt
-    }
-
-    let data: Vec<u8> = context
-        .interpreter
-        .memory
-        .slice_len(from, len)
-        .as_ref()
-        .to_vec();
-
-    let algo_id = data[0];
-    let gas_cost = match algo_id {
-        ALGO_MLDSA65 => PQ_MLDSA65_VERIFY_GAS,
+    let gas_cost = match algo_byte {
+        ALGO_MLDSA65 | ALGO_DILITHIUM3 => PQ_MLDSA65_VERIFY_GAS,
         ALGO_SLHDSA_SHA2_256F => PQ_SLHDSA_VERIFY_GAS,
         _ => {
             // Unknown algorithm — charge minimum and push false.
@@ -145,10 +137,102 @@ pub fn pq_verify<WIRE: InterpreterTypes, H: Host + ?Sized>(
         return;
     }
 
-    let payload = &data[1..];
-    let valid = match algo_id {
-        ALGO_MLDSA65 => verify_mldsa65(payload),
-        ALGO_SLHDSA_SHA2_256F => verify_slhdsa(payload),
+    let sig_ptr = match u256_to_usize(context.interpreter, sig_ptr_u256) {
+        Some(v) => v,
+        None => return,
+    };
+    let sig_len = match u256_to_usize(context.interpreter, sig_len_u256) {
+        Some(v) => v,
+        None => return,
+    };
+    let pk_ptr = match u256_to_usize(context.interpreter, pk_ptr_u256) {
+        Some(v) => v,
+        None => return,
+    };
+    let pk_len = match u256_to_usize(context.interpreter, pk_len_u256) {
+        Some(v) => v,
+        None => return,
+    };
+    let msg_ptr = match u256_to_usize(context.interpreter, msg_ptr_u256) {
+        Some(v) => v,
+        None => return,
+    };
+    let msg_len = match u256_to_usize(context.interpreter, msg_len_u256) {
+        Some(v) => v,
+        None => return,
+    };
+
+    // Resize memory to cover all three regions before reading.
+    let gas_params = context.host.gas_params().clone();
+    if sig_len > 0
+        && !context
+            .interpreter
+            .resize_memory(&gas_params, sig_ptr, sig_len)
+    {
+        return;
+    }
+    if pk_len > 0
+        && !context
+            .interpreter
+            .resize_memory(&gas_params, pk_ptr, pk_len)
+    {
+        return;
+    }
+    if msg_len > 0
+        && !context
+            .interpreter
+            .resize_memory(&gas_params, msg_ptr, msg_len)
+    {
+        return;
+    }
+
+    let sig_bytes: Vec<u8> = if sig_len > 0 {
+        context
+            .interpreter
+            .memory
+            .slice_len(sig_ptr, sig_len)
+            .as_ref()
+            .to_vec()
+    } else {
+        vec![]
+    };
+    let pk_bytes: Vec<u8> = if pk_len > 0 {
+        context
+            .interpreter
+            .memory
+            .slice_len(pk_ptr, pk_len)
+            .as_ref()
+            .to_vec()
+    } else {
+        vec![]
+    };
+    let msg_bytes: Vec<u8> = if msg_len > 0 {
+        context
+            .interpreter
+            .memory
+            .slice_len(msg_ptr, msg_len)
+            .as_ref()
+            .to_vec()
+    } else {
+        vec![]
+    };
+
+    let valid = match algo_byte {
+        ALGO_MLDSA65 | ALGO_DILITHIUM3 => {
+            let sig_type = if algo_byte == ALGO_MLDSA65 {
+                SignatureType::MlDsa65
+            } else {
+                SignatureType::Dilithium3
+            };
+            verify_signature(sig_type, &pk_bytes, &msg_bytes, &sig_bytes).unwrap_or(false)
+        }
+        ALGO_SLHDSA_SHA2_256F => verify_signature(
+            SignatureType::SphincsSha2256f,
+            &pk_bytes,
+            &msg_bytes,
+            &sig_bytes,
+        )
+        .unwrap_or(false),
         _ => false,
     };
 
@@ -160,69 +244,89 @@ pub fn pq_verify<WIRE: InterpreterTypes, H: Host + ?Sized>(
 
 // ── PQHASH (0xB1) ────────────────────────────────────────────────────────────
 
-/// `PQHASH` instruction: BLAKE3-256 hash of a memory region.
+/// `PQHASH` instruction: BLAKE3-256 hash of a memory region, written to memory (WP §1062-1085).
 ///
-/// Stack: `[offset (U256), len (U256)]` → `[hash (B256 as U256)]`
+/// Stack (deepest → top): `data_ptr, data_len, out_ptr` → (side effect)
 ///
-/// Gas: `30 + 6 × ⌈len/32⌉`.
+/// Reads `data_len` bytes from `data_ptr`, computes BLAKE3-256, and writes the
+/// 32-byte result to `out_ptr`. No value is pushed to the stack.
+///
+/// Gas: `30 + 6 × ⌈data_len/32⌉`.
 pub fn pq_hash<WIRE: InterpreterTypes, H: Host + ?Sized>(context: InstructionContext<'_, H, WIRE>) {
-    let Some(len_u256) = context.interpreter.stack.pop() else {
+    let Some(out_ptr_u256) = context.interpreter.stack.pop() else {
         context.interpreter.halt_underflow();
         return;
     };
-    let Some(offset) = context.interpreter.stack.pop() else {
+    let Some(data_len_u256) = context.interpreter.stack.pop() else {
+        context.interpreter.halt_underflow();
+        return;
+    };
+    let Some(data_ptr_u256) = context.interpreter.stack.pop() else {
         context.interpreter.halt_underflow();
         return;
     };
 
-    let len = match u256_to_usize(context.interpreter, len_u256) {
+    let data_len = match u256_to_usize(context.interpreter, data_len_u256) {
         Some(v) => v,
         None => return,
     };
 
-    let words = (len as u64).div_ceil(32);
+    let words = (data_len as u64).div_ceil(32);
     let gas_cost = BLAKE3_BASE_GAS + BLAKE3_WORD_GAS * words;
     if !context.interpreter.gas.record_cost(gas_cost) {
         context.interpreter.halt_oog();
         return;
     }
 
-    let hash_bytes: [u8; 32] = if len == 0 {
+    let hash_bytes: [u8; 32] = if data_len == 0 {
         *blake3::hash(b"").as_bytes()
     } else {
-        let from = match u256_to_usize(context.interpreter, offset) {
+        let data_ptr = match u256_to_usize(context.interpreter, data_ptr_u256) {
             Some(v) => v,
             None => return,
         };
         let gas_params = context.host.gas_params().clone();
-        if !context.interpreter.resize_memory(&gas_params, from, len) {
+        if !context
+            .interpreter
+            .resize_memory(&gas_params, data_ptr, data_len)
+        {
             return;
         }
-        *blake3::hash(context.interpreter.memory.slice_len(from, len).as_ref()).as_bytes()
+        *blake3::hash(
+            context
+                .interpreter
+                .memory
+                .slice_len(data_ptr, data_len)
+                .as_ref(),
+        )
+        .as_bytes()
     };
 
-    if !context
-        .interpreter
-        .stack
-        .push(B256::from(hash_bytes).into())
-    {
-        context.interpreter.halt_overflow();
+    // Expand memory to cover the 32-byte output region and write the hash.
+    let out_ptr = match u256_to_usize(context.interpreter, out_ptr_u256) {
+        Some(v) => v,
+        None => return,
+    };
+    let gas_params = context.host.gas_params().clone();
+    if !context.interpreter.resize_memory(&gas_params, out_ptr, 32) {
+        return;
     }
+    context.interpreter.memory.set(out_ptr, &hash_bytes);
 }
 
 // ── PQADDR (0xB2) ────────────────────────────────────────────────────────────
 
-/// `PQADDR` instruction: derive PQ address `BLAKE3(algo_id ‖ pubkey)`.
+/// `PQADDR` instruction: derive PQ address `BLAKE3(algo_id ‖ pubkey)` (WP §1065-1091).
 ///
-/// Stack: `[algo_id (U256), offset (U256), len (U256)]` → `[addr (B256 as U256)]`
+/// Stack (deepest → top): `algo_id (U256), pk_ptr (U256), pk_len (U256)` → `address (B256 as U256)`
 ///
 /// Gas: `200`.
 pub fn pq_addr<WIRE: InterpreterTypes, H: Host + ?Sized>(context: InstructionContext<'_, H, WIRE>) {
-    let Some(len_u256) = context.interpreter.stack.pop() else {
+    let Some(pk_len_u256) = context.interpreter.stack.pop() else {
         context.interpreter.halt_underflow();
         return;
     };
-    let Some(offset) = context.interpreter.stack.pop() else {
+    let Some(pk_ptr_u256) = context.interpreter.stack.pop() else {
         context.interpreter.halt_underflow();
         return;
     };
@@ -238,28 +342,31 @@ pub fn pq_addr<WIRE: InterpreterTypes, H: Host + ?Sized>(context: InstructionCon
 
     let algo_byte = algo_id.as_limbs()[0] as u8; // least-significant byte of the U256
 
-    let len = match u256_to_usize(context.interpreter, len_u256) {
+    let pk_len = match u256_to_usize(context.interpreter, pk_len_u256) {
         Some(v) => v,
         None => return,
     };
 
-    let hash_bytes: [u8; 32] = if len == 0 {
+    let hash_bytes: [u8; 32] = if pk_len == 0 {
         let mut hasher = blake3::Hasher::new();
         hasher.update(&[algo_byte]);
         *hasher.finalize().as_bytes()
     } else {
-        let from = match u256_to_usize(context.interpreter, offset) {
+        let pk_ptr = match u256_to_usize(context.interpreter, pk_ptr_u256) {
             Some(v) => v,
             None => return,
         };
         let gas_params = context.host.gas_params().clone();
-        if !context.interpreter.resize_memory(&gas_params, from, len) {
+        if !context
+            .interpreter
+            .resize_memory(&gas_params, pk_ptr, pk_len)
+        {
             return;
         }
         let pubkey = context
             .interpreter
             .memory
-            .slice_len(from, len)
+            .slice_len(pk_ptr, pk_len)
             .as_ref()
             .to_vec();
         let mut hasher = blake3::Hasher::new();
@@ -296,73 +403,19 @@ where
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-/// ML-DSA-family signature verification.
-/// Wire format: `[1-byte sig_type][4-byte pk_len][pk][4-byte msg_len][msg][sig]`
-fn verify_mldsa65(payload: &[u8]) -> bool {
-    let Some((&sig_type_id, payload)) = payload.split_first() else {
-        return false;
-    };
-    let Some(sig_type) = SignatureType::from_u8(sig_type_id) else {
-        return false;
-    };
-    if !matches!(sig_type, SignatureType::MlDsa65 | SignatureType::Dilithium3) {
-        return false;
-    }
-
-    if payload.len() < 8 {
-        return false;
-    }
-    let pk_len = u32::from_be_bytes(payload[..4].try_into().unwrap()) as usize;
-    if payload.len() < 4 + pk_len + 4 {
-        return false;
-    }
-    let public_key = &payload[4..4 + pk_len];
-    let msg_len =
-        u32::from_be_bytes(payload[4 + pk_len..4 + pk_len + 4].try_into().unwrap()) as usize;
-    if payload.len() < 4 + pk_len + 4 + msg_len {
-        return false;
-    }
-    let message = &payload[4 + pk_len + 4..4 + pk_len + 4 + msg_len];
-    let sig_bytes = &payload[4 + pk_len + 4 + msg_len..];
-    verify_signature(sig_type, public_key, message, sig_bytes).unwrap_or(false)
-}
-
-/// SLH-DSA-SHA2-256f signature verification.
-/// Wire format: `[pk (64 B)][sig (49 856 B)][msg]`
-fn verify_slhdsa(payload: &[u8]) -> bool {
-    const PK_LEN: usize = 64;
-    const SIG_LEN: usize = 49_856;
-    if payload.len() < PK_LEN + SIG_LEN {
-        return false;
-    }
-    let public_key = &payload[..PK_LEN];
-    let sig_bytes = &payload[PK_LEN..PK_LEN + SIG_LEN];
-    let message = &payload[PK_LEN + SIG_LEN..];
-    verify_signature(
-        SignatureType::SphincsSha2256f,
-        public_key,
-        message,
-        sig_bytes,
-    )
-    .unwrap_or(false)
-}
-
 // ── tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // ── PQHASH helper tests (pure logic, no EVM harness needed) ──────────────
+    // ── PQHASH logic tests (pure, no EVM harness needed) ─────────────────────
 
     #[test]
     fn pqhash_empty_input_matches_blake3_empty() {
-        let expected: [u8; 32] = *blake3::hash(b"").as_bytes();
-        let expected_u256: U256 = B256::from(expected).into();
-        // Re-create the same logic used in pq_hash for len==0.
         let hash_bytes: [u8; 32] = *blake3::hash(b"").as_bytes();
-        let result: U256 = B256::from(hash_bytes).into();
-        assert_eq!(result, expected_u256);
+        let expected: [u8; 32] = *blake3::hash(b"").as_bytes();
+        assert_eq!(hash_bytes, expected);
     }
 
     #[test]
@@ -370,10 +423,9 @@ mod tests {
         let input = b"shell-pqvm-blake3";
         let expected: [u8; 32] = *blake3::hash(input).as_bytes();
         assert_eq!(expected.len(), 32);
-        let u: U256 = B256::from(expected).into();
-        // Round-trip: convert back to bytes and compare.
-        let bytes: [u8; 32] = u.to_be_bytes();
-        assert_eq!(bytes, expected);
+        // BLAKE3 is deterministic — recompute and compare.
+        let repeated: [u8; 32] = *blake3::hash(input).as_bytes();
+        assert_eq!(expected, repeated);
     }
 
     #[test]
@@ -381,62 +433,50 @@ mod tests {
         let pubkey = b"test-public-key-bytes";
         let algo_id = 0x01u8;
 
-        // Logic used in pq_addr (and in the PQAddr precompile).
         let mut hasher = blake3::Hasher::new();
         hasher.update(&[algo_id]);
         hasher.update(pubkey);
         let addr: [u8; 32] = *hasher.finalize().as_bytes();
 
-        // Verify it matches what the precompile would produce when called
-        // with the same algo_id byte + pubkey.
-        let mut precompile_input = vec![algo_id];
-        precompile_input.extend_from_slice(pubkey);
+        // Should match direct precompile-like computation.
         let mut hasher2 = blake3::Hasher::new();
-        hasher2.update(&[precompile_input[0]]);
-        hasher2.update(&precompile_input[1..]);
+        hasher2.update(&[algo_id]);
+        hasher2.update(pubkey);
         let addr2: [u8; 32] = *hasher2.finalize().as_bytes();
 
         assert_eq!(addr, addr2);
     }
 
+    // ── PQVERIFY logic tests ──────────────────────────────────────────────────
+
     #[test]
-    fn verify_mldsa65_helper_accepts_legacy_dilithium_sig() {
+    fn pqverify_verify_signature_accepts_dilithium3_sig() {
         use shell_crypto::{DilithiumSigner, SignatureType, Signer};
         let signer = DilithiumSigner::generate();
         let message = b"pqvm opcode verify test";
         let sig = signer.sign(message).unwrap();
         let pubkey = signer.public_key();
 
-        let mut payload = vec![SignatureType::Dilithium3.as_u8()];
-        payload.extend_from_slice(&(pubkey.len() as u32).to_be_bytes());
-        payload.extend_from_slice(pubkey);
-        payload.extend_from_slice(&(message.len() as u32).to_be_bytes());
-        payload.extend_from_slice(message);
-        payload.extend_from_slice(&sig.data);
-
-        assert!(verify_mldsa65(&payload));
+        assert!(
+            verify_signature(SignatureType::Dilithium3, pubkey, message, &sig.data)
+                .unwrap_or(false)
+        );
     }
 
     #[test]
-    fn verify_mldsa65_helper_rejects_bad_sig() {
+    fn pqverify_verify_signature_rejects_bad_sig() {
         use shell_crypto::{DilithiumSigner, SignatureType, Signer};
         let signer = DilithiumSigner::generate();
         let message = b"legitimate message";
         let sig = signer.sign(message).unwrap();
         let pubkey = signer.public_key();
 
-        // Corrupt last byte of the signature.
         let mut bad_sig = sig.data.clone();
         *bad_sig.last_mut().unwrap() ^= 0xFF;
 
-        let mut payload = vec![SignatureType::Dilithium3.as_u8()];
-        payload.extend_from_slice(&(pubkey.len() as u32).to_be_bytes());
-        payload.extend_from_slice(pubkey);
-        payload.extend_from_slice(&(message.len() as u32).to_be_bytes());
-        payload.extend_from_slice(message);
-        payload.extend_from_slice(&bad_sig);
-
-        assert!(!verify_mldsa65(&payload));
+        assert!(
+            !verify_signature(SignatureType::Dilithium3, pubkey, message, &bad_sig).unwrap_or(true)
+        );
     }
 
     #[test]
