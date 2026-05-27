@@ -128,16 +128,15 @@ impl<S: KvStore + 'static> Node<S> {
                         )?;
                     } else {
                         // Normal PQVM tx: commit the revm state changeset.
-                        commit_pqvm_state(
-                            &result,
-                            evm.state_db_mut().world_state_mut(),
-                            &self.chain_store,
-                        )?;
+                        // Snapshot the address registry before the first commit clears it,
+                        // so the persistent WorldState can resolve PQ addresses too.
+                        let registry = evm.state_db().address_registry_snapshot();
+                        commit_pqvm_state(&result, evm.state_db_mut())?;
 
                         // Commit to the node's persistent WorldState.
                         {
                             let mut ws = self.world_state.write();
-                            commit_pqvm_state(&result, &mut ws, &self.chain_store)?;
+                            commit_pqvm_state_raw(&result, &mut *ws, &self.chain_store, &registry)?;
                         }
                     }
                     total_effective_fees = total_effective_fees.saturating_add(

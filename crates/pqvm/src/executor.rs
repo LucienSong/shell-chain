@@ -4,7 +4,6 @@
 //! provides a high-level API for executing individual transactions and
 //! full blocks.
 
-use alloy_primitives::Address as EvmAddress;
 use alloy_primitives::{Bytes as AlBytes, B256, U256};
 use revm::context::result::ExecutionResult;
 use revm::context::{BlockEnv, CfgEnv, Context, Evm, TxEnv};
@@ -49,10 +48,6 @@ pub struct TxExecutionResult {
     pub receipt: TransactionReceipt,
     /// State changes produced by this transaction (for committing).
     pub state_changes: EvmState,
-    /// Maps 20-byte revm bridge address → full 32-byte PQ Shell address for accounts
-    /// whose upper 12 bytes are non-zero. Required by `commit_pqvm_state` to
-    /// write state to the correct canonical key in world_state.
-    pub pq_addr_map: std::collections::HashMap<EvmAddress, ShellAddress>,
     /// The sender's nonce after this transaction (= tx.nonce + 1). Used by
     /// `commit_pqvm_state` to ensure the nonce is always advanced correctly even
     /// when revm's `disable_nonce_check = true` suppresses the normal increment.
@@ -158,9 +153,9 @@ impl<S: KvStore + 'static> ShellPqvm<S> {
         let sender_shell_addr = signed_tx.from;
         let sender_nonce_after = tx.nonce.saturating_add(1);
 
-        // Register the sender's full 32-byte PQ address so ShellStateDb::basic()
-        // can find it when revm queries by the 20-byte EVM address.
-        self.state_db.hint_pq_address(signed_tx.from);
+        // Register the sender's full 32-byte address so ShellStateDb can find
+        // it when revm queries by the 20-byte truncated form.
+        self.state_db.register_pq_address(signed_tx.from);
 
         // Build revm TxEnv
         let kind = match &tx.to {
@@ -227,10 +222,6 @@ impl<S: KvStore + 'static> ShellPqvm<S> {
         let exec_result = result_and_state.result;
         let state = result_and_state.state;
 
-        // Capture PQ address hints for commit_pqvm_state so it writes to the
-        // canonical Shell address rather than the zero-padded EVM address.
-        let pq_addr_map = self.state_db.pq_hints.clone();
-
         // Build receipt
         let gas_used = exec_result.gas().spent();
         let new_cumulative = cumulative_gas_used.saturating_add(gas_used);
@@ -283,7 +274,6 @@ impl<S: KvStore + 'static> ShellPqvm<S> {
         Ok(TxExecutionResult {
             receipt,
             state_changes: state,
-            pq_addr_map,
             sender_shell_addr,
             sender_nonce_after,
             gas_used,
@@ -389,7 +379,6 @@ impl<S: KvStore + 'static> ShellPqvm<S> {
             return Ok(TxExecutionResult {
                 receipt,
                 state_changes: EvmState::default(),
-                pq_addr_map: Default::default(),
                 sender_shell_addr: ShellAddress::default(),
                 sender_nonce_after: 0,
                 gas_used: 0,
@@ -482,15 +471,12 @@ impl<S: KvStore + 'static> ShellPqvm<S> {
                         }
                     }
                     successful_values_sum = successful_values_sum.saturating_add(inner.value);
-                    let cs_arc = std::sync::Arc::clone(self.state_db.chain_store().store());
-                    let cs_view = ChainStore::new(cs_arc);
                     // Build a minimal result for commit_pqvm_state; no PQ addresses in AA
                     // inner calls (they use EVM-canonical addresses), no nonce advance here
                     // as outer tx handles it.
                     let inner_result = TxExecutionResult {
                         receipt: empty_receipt(),
                         state_changes: state,
-                        pq_addr_map: Default::default(),
                         sender_shell_addr: ShellAddress::default(),
                         sender_nonce_after: 0,
                         gas_used: 0,
@@ -498,7 +484,7 @@ impl<S: KvStore + 'static> ShellPqvm<S> {
                         is_system_tx: false,
                         system_contract_effects: SystemContractEffects::default(),
                     };
-                    commit_pqvm_state(&inner_result, self.state_db.world_state_mut(), &cs_view)?;
+                    commit_pqvm_state(&inner_result, &mut self.state_db)?;
                 }
                 ExecutionResult::Revert { output, .. } => {
                     atomic_failure = true;
@@ -625,7 +611,6 @@ impl<S: KvStore + 'static> ShellPqvm<S> {
         Ok(TxExecutionResult {
             receipt,
             state_changes: EvmState::default(),
-            pq_addr_map: Default::default(),
             sender_shell_addr: ShellAddress::default(),
             sender_nonce_after: 0,
             gas_used: total_gas_used,
@@ -754,7 +739,6 @@ impl<S: KvStore + 'static> ShellPqvm<S> {
                 Ok(TxExecutionResult {
                     receipt,
                     state_changes: EvmState::default(),
-                    pq_addr_map: Default::default(),
                     sender_shell_addr: ShellAddress::default(),
                     sender_nonce_after: 0,
                     gas_used,
@@ -791,7 +775,6 @@ impl<S: KvStore + 'static> ShellPqvm<S> {
                 Ok(TxExecutionResult {
                     receipt,
                     state_changes: EvmState::default(),
-                    pq_addr_map: Default::default(),
                     sender_shell_addr: ShellAddress::default(),
                     sender_nonce_after: 0,
                     gas_used,
@@ -818,31 +801,17 @@ fn empty_receipt() -> TransactionReceipt {
     }
 }
 
-/// Apply EVM state changes to a WorldState and ChainStore.
+/// Core commit logic shared by `commit_pqvm_state` and `commit_pqvm_state_raw`.
 ///
-/// Iterates the revm `EvmState` (address → account) and for each touched
-/// account, updates balance, nonce, contract code, and storage slots.
-///
-/// Call this after `ShellPqvm::execute_tx()` to persist the computed state
-/// diff. For multi-transaction blocks, call after **each** transaction so
-/// subsequent transactions see prior state updates.
-///
-/// Uses `result.pq_addr_map` to write PQ-derived accounts to the correct
-/// 32-byte canonical key, and `result.sender_nonce_after` to ensure the
-/// sender's nonce advances even when revm's `disable_nonce_check = true`.
-pub fn commit_pqvm_state<S: KvStore + 'static>(
+/// `resolve` maps a 20-byte EVM address to the full 32-byte Shell address.
+fn do_commit_state<S: KvStore + 'static>(
     result: &TxExecutionResult,
     world_state: &mut WorldState<S>,
     chain_store: &ChainStore<S>,
+    resolve: &impl Fn(&alloy_primitives::Address) -> ShellAddress,
 ) -> Result<(), ExecutorError> {
-    let state = &result.state_changes;
-    let pq_addr_map = &result.pq_addr_map;
-
-    for (addr, acct) in state {
-        let shell_addr = pq_addr_map
-            .get(addr)
-            .copied()
-            .unwrap_or_else(|| ShellAddress::from(*addr));
+    for (addr, acct) in &result.state_changes {
+        let shell_addr = resolve(addr);
         let info = &acct.info;
 
         let mut account = world_state
@@ -859,7 +828,7 @@ pub fn commit_pqvm_state<S: KvStore + 'static>(
         account.nonce = info.nonce;
         account.balance = info.balance;
 
-        // Store deployed contract bytecode
+        // Store deployed contract bytecode.
         if let Some(code) = &info.code {
             let code_bytes = code.bytes_slice();
             if !code_bytes.is_empty() && info.code_hash != KECCAK_EMPTY {
@@ -871,7 +840,7 @@ pub fn commit_pqvm_state<S: KvStore + 'static>(
 
         world_state.set_account(&shell_addr, &account)?;
 
-        // Apply storage slot changes
+        // Apply storage slot changes.
         for (slot, value) in &acct.storage {
             let key = ShellHash::from(B256::from(*slot));
             let val = ShellHash::from(B256::from(value.present_value));
@@ -879,24 +848,83 @@ pub fn commit_pqvm_state<S: KvStore + 'static>(
         }
     }
 
-    // Force-advance the sender's nonce to tx.nonce + 1.  When revm runs with
+    // Force-advance the sender's nonce to tx.nonce + 1. When revm runs with
     // `disable_nonce_check = true` the nonce in EvmState is not incremented,
     // so we do it explicitly here for any non-system tx (sender_nonce_after > 0).
     if result.sender_nonce_after > 0 {
-        let sender = &result.sender_shell_addr;
-        let mut account = world_state.get_account(sender)?.unwrap_or_else(|| Account {
-            pq_pubkey_hash: ShellHash::default(),
-            nonce: 0,
-            balance: U256::ZERO,
-            validation_code_hash: None,
-            code_hash: None,
-            storage_root: ShellHash::ZERO,
-        });
+        let sender = result.sender_shell_addr;
+        let mut account = world_state
+            .get_account(&sender)?
+            .unwrap_or_else(|| Account {
+                pq_pubkey_hash: ShellHash::default(),
+                nonce: 0,
+                balance: U256::ZERO,
+                validation_code_hash: None,
+                code_hash: None,
+                storage_root: ShellHash::ZERO,
+            });
         account.nonce = account.nonce.max(result.sender_nonce_after);
-        world_state.set_account(sender, &account)?;
+        world_state.set_account(&sender, &account)?;
     }
 
     Ok(())
+}
+
+/// Apply EVM state changes to a WorldState and ChainStore.
+///
+/// Iterates the revm `EvmState` (address → account) and for each touched
+/// account, updates balance, nonce, contract code, and storage slots.
+///
+/// Call this after `ShellPqvm::execute_tx()` to persist the computed state
+/// diff. For multi-transaction blocks, call after **each** transaction so
+/// subsequent transactions see prior state updates.
+///
+/// Uses `result.sender_nonce_after` to ensure the sender's nonce advances
+/// even when revm's `disable_nonce_check = true`.
+///
+/// Uses `state_db.address_registry` to write PQ-derived accounts to their
+/// correct 32-byte canonical key rather than the zero-padded 20-byte form.
+/// Clears the registry after committing.
+pub fn commit_pqvm_state<S: KvStore + 'static>(
+    result: &TxExecutionResult,
+    state_db: &mut ShellStateDb<S>,
+) -> Result<(), ExecutorError> {
+    // Clone the registry before the split borrow (typically 0–1 entries).
+    let registry = state_db.address_registry.clone();
+    let resolve = |addr: &alloy_primitives::Address| {
+        registry
+            .get(addr)
+            .copied()
+            .unwrap_or_else(|| ShellAddress::from(*addr))
+    };
+    let (world_state, chain_store) = state_db.world_state_and_chain_store();
+    do_commit_state(result, world_state, chain_store, &resolve)?;
+    state_db.clear_address_registry();
+    Ok(())
+}
+
+/// Apply EVM state changes directly to a `WorldState` and `ChainStore`,
+/// using an explicit address registry for PQ address resolution.
+///
+/// This variant is used when the caller holds a separate `WorldState`
+/// (e.g. the node's persistent world state) that must mirror execution
+/// results from the EVM's in-process `ShellStateDb`.
+///
+/// Obtain the registry with `state_db.address_registry_snapshot()` before
+/// calling `commit_pqvm_state` (which clears it).
+pub fn commit_pqvm_state_raw<S: KvStore + 'static>(
+    result: &TxExecutionResult,
+    world_state: &mut WorldState<S>,
+    chain_store: &ChainStore<S>,
+    registry: &std::collections::HashMap<alloy_primitives::Address, ShellAddress>,
+) -> Result<(), ExecutorError> {
+    let resolve = |addr: &alloy_primitives::Address| {
+        registry
+            .get(addr)
+            .copied()
+            .unwrap_or_else(|| ShellAddress::from(*addr))
+    };
+    do_commit_state(result, world_state, chain_store, &resolve)
 }
 
 #[cfg(test)]
@@ -1453,11 +1481,9 @@ mod tests {
     // ── Helpers for advanced EVM tests ────────────────────────
 
     fn commit_state(evm: &mut ShellPqvm<MemoryDb>, state: &EvmState) {
-        let (ws, cs) = evm.state_db_mut().world_state_and_chain_store();
         let fake_result = TxExecutionResult {
             receipt: empty_receipt(),
             state_changes: state.clone(),
-            pq_addr_map: Default::default(),
             sender_shell_addr: ShellAddress::default(),
             sender_nonce_after: 0,
             gas_used: 0,
@@ -1465,7 +1491,7 @@ mod tests {
             is_system_tx: false,
             system_contract_effects: SystemContractEffects::default(),
         };
-        commit_pqvm_state(&fake_result, ws, cs).unwrap();
+        commit_pqvm_state(&fake_result, evm.state_db_mut()).unwrap();
     }
 
     fn deploy_contract(

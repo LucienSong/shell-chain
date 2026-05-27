@@ -426,11 +426,7 @@ impl<S: KvStore + 'static> Node<S> {
                                 &result.system_contract_effects,
                             )?;
                         } else {
-                            commit_pqvm_state(
-                                &result,
-                                evm.state_db_mut().world_state_mut(),
-                                &self.chain_store,
-                            )?;
+                            commit_pqvm_state(&result, evm.state_db_mut())?;
                         }
                         total_effective_fees = total_effective_fees.saturating_add(
                             U256::from(result.gas_used).saturating_mul(U256::from(price)),

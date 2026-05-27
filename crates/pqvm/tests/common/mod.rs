@@ -99,8 +99,7 @@ pub fn apply_tx<V: Verifier>(
         .expect("execute_tx failed");
 
     if !result.is_system_tx {
-        commit_pqvm_state(&result, evm.state_db_mut().world_state_mut(), chain_store)
-            .expect("commit_pqvm_state failed");
+        commit_pqvm_state(&result, evm.state_db_mut()).expect("commit_pqvm_state failed");
     }
 
     result

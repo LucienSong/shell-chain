@@ -3,6 +3,18 @@
 //! [`ShellStateDb`] wraps a [`WorldState`] and [`ChainStore`] to satisfy
 //! revm's [`Database`] trait, translating between shell-chain's account
 //! model and the EVM account model.
+//!
+//! # Address model at the revm boundary
+//!
+//! revm's [`Database`] trait uses 20-byte [`alloy_primitives::Address`]
+//! values throughout. Shell-Chain uses 32-byte BLAKE3 addresses
+//! (`ShellAddress`). This file is the boundary where the translation happens.
+//!
+//! For EVM-compatible accounts (upper 12 bytes are all zero), the 20-byte
+//! form is losslessly recovered by zero-padding. For PQ-derived accounts
+//! (upper 12 bytes non-zero, produced by `PQADDR`), the 20-byte form is a
+//! lossy truncation; full 32-byte-native execution requires a future revm
+//! fork that passes `ShellAddress` through the EVM call stack.
 
 use alloy_primitives::{Address as EvmAddress, B256, U256};
 use revm::database_interface::{DBErrorMarker, Database};
@@ -31,13 +43,24 @@ impl DBErrorMarker for StateDbError {}
 ///
 /// # Type Parameter
 /// - `S`: The key-value store backend (e.g. `MemoryDb` or `RocksDbStore`)
+///
+/// # Address translation (revm compatibility bridge)
+///
+/// revm's [`Database`] trait uses 20-byte [`alloy_primitives::Address`].
+/// Shell-Chain uses 32-byte BLAKE3 addresses (`ShellAddress`). For accounts
+/// whose address has non-zero upper 12 bytes (PQ-derived via `PQADDR`), the
+/// `address_registry` provides the full 32-byte address so that lookups
+/// succeed when revm queries by the 20-byte truncated form.
+///
+/// Full 32-byte-native execution throughout the EVM call stack requires a
+/// future revm fork; this registry is the compatibility shim until then.
 pub struct ShellStateDb<S: KvStore + 'static> {
     world_state: WorldState<S>,
     chain_store: ChainStore<S>,
-    /// Maps 20-byte EVM address → full 32-byte Shell address for PQ-derived
-    /// accounts. Populated by the executor before each tx so that `basic()`
-    /// can locate accounts whose upper 12 bytes are non-zero.
-    pub(crate) pq_hints: HashMap<EvmAddress, ShellAddress>,
+    /// Maps 20-byte revm address → full 32-byte Shell address for PQ-derived
+    /// accounts (upper 12 bytes non-zero). Populated by the executor before
+    /// each tx; cleared after commit.
+    pub(crate) address_registry: HashMap<EvmAddress, ShellAddress>,
 }
 
 impl<S: KvStore + 'static> ShellStateDb<S> {
@@ -49,25 +72,46 @@ impl<S: KvStore + 'static> ShellStateDb<S> {
         Self {
             world_state,
             chain_store,
-            pq_hints: HashMap::new(),
+            address_registry: HashMap::new(),
         }
     }
 
     /// Register the full 32-byte Shell address for a PQ-derived account so
-    /// that `basic()` can find it when the EVM queries by 20-byte suffix.
-    /// Call this before executing any transaction whose `from` is PQ-derived
-    /// (i.e. has non-zero upper 12 bytes).
-    pub fn hint_pq_address(&mut self, addr: ShellAddress) {
+    /// that `basic()` and `storage()` can find it when revm queries by the
+    /// 20-byte truncated form. Call this before executing any transaction
+    /// whose `from` has non-zero upper 12 bytes.
+    pub fn register_pq_address(&mut self, addr: ShellAddress) {
         let evm_addr: EvmAddress = addr.into();
         let zero_padded = ShellAddress::from(evm_addr);
         if zero_padded != addr {
-            self.pq_hints.insert(evm_addr, addr);
+            self.address_registry.insert(evm_addr, addr);
         }
     }
 
-    /// Clear all PQ address hints registered for the previous transaction.
-    pub fn clear_pq_hints(&mut self) {
-        self.pq_hints.clear();
+    /// Clear the address registry after a transaction has been committed.
+    pub fn clear_address_registry(&mut self) {
+        self.address_registry.clear();
+    }
+
+    /// Return a snapshot of the address registry (cloned).
+    ///
+    /// Use this to obtain the registry before `commit_pqvm_state` clears it,
+    /// so it can be passed to `commit_pqvm_state_raw` for a second commit
+    /// target (e.g. the node's persistent WorldState).
+    pub fn address_registry_snapshot(
+        &self,
+    ) -> std::collections::HashMap<alloy_primitives::Address, ShellAddress> {
+        self.address_registry.clone()
+    }
+
+    /// Resolve a 20-byte EVM address to a full 32-byte Shell address.
+    /// Checks the registry first; falls back to zero-padding.
+    #[inline]
+    pub(crate) fn resolve_address(&self, addr: &EvmAddress) -> ShellAddress {
+        self.address_registry
+            .get(addr)
+            .copied()
+            .unwrap_or_else(|| ShellAddress::from(*addr))
     }
 
     /// Returns a reference to the underlying WorldState.
@@ -119,19 +163,11 @@ impl<S: KvStore + 'static> Database for ShellStateDb<S> {
         &mut self,
         address: alloy_primitives::Address,
     ) -> Result<Option<AccountInfo>, Self::Error> {
-        let shell_addr = ShellAddress::from(address);
-        if let Some(account) = self.world_state.get_account(&shell_addr)? {
-            return Ok(Some(Self::to_account_info(&account)));
+        let shell_addr = self.resolve_address(&address);
+        match self.world_state.get_account(&shell_addr)? {
+            Some(account) => Ok(Some(Self::to_account_info(&account))),
+            None => Ok(None),
         }
-        // Fallback: check PQ hints — the EVM uses the 20-byte suffix of a
-        // 32-byte PQ-derived address, so the zero-padded lookup above misses
-        // accounts stored at the full PQ address.
-        if let Some(&pq_addr) = self.pq_hints.get(&address) {
-            if let Some(account) = self.world_state.get_account(&pq_addr)? {
-                return Ok(Some(Self::to_account_info(&account)));
-            }
-        }
-        Ok(None)
     }
 
     fn code_by_hash(&mut self, code_hash: B256) -> Result<Bytecode, Self::Error> {
@@ -149,11 +185,7 @@ impl<S: KvStore + 'static> Database for ShellStateDb<S> {
         address: alloy_primitives::Address,
         index: U256,
     ) -> Result<U256, Self::Error> {
-        let shell_addr = if let Some(&pq) = self.pq_hints.get(&address) {
-            pq
-        } else {
-            ShellAddress::from(address)
-        };
+        let shell_addr = self.resolve_address(&address);
         let key = ShellHash::from(B256::from(index));
         let value_hash = self.world_state.get_storage(&shell_addr, &key)?;
         Ok(U256::from_be_bytes(*value_hash.as_bytes()))

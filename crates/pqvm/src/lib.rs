@@ -24,7 +24,9 @@ mod tx_validation;
 pub use aa_validation::{
     validate_aa_tx, AaValidationError, AaValidationOutcome, VALIDATION_GAS_CAP,
 };
-pub use executor::{commit_pqvm_state, ExecutorError, ShellPqvm, TxExecutionResult};
+pub use executor::{
+    commit_pqvm_state, commit_pqvm_state_raw, ExecutorError, ShellPqvm, TxExecutionResult,
+};
 pub use parallel::{
     ConflictMetric, ConflictReason, ExecutionWave, ParallelExecutionPlan, ParallelPqvmConfig,
     ParallelScheduler, TxConflict, TxConflictGraph,
