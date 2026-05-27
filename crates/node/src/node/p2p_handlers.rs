@@ -60,8 +60,8 @@ impl<S: KvStore + 'static> Node<S> {
             NodeError::Startup(format!("unknown attestation validator: {:?}", validator))
         })?;
 
-        // Verify the attestation signature.
-        let msg = Attestation::signing_message(&block_hash, block_number);
+        // Verify the attestation signature using the payload that was signed.
+        let msg = attestation.own_signing_message();
         let sig_type = shell_crypto::infer_signature_type_from_address(pubkey, &validator)
             .ok_or_else(|| {
                 NodeError::Startup(format!(
@@ -151,15 +151,30 @@ impl<S: KvStore + 'static> Node<S> {
     ) -> Result<Attestation, NodeError> {
         let proposer_addr = self.config.proposer_address.ok_or(NodeError::NotProposer)?;
 
-        let msg = Attestation::signing_message(&block_hash, block_number);
+        // Look up the parent hash so the signing payload binds to the specific fork.
+        let parent_hash = self
+            .chain_store
+            .get_header_by_hash(&block_hash)
+            .ok()
+            .flatten()
+            .map(|h| h.parent_hash)
+            .unwrap_or(ShellHash::ZERO);
+
+        let chain_id = self.config.chain_id;
+        // round = 0 for standard PoA; wPoA round is embedded per-block in Phase 2.
+        let round: u64 = 0;
+        let msg = Attestation::signing_message(chain_id, &parent_hash, &block_hash, block_number, round);
         let sig = signer
             .sign(&msg)
             .map_err(|e| NodeError::Startup(format!("failed to sign attestation: {e}")))?;
 
         Ok(Attestation::new(
+            chain_id,
+            parent_hash,
             block_hash,
             block_number,
             proposer_addr,
+            round,
             sig.data,
         ))
     }
@@ -624,7 +639,7 @@ impl<S: KvStore + 'static> Node<S> {
             ))
         })?;
 
-        let signing_message = ViewChangeMessage::signing_message(msg.view, msg.block_number);
+        let signing_message = msg.own_signing_message();
         let sig_type = shell_crypto::infer_signature_type_from_address(pubkey, &msg.validator)
             .ok_or_else(|| {
                 NodeError::Startup(format!(

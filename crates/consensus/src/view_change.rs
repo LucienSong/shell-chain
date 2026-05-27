@@ -2,33 +2,72 @@ use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use shell_primitives::Address;
+use shell_primitives::{Address, ShellHash};
 
 pub const VIEW_CHANGE_TIMEOUT_MS: u64 = 10_000;
 
+/// Domain tag for the view-change signing payload.
+const VIEWCHG_DOMAIN: &[u8; 16] = b"SHELL_VIEWCHG_V1";
+
+/// A validator's request to advance the consensus view (rotate the proposer).
+///
+/// Signing payload (WP §1585-1596):
+///   SHELL_VIEWCHG_V1 || chain_id(8 BE) || block_number(8 BE) || view(8 BE) || highest_qc_hash(32)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ViewChangeMessage {
-    pub view: u64,
+    /// Chain ID — binds the message to a specific network.
+    pub chain_id: u64,
+    /// Block number at which the view change is requested.
     pub block_number: u64,
+    /// Requested view number.
+    pub view: u64,
+    /// Hash of the highest QC seen by this validator (last finalized block hash).
+    pub highest_qc_hash: ShellHash,
+    /// Address of the validator requesting the view change.
     pub validator: Address,
+    /// PQ signature over the signing payload.
     pub signature: Vec<u8>,
 }
 
 impl ViewChangeMessage {
-    pub fn new(view: u64, block_number: u64, validator: Address, signature: Vec<u8>) -> Self {
+    pub fn new(
+        chain_id: u64,
+        block_number: u64,
+        view: u64,
+        highest_qc_hash: ShellHash,
+        validator: Address,
+        signature: Vec<u8>,
+    ) -> Self {
         Self {
-            view,
+            chain_id,
             block_number,
+            view,
+            highest_qc_hash,
             validator,
             signature,
         }
     }
 
-    pub fn signing_message(view: u64, block_number: u64) -> Vec<u8> {
-        let mut msg = Vec::with_capacity(16);
-        msg.extend_from_slice(&view.to_be_bytes());
+    /// The canonical signing payload (WP §1585-1596):
+    ///   SHELL_VIEWCHG_V1 || chain_id(8 BE) || block_number(8 BE) || view(8 BE) || highest_qc_hash(32)
+    pub fn signing_message(
+        chain_id: u64,
+        block_number: u64,
+        view: u64,
+        highest_qc_hash: &ShellHash,
+    ) -> Vec<u8> {
+        let mut msg = Vec::with_capacity(56);
+        msg.extend_from_slice(VIEWCHG_DOMAIN);
+        msg.extend_from_slice(&chain_id.to_be_bytes());
         msg.extend_from_slice(&block_number.to_be_bytes());
+        msg.extend_from_slice(&view.to_be_bytes());
+        msg.extend_from_slice(highest_qc_hash.as_bytes());
         msg
+    }
+
+    /// Reconstruct the signing message from this message's own fields.
+    pub fn own_signing_message(&self) -> Vec<u8> {
+        Self::signing_message(self.chain_id, self.block_number, self.view, &self.highest_qc_hash)
     }
 }
 
@@ -40,6 +79,9 @@ pub struct ViewChangeState {
     quorum_weight: u64,
     validator_weights: HashMap<Address, u64>,
     pending_view_change_weights: HashMap<u64, u64>,
+    /// Chain ID used to reject cross-chain view-change messages.
+    /// Zero means unconfigured (no chain-ID check).
+    chain_id: u64,
 }
 
 impl ViewChangeState {
@@ -51,11 +93,20 @@ impl ViewChangeState {
             quorum_weight: 1,
             validator_weights: HashMap::new(),
             pending_view_change_weights: HashMap::new(),
+            chain_id: 0,
         }
+    }
+
+    /// Set the chain ID to enforce on incoming view-change messages.
+    pub fn set_chain_id(&mut self, chain_id: u64) {
+        self.chain_id = chain_id;
     }
 
     pub fn record_view_change(&mut self, msg: ViewChangeMessage) -> bool {
         if msg.view != self.current_view {
+            return false;
+        }
+        if self.chain_id != 0 && msg.chain_id != self.chain_id {
             return false;
         }
 
@@ -158,8 +209,8 @@ mod tests {
         let mut state = ViewChangeState::new();
         state.configure_quorum(HashMap::from([(addr(1), 1), (addr(2), 1), (addr(3), 1)]), 3);
 
-        let first = ViewChangeMessage::new(0, 7, addr(1), vec![1]);
-        let second = ViewChangeMessage::new(0, 7, addr(2), vec![2]);
+        let first = ViewChangeMessage::new(0, 7, 0, ShellHash::ZERO, addr(1), vec![1]);
+        let second = ViewChangeMessage::new(0, 7, 0, ShellHash::ZERO, addr(2), vec![2]);
 
         assert!(!state.record_view_change(first));
         assert!(state.record_view_change(second));
