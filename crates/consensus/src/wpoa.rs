@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use shell_core::{Block, BlockHeader};
 use shell_crypto::{PQSignature, Signer, Verifier};
-use shell_primitives::{Address, ShellHash};
+use shell_primitives::Address;
 
 use crate::poa::PoaEngine;
 use crate::validator::{ValidatorSet, ValidatorSetConfig};
@@ -419,6 +419,7 @@ mod tests {
     use super::*;
     use crate::{poa::PoaConfig, VIEW_CHANGE_TIMEOUT_MS};
     use shell_crypto::{PQSignature, SignatureType};
+    use shell_primitives::ShellHash;
 
     fn addr(n: u8) -> Address {
         Address::from([n; 20])
