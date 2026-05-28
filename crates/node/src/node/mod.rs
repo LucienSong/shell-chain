@@ -31,12 +31,13 @@ pub(crate) use shell_core::{
     SystemTransaction, SystemTxKind, TransactionReceipt,
 };
 pub(crate) use shell_crypto::{
-    BatchVerifier, MultiVerifier, PreVerified, Signer, Verifier, VerifyItem,
+    AlgorithmRegistry, BatchVerifier, MultiVerifier, PreVerified, Signer, Verifier, VerifyItem,
 };
 pub(crate) use shell_mempool::TxPool;
 pub(crate) use shell_network::{NetworkMessage, NetworkService};
 pub(crate) use shell_pqvm::{
-    commit_pqvm_state, commit_pqvm_state_raw, validate_tx_for_import, ShellPqvm, ShellStateDb,
+    commit_pqvm_state, commit_pqvm_state_raw, process_pending_activations, validate_tx_for_import,
+    ShellPqvm, ShellStateDb,
 };
 pub(crate) use shell_primitives::{Address, Bytes, ShellHash, U256};
 pub(crate) use shell_rpc::DevRpcControl;

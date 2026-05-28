@@ -413,6 +413,7 @@ mod tests {
             parent_hash: ShellHash::ZERO,
             block_hash: ShellHash::default(),
             block_number: 99,
+            round: 0,
             validator: Address::from_public_key(b"validator-key", 0),
             round: 0,
             signature: vec![1, 2, 3, 4],

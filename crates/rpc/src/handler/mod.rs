@@ -1773,7 +1773,7 @@ mod tests {
             start_block: Some(0),
             proof: shell_stark_prover::SigBatchProof {
                 version: shell_stark_prover::SIG_BATCH_PROOF_VERSION,
-                batch_root_bytes: [7; 16],
+                batch_root_bytes: [7; 32],
                 n_sigs: 1,
                 proof_bytes: vec![1, 2, 3, 4, 5],
             },
@@ -1819,7 +1819,7 @@ mod tests {
             start_block: Some(0),
             proof: shell_stark_prover::SigBatchProof {
                 version: shell_stark_prover::SIG_BATCH_PROOF_VERSION,
-                batch_root_bytes: [7; 16],
+                batch_root_bytes: [7; 32],
                 n_sigs: 512,
                 proof_bytes: vec![1, 2, 3, 4, 5],
             },
