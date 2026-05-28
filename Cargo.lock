@@ -6166,6 +6166,7 @@ dependencies = [
 name = "shell-stark-prover"
 version = "0.23.0"
 dependencies = [
+ "blake3",
  "criterion",
  "serde",
  "serde_json",

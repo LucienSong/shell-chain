@@ -53,6 +53,19 @@ impl std::fmt::Display for AlgorithmStatus {
     }
 }
 
+/// On-chain governance specification attached to a proposed algorithm.
+///
+/// Populated when a validator submits `proposeAlgorithmActivation`; absent for
+/// compile-time (genesis) entries that are always Active.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AlgorithmSpec {
+    /// BLAKE3 hash of the reference verifier bytecode for this algorithm.
+    /// Nodes verify their local verifier matches this before accepting signatures.
+    pub verifier_hash: [u8; 32],
+    /// Block height at which this algorithm transitions PendingActivation → Active.
+    pub activation_height: u64,
+}
+
 /// A single algorithm entry in the registry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AlgorithmEntry {
@@ -62,6 +75,8 @@ pub struct AlgorithmEntry {
     pub status: AlgorithmStatus,
     /// Human-readable description / reference.
     pub description: &'static str,
+    /// Governance spec; `None` for genesis compile-time entries.
+    pub spec: Option<AlgorithmSpec>,
 }
 
 /// The canonical algorithm registry for this node.
@@ -91,6 +106,7 @@ impl AlgorithmRegistry {
                 algo,
                 status: AlgorithmStatus::Active,
                 description: algo.registry_description(),
+                spec: None,
             })
             .collect();
         Self { entries }
@@ -112,23 +128,47 @@ impl AlgorithmRegistry {
 
     /// Mark an algorithm as pending activation.
     pub fn propose_activation(&mut self, algo: SignatureType) {
-        self.upsert_status(algo, AlgorithmStatus::PendingActivation);
+        self.upsert_status(algo, AlgorithmStatus::PendingActivation, None);
+    }
+
+    /// Mark an algorithm as pending activation with full governance spec.
+    ///
+    /// Called by `process_pending_activations` when a governance quorum is reached.
+    pub fn propose_activation_with_spec(
+        &mut self,
+        algo: SignatureType,
+        activation_height: u64,
+        verifier_hash: [u8; 32],
+    ) {
+        let spec = Some(AlgorithmSpec {
+            verifier_hash,
+            activation_height,
+        });
+        self.upsert_status(algo, AlgorithmStatus::PendingActivation, spec);
     }
 
     /// Mark an algorithm as active.
     pub fn activate(&mut self, algo: SignatureType) {
-        self.upsert_status(algo, AlgorithmStatus::Active);
+        self.upsert_status(algo, AlgorithmStatus::Active, None);
     }
 
     /// Mark an algorithm as deprecated.
     pub fn deprecate(&mut self, algo: SignatureType) {
-        self.upsert_status(algo, AlgorithmStatus::Deprecated);
+        self.upsert_status(algo, AlgorithmStatus::Deprecated, None);
     }
 
-    fn upsert_status(&mut self, algo: SignatureType, status: AlgorithmStatus) {
+    fn upsert_status(
+        &mut self,
+        algo: SignatureType,
+        status: AlgorithmStatus,
+        spec: Option<AlgorithmSpec>,
+    ) {
         if let Some(entry) = self.entries.iter_mut().find(|entry| entry.algo == algo) {
             entry.status = status;
             entry.description = algo.registry_description();
+            if spec.is_some() {
+                entry.spec = spec;
+            }
             return;
         }
 
@@ -136,6 +176,7 @@ impl AlgorithmRegistry {
             algo,
             status,
             description: algo.registry_description(),
+            spec,
         });
     }
 
@@ -303,6 +344,7 @@ mod tests {
             algo: SignatureType::Dilithium3,
             status: AlgorithmStatus::Deprecated,
             description: "test",
+            spec: None,
         }];
         let reg = AlgorithmRegistry { entries };
         assert!(!reg.is_allowed(SignatureType::Dilithium3));

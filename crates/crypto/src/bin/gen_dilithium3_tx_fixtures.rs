@@ -22,7 +22,7 @@ use pqcrypto_traits::sign::{
 use shell_primitives::{blake3_hash, Address, U256};
 
 /// Signing-hash preimage layout (matches `Transaction::signing_hash`):
-///   chain_id(8B be) || nonce(8B be) || to(32B) || value(32B) ||
+///   PQTX_SIGNING_V1\0(16B) || chain_id(8B be) || nonce(8B be) || to(32B) || value(32B) ||
 ///   data || gas_limit(8B be) || max_fee_per_gas(8B be) || max_priority_fee_per_gas(8B be) ||
 ///   sig_type(1B) || tx_type(1B)
 /// For tx_type == 3: also max_fee_per_blob_gas(8B be) || blob_hashes...
@@ -41,13 +41,15 @@ fn signing_hash(
     max_fee_per_blob_gas: Option<u64>,
     blob_versioned_hashes: Option<&[[u8; 32]]>,
 ) -> [u8; 32] {
+    const PQTX_SIGNING_DOMAIN: &[u8; 16] = b"PQTX_SIGNING_V1\0";
     let blob_extra = if tx_type == 3 {
         8 + blob_versioned_hashes.map_or(0, |h| h.len() * 32)
     } else {
         0
     };
     let mut preimage =
-        Vec::with_capacity(8 + 8 + 32 + 32 + data.len() + 8 + 8 + 8 + 1 + 1 + blob_extra);
+        Vec::with_capacity(16 + 8 + 8 + 32 + 32 + data.len() + 8 + 8 + 8 + 1 + 1 + blob_extra);
+    preimage.extend_from_slice(PQTX_SIGNING_DOMAIN);
     preimage.extend_from_slice(&chain_id.to_be_bytes());
     preimage.extend_from_slice(&nonce.to_be_bytes());
     match to {
@@ -73,8 +75,27 @@ fn signing_hash(
 }
 
 fn main() {
-    // ── Step 1: Generate keypair ─────────────────────────────────────────────
-    let (pk, sk) = dilithium3::keypair();
+    // ── Step 1: Load existing keypair (or generate fresh if secretkey fixture is absent) ──
+    let fixtures_dir = std::path::PathBuf::from("crates/rpc/tests/fixtures");
+    let sk_path = fixtures_dir.join("sdk_dilithium3_tx_secretkey.hex");
+    let pk_path = fixtures_dir.join("sdk_dilithium3_tx_pubkey.hex");
+
+    let (pk, sk) = if sk_path.exists() && pk_path.exists() {
+        use pqcrypto_traits::sign::{PublicKey as _, SecretKey as _};
+        let sk_hex = std::fs::read_to_string(&sk_path).expect("read sk hex");
+        let pk_hex = std::fs::read_to_string(&pk_path).expect("read pk hex");
+        let sk_raw = hex::decode(sk_hex.trim()).expect("decode sk hex");
+        let pk_raw = hex::decode(pk_hex.trim()).expect("decode pk hex");
+        let sk = dilithium3::SecretKey::from_bytes(&sk_raw).expect("parse sk");
+        let pk = dilithium3::PublicKey::from_bytes(&pk_raw).expect("parse pk");
+        println!("Re-using existing keypair (address unchanged).");
+        (pk, sk)
+    } else {
+        let pair = dilithium3::keypair();
+        println!("Generated new keypair.");
+        println!("Update 'assert_eq!(addr.to_string(), ...)' in crates/rpc/src/handler/mod.rs");
+        pair
+    };
     let pk_bytes = pk.as_bytes();
     let sk_bytes = sk.as_bytes();
 
@@ -114,7 +135,6 @@ fn main() {
     println!("Self-verify: OK");
 
     // ── Step 6: Write fixtures ───────────────────────────────────────────────
-    let fixtures_dir = std::path::PathBuf::from("crates/rpc/tests/fixtures");
     std::fs::create_dir_all(&fixtures_dir).expect("create fixtures dir");
 
     let write_hex = |name: &str, bytes: &[u8]| {

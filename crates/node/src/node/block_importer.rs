@@ -564,6 +564,18 @@ impl<S: KvStore + 'static> Node<S> {
         let block_hash = block.hash();
         block_store.commit_canonical_block(&block, Some(receipts.as_slice()))?;
         block_store.replace_world_state(committed_world_state);
+
+        // Apply algorithm activations whose timelock has elapsed (WP §6.5).
+        {
+            let mut ws = self.world_state.write();
+            let mut registry = AlgorithmRegistry::global_mut();
+            if let Err(e) = process_pending_activations(block.number(), &mut *ws, &mut registry) {
+                warn!(
+                    block = block.number(),
+                    "process_pending_activations failed during import: {e}"
+                );
+            }
+        }
         let settlement_hashes: Vec<ShellHash> = block
             .system_transactions
             .iter()
