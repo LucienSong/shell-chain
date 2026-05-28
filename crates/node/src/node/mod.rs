@@ -6010,8 +6010,10 @@ mod tests {
         fn wpoa_network_message_wpoa_view_change_serde() {
             let voter = Address::from([0xef; 32]);
             let msg = NetworkMessage::WPoaViewChange(Box::new(ViewChangeMessage::new(
-                3,
+                0,
                 10,
+                3,
+                ShellHash::ZERO,
                 voter,
                 vec![9, 9, 9],
             )));

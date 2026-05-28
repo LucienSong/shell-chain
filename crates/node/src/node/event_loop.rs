@@ -716,13 +716,21 @@ impl<S: KvStore + 'static> Node<S> {
                                 .expect("validated block producer has proposer address");
                             let view = self.consensus.read().current_view();
                             let block_number = self.head_number() + 1;
-                            let signing_message =
-                                ViewChangeMessage::signing_message(view, block_number);
+                            let chain_id = self.config.chain_id;
+                            let highest_qc_hash = *self.finality.read().last_finalized_hash();
+                            let signing_message = ViewChangeMessage::signing_message(
+                                chain_id,
+                                block_number,
+                                view,
+                                &highest_qc_hash,
+                            );
                             match signer.sign(&signing_message) {
                                 Ok(signature) => {
                                     let msg = ViewChangeMessage::new(
-                                        view,
+                                        chain_id,
                                         block_number,
+                                        view,
+                                        highest_qc_hash,
                                         validator,
                                         signature.data,
                                     );

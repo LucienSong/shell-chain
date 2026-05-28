@@ -11,43 +11,106 @@ use std::collections::{HashMap, HashSet};
 /// `ShellHash → HashSet<Address>` mapping, bounded at this many unique block hashes.
 const MAX_PENDING_ATTESTATION_BLOCKS: usize = 512;
 
+/// Number of blocks per attestation epoch. Used to derive the epoch field
+/// in the attestation signing payload (WP §attestation binding).
+pub const ATTESTATION_EPOCH_BLOCKS: u64 = 1000;
+
+/// Domain tag for the attestation signing payload.
+/// Prevents cross-protocol message reuse.
+const ATTEST_DOMAIN: &[u8; 16] = b"SHELL_ATTEST_V1\0";
+
 /// An attestation is a validator's signed confirmation that they accept a block.
 /// Validators broadcast attestations after importing a valid block.
 /// When attesting weight exceeds 2/3 of total validator weight, the block becomes finalized.
+///
+/// Signing payload (WP §1568-1582):
+///   SHELL_ATTEST_V1\0 || chain_id(8 BE) || epoch(8 BE) || parent_hash(32)
+///   || block_hash(32) || block_number(8 BE) || round(8 BE)
+///
+/// `chain_id`, `parent_hash`, and `round` are tagged `#[serde(default)]` so that
+/// messages produced by pre-Phase-1 nodes still deserialise without panicking;
+/// their signatures will fail verification against the new payload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attestation {
+    /// Chain ID — binds the attestation to a specific network.
+    #[serde(default)]
+    pub chain_id: u64,
+    /// Hash of the parent block — prevents cross-fork replays.
+    #[serde(default)]
+    pub parent_hash: ShellHash,
     /// Hash of the attested block.
     pub block_hash: ShellHash,
     /// Number of the attested block.
     pub block_number: u64,
     /// Address of the attesting validator.
     pub validator: Address,
-    /// PQ signature over (block_hash || block_number) by the validator.
+    /// Consensus round (view) in which this block was produced.
+    /// Always 0 for standard PoA; set to the wPoA view after a view-change.
+    #[serde(default)]
+    pub round: u64,
+    /// PQ signature over the signing payload.
     pub signature: Vec<u8>,
 }
 
 impl Attestation {
     /// Create a new attestation.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
+        chain_id: u64,
+        parent_hash: ShellHash,
         block_hash: ShellHash,
         block_number: u64,
         validator: Address,
+        round: u64,
         signature: Vec<u8>,
     ) -> Self {
         Self {
+            chain_id,
+            parent_hash,
             block_hash,
             block_number,
             validator,
+            round,
             signature,
         }
     }
 
-    /// The message that must be signed: block_hash ++ block_number (big-endian).
-    pub fn signing_message(block_hash: &ShellHash, block_number: u64) -> Vec<u8> {
-        let mut msg = Vec::with_capacity(40);
+    /// Derive the epoch from a block number.
+    pub fn epoch_of(block_number: u64) -> u64 {
+        block_number / ATTESTATION_EPOCH_BLOCKS
+    }
+
+    /// The canonical signing payload (WP §1568-1582):
+    ///   SHELL_ATTEST_V1\0 || chain_id(8 BE) || epoch(8 BE) || parent_hash(32)
+    ///   || block_hash(32) || block_number(8 BE) || round(8 BE)
+    pub fn signing_message(
+        chain_id: u64,
+        parent_hash: &ShellHash,
+        block_hash: &ShellHash,
+        block_number: u64,
+        round: u64,
+    ) -> Vec<u8> {
+        let epoch = Self::epoch_of(block_number);
+        let mut msg = Vec::with_capacity(112);
+        msg.extend_from_slice(ATTEST_DOMAIN);
+        msg.extend_from_slice(&chain_id.to_be_bytes());
+        msg.extend_from_slice(&epoch.to_be_bytes());
+        msg.extend_from_slice(parent_hash.as_bytes());
         msg.extend_from_slice(block_hash.as_bytes());
         msg.extend_from_slice(&block_number.to_be_bytes());
+        msg.extend_from_slice(&round.to_be_bytes());
         msg
+    }
+
+    /// Reconstruct the signing message from this attestation's own fields.
+    pub fn own_signing_message(&self) -> Vec<u8> {
+        Self::signing_message(
+            self.chain_id,
+            &self.parent_hash,
+            &self.block_hash,
+            self.block_number,
+            self.round,
+        )
     }
 }
 
@@ -257,7 +320,7 @@ impl FinalityState {
 
         let messages: Vec<Vec<u8>> = attestations
             .iter()
-            .map(|att| Attestation::signing_message(&att.block_hash, att.block_number))
+            .map(|att| att.own_signing_message())
             .collect();
 
         let sigs: Vec<PQSignature> = attestations
@@ -353,6 +416,25 @@ mod tests {
         Address::from(bytes)
     }
 
+    /// Test helper: build an Attestation with zero values for chain_id, parent_hash,
+    /// and round. Tests that only verify quorum logic (not signature binding) use this.
+    fn make_att(
+        block_hash: ShellHash,
+        block_number: u64,
+        validator: Address,
+        sig: Vec<u8>,
+    ) -> Attestation {
+        Attestation::new(
+            0,
+            ShellHash::ZERO,
+            block_hash,
+            block_number,
+            validator,
+            0,
+            sig,
+        )
+    }
+
     fn strict_quorum_weight(total_weight: u64) -> u64 {
         if total_weight == 0 {
             return 0;
@@ -364,7 +446,7 @@ mod tests {
     fn test_attestation_new() {
         let hash = make_hash(1);
         let addr = make_addr(1);
-        let att = Attestation::new(hash, 10, addr, vec![1, 2, 3]);
+        let att = make_att(hash, 10, addr, vec![1, 2, 3]);
         assert_eq!(att.block_hash, hash);
         assert_eq!(att.block_number, 10);
         assert_eq!(att.validator, addr);
@@ -374,10 +456,21 @@ mod tests {
     #[test]
     fn test_signing_message() {
         let hash = make_hash(42);
-        let msg = Attestation::signing_message(&hash, 100);
-        assert_eq!(msg.len(), 40); // 32 bytes hash + 8 bytes number
-        assert_eq!(msg[0], 42);
-        assert_eq!(&msg[32..], &100u64.to_be_bytes());
+        let parent = ShellHash::ZERO;
+        let chain_id: u64 = 1337;
+        let block_number: u64 = 100;
+        let round: u64 = 0;
+        let epoch = Attestation::epoch_of(block_number);
+        let msg = Attestation::signing_message(chain_id, &parent, &hash, block_number, round);
+        // Domain (16) + chain_id (8) + epoch (8) + parent_hash (32) + block_hash (32) + height (8) + round (8)
+        assert_eq!(msg.len(), 112);
+        assert_eq!(&msg[..16], b"SHELL_ATTEST_V1\0");
+        assert_eq!(&msg[16..24], &chain_id.to_be_bytes());
+        assert_eq!(&msg[24..32], &epoch.to_be_bytes());
+        assert_eq!(&msg[32..64], parent.as_bytes());
+        assert_eq!(&msg[64..96], hash.as_bytes());
+        assert_eq!(&msg[96..104], &block_number.to_be_bytes());
+        assert_eq!(&msg[104..112], &round.to_be_bytes());
     }
 
     #[test]
@@ -397,8 +490,8 @@ mod tests {
         let mut state = FinalityState::new();
         let hash = make_hash(1);
         let addr = make_addr(1);
-        let att1 = Attestation::new(hash, 10, addr, vec![1]);
-        let att2 = Attestation::new(hash, 10, addr, vec![2]);
+        let att1 = make_att(hash, 10, addr, vec![1]);
+        let att2 = make_att(hash, 10, addr, vec![2]);
 
         assert!(state.record_attestation(att1));
         assert!(!state.record_attestation(att2)); // duplicate validator
@@ -411,7 +504,7 @@ mod tests {
         let hash = make_hash(1);
 
         // 1 of 3 validators
-        state.record_attestation(Attestation::new(hash, 10, make_addr(1), vec![]));
+        state.record_attestation(make_att(hash, 10, make_addr(1), vec![]));
         assert!(!state.check_finality_weighted(&hash, 10, 3));
         assert_eq!(state.last_finalized_number(), 0);
     }
@@ -422,9 +515,9 @@ mod tests {
         let hash = make_hash(1);
 
         // 3 of 3 validators is the minimum strict supermajority for uniform weights.
-        state.record_attestation(Attestation::new(hash, 10, make_addr(1), vec![]));
-        state.record_attestation(Attestation::new(hash, 10, make_addr(2), vec![]));
-        state.record_attestation(Attestation::new(hash, 10, make_addr(3), vec![]));
+        state.record_attestation(make_att(hash, 10, make_addr(1), vec![]));
+        state.record_attestation(make_att(hash, 10, make_addr(2), vec![]));
+        state.record_attestation(make_att(hash, 10, make_addr(3), vec![]));
         assert!(state.check_finality_weighted(&hash, 10, 3));
         assert_eq!(state.last_finalized_number(), 10);
         assert_eq!(state.last_finalized_hash(), &hash);
@@ -435,8 +528,8 @@ mod tests {
         let mut state = FinalityState::new();
         let hash = make_hash(9);
 
-        state.record_attestation_weighted(Attestation::new(hash, 10, make_addr(1), vec![]), 2);
-        state.record_attestation_weighted(Attestation::new(hash, 10, make_addr(2), vec![]), 2);
+        state.record_attestation_weighted(make_att(hash, 10, make_addr(1), vec![]), 2);
+        state.record_attestation_weighted(make_att(hash, 10, make_addr(2), vec![]), 2);
         assert_eq!(state.attested_weight(&hash), 4);
         assert!(!state.check_finality_weighted(&hash, 10, 6));
     }
@@ -446,8 +539,8 @@ mod tests {
         let mut state = FinalityState::new();
         let hash = make_hash(10);
 
-        state.record_attestation_weighted(Attestation::new(hash, 10, make_addr(1), vec![]), 4);
-        state.record_attestation_weighted(Attestation::new(hash, 10, make_addr(2), vec![]), 1);
+        state.record_attestation_weighted(make_att(hash, 10, make_addr(1), vec![]), 4);
+        state.record_attestation_weighted(make_att(hash, 10, make_addr(2), vec![]), 1);
         assert_eq!(state.attestation_count(&hash), 2);
         assert_eq!(state.attested_weight(&hash), 5);
         assert!(state.check_finality_weighted(&hash, 10, 6));
@@ -458,7 +551,7 @@ mod tests {
         let mut state = FinalityState::new();
         let hash = make_hash(11);
 
-        state.record_attestation_weighted(Attestation::new(hash, 1, make_addr(1), vec![]), 1);
+        state.record_attestation_weighted(make_att(hash, 1, make_addr(1), vec![]), 1);
         assert!(state.check_finality_weighted(&hash, 1, 1));
         assert_eq!(state.last_finalized_hash(), &hash);
     }
@@ -469,9 +562,9 @@ mod tests {
         let hash = make_hash(1);
 
         // Even with weighted quorum, block 10 < finalized 20 → no update
-        state.record_attestation(Attestation::new(hash, 10, make_addr(1), vec![]));
-        state.record_attestation(Attestation::new(hash, 10, make_addr(2), vec![]));
-        state.record_attestation(Attestation::new(hash, 10, make_addr(3), vec![]));
+        state.record_attestation(make_att(hash, 10, make_addr(1), vec![]));
+        state.record_attestation(make_att(hash, 10, make_addr(2), vec![]));
+        state.record_attestation(make_att(hash, 10, make_addr(3), vec![]));
         assert!(!state.check_finality_weighted(&hash, 10, 3));
         assert_eq!(state.last_finalized_number(), 20);
     }
@@ -483,7 +576,7 @@ mod tests {
         let addr = make_addr(1);
 
         assert!(!state.has_attested(&hash, &addr));
-        state.record_attestation(Attestation::new(hash, 10, addr, vec![]));
+        state.record_attestation(make_att(hash, 10, addr, vec![]));
         assert!(state.has_attested(&hash, &addr));
     }
 
@@ -494,7 +587,7 @@ mod tests {
         let hash2 = make_hash(2);
         let validator = make_addr(1);
 
-        state.record_attestation(Attestation::new(hash1, 10, validator, vec![]));
+        state.record_attestation(make_att(hash1, 10, validator, vec![]));
 
         // Same validator, same height, different hash → equivocation
         let conflict = state.detect_equivocation(&hash2, 10, &validator);
@@ -508,7 +601,7 @@ mod tests {
         let hash2 = make_hash(2);
         let validator = make_addr(1);
 
-        state.record_attestation(Attestation::new(hash1, 10, validator, vec![]));
+        state.record_attestation(make_att(hash1, 10, validator, vec![]));
 
         // Different height → not equivocation
         let conflict = state.detect_equivocation(&hash2, 11, &validator);
@@ -521,12 +614,12 @@ mod tests {
         let hash1 = make_hash(1);
         let hash2 = make_hash(2);
 
-        state.record_attestation(Attestation::new(hash1, 5, make_addr(1), vec![]));
-        state.record_attestation(Attestation::new(hash2, 15, make_addr(1), vec![]));
+        state.record_attestation(make_att(hash1, 5, make_addr(1), vec![]));
+        state.record_attestation(make_att(hash2, 15, make_addr(1), vec![]));
 
         // Finalize at block 15 → prune block 5 attestations
-        state.record_attestation(Attestation::new(hash2, 15, make_addr(2), vec![]));
-        state.record_attestation(Attestation::new(hash2, 15, make_addr(3), vec![]));
+        state.record_attestation(make_att(hash2, 15, make_addr(2), vec![]));
+        state.record_attestation(make_att(hash2, 15, make_addr(3), vec![]));
         assert!(state.check_finality_weighted(&hash2, 15, 3));
 
         assert_eq!(state.attestation_count(&hash1), 0); // pruned
@@ -541,11 +634,11 @@ mod tests {
 
         // 7 validators, BFT quorum = ceil(14/3) = 5
         for i in 0..4 {
-            state.record_attestation(Attestation::new(hash, 10, make_addr(i), vec![]));
+            state.record_attestation(make_att(hash, 10, make_addr(i), vec![]));
         }
         assert!(!state.check_finality_weighted(&hash, 10, 7)); // 4 < 5
 
-        state.record_attestation(Attestation::new(hash, 10, make_addr(4), vec![]));
+        state.record_attestation(make_att(hash, 10, make_addr(4), vec![]));
         assert!(state.check_finality_weighted(&hash, 10, 7)); // 5 >= 5
     }
 
@@ -568,7 +661,7 @@ mod tests {
 
             // Add one weight less than quorum → should NOT finalize.
             for i in 0..(quorum - 1) {
-                state.record_attestation(Attestation::new(hash, 100, make_addr(i as u8), vec![]));
+                state.record_attestation(make_att(hash, 100, make_addr(i as u8), vec![]));
             }
             assert!(
                 !state.check_finality_weighted(&hash, 100, total),
@@ -578,7 +671,7 @@ mod tests {
 
             let mut state2 = FinalityState::new();
             for i in 0..quorum {
-                state2.record_attestation(Attestation::new(hash, 100, make_addr(i as u8), vec![]));
+                state2.record_attestation(make_att(hash, 100, make_addr(i as u8), vec![]));
             }
             assert!(
                 state2.check_finality_weighted(&hash, 100, total),
@@ -594,7 +687,7 @@ mod tests {
 
         // 5 of 10 validators → quorum is 6
         for i in 0..5 {
-            state.record_attestation(Attestation::new(hash, 50, make_addr(i), vec![]));
+            state.record_attestation(make_att(hash, 50, make_addr(i), vec![]));
         }
         assert!(!state.check_finality_weighted(&hash, 50, 10));
         assert_eq!(
@@ -611,7 +704,7 @@ mod tests {
         // Round 1: finalize block 10
         let hash10 = make_hash(10);
         for i in 0..3 {
-            state.record_attestation(Attestation::new(hash10, 10, make_addr(i), vec![]));
+            state.record_attestation(make_att(hash10, 10, make_addr(i), vec![]));
         }
         assert!(state.check_finality_weighted(&hash10, 10, 4)); // quorum = 3 for N=4
         assert_eq!(state.last_finalized_number(), 10);
@@ -619,7 +712,7 @@ mod tests {
         // Round 2: finalize block 20
         let hash20 = make_hash(20);
         for i in 0..3 {
-            state.record_attestation(Attestation::new(hash20, 20, make_addr(100 + i), vec![]));
+            state.record_attestation(make_att(hash20, 20, make_addr(100 + i), vec![]));
         }
         assert!(state.check_finality_weighted(&hash20, 20, 4));
         assert_eq!(state.last_finalized_number(), 20);
@@ -628,7 +721,7 @@ mod tests {
         // Round 3: finalize block 30
         let hash30 = make_hash(30);
         for i in 0..3 {
-            state.record_attestation(Attestation::new(hash30, 30, make_addr(200 + i), vec![]));
+            state.record_attestation(make_att(hash30, 30, make_addr(200 + i), vec![]));
         }
         assert!(state.check_finality_weighted(&hash30, 30, 4));
         assert_eq!(state.last_finalized_number(), 30);
@@ -645,12 +738,12 @@ mod tests {
 
         // Add 66 attestations → not enough
         for i in 0..66u8 {
-            state.record_attestation(Attestation::new(hash, 500, make_addr(i), vec![]));
+            state.record_attestation(make_att(hash, 500, make_addr(i), vec![]));
         }
         assert!(!state.check_finality_weighted(&hash, 500, total));
 
         // Add 1 more → exactly 67 → quorum
-        state.record_attestation(Attestation::new(hash, 500, make_addr(66), vec![]));
+        state.record_attestation(make_att(hash, 500, make_addr(66), vec![]));
         assert!(state.check_finality_weighted(&hash, 500, total));
         assert_eq!(state.last_finalized_number(), 500);
     }
@@ -662,7 +755,7 @@ mod tests {
         // Finalize block 20 first
         let hash20 = make_hash(20);
         for i in 0..3 {
-            state.record_attestation(Attestation::new(hash20, 20, make_addr(i), vec![]));
+            state.record_attestation(make_att(hash20, 20, make_addr(i), vec![]));
         }
         assert!(state.check_finality_weighted(&hash20, 20, 4));
         assert_eq!(state.last_finalized_number(), 20);
@@ -670,7 +763,7 @@ mod tests {
         // Try to finalize block 15 (lower) — should fail
         let hash15 = make_hash(15);
         for i in 10..13 {
-            state.record_attestation(Attestation::new(hash15, 15, make_addr(i), vec![]));
+            state.record_attestation(make_att(hash15, 15, make_addr(i), vec![]));
         }
         assert!(!state.check_finality_weighted(&hash15, 15, 4));
         assert_eq!(
@@ -682,7 +775,7 @@ mod tests {
         // Finalize block 25 (higher) — should succeed
         let hash25 = make_hash(25);
         for i in 20..23 {
-            state.record_attestation(Attestation::new(hash25, 25, make_addr(i), vec![]));
+            state.record_attestation(make_att(hash25, 25, make_addr(i), vec![]));
         }
         assert!(state.check_finality_weighted(&hash25, 25, 4));
         assert_eq!(state.last_finalized_number(), 25);
@@ -696,13 +789,13 @@ mod tests {
         let hash_future = make_hash(3);
 
         // Attestation at height 5
-        state.record_attestation(Attestation::new(hash_low, 5, make_addr(1), vec![]));
+        state.record_attestation(make_att(hash_low, 5, make_addr(1), vec![]));
         // Attestation at height 10
-        state.record_attestation(Attestation::new(hash_high, 10, make_addr(2), vec![]));
-        state.record_attestation(Attestation::new(hash_high, 10, make_addr(3), vec![]));
-        state.record_attestation(Attestation::new(hash_high, 10, make_addr(4), vec![]));
+        state.record_attestation(make_att(hash_high, 10, make_addr(2), vec![]));
+        state.record_attestation(make_att(hash_high, 10, make_addr(3), vec![]));
+        state.record_attestation(make_att(hash_high, 10, make_addr(4), vec![]));
         // Attestation at height 20
-        state.record_attestation(Attestation::new(hash_future, 20, make_addr(5), vec![]));
+        state.record_attestation(make_att(hash_future, 20, make_addr(5), vec![]));
 
         // Finalize at height 10 → prune heights <= 10
         assert!(state.check_finality_weighted(&hash_high, 10, 3));
@@ -723,17 +816,17 @@ mod tests {
         let hash1 = make_hash(1);
         let hash2 = make_hash(2);
 
-        state.record_attestation(Attestation::new(hash1, 10, make_addr(1), vec![]));
+        state.record_attestation(make_att(hash1, 10, make_addr(1), vec![]));
         assert_eq!(state.total_pending_attestations(), 1);
 
-        state.record_attestation(Attestation::new(hash1, 10, make_addr(2), vec![]));
+        state.record_attestation(make_att(hash1, 10, make_addr(2), vec![]));
         assert_eq!(state.total_pending_attestations(), 2);
 
-        state.record_attestation(Attestation::new(hash2, 11, make_addr(3), vec![]));
+        state.record_attestation(make_att(hash2, 11, make_addr(3), vec![]));
         assert_eq!(state.total_pending_attestations(), 3);
 
         // Duplicate should not increase count
-        state.record_attestation(Attestation::new(hash1, 10, make_addr(1), vec![]));
+        state.record_attestation(make_att(hash1, 10, make_addr(1), vec![]));
         assert_eq!(state.total_pending_attestations(), 3);
     }
 
@@ -752,7 +845,7 @@ mod tests {
         let hash = make_hash(1);
         let validator = make_addr(1);
 
-        state.record_attestation(Attestation::new(hash, 10, validator, vec![]));
+        state.record_attestation(make_att(hash, 10, validator, vec![]));
 
         // Same hash, same validator — not equivocation (just a duplicate)
         let conflict = state.detect_equivocation(&hash, 10, &validator);
@@ -766,9 +859,9 @@ mod tests {
         let hash_b = make_hash(2);
 
         // Different validators attest to different blocks at height 10.
-        state.record_attestation_weighted(Attestation::new(hash_a, 10, make_addr(1), vec![]), 4);
-        state.record_attestation_weighted(Attestation::new(hash_a, 10, make_addr(2), vec![]), 1);
-        state.record_attestation_weighted(Attestation::new(hash_b, 10, make_addr(3), vec![]), 1);
+        state.record_attestation_weighted(make_att(hash_a, 10, make_addr(1), vec![]), 4);
+        state.record_attestation_weighted(make_att(hash_a, 10, make_addr(2), vec![]), 1);
+        state.record_attestation_weighted(make_att(hash_b, 10, make_addr(3), vec![]), 1);
 
         assert_eq!(state.attestation_count(&hash_a), 2);
         assert_eq!(state.attested_weight(&hash_a), 5);
@@ -785,17 +878,17 @@ mod tests {
         let hash = make_hash(1);
 
         // 1 of 10 validators
-        state.record_attestation(Attestation::new(hash, 10, make_addr(1), vec![]));
+        state.record_attestation(make_att(hash, 10, make_addr(1), vec![]));
         assert!(!state.check_finality_weighted(&hash, 10, 10)); // BFT quorum = 7
 
         // 6 of 10 validators
         for i in 2..=6 {
-            state.record_attestation(Attestation::new(hash, 10, make_addr(i), vec![]));
+            state.record_attestation(make_att(hash, 10, make_addr(i), vec![]));
         }
         assert!(!state.check_finality_weighted(&hash, 10, 10)); // still only 6 < 7
 
         // 7 of 10 validators → exactly quorum
-        state.record_attestation(Attestation::new(hash, 10, make_addr(7), vec![]));
+        state.record_attestation(make_att(hash, 10, make_addr(7), vec![]));
         assert!(state.check_finality_weighted(&hash, 10, 10));
     }
 
@@ -811,7 +904,11 @@ mod tests {
         let block_number: u64 = 100;
 
         // Sign the attestation message with a real Dilithium key.
-        let msg = Attestation::signing_message(&block_hash, block_number);
+        let chain_id: u64 = 0;
+        let parent_hash = ShellHash::ZERO;
+        let round: u64 = 0;
+        let msg =
+            Attestation::signing_message(chain_id, &parent_hash, &block_hash, block_number, round);
         let sig = signer.sign(&msg).expect("signing must succeed");
         assert!(!sig.data.is_empty(), "signature must not be empty");
 
@@ -823,8 +920,7 @@ mod tests {
         assert!(valid, "real Dilithium signature must verify");
 
         // Record the attestation with the real signature.
-        let attestation =
-            Attestation::new(block_hash, block_number, validator_addr, sig.data.clone());
+        let attestation = make_att(block_hash, block_number, validator_addr, sig.data.clone());
         let mut state = FinalityState::new();
         assert!(state.record_attestation(attestation));
         assert_eq!(state.attestation_count(&block_hash), 1);
@@ -841,7 +937,13 @@ mod tests {
         assert!(stored_valid, "stored attestation signature must verify");
 
         // Verify a tampered message does not pass.
-        let wrong_msg = Attestation::signing_message(&block_hash, block_number + 1);
+        let wrong_msg = Attestation::signing_message(
+            chain_id,
+            &parent_hash,
+            &block_hash,
+            block_number + 1,
+            round,
+        );
         let wrong_valid = verifier.verify(&pubkey, &wrong_msg, &stored_sig).unwrap();
         assert!(!wrong_valid, "signature must not verify for wrong message");
     }
