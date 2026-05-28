@@ -56,7 +56,7 @@ impl Encodable for Transaction {
         header.encode(out);
         self.chain_id.encode(out);
         self.nonce.encode(out);
-        // Ethereum convention: None → empty bytes, Some → 20-byte address
+        // None → empty bytes, Some → 32-byte address
         match &self.to {
             Some(addr) => addr.encode(out),
             None => {
@@ -316,7 +316,7 @@ impl Transaction {
 
     /// Compute the PQ signing hash using the spec payload and BLAKE3.
     ///
-    /// Preimage: `chain_id || nonce || to(32B) || value(32B) || data ||
+    /// Preimage: `PQTX_SIGNING_V1\0(16B) || chain_id || nonce || to(32B) || value(32B) || data ||
     ///            gas_limit || max_fee_per_gas || max_priority_fee_per_gas ||
     ///            sig_type || tx_type`
     /// For blob transactions (tx_type == 3), appends: `max_fee_per_blob_gas(8B) || blob_hash_0(32B) || ...`
@@ -329,8 +329,10 @@ impl Transaction {
         } else {
             0
         };
-        let mut preimage =
-            Vec::with_capacity(8 + 8 + 32 + 32 + self.data.len() + 8 + 8 + 8 + 1 + 1 + blob_extra);
+        let mut preimage = Vec::with_capacity(
+            16 + 8 + 8 + 32 + 32 + self.data.len() + 8 + 8 + 8 + 1 + 1 + blob_extra,
+        );
+        preimage.extend_from_slice(PQTX_SIGNING_DOMAIN);
         preimage.extend_from_slice(&self.chain_id.to_be_bytes());
         preimage.extend_from_slice(&self.nonce.to_be_bytes());
         match &self.to {
@@ -404,20 +406,17 @@ pub const MAX_INNER_CALLDATA: usize = 128 * 1024;
 /// Maximum size of `paymaster_context` passed to `IPaymaster.validatePaymasterOp`.
 pub const MAX_PAYMASTER_CONTEXT: usize = 4 * 1024;
 
-/// Domain byte mixed into the canonical batch signing hash (sender PQ sig).
-///
-/// Intentionally equal to `AA_BUNDLE_TX_TYPE` (0x7E): the byte is used as a
-/// domain separator *inside* the keccak256 preimage (not as an RLP tx-type
-/// envelope byte), so reusing the tx-type value is safe — the two constants
-/// operate in entirely different contexts.  Future maintainers: do not "fix"
-/// this without reading `batch_signing_hash()` first.
-pub const BATCH_SIGNING_HASH_DOMAIN: u8 = 0x7E;
+/// Domain prefix for PQTX signing hash (WP §1503-1509).
+pub const PQTX_SIGNING_DOMAIN: &[u8; 16] = b"PQTX_SIGNING_V1\0";
 
-/// Domain byte mixed into the paymaster authorization signing hash.
-pub const PAYMASTER_SIGNING_HASH_DOMAIN: u8 = 0x7F;
+/// Domain tag for the canonical batch signing hash (sender PQ sig) (WP §AA-spec).
+pub const PQTX_BUNDLE_DOMAIN: &[u8; 16] = b"PQTX_BUNDLE_V1\0\0";
 
-/// Domain byte for session key authorization hash.
-pub const SESSION_AUTH_HASH_DOMAIN: u8 = 0x81;
+/// Domain tag for the paymaster authorization signing hash.
+pub const PQTX_PAYMASTER_DOMAIN: &[u8; 16] = b"PQTX_PAYMASTER_V";
+
+/// Domain tag for session key authorization hash.
+pub const PQTX_SESSION_DOMAIN: &[u8; 16] = b"PQTX_SESSION_V1\0";
 
 /// Intrinsic gas surcharge for each *additional* inner call beyond the first.
 /// One-call bundles cost the same as a normal tx; bundles of N cost
@@ -463,17 +462,17 @@ pub struct SessionAuth {
 }
 
 impl SessionAuth {
-    /// Canonical hash that the root key signs to authorize this session key.
+    /// Canonical hash that the root key signs to authorize this session key (WP §AA-spec).
     ///
-    /// `blake3(SESSION_AUTH_HASH_DOMAIN || session_pubkey || target (20B|zero) || value_cap (32B BE) || expiry_block (8B BE) || chain_id (8B BE))`
+    /// `blake3(PQTX_SESSION_V1\0(16B) || session_pubkey || target(32B|zero) || value_cap(32B BE) || expiry_block(8B BE) || chain_id(8B BE))`
     pub fn auth_hash(&self, chain_id: u64) -> ShellHash {
         use shell_primitives::blake3_hash;
-        let mut preimage = Vec::with_capacity(1 + self.session_pubkey.len() + 20 + 32 + 8 + 8);
-        preimage.push(SESSION_AUTH_HASH_DOMAIN);
+        let mut preimage = Vec::with_capacity(16 + self.session_pubkey.len() + 32 + 32 + 8 + 8);
+        preimage.extend_from_slice(PQTX_SESSION_DOMAIN);
         preimage.extend_from_slice(self.session_pubkey.as_ref());
         match &self.target {
             Some(addr) => preimage.extend_from_slice(addr.0.as_slice()),
-            None => preimage.extend_from_slice(&[0u8; 20]),
+            None => preimage.extend_from_slice(&[0u8; 32]),
         }
         let value_buf = self.value_cap.to_be_bytes::<32>();
         preimage.extend_from_slice(&value_buf);
@@ -565,13 +564,13 @@ impl Decodable for SessionAuth {
         let target_raw = alloy_rlp::Header::decode_bytes(buf, false)?;
         let target = if target_raw.is_empty() {
             None
-        } else if target_raw.len() == 20 {
-            let mut arr = [0u8; 20];
+        } else if target_raw.len() == 32 {
+            let mut arr = [0u8; 32];
             arr.copy_from_slice(target_raw);
             Some(Address::from(arr))
         } else {
             return Err(alloy_rlp::Error::Custom(
-                "session_auth: invalid target address length",
+                "session_auth: invalid target address length: expected 32 bytes or empty",
             ));
         };
         let value_bytes = alloy_rlp::Header::decode_bytes(buf, false)?;
@@ -680,12 +679,10 @@ impl Decodable for InnerCall {
                 Address::try_from_slice(to_raw)
                     .map_err(|_| alloy_rlp::Error::Custom("invalid 'to' address bytes"))?,
             )
-        } else if to_raw.len() == 20 {
-            let mut arr = [0u8; 20];
-            arr.copy_from_slice(to_raw);
-            Some(Address::from(arr))
         } else {
-            return Err(alloy_rlp::Error::Custom("invalid 'to' address length"));
+            return Err(alloy_rlp::Error::Custom(
+                "invalid 'to' address length: expected 32 bytes or empty",
+            ));
         };
         let value = U256::decode(buf)?;
         let data = Bytes::decode(buf)?;
@@ -987,7 +984,7 @@ impl Encodable for AaBundle {
         for call in &self.inner_calls {
             call.encode(out);
         }
-        // paymaster: 20-byte address or empty bytes
+        // paymaster: None → empty bytes, Some → 32-byte address
         match &self.paymaster {
             Some(addr) => addr.encode(out),
             None => {
@@ -1060,12 +1057,10 @@ impl Decodable for AaBundle {
                 Address::try_from_slice(paymaster_raw)
                     .map_err(|_| alloy_rlp::Error::Custom("invalid paymaster address bytes"))?,
             )
-        } else if paymaster_raw.len() == 20 {
-            let mut arr = [0u8; 20];
-            arr.copy_from_slice(paymaster_raw);
-            Some(Address::from(arr))
         } else {
-            return Err(alloy_rlp::Error::Custom("invalid paymaster address length"));
+            return Err(alloy_rlp::Error::Custom(
+                "invalid paymaster address length: expected 32 bytes or empty",
+            ));
         };
 
         // paymaster_signature (Phase 1)
@@ -1445,8 +1440,8 @@ impl SignedTransaction {
         self.aa_bundle.as_ref()
     }
 
-    /// Canonical signing hash for AA-bundle senders:
-    /// `blake3( BATCH_SIGNING_HASH_DOMAIN || tx_signing_hash || rlp(aa_bundle_for_signing) )`.
+    /// Canonical signing hash for AA-bundle senders (WP §AA-spec):
+    /// `blake3( PQTX_BUNDLE_V1\0\0(16B) || tx_signing_hash(32B) || rlp(aa_bundle_for_signing) )`.
     ///
     /// Returns `None` for non-AA transactions (callers should use [`Self::hash`]).
     pub fn batch_signing_hash(&self) -> Option<ShellHash> {
@@ -1455,15 +1450,15 @@ impl SignedTransaction {
             return None;
         }
         let tx_hash = self.tx.signing_hash(self.signature.sig_type.as_u8());
-        let mut buf = Vec::with_capacity(1 + 32 + bundle.signing_length());
-        buf.push(BATCH_SIGNING_HASH_DOMAIN);
+        let mut buf = Vec::with_capacity(16 + 32 + bundle.signing_length());
+        buf.extend_from_slice(PQTX_BUNDLE_DOMAIN);
         buf.extend_from_slice(tx_hash.as_bytes());
         bundle.encode_for_signing(&mut buf);
         Some(shell_primitives::blake3_hash(&buf))
     }
 
-    /// Canonical signing hash for the paymaster's authorization:
-    /// `blake3( PAYMASTER_SIGNING_HASH_DOMAIN || from || batch_signing_hash )`.
+    /// Canonical signing hash for the paymaster's authorization (WP §AA-spec):
+    /// `blake3( PQTX_PAYMASTER_V(16B) || from(32B) || batch_signing_hash(32B) )`.
     ///
     /// Returns `None` if no paymaster is set on the bundle (or the tx is not
     /// an AA bundle at all).
@@ -1471,8 +1466,8 @@ impl SignedTransaction {
         let bundle = self.aa_bundle.as_ref()?;
         bundle.paymaster?;
         let batch_hash = self.batch_signing_hash()?;
-        let mut buf = Vec::with_capacity(1 + 32 + 32);
-        buf.push(PAYMASTER_SIGNING_HASH_DOMAIN);
+        let mut buf = Vec::with_capacity(16 + 32 + 32);
+        buf.extend_from_slice(PQTX_PAYMASTER_DOMAIN);
         buf.extend_from_slice(self.from.0.as_slice());
         buf.extend_from_slice(batch_hash.0.as_slice());
         Some(shell_primitives::blake3_hash(&buf))
@@ -1574,7 +1569,7 @@ impl Decodable for Transaction {
         let chain_id = u64::decode(buf)?;
         let nonce = u64::decode(buf)?;
 
-        // to: empty bytes → None, 20-byte address → Some
+        // to: empty bytes → None, 32-byte address → Some
         let to_raw = alloy_rlp::Header::decode_bytes(buf, false)?;
         let to = if to_raw.is_empty() {
             None
@@ -1583,12 +1578,10 @@ impl Decodable for Transaction {
                 Address::try_from_slice(to_raw)
                     .map_err(|_| alloy_rlp::Error::Custom("invalid 'to' address bytes"))?,
             )
-        } else if to_raw.len() == 20 {
-            let mut arr = [0u8; 20];
-            arr.copy_from_slice(to_raw);
-            Some(Address::from(arr))
         } else {
-            return Err(alloy_rlp::Error::Custom("invalid 'to' address length"));
+            return Err(alloy_rlp::Error::Custom(
+                "invalid 'to' address length: expected 32 bytes or empty",
+            ));
         };
 
         let value = U256::decode(buf)?;
@@ -1995,12 +1988,13 @@ mod tests {
             blob_versioned_hashes: Some(vec![ShellHash::from([0x55; 32])]),
         };
 
-        // Generated by shell-sdk hashTransaction() (includes fees, tx_type + blob fields in preimage):
-        // 0xf5a14a12f556ff79fff941e944519f1c965b80e53c91503a676ff0a891ef0836
+        // Updated golden after adding PQTX_SIGNING_V1\0 domain prefix (WP §1503-1509).
+        // shell-sdk hashTransaction() must be updated to prepend the same 16-byte domain.
+        // Previous (no-domain): 0xf5a14a12f556ff79fff941e944519f1c965b80e53c91503a676ff0a891ef0836
         let expected = ShellHash::from([
-            0xf5, 0xa1, 0x4a, 0x12, 0xf5, 0x56, 0xff, 0x79, 0xff, 0xf9, 0x41, 0xe9, 0x44, 0x51,
-            0x9f, 0x1c, 0x96, 0x5b, 0x80, 0xe5, 0x3c, 0x91, 0x50, 0x3a, 0x67, 0x6f, 0xf0, 0xa8,
-            0x91, 0xef, 0x08, 0x36,
+            0x68, 0xee, 0xa4, 0x69, 0x4a, 0xb0, 0xfb, 0xa5, 0x49, 0xe5, 0xb5, 0x2b, 0xe4, 0x72,
+            0x98, 0x4c, 0x61, 0x21, 0xf0, 0x95, 0xd8, 0x3d, 0xb5, 0x51, 0x5a, 0x59, 0xcc, 0x34,
+            0x5c, 0xcc, 0x47, 0x61,
         ]);
 
         assert_eq!(tx.hash(), expected);
@@ -2609,7 +2603,7 @@ mod tests {
 
     fn sample_inner_call(value: u64) -> InnerCall {
         InnerCall {
-            to: Some(Address::from([0xAA; 20])),
+            to: Some(Address::from([0xAA; 32])),
             value: U256::from(value),
             data: Bytes::from(vec![0x01, 0x02, 0x03]),
             gas_limit: 50_000,

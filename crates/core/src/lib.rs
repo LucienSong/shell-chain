@@ -18,8 +18,8 @@ pub use receipt::TransactionReceipt;
 pub use reward::{StarkRewardParams, SystemTransaction, SystemTxKind};
 pub use transaction::{
     AaBundle, AccessListItem, InnerCall, PubkeyMode, SessionAuth, SignedTransaction, Transaction,
-    AA_BUNDLE_PRESENCE_FLAG, AA_BUNDLE_TX_TYPE, AA_INNER_CALL_INTRINSIC_GAS,
-    BATCH_SIGNING_HASH_DOMAIN, DILITHIUM3_PUBKEY_LEN, MAX_BLOB_HASHES_PER_TX, MAX_INNER_CALLDATA,
-    MAX_INNER_CALLS, PAYMASTER_SIGNING_HASH_DOMAIN,
+    AA_BUNDLE_PRESENCE_FLAG, AA_BUNDLE_TX_TYPE, AA_INNER_CALL_INTRINSIC_GAS, DILITHIUM3_PUBKEY_LEN,
+    MAX_BLOB_HASHES_PER_TX, MAX_INNER_CALLDATA, MAX_INNER_CALLS, PQTX_BUNDLE_DOMAIN,
+    PQTX_PAYMASTER_DOMAIN, PQTX_SESSION_DOMAIN, PQTX_SIGNING_DOMAIN,
 };
 pub use witness::{StrippedTransaction, TxWitness, WitnessBundle};
