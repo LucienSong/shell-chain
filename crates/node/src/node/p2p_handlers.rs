@@ -54,6 +54,14 @@ impl<S: KvStore + 'static> Node<S> {
             }
         }
 
+        // Reject cross-network attestations: chain_id must match our own.
+        if attestation.chain_id != self.config.chain_id {
+            return Err(NodeError::Startup(format!(
+                "attestation chain_id {} does not match local chain_id {}",
+                attestation.chain_id, self.config.chain_id
+            )));
+        }
+
         // Verify the attesting validator is a known authority.
         let known = self.known_authorities.read();
         let pubkey = known.get(&validator).ok_or_else(|| {
@@ -152,18 +160,22 @@ impl<S: KvStore + 'static> Node<S> {
         let proposer_addr = self.config.proposer_address.ok_or(NodeError::NotProposer)?;
 
         // Look up the parent hash so the signing payload binds to the specific fork.
+        // Return an error if the header is missing — signing with ZERO parent_hash would
+        // produce an invalid payload that misses the intended fork-binding guarantee.
         let parent_hash = self
             .chain_store
             .get_header_by_hash(&block_hash)
-            .ok()
-            .flatten()
-            .map(|h| h.parent_hash)
-            .unwrap_or(ShellHash::ZERO);
+            .map_err(|e| NodeError::Startup(format!("failed to look up header for attestation parent_hash: {e}")))?
+            .ok_or_else(|| NodeError::Startup(format!(
+                "header not found for block {block_hash} — cannot create attestation with correct parent_hash"
+            )))?
+            .parent_hash;
 
         let chain_id = self.config.chain_id;
         // round = 0 for standard PoA; wPoA round is embedded per-block in Phase 2.
         let round: u64 = 0;
-        let msg = Attestation::signing_message(chain_id, &parent_hash, &block_hash, block_number, round);
+        let msg =
+            Attestation::signing_message(chain_id, &parent_hash, &block_hash, block_number, round);
         let sig = signer
             .sign(&msg)
             .map_err(|e| NodeError::Startup(format!("failed to sign attestation: {e}")))?;
@@ -628,6 +640,14 @@ impl<S: KvStore + 'static> Node<S> {
             return Err(NodeError::Startup(format!(
                 "view-change block_number {} does not match expected height {}",
                 msg.block_number, expected_block
+            )));
+        }
+
+        // Reject cross-chain view-change injection.
+        if msg.chain_id != self.config.chain_id {
+            return Err(NodeError::Startup(format!(
+                "view-change chain_id {} does not match local chain_id {}",
+                msg.chain_id, self.config.chain_id
             )));
         }
 

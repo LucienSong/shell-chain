@@ -13,15 +13,21 @@ const VIEWCHG_DOMAIN: &[u8; 16] = b"SHELL_VIEWCHG_V1";
 ///
 /// Signing payload (WP §1585-1596):
 ///   SHELL_VIEWCHG_V1 || chain_id(8 BE) || block_number(8 BE) || view(8 BE) || highest_qc_hash(32)
+///
+/// `chain_id` and `highest_qc_hash` are tagged `#[serde(default)]` so that messages
+/// produced by pre-Phase-1 nodes (missing these fields) still deserialise without
+/// panicking; their signatures will fail verification against the new payload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ViewChangeMessage {
     /// Chain ID — binds the message to a specific network.
+    #[serde(default)]
     pub chain_id: u64,
     /// Block number at which the view change is requested.
     pub block_number: u64,
     /// Requested view number.
     pub view: u64,
     /// Hash of the highest QC seen by this validator (last finalized block hash).
+    #[serde(default)]
     pub highest_qc_hash: ShellHash,
     /// Address of the validator requesting the view change.
     pub validator: Address,
@@ -50,13 +56,15 @@ impl ViewChangeMessage {
 
     /// The canonical signing payload (WP §1585-1596):
     ///   SHELL_VIEWCHG_V1 || chain_id(8 BE) || block_number(8 BE) || view(8 BE) || highest_qc_hash(32)
+    ///
+    /// Total: 16 + 8 + 8 + 8 + 32 = 72 bytes.
     pub fn signing_message(
         chain_id: u64,
         block_number: u64,
         view: u64,
         highest_qc_hash: &ShellHash,
     ) -> Vec<u8> {
-        let mut msg = Vec::with_capacity(56);
+        let mut msg = Vec::with_capacity(72);
         msg.extend_from_slice(VIEWCHG_DOMAIN);
         msg.extend_from_slice(&chain_id.to_be_bytes());
         msg.extend_from_slice(&block_number.to_be_bytes());
@@ -67,7 +75,12 @@ impl ViewChangeMessage {
 
     /// Reconstruct the signing message from this message's own fields.
     pub fn own_signing_message(&self) -> Vec<u8> {
-        Self::signing_message(self.chain_id, self.block_number, self.view, &self.highest_qc_hash)
+        Self::signing_message(
+            self.chain_id,
+            self.block_number,
+            self.view,
+            &self.highest_qc_hash,
+        )
     }
 }
 
@@ -232,5 +245,33 @@ mod tests {
         assert_eq!(state.advance_view(), 1);
         assert_eq!(state.advance_view(), 2);
         assert_eq!(state.advance_view(), 3);
+    }
+
+    #[test]
+    fn signing_message_has_correct_layout_and_length() {
+        let chain_id: u64 = 42;
+        let block_number: u64 = 1_000;
+        let view: u64 = 3;
+        let qc_hash = ShellHash::from([0xab; 32]);
+
+        let msg = ViewChangeMessage::signing_message(chain_id, block_number, view, &qc_hash);
+
+        // Total length: 16 (domain) + 8 + 8 + 8 + 32 = 72 bytes
+        assert_eq!(msg.len(), 72);
+
+        // Domain tag at [0..16]
+        assert_eq!(&msg[0..16], b"SHELL_VIEWCHG_V1");
+
+        // chain_id at [16..24] big-endian
+        assert_eq!(&msg[16..24], &42u64.to_be_bytes());
+
+        // block_number at [24..32] big-endian
+        assert_eq!(&msg[24..32], &1_000u64.to_be_bytes());
+
+        // view at [32..40] big-endian
+        assert_eq!(&msg[32..40], &3u64.to_be_bytes());
+
+        // highest_qc_hash at [40..72]
+        assert_eq!(&msg[40..72], &[0xab; 32]);
     }
 }

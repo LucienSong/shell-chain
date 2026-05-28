@@ -26,11 +26,17 @@ const ATTEST_DOMAIN: &[u8; 16] = b"SHELL_ATTEST_V1\0";
 /// Signing payload (WP §1568-1582):
 ///   SHELL_ATTEST_V1\0 || chain_id(8 BE) || epoch(8 BE) || parent_hash(32)
 ///   || block_hash(32) || block_number(8 BE) || round(8 BE)
+///
+/// `chain_id`, `parent_hash`, and `round` are tagged `#[serde(default)]` so that
+/// messages produced by pre-Phase-1 nodes still deserialise without panicking;
+/// their signatures will fail verification against the new payload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attestation {
     /// Chain ID — binds the attestation to a specific network.
+    #[serde(default)]
     pub chain_id: u64,
     /// Hash of the parent block — prevents cross-fork replays.
+    #[serde(default)]
     pub parent_hash: ShellHash,
     /// Hash of the attested block.
     pub block_hash: ShellHash,
@@ -40,6 +46,7 @@ pub struct Attestation {
     pub validator: Address,
     /// Consensus round (view) in which this block was produced.
     /// Always 0 for standard PoA; set to the wPoA view after a view-change.
+    #[serde(default)]
     pub round: u64,
     /// PQ signature over the signing payload.
     pub signature: Vec<u8>,
@@ -411,8 +418,21 @@ mod tests {
 
     /// Test helper: build an Attestation with zero values for chain_id, parent_hash,
     /// and round. Tests that only verify quorum logic (not signature binding) use this.
-    fn make_att(block_hash: ShellHash, block_number: u64, validator: Address, sig: Vec<u8>) -> Attestation {
-        Attestation::new(0, ShellHash::ZERO, block_hash, block_number, validator, 0, sig)
+    fn make_att(
+        block_hash: ShellHash,
+        block_number: u64,
+        validator: Address,
+        sig: Vec<u8>,
+    ) -> Attestation {
+        Attestation::new(
+            0,
+            ShellHash::ZERO,
+            block_hash,
+            block_number,
+            validator,
+            0,
+            sig,
+        )
     }
 
     fn strict_quorum_weight(total_weight: u64) -> u64 {
@@ -887,7 +907,8 @@ mod tests {
         let chain_id: u64 = 0;
         let parent_hash = ShellHash::ZERO;
         let round: u64 = 0;
-        let msg = Attestation::signing_message(chain_id, &parent_hash, &block_hash, block_number, round);
+        let msg =
+            Attestation::signing_message(chain_id, &parent_hash, &block_hash, block_number, round);
         let sig = signer.sign(&msg).expect("signing must succeed");
         assert!(!sig.data.is_empty(), "signature must not be empty");
 
@@ -899,8 +920,7 @@ mod tests {
         assert!(valid, "real Dilithium signature must verify");
 
         // Record the attestation with the real signature.
-        let attestation =
-            make_att(block_hash, block_number, validator_addr, sig.data.clone());
+        let attestation = make_att(block_hash, block_number, validator_addr, sig.data.clone());
         let mut state = FinalityState::new();
         assert!(state.record_attestation(attestation));
         assert_eq!(state.attestation_count(&block_hash), 1);
@@ -917,7 +937,13 @@ mod tests {
         assert!(stored_valid, "stored attestation signature must verify");
 
         // Verify a tampered message does not pass.
-        let wrong_msg = Attestation::signing_message(chain_id, &parent_hash, &block_hash, block_number + 1, round);
+        let wrong_msg = Attestation::signing_message(
+            chain_id,
+            &parent_hash,
+            &block_hash,
+            block_number + 1,
+            round,
+        );
         let wrong_valid = verifier.verify(&pubkey, &wrong_msg, &stored_sig).unwrap();
         assert!(!wrong_valid, "signature must not verify for wrong message");
     }

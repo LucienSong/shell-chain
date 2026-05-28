@@ -409,9 +409,12 @@ mod tests {
     #[test]
     fn serde_roundtrip_new_attestation() {
         let attestation = Attestation {
+            chain_id: 1,
+            parent_hash: ShellHash::ZERO,
             block_hash: ShellHash::default(),
             block_number: 99,
             validator: Address::from_public_key(b"validator-key", 0),
+            round: 0,
             signature: vec![1, 2, 3, 4],
         };
         let msg = NetworkMessage::NewAttestation(Box::new(attestation));
@@ -518,8 +521,10 @@ mod tests {
     #[test]
     fn serde_roundtrip_wpoa_view_change() {
         let msg = NetworkMessage::WPoaViewChange(Box::new(ViewChangeMessage::new(
-            3,
+            1,
             42,
+            3,
+            ShellHash::ZERO,
             Address::from_public_key(b"voter-key", 0),
             vec![1, 2, 3],
         )));

@@ -37,6 +37,9 @@ pub struct WPoaConfig {
     pub weights: Vec<u64>,
     /// Validator set lifecycle parameters.
     pub validator_set_config: ValidatorSetConfig,
+    /// Chain ID used to reject cross-chain view-change messages.
+    /// 0 means unconfigured (no chain-ID enforcement in `ViewChangeState`).
+    pub chain_id: u64,
 }
 
 impl WPoaConfig {
@@ -47,6 +50,7 @@ impl WPoaConfig {
             poa,
             weights: vec![1u64; n],
             validator_set_config: ValidatorSetConfig::default(),
+            chain_id: 0,
         }
     }
 
@@ -59,6 +63,7 @@ impl WPoaConfig {
             weights,
             poa,
             validator_set_config: ValidatorSetConfig::default(),
+            chain_id: 0,
         }
     }
 }
@@ -93,12 +98,17 @@ impl WPoaEngine {
         let validator_set =
             ValidatorSet::from_genesis(entries, config.validator_set_config.clone());
 
+        let mut view_change_state = ViewChangeState::new();
+        if config.chain_id != 0 {
+            view_change_state.set_chain_id(config.chain_id);
+        }
+
         Self {
             inner: PoaEngine::new(poa),
             validator_set,
             validator_set_config: config.validator_set_config,
             slash_weights: HashMap::new(),
-            view_change_state: Mutex::new(ViewChangeState::new()),
+            view_change_state: Mutex::new(view_change_state),
             signer: None,
         }
     }
@@ -566,8 +576,14 @@ mod tests {
     fn view_change_quorum_advances_view() {
         let mut e = engine(vec![addr(1), addr(2), addr(3)], vec![1, 1, 1]);
 
-        assert!(!e.handle_view_change_message(ViewChangeMessage::new(0, 7, 0, ShellHash::ZERO, addr(1), vec![1]), 3,));
-        assert!(e.handle_view_change_message(ViewChangeMessage::new(0, 7, 0, ShellHash::ZERO, addr(2), vec![2]), 3,));
+        assert!(!e.handle_view_change_message(
+            ViewChangeMessage::new(0, 7, 0, ShellHash::ZERO, addr(1), vec![1]),
+            3,
+        ));
+        assert!(e.handle_view_change_message(
+            ViewChangeMessage::new(0, 7, 0, ShellHash::ZERO, addr(2), vec![2]),
+            3,
+        ));
         assert_eq!(e.current_view(), 1);
         assert_eq!(e.proposer_for_block(0), addr(2));
     }
@@ -576,8 +592,14 @@ mod tests {
     fn note_block_progress_resets_view_change_state() {
         let mut e = engine(vec![addr(1), addr(2), addr(3)], vec![1, 1, 1]);
 
-        assert!(!e.handle_view_change_message(ViewChangeMessage::new(0, 9, 0, ShellHash::ZERO, addr(1), vec![1]), 3,));
-        assert!(e.handle_view_change_message(ViewChangeMessage::new(0, 9, 0, ShellHash::ZERO, addr(2), vec![2]), 3,));
+        assert!(!e.handle_view_change_message(
+            ViewChangeMessage::new(0, 9, 0, ShellHash::ZERO, addr(1), vec![1]),
+            3,
+        ));
+        assert!(e.handle_view_change_message(
+            ViewChangeMessage::new(0, 9, 0, ShellHash::ZERO, addr(2), vec![2]),
+            3,
+        ));
         assert_eq!(e.current_view(), 1);
 
         e.note_block_progress(42);

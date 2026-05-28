@@ -16,6 +16,13 @@ use shell_storage::{
     DEFAULT_WITNESS_RETENTION,
 };
 
+/// Grace period (in blocks) before a replaced witness bundle may be deleted.
+/// Equals `MIN_AMENDMENT_DEPTH` — the minimum depth at which an on-chain amendment
+/// that replaces a witness bundle can be considered confirmed.
+/// Using a fixed 0 grace period would delete witness bundles before amendments
+/// at those heights are confirmed, breaking proof retrieval.
+pub const MIN_AMENDMENT_DEPTH: u64 = 128;
+
 /// High-level node storage classification.
 ///
 /// Each profile maps to a concrete set of pruning parameters.  The `--storage-profile`
@@ -25,11 +32,11 @@ use shell_storage::{
 /// White-paper canonical names are `Archive`, `Full`, and `Pruned (Rolling)`.
 /// `Light` is an accepted alias for `Pruned` (backwards compatible).
 ///
-/// | Profile (WP name)       | body_retention | witness_retention | proof_replacement_grace | keep_recent |
-/// |-------------------------|---------------|------------------|------------------------|-------------|
-/// | Archive                 | 0 (forever)   | 0 (forever)      | u64::MAX (never)       | 0 (forever) |
-/// | Full                    | 0 (forever)   | 128              | 128 (MIN_AMENDMENT_DEPTH) | 0 (forever) |
-/// | Pruned / Rolling / Light| 4 096         | 64               | 128 (MIN_AMENDMENT_DEPTH) | 4 096       |
+/// | Profile (WP name)       | body_retention | witness_retention | keep_recent | proof_replacement_grace          |
+/// |-------------------------|----------------|-------------------|-------------|----------------------------------|
+/// | Archive                 | 0 (forever)    | 0 (forever)       | 0 (forever) | u64::MAX (never delete)          |
+/// | Full                    | 0 (forever)    | 128               | 0 (forever) | MIN_AMENDMENT_DEPTH (128)        |
+/// | Pruned / Rolling / Light| 4 096          | 64                | 4 096       | MIN_AMENDMENT_DEPTH (128)        |
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum StorageProfile {
@@ -79,9 +86,9 @@ impl StorageProfile {
             // Archive: keep everything forever; never delete witness even after STARK proof.
             Self::Archive => (0, 0, 0, u64::MAX),
             // Full: keep TX forever; grace = MIN_AMENDMENT_DEPTH (WP §storage).
-            Self::Full => (0, DEFAULT_WITNESS_RETENTION, 0, 128),
+            Self::Full => (0, DEFAULT_WITNESS_RETENTION, 0, MIN_AMENDMENT_DEPTH),
             // Light: rolling 4 096-block window (~2.3 h at 2 s/block); grace = MIN_AMENDMENT_DEPTH.
-            Self::Light => (4_096, 64, 4_096, 128),
+            Self::Light => (4_096, 64, 4_096, MIN_AMENDMENT_DEPTH),
         }
     }
 
@@ -544,7 +551,10 @@ mod tests {
         assert_eq!(body, 0, "full: body_retention must be 0");
         assert!(witness > 0, "full: witness_retention must be non-zero");
         assert_eq!(keep, 0, "full: keep_recent must be 0");
-        assert_eq!(grace, 128, "full: grace must be MIN_AMENDMENT_DEPTH (128)");
+        assert_eq!(
+            grace, MIN_AMENDMENT_DEPTH,
+            "full: grace must be MIN_AMENDMENT_DEPTH (128)"
+        );
     }
 
     #[test]
@@ -553,7 +563,10 @@ mod tests {
         assert!(body > 0, "light: body_retention must be non-zero");
         assert!(witness > 0, "light: witness_retention must be non-zero");
         assert!(keep > 0, "light: keep_recent must be non-zero");
-        assert_eq!(grace, 128, "light: grace must be MIN_AMENDMENT_DEPTH (128)");
+        assert_eq!(
+            grace, MIN_AMENDMENT_DEPTH,
+            "light: grace must be MIN_AMENDMENT_DEPTH (128)"
+        );
     }
 
     #[test]
