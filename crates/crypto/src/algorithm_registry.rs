@@ -133,7 +133,11 @@ impl AlgorithmRegistry {
 
     /// Mark an algorithm as pending activation with full governance spec.
     ///
-    /// Called by `process_pending_activations` when a governance quorum is reached.
+    /// Called by the governance system contract when the first vote for a new
+    /// proposal is cast, recording the agreed `activation_height` and
+    /// `verifier_hash` alongside the `PendingActivation` status.
+    /// `process_pending_activations` later calls [`Self::activate`] once the
+    /// timelock has elapsed.
     pub fn propose_activation_with_spec(
         &mut self,
         algo: SignatureType,

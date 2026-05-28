@@ -286,7 +286,20 @@ impl<S: KvStore + 'static> Node<S> {
             header.logs_bloom = Bytes::from(block_bloom.to_vec());
         }
 
-        // Compute state root from the updated world state.
+        // Apply algorithm activations whose timelock has elapsed (WP §6.5).
+        // Must run BEFORE state_root so activations are committed to the Merkle root.
+        {
+            let mut ws = self.world_state.write();
+            let mut registry = AlgorithmRegistry::global_mut();
+            if let Err(e) = process_pending_activations(header.number, &mut *ws, &mut registry) {
+                warn!(
+                    block = header.number,
+                    "process_pending_activations failed during production: {e}"
+                );
+            }
+        }
+
+        // Compute state root from the updated world state (includes any activations above).
         {
             let mut ws = self.world_state.write();
             header.state_root = ws.state_root()?;
@@ -362,19 +375,6 @@ impl<S: KvStore + 'static> Node<S> {
             return Err(err);
         }
 
-        // Apply algorithm activations whose timelock has elapsed (WP §6.5).
-        {
-            let mut ws = self.world_state.write();
-            let mut registry = AlgorithmRegistry::global_mut();
-            if let Err(e) =
-                process_pending_activations(block.header.number, &mut *ws, &mut registry)
-            {
-                warn!(
-                    block = block.header.number,
-                    "process_pending_activations failed during production: {e}"
-                );
-            }
-        }
         if let Some((task, block_num, original_size)) = pending_proof_task {
             prover.queue_task(task);
             debug!(

@@ -505,6 +505,21 @@ impl<S: KvStore + 'static> Node<S> {
                     block.system_transactions
                 )));
             }
+            // Apply algorithm activations whose timelock has elapsed (WP §6.5).
+            // Must run BEFORE state_root so activations are committed to the Merkle root.
+            {
+                let mut registry = AlgorithmRegistry::global_mut();
+                if let Err(e) = process_pending_activations(
+                    block.number(),
+                    evm.state_db_mut().world_state_mut(),
+                    &mut registry,
+                ) {
+                    warn!(
+                        block = block.number(),
+                        "process_pending_activations failed during import: {e}"
+                    );
+                }
+            }
             evm.state_db_mut().world_state_mut().state_root()?
         } else {
             if !block.system_transactions.is_empty() {
@@ -513,7 +528,22 @@ impl<S: KvStore + 'static> Node<S> {
                     block.number()
                 )));
             }
-            current_root
+            // Empty blocks still need to apply timelock activations before computing
+            // state_root — a producer at this height will have already applied them.
+            let mut ws = WorldState::at_root(self.store.clone(), &current_root)
+                .map_err(|e| NodeError::Startup(format!("world_state at root: {e}")))?;
+            {
+                let mut registry = AlgorithmRegistry::global_mut();
+                if let Err(e) = process_pending_activations(block.number(), &mut ws, &mut registry)
+                {
+                    warn!(
+                        block = block.number(),
+                        "process_pending_activations failed during empty-block import: {e}"
+                    );
+                }
+            }
+            ws.state_root()
+                .map_err(|e| NodeError::Startup(format!("state_root for empty block: {e}")))?
         };
         if imported_state_root != block.header.state_root {
             return Err(NodeError::Startup(format!(
@@ -564,18 +594,6 @@ impl<S: KvStore + 'static> Node<S> {
         let block_hash = block.hash();
         block_store.commit_canonical_block(&block, Some(receipts.as_slice()))?;
         block_store.replace_world_state(committed_world_state);
-
-        // Apply algorithm activations whose timelock has elapsed (WP §6.5).
-        {
-            let mut ws = self.world_state.write();
-            let mut registry = AlgorithmRegistry::global_mut();
-            if let Err(e) = process_pending_activations(block.number(), &mut *ws, &mut registry) {
-                warn!(
-                    block = block.number(),
-                    "process_pending_activations failed during import: {e}"
-                );
-            }
-        }
         let settlement_hashes: Vec<ShellHash> = block
             .system_transactions
             .iter()

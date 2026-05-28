@@ -254,7 +254,9 @@ async fn prover_worker(
 
                 // Extract batch_root lo-half for L2 aggregation (bytes [0..16] of the 32-byte root).
                 let batch_root = u128::from_le_bytes(
-                    proof.batch_root_bytes[..16].try_into().unwrap_or([0u8; 16]),
+                    proof.batch_root_bytes[..16]
+                        .try_into()
+                        .expect("batch_root_bytes is 32 bytes; first 16 always fits"),
                 );
 
                 let verify_result = tokio::task::spawn_blocking(move || {

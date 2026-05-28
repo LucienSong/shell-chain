@@ -179,8 +179,12 @@ pub enum SystemContractError {
     TimelockTooShort(u64, u64),
     #[error("activation height {0} is below minimum (current + delta_min = {1})")]
     InvalidActivationHeight(u64, u64),
-    #[error("duplicate proposal: an identical governance proposal already exists")]
-    DuplicateProposal,
+    #[error("duplicate vote: this validator has already cast a vote for this proposal")]
+    DuplicateVote,
+    #[error("activation height {0} conflicts with open proposal (stored: {1})")]
+    HeightMismatch(u64, u64),
+    #[error("verifier_hash conflicts with open proposal")]
+    GovernanceConflict,
     #[error("guardian cannot be the account itself")]
     GuardianIsSelf,
     #[error("duplicate guardian address")]
@@ -592,7 +596,7 @@ fn propose_algorithm_activation_op<S: KvStore + 'static>(
         .get_storage(&registry_address(), &voter_key)
         .map_err(|e| SystemContractError::Storage(e.to_string()))?;
     if already_voted != ShellHash::ZERO {
-        return Err(SystemContractError::DuplicateProposal);
+        return Err(SystemContractError::DuplicateVote);
     }
 
     // Determine whether this is the first vote on the proposal or a subsequent vote.
@@ -610,7 +614,7 @@ fn propose_algorithm_activation_op<S: KvStore + 'static>(
             .get_storage(&registry_address(), &algorithm_activation_height_key(algo))
             .map_err(|e| SystemContractError::Storage(e.to_string()))?;
         if stored_height_hash != encode_u64_as_hash(activation_height) {
-            return Err(SystemContractError::InvalidActivationHeight(
+            return Err(SystemContractError::HeightMismatch(
                 activation_height,
                 decode_u64_from_hash(&stored_height_hash),
             ));
@@ -619,9 +623,7 @@ fn propose_algorithm_activation_op<S: KvStore + 'static>(
             .get_storage(&registry_address(), &algorithm_verifier_hash_key(algo))
             .map_err(|e| SystemContractError::Storage(e.to_string()))?;
         if stored_verifier != ShellHash::from(verifier_hash) {
-            return Err(SystemContractError::AbiDecode(
-                "verifier_hash mismatch with open proposal".into(),
-            ));
+            return Err(SystemContractError::GovernanceConflict);
         }
     } else {
         // First vote: create the proposal.
@@ -862,8 +864,8 @@ fn record_algorithm_vote<S: KvStore + 'static>(
     }
 
     // ⌈2N/3⌉ quorum: voted_weight >= ceil(2 * total_weight / 3).
-    // Equivalent integer check: voted_weight * 3 >= total_weight * 2.
-    Ok(voted_weight.saturating_mul(3) >= total_weight.saturating_mul(2))
+    // Use u128 to avoid overflow when weights are large u64 values.
+    Ok((voted_weight as u128) * 3 >= (total_weight as u128) * 2)
 }
 
 fn store_algorithm_status<S: KvStore + 'static>(
@@ -2316,13 +2318,13 @@ mod tests {
         execute_validator_registry_with_registry(&v1, &calldata, &mut ws, None, &mut registry)
             .unwrap();
 
-        // Second call with identical params must be rejected as duplicate
+        // Second call with identical params must be rejected as a duplicate vote
         let err =
             execute_validator_registry_with_registry(&v1, &calldata, &mut ws, None, &mut registry)
                 .unwrap_err();
         assert!(
-            matches!(err, SystemContractError::DuplicateProposal),
-            "expected DuplicateProposal, got {err:?}"
+            matches!(err, SystemContractError::DuplicateVote),
+            "expected DuplicateVote, got {err:?}"
         );
     }
 
