@@ -35,7 +35,9 @@ pub(crate) use shell_crypto::{
 };
 pub(crate) use shell_mempool::TxPool;
 pub(crate) use shell_network::{NetworkMessage, NetworkService};
-pub(crate) use shell_pqvm::{commit_pqvm_state, validate_tx_for_import, ShellPqvm, ShellStateDb};
+pub(crate) use shell_pqvm::{
+    commit_pqvm_state, commit_pqvm_state_raw, validate_tx_for_import, ShellPqvm, ShellStateDb,
+};
 pub(crate) use shell_primitives::{Address, Bytes, ShellHash, U256};
 pub(crate) use shell_rpc::DevRpcControl;
 pub(crate) use shell_storage::{
@@ -56,7 +58,8 @@ pub(crate) use challenge_lifecycle::{
 pub(crate) use readiness::{ProductionReadiness, ProductionReadinessState};
 
 pub(crate) use shell_stark_prover::{
-    prover::{verify_sig_batch, SigBatchEntry},
+    proof::SigBatchProof,
+    prover::{compute_batch_root, verify_sig_batch, SigBatchEntry},
     AggregationConfig, AggregationScheduler, AggregationTrigger, ProofAmendment, ProofBacklog,
     ProofTask, SettledL1Input, DEFAULT_MAX_L1_RANGE_SOURCES, MIN_L1_STARK_TXS,
 };
@@ -1533,7 +1536,7 @@ mod tests {
             start_block: Some(6),
             proof: shell_stark_prover::proof::SigBatchProof {
                 version: shell_stark_prover::proof::SIG_BATCH_PROOF_VERSION,
-                batch_root_bytes: [0x22; 16],
+                batch_root_bytes: [0x22; 32],
                 n_sigs: if layer == 1 { MIN_L1_STARK_TXS } else { 2 },
                 proof_bytes: vec![0x33; compressed_size as usize],
             },
@@ -1600,7 +1603,7 @@ mod tests {
                 .and_then(|end_plus_one| end_plus_one.checked_sub(source_hashes.len() as u64)),
             proof: shell_stark_prover::proof::SigBatchProof {
                 version: shell_stark_prover::proof::SIG_BATCH_PROOF_VERSION,
-                batch_root_bytes: [0x22; 16],
+                batch_root_bytes: [0x22; 32],
                 n_sigs: if layer == 1 {
                     MIN_L1_STARK_TXS
                 } else {
@@ -1820,7 +1823,7 @@ mod tests {
             .insert((1, l1_src.block_hash));
 
         // Build an L2 amendment with correct n_sigs and aggregate root.
-        let root = u128::from_le_bytes(l1_src.proof.batch_root_bytes);
+        let root = u128::from_le_bytes(l1_src.proof.batch_root_bytes[0..16].try_into().unwrap());
         let agg_root = compute_aggregate_root(&[root]);
         let l2 = ProofAmendment {
             version: shell_stark_prover::amendment::PROOF_AMENDMENT_VERSION,
@@ -1829,7 +1832,11 @@ mod tests {
             start_block: Some(1),
             proof: shell_stark_prover::proof::SigBatchProof {
                 version: shell_stark_prover::proof::SIG_BATCH_PROOF_VERSION,
-                batch_root_bytes: agg_root.to_le_bytes(),
+                batch_root_bytes: {
+                    let mut b = [0u8; 32];
+                    b[0..16].copy_from_slice(&agg_root.to_le_bytes());
+                    b
+                },
                 n_sigs: 1,
                 proof_bytes: vec![0x33; 128],
             },
@@ -1868,7 +1875,7 @@ mod tests {
             .lock()
             .insert((1, l1_src.block_hash));
 
-        let root = u128::from_le_bytes(l1_src.proof.batch_root_bytes);
+        let root = u128::from_le_bytes(l1_src.proof.batch_root_bytes[0..16].try_into().unwrap());
         let agg_root = compute_aggregate_root(&[root]);
         let l2 = ProofAmendment {
             version: shell_stark_prover::amendment::PROOF_AMENDMENT_VERSION,
@@ -1877,7 +1884,11 @@ mod tests {
             start_block: Some(1),
             proof: shell_stark_prover::proof::SigBatchProof {
                 version: shell_stark_prover::proof::SIG_BATCH_PROOF_VERSION,
-                batch_root_bytes: agg_root.to_le_bytes(),
+                batch_root_bytes: {
+                    let mut b = [0u8; 32];
+                    b[0..16].copy_from_slice(&agg_root.to_le_bytes());
+                    b
+                },
                 n_sigs: 1,
                 // H-1: These garbage bytes cannot be decoded as a RecursiveProof.
                 proof_bytes: vec![0x33; 128],
@@ -2288,7 +2299,7 @@ mod tests {
             start_block: Some(0),
             proof: shell_stark_prover::proof::SigBatchProof {
                 version: shell_stark_prover::proof::SIG_BATCH_PROOF_VERSION,
-                batch_root_bytes: [0x22; 16],
+                batch_root_bytes: [0x22; 32],
                 n_sigs: MIN_L1_STARK_TXS,
                 proof_bytes: vec![0x33; 128],
             },
@@ -2531,7 +2542,7 @@ mod tests {
             start_block: Some(0),
             proof: shell_stark_prover::proof::SigBatchProof {
                 version: shell_stark_prover::proof::SIG_BATCH_PROOF_VERSION,
-                batch_root_bytes: [0u8; 16],
+                batch_root_bytes: [0u8; 32],
                 n_sigs: 999, // wrong — actual canonical entry count is 0
                 proof_bytes: vec![0x33; 128],
             },

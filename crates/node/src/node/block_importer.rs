@@ -169,20 +169,30 @@ impl<S: KvStore + 'static> Node<S> {
         // A valid proof means the block producer correctly accumulated all
         // tx signature entries; this is belt-and-suspenders verification on top
         // of the existing individual sig checks below.
+        // Commitment-only payloads (no proof_bytes) are accepted as-is; full
+        // STARK verification happens when a ProofAmendment is gossiped.
         if let Some(proof_bytes) = &block.header.sig_aggregate_proof {
             match shell_stark_prover::proof::SigBatchProof::from_json(proof_bytes.as_ref()) {
                 Ok(sig_proof) => {
-                    if let Err(e) = verify_sig_batch(&sig_proof) {
-                        return Err(NodeError::Startup(format!(
-                            "block {} STARK aggregate proof verification failed: {e}",
-                            block.number()
-                        )));
+                    if sig_proof.has_proof() {
+                        if let Err(e) = verify_sig_batch(&sig_proof) {
+                            return Err(NodeError::Startup(format!(
+                                "block {} STARK aggregate proof verification failed: {e}",
+                                block.number()
+                            )));
+                        }
+                        debug!(
+                            block = block.number(),
+                            n_sigs = sig_proof.n_sigs,
+                            "C3: STARK aggregate proof verified"
+                        );
+                    } else {
+                        debug!(
+                            block = block.number(),
+                            n_sigs = sig_proof.n_sigs,
+                            "C3: commitment-only sig_aggregate_proof accepted; full proof pending ProofAmendment"
+                        );
                     }
-                    debug!(
-                        block = block.number(),
-                        n_sigs = sig_proof.n_sigs,
-                        "C3: STARK aggregate proof verified"
-                    );
                 }
                 Err(e) => {
                     return Err(NodeError::Startup(format!(
@@ -426,11 +436,7 @@ impl<S: KvStore + 'static> Node<S> {
                                 &result.system_contract_effects,
                             )?;
                         } else {
-                            commit_pqvm_state(
-                                &result,
-                                evm.state_db_mut().world_state_mut(),
-                                &self.chain_store,
-                            )?;
+                            commit_pqvm_state(&result, evm.state_db_mut())?;
                         }
                         total_effective_fees = total_effective_fees.saturating_add(
                             U256::from(result.gas_used).saturating_mul(U256::from(price)),

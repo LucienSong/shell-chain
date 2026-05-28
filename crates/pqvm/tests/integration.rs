@@ -262,9 +262,8 @@ fn e2e_hybrid_pubkey_second_tx_from_registry() {
     assert_eq!(r1.receipt.status, 1);
 
     // Commit the nonce change from execution using commit_pqvm_state so PQ
-    // addresses are correctly resolved via the pq_addr_map.
-    shell_pqvm::commit_pqvm_state(&r1, evm.state_db_mut().world_state_mut(), &cs)
-        .expect("commit r1 failed");
+    // addresses are correctly resolved via the address_registry.
+    shell_pqvm::commit_pqvm_state(&r1, evm.state_db_mut()).expect("commit r1 failed");
 
     // Second tx: NO pubkey attached — should read from registry
     let tx2 = Transaction {

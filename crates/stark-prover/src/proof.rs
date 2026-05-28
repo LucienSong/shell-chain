@@ -3,29 +3,34 @@
 //!
 //! [`SigBatchProof`] bundles the Winterfell [`Proof`] bytes with the
 //! `batch_root` and `n_sigs` needed to verify it.  This is what gets stored
-//! in `BlockHeader::sig_aggregate_proof`.
+//! in `BlockHeader::sig_aggregate_proof` as a full proof (when available).
+//!
+//! For the compact commitment stored in the block header at production time,
+//! only `batch_root_bytes` (32 bytes) and `n_sigs` are required; the full
+//! `proof_bytes` are populated later and gossiped as a `ProofAmendment`.
 
 use serde::{Deserialize, Serialize};
 use winterfell::Proof;
 
 /// Current serialization version tag.
-pub const SIG_BATCH_PROOF_VERSION: u8 = 1;
+pub const SIG_BATCH_PROOF_VERSION: u8 = 2;
 
 /// Serializable aggregate proof for a block's signature batch.
 ///
 /// Contains everything a verifier needs:
-/// - `batch_root`: the 16-byte (128-bit field element) final accumulator.
+/// - `batch_root`: the 32-byte (256-bit) Merkle-accumulator root.
 /// - `n_sigs`: number of signatures included.
-/// - `proof_bytes`: Winterfell [`Proof`] serialized via its own codec.
+/// - `proof_bytes`: Winterfell [`Proof`] serialized via its own codec
+///   (empty when only the compact commitment is stored in the header).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SigBatchProof {
     /// Protocol version (always [`SIG_BATCH_PROOF_VERSION`]).
     pub version: u8,
-    /// Final accumulator value as 16 little-endian bytes.
-    pub batch_root_bytes: [u8; 16],
+    /// Final accumulator root as 32 little-endian bytes (256-bit).
+    pub batch_root_bytes: [u8; 32],
     /// Number of signatures covered by this proof.
     pub n_sigs: usize,
-    /// Raw Winterfell proof bytes.
+    /// Raw Winterfell proof bytes (empty for commitment-only payloads).
     pub proof_bytes: Vec<u8>,
 }
 
@@ -40,8 +45,26 @@ impl SigBatchProof {
         serde_json::from_slice(bytes)
     }
 
+    /// Build a commitment-only payload (no STARK proof bytes).
+    ///
+    /// Use this to populate `BlockHeader::sig_aggregate_proof` immediately
+    /// during block production, before async STARK proving completes.
+    pub fn commitment_only(batch_root_bytes: [u8; 32], n_sigs: usize) -> Self {
+        Self {
+            version: SIG_BATCH_PROOF_VERSION,
+            batch_root_bytes,
+            n_sigs,
+            proof_bytes: Vec::new(),
+        }
+    }
+
+    /// Returns true if this carries a full STARK proof (not just a commitment).
+    pub fn has_proof(&self) -> bool {
+        !self.proof_bytes.is_empty()
+    }
+
     /// Wrap a raw Winterfell proof.
-    pub fn from_proof(proof: Proof, batch_root_bytes: [u8; 16], n_sigs: usize) -> Self {
+    pub fn from_proof(proof: Proof, batch_root_bytes: [u8; 32], n_sigs: usize) -> Self {
         let proof_bytes = proof.to_bytes();
         Self {
             version: SIG_BATCH_PROOF_VERSION,

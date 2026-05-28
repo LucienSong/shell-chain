@@ -2,6 +2,21 @@
 //! commitment circuit.
 //!
 //! See [`crate`] module docs for the full circuit description.
+//!
+//! # Circuit summary
+//!
+//! Each signature is mapped to a 256-bit BLAKE3 leaf:
+//! `leaf_i = BLAKE3(msg_hash_i ‖ pk_hash_i)`
+//!
+//! The leaf is split into two f128 field elements:
+//! `leaf_lo_i = u128::from_le_bytes(leaf_i[0..16])`
+//! `leaf_hi_i = u128::from_le_bytes(leaf_i[16..32])`
+//!
+//! Two parallel degree-3 accumulators produce the 256-bit batch root:
+//! `acc_lo[t+1] = acc_lo[t]^3 + leaf_lo[t]`
+//! `acc_hi[t+1] = acc_hi[t]^3 + leaf_hi[t]`
+//!
+//! The batch root is `acc_lo_final ‖ acc_hi_final` (32 LE bytes).
 
 use winterfell::{
     math::{fields::f128::BaseElement, FieldElement, ToElements},
@@ -13,32 +28,44 @@ use winterfell::{
 
 /// Public inputs for the signature batch commitment proof.
 ///
-/// - `batch_root`: the final accumulator value after hashing all entries.
+/// - `batch_root_lo` / `batch_root_hi`: the two halves of the 256-bit root.
 /// - `n_sigs`: number of signatures included in the batch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SigBatchPublicInputs {
-    /// Final accumulator value — committed to in the block header.
-    pub batch_root: BaseElement,
+    /// Low 128 bits of the final batch root (acc_lo after all entries).
+    pub batch_root_lo: BaseElement,
+    /// High 128 bits of the final batch root (acc_hi after all entries).
+    pub batch_root_hi: BaseElement,
     /// Number of signatures in the batch (padded trace length may be larger).
     pub n_sigs: usize,
 }
 
 impl ToElements<BaseElement> for SigBatchPublicInputs {
     fn to_elements(&self) -> Vec<BaseElement> {
-        vec![self.batch_root, BaseElement::new(self.n_sigs as u128)]
+        vec![
+            self.batch_root_lo,
+            self.batch_root_hi,
+            BaseElement::new(self.n_sigs as u128),
+        ]
     }
 }
 
 // ── AIR ──────────────────────────────────────────────────────────────────────
 
 /// Trace column indices.
-pub const COL_ACC: usize = 0;
-pub const COL_ENTRY: usize = 1;
+pub const COL_ACC_LO: usize = 0;
+pub const COL_ACC_HI: usize = 1;
+pub const COL_LEAF_LO: usize = 2;
+pub const COL_LEAF_HI: usize = 3;
 
 /// Number of trace columns.
-pub const TRACE_WIDTH: usize = 2;
+pub const TRACE_WIDTH: usize = 4;
 
-/// AIR for the hash-chain accumulator circuit.
+/// AIR for the dual hash-chain accumulator circuit.
+///
+/// Two parallel degree-3 transitions:
+/// - `acc_lo[t+1] = acc_lo[t]^3 + leaf_lo[t]`
+/// - `acc_hi[t+1] = acc_hi[t]^3 + leaf_hi[t]`
 pub struct SigBatchAir {
     context: AirContext<BaseElement>,
     pub_inputs: SigBatchPublicInputs,
@@ -55,12 +82,16 @@ impl Air for SigBatchAir {
             "SigBatchAir requires exactly {TRACE_WIDTH} trace columns"
         );
 
-        // Single transition constraint of degree 3:
-        //   acc[t+1] = acc[t]^3 + entry[t]
-        let degrees = vec![TransitionConstraintDegree::new(3)];
+        // Two parallel transition constraints of degree 3:
+        //   acc_lo[t+1] = acc_lo[t]^3 + leaf_lo[t]
+        //   acc_hi[t+1] = acc_hi[t]^3 + leaf_hi[t]
+        let degrees = vec![
+            TransitionConstraintDegree::new(3),
+            TransitionConstraintDegree::new(3),
+        ];
 
-        // Two boundary assertions: acc at step 0 and at the last step.
-        let num_assertions = 2;
+        // Four boundary assertions: both accumulators at step 0 and last step.
+        let num_assertions = 4;
 
         SigBatchAir {
             context: AirContext::new(trace_info, degrees, num_assertions, options),
@@ -74,21 +105,28 @@ impl Air for SigBatchAir {
         _periodic_values: &[E],
         result: &mut [E],
     ) {
-        let cur_acc = frame.current()[COL_ACC];
-        let cur_entry = frame.current()[COL_ENTRY];
-        let next_acc = frame.next()[COL_ACC];
+        let cur_acc_lo = frame.current()[COL_ACC_LO];
+        let cur_acc_hi = frame.current()[COL_ACC_HI];
+        let cur_leaf_lo = frame.current()[COL_LEAF_LO];
+        let cur_leaf_hi = frame.current()[COL_LEAF_HI];
+        let next_acc_lo = frame.next()[COL_ACC_LO];
+        let next_acc_hi = frame.next()[COL_ACC_HI];
 
-        // acc[t+1] - (acc[t]^3 + entry[t]) = 0
-        result[0] = next_acc - (cur_acc.exp(3u32.into()) + cur_entry);
+        // acc_lo[t+1] - (acc_lo[t]^3 + leaf_lo[t]) = 0
+        result[0] = next_acc_lo - (cur_acc_lo.exp(3u32.into()) + cur_leaf_lo);
+        // acc_hi[t+1] - (acc_hi[t]^3 + leaf_hi[t]) = 0
+        result[1] = next_acc_hi - (cur_acc_hi.exp(3u32.into()) + cur_leaf_hi);
     }
 
     fn get_assertions(&self) -> Vec<Assertion<Self::BaseField>> {
         let last_step = self.trace_length() - 1;
         vec![
-            // Accumulator must start at zero.
-            Assertion::single(COL_ACC, 0, BaseElement::ZERO),
-            // Accumulator must end at the claimed batch_root.
-            Assertion::single(COL_ACC, last_step, self.pub_inputs.batch_root),
+            // Both accumulators must start at zero.
+            Assertion::single(COL_ACC_LO, 0, BaseElement::ZERO),
+            Assertion::single(COL_ACC_HI, 0, BaseElement::ZERO),
+            // Both accumulators must end at the claimed batch root halves.
+            Assertion::single(COL_ACC_LO, last_step, self.pub_inputs.batch_root_lo),
+            Assertion::single(COL_ACC_HI, last_step, self.pub_inputs.batch_root_hi),
         ]
     }
 

@@ -336,9 +336,10 @@ impl<S: KvStore + 'static> Node<S> {
                 )));
             }
 
-            // Extract the L1 batch root as a u128 for aggregate computation.
+            // Extract the L1 batch root lo-half as a u128 for L2 aggregate computation.
+            // batch_root_bytes is [lo:16 ‖ hi:16]; the L2 recursive circuit operates on u128.
             let root_bytes = source_amendment.proof.batch_root_bytes;
-            let root = u128::from_le_bytes(root_bytes);
+            let root = u128::from_le_bytes(root_bytes[0..16].try_into().unwrap());
             l1_roots.push(root);
         }
 
@@ -355,7 +356,9 @@ impl<S: KvStore + 'static> Node<S> {
         // Check 2: aggregate root must match compute_aggregate_root(l1_roots).
         let expected_agg_root =
             shell_stark_prover::recursive_air::compute_aggregate_root(&l1_roots);
-        let declared_agg_root = u128::from_le_bytes(amendment.proof.batch_root_bytes);
+        // batch_root_bytes is [lo:16 ‖ hi:16]; L2 aggregate root lives in the lo half.
+        let declared_agg_root =
+            u128::from_le_bytes(amendment.proof.batch_root_bytes[0..16].try_into().unwrap());
         if expected_agg_root != declared_agg_root {
             self.metrics.stark_settlements_rejected.inc();
             return Err(NodeError::Startup(format!(
@@ -510,7 +513,9 @@ impl<S: KvStore + 'static> Node<S> {
             let start_block = amendment
                 .range_start_block()
                 .unwrap_or(amendment.block_number);
-            let batch_root = u128::from_le_bytes(amendment.proof.batch_root_bytes);
+            // batch_root_bytes is [lo:16 ‖ hi:16]; SettledL1Input uses the lo half (u128).
+            let batch_root =
+                u128::from_le_bytes(amendment.proof.batch_root_bytes[0..16].try_into().unwrap());
             let input = SettledL1Input {
                 start_block,
                 end_block: amendment.block_number,

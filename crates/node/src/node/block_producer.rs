@@ -128,16 +128,15 @@ impl<S: KvStore + 'static> Node<S> {
                         )?;
                     } else {
                         // Normal PQVM tx: commit the revm state changeset.
-                        commit_pqvm_state(
-                            &result,
-                            evm.state_db_mut().world_state_mut(),
-                            &self.chain_store,
-                        )?;
+                        // Snapshot the address registry before the first commit clears it,
+                        // so the persistent WorldState can resolve PQ addresses too.
+                        let registry = evm.state_db().address_registry_snapshot();
+                        commit_pqvm_state(&result, evm.state_db_mut())?;
 
                         // Commit to the node's persistent WorldState.
                         {
                             let mut ws = self.world_state.write();
-                            commit_pqvm_state(&result, &mut ws, &self.chain_store)?;
+                            commit_pqvm_state_raw(&result, &mut *ws, &self.chain_store, &registry)?;
                         }
                     }
                     total_effective_fees = total_effective_fees.saturating_add(
@@ -300,13 +299,26 @@ impl<S: KvStore + 'static> Node<S> {
             proposer_seal: None,
         };
 
-        // C3: If STARK aggregation is enabled, collect sig batch entries now.
-        // G4: ProofTask pushed to backlog AFTER signing so we have the real block hash.
+        // C3: If STARK aggregation is enabled, collect sig batch entries and
+        // compute the 32-byte commitment synchronously so it can be embedded
+        // in the header (and thus covered by the block hash / proposer seal).
+        // The full STARK proof is generated asynchronously; nodes that receive
+        // a commitment-only header will skip full STARK verification until a
+        // ProofAmendment arrives.
         let stark_entries: Option<Vec<SigBatchEntry>> = if self.stark_aggregation {
             Some(stark_sources::entries_from_txs(&included_txs))
         } else {
             None
         };
+
+        // Embed the batch-root commitment in the header before signing.
+        if let Some(entries) = stark_entries.as_ref() {
+            if !entries.is_empty() {
+                let batch_root = compute_batch_root(entries);
+                let commitment = SigBatchProof::commitment_only(batch_root, entries.len());
+                block.header.sig_aggregate_proof = commitment.to_json().ok().map(Into::into);
+            }
+        }
 
         // Sign the block with the proposer's key.
         consensus.sign_block(&mut block, signer)?;
