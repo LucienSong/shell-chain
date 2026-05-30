@@ -101,8 +101,10 @@ enum Commands {
         chain_id: u64,
 
         /// Storage backend: "memory" or "rocksdb".
-        #[arg(long, default_value = "memory")]
-        db: String,
+        /// Defaults to "rocksdb" for testnet/mainnet (persistent) and "memory" for dev (ephemeral).
+        /// Explicit values always override the network-profile default.
+        #[arg(long)]
+        db: Option<String>,
 
         /// Enable dedicated WebSocket RPC server on a separate port.
         #[arg(long)]
@@ -555,11 +557,28 @@ async fn main() {
                 file_config.node.chain_id.unwrap_or(chain_id)
             };
 
-            let effective_db = if db != "memory" {
-                db
-            } else {
-                file_config.node.db.unwrap_or(db)
+            // Storage backend: explicit CLI > config file > network-profile default.
+            // dev → memory (ephemeral); testnet/mainnet → rocksdb (persistent).
+            // If the binary was compiled without the rocksdb feature, fall back to
+            // memory and warn so operators notice and rebuild with the feature enabled.
+            let network_default_db = match effective_network.as_str() {
+                "testnet" | "mainnet" => {
+                    if cfg!(feature = "rocksdb") {
+                        "rocksdb"
+                    } else {
+                        tracing::warn!(
+                            "rocksdb feature not compiled in; falling back to memory for \
+                             {effective_network} — DATA WILL NOT PERSIST across restarts. \
+                             Rebuild with --features shell-cli/rocksdb."
+                        );
+                        "memory"
+                    }
+                }
+                _ => "memory",
             };
+            let effective_db = db
+                .or(file_config.node.db.clone())
+                .unwrap_or_else(|| network_default_db.to_string());
 
             let effective_ws = ws || file_config.rpc.ws_enabled.unwrap_or(false);
 
