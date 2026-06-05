@@ -331,6 +331,16 @@ enum Commands {
         command: commands::wallet::WalletCommand,
     },
 
+    /// Shell PQ-HD v1 hierarchical-deterministic wallet.
+    ///
+    /// Generate or restore a BIP-39 mnemonic-backed wallet that derives
+    /// post-quantum accounts (ML-DSA-65 or SLH-DSA) via the Shell PQ-HD v1
+    /// BLAKE3-keyed hardened tree.  See ADR-011 for the full specification.
+    PqHd {
+        #[command(subcommand)]
+        action: PqHdCommands,
+    },
+
     /// Hot backup and restore for the RocksDB data directory.
     Backup {
         #[command(subcommand)]
@@ -409,6 +419,57 @@ enum GenesisCommands {
         /// Write output to this file instead of modifying genesis in-place.
         #[arg(long)]
         output: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum PqHdCommands {
+    /// Generate a new BIP-39 mnemonic and save an encrypted HD keystore.
+    ///
+    /// The recovery phrase is printed ONCE to stderr — write it down.
+    Generate {
+        /// Output path for the encrypted HD keystore file.
+        #[arg(long, default_value = "hd-keystore.json")]
+        output: PathBuf,
+
+        /// PQ algorithm for account 0: `mldsa65` (default) or `slhdsa`.
+        #[arg(long, default_value = "mldsa65")]
+        algo: String,
+    },
+
+    /// Derive a specific account from an encrypted HD keystore.
+    Derive {
+        /// Path to the encrypted HD keystore file.
+        #[arg(long)]
+        keystore: PathBuf,
+
+        /// Account index (raw, hardened applied automatically). Default: 0.
+        #[arg(long, default_value = "0")]
+        account: u32,
+
+        /// Change index (0 = external, 1 = internal). Default: 0.
+        #[arg(long, default_value = "0")]
+        change: u32,
+
+        /// Address index. Default: 0.
+        #[arg(long, default_value = "0")]
+        index: u32,
+
+        /// PQ algorithm: `mldsa65` (default) or `slhdsa`.
+        #[arg(long, default_value = "mldsa65")]
+        algo: String,
+    },
+
+    /// Print addresses for a mnemonic without storing anything (dry run).
+    /// The mnemonic is read from stdin (never passed as a CLI argument).
+    Address {
+        /// Number of accounts to derive (account indices 0..count-1).
+        #[arg(long, default_value = "5")]
+        count: u32,
+
+        /// PQ algorithm: `mldsa65` (default) or `slhdsa`.
+        #[arg(long, default_value = "mldsa65")]
+        algo: String,
     },
 }
 
@@ -705,6 +766,32 @@ async fn main() {
         Commands::Tx { command } => commands::tx::execute(command, password_args),
         Commands::Account { command } => commands::account::execute(command),
         Commands::Wallet { command } => commands::wallet::execute(command, password_args),
+        Commands::PqHd { action } => match action {
+            PqHdCommands::Generate { output, algo } => {
+                commands::pqhd::execute(commands::pqhd::PqHdCommand::Generate {
+                    output,
+                    algo,
+                    password_args,
+                })
+            }
+            PqHdCommands::Derive {
+                keystore,
+                account,
+                change,
+                index,
+                algo,
+            } => commands::pqhd::execute(commands::pqhd::PqHdCommand::Derive {
+                keystore,
+                account,
+                change,
+                index,
+                algo,
+                password_args,
+            }),
+            PqHdCommands::Address { count, algo } => {
+                commands::pqhd::execute(commands::pqhd::PqHdCommand::Address { count, algo })
+            }
+        },
         Commands::Backup { command } => match command {
             BackupCommands::Create { output } => commands::create_backup(cli.datadir, output),
             BackupCommands::Restore { backup_path } => {

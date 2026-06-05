@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use parking_lot::RwLock;
+use tracing::warn;
 
 use shell_core::SignedTransaction;
 use shell_crypto::Verifier;
@@ -278,10 +279,20 @@ impl TxPool {
         let stale_hashes: Vec<ShellHash> = inner
             .by_hash
             .iter()
-            .filter_map(|(hash, entry)| {
-                let canonical_nonce = world_state.get_nonce(&entry.tx.from).ok()?;
-                (entry.tx.tx.nonce < canonical_nonce).then_some(*hash)
-            })
+            .filter_map(
+                |(hash, entry)| match world_state.get_nonce(&entry.tx.from) {
+                    Ok(canonical_nonce) => (entry.tx.tx.nonce < canonical_nonce).then_some(*hash),
+                    Err(e) => {
+                        warn!(
+                            tx = ?hash,
+                            sender = ?entry.tx.from,
+                            error = %e,
+                            "prune_nonce_too_low: get_nonce failed, skipping tx"
+                        );
+                        None
+                    }
+                },
+            )
             .collect();
         let pruned = stale_hashes.len();
         for hash in stale_hashes {
