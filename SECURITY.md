@@ -5,10 +5,10 @@
 | Version | Supported |
 |---------|-----------|
 | latest (`main`) | ✅ Active |
-| v0.23.x | ✅ Security fixes |
-| < v0.23.0 | ❌ End of life |
+| v0.24.x | ✅ Security fixes |
+| < v0.24.0 | ❌ End of life |
 
-**v0.23.x is the current supported release line.** `main` receives active development and security fixes; v0.23.x receives security-only backports. Users on versions older than v0.23.0 should upgrade before reporting issues against them.
+**v0.24.x is the current supported release line.** `main` receives active development and security fixes; v0.24.x receives security-only backports. Users on versions older than v0.24.0 should upgrade before reporting issues against them.
 
 ## Scope
 
@@ -22,7 +22,7 @@ The following components are **in scope**:
 - `crates/rpc` — JSON-RPC handler, TLS, three-RPC fanout
 - `crates/mempool` — transaction pool, AA validation
 - `crates/stark-prover` — STARK settlement
-- `crates/cli` — `shell-chain` binary, `pqhd` key management commands
+- `crates/cli` — `shell-chain` binary, `pq-hd` key management commands
 - Protocol-level vulnerabilities (consensus safety/liveness, double-spend, AA bypass)
 - Denial-of-service attacks that can halt block production on the public testnet
 
@@ -47,7 +47,7 @@ The following are **out of scope**:
 We will acknowledge receipt within **72 hours** and aim to provide an initial
 assessment within **7 days**.
 
-### Alternative — email
+### Alternative — encrypted email
 
 Reach the ShellDAO security team via the contact on [shell.org](https://shell.org).
 If you need an encrypted channel, open a GitHub Private Security Advisory first
@@ -115,6 +115,6 @@ For operators running validator nodes, consult the
   process user only
 - The RPC/WS ports (`8545` HTTP JSON-RPC, `8546` WebSocket, `8548`/`8549` for
   rpc-node) are not exposed to the public internet without authentication/TLS
-- The `pqhd` CLI reads mnemonics from stdin (no shell history exposure); never
+- The `pq-hd` CLI reads mnemonics from stdin (no shell history exposure); never
   pass mnemonics as command-line arguments
 - Backups of `*.keystore.json` files must be encrypted at rest
