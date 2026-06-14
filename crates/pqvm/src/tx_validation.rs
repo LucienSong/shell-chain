@@ -10,7 +10,10 @@
 use crate::aa_validation::{validate_aa_tx, AaValidationError};
 use shell_core::SignedTransaction;
 use shell_crypto::{infer_signature_type_from_address, Verifier};
-use shell_primitives::{Address, U256};
+use shell_primitives::{
+    Address, ACCESS_LIST_ADDRESS_COST, ACCESS_LIST_STORAGE_KEY_COST, GAS_CONTRACT_CREATION,
+    GAS_PER_NONZERO_BYTE, GAS_PER_ZERO_BYTE, INTRINSIC_GAS_TX, U256,
+};
 use shell_storage::{ChainStore, KvStore, StorageError, WorldState};
 
 /// Errors returned during transaction validation.
@@ -77,6 +80,9 @@ pub enum TxValidationError {
     #[error("contract paymaster validation failed: {0}")]
     PaymasterValidationFailed(String),
 
+    #[error("contract paymaster validation exceeded gas budget (50k limit)")]
+    PaymasterGasExceeded,
+
     #[error("session key expired at block {expiry_block} (current {current_block})")]
     SessionKeyExpired {
         expiry_block: u64,
@@ -127,6 +133,7 @@ impl TxValidationError {
             Self::PaymasterInsufficientBalance { .. } => "paymaster_insufficient_balance",
             Self::PaymasterRejected => "paymaster_rejected",
             Self::PaymasterValidationFailed(_) => "paymaster_validation_failed",
+            Self::PaymasterGasExceeded => "paymaster_gas_exceeded",
             Self::SessionKeyExpired { .. } => "session_key_expired",
             Self::SessionValueCapExceeded => "session_value_cap_exceeded",
             Self::SessionTargetMismatch => "session_target_mismatch",
@@ -137,19 +144,6 @@ impl TxValidationError {
         }
     }
 }
-
-/// Minimum gas for a plain transfer (no data).
-const INTRINSIC_GAS_TX: u64 = 21_000;
-/// Per-byte cost for non-zero calldata.
-const GAS_PER_NONZERO_BYTE: u64 = 16;
-/// Per-byte cost for zero calldata.
-const GAS_PER_ZERO_BYTE: u64 = 4;
-/// Extra gas for contract creation.
-const GAS_CONTRACT_CREATION: u64 = 32_000;
-/// EIP-2930: gas cost per address in the access list.
-const ACCESS_LIST_ADDRESS_COST: u64 = 2400;
-/// EIP-2930: gas cost per storage key in the access list.
-const ACCESS_LIST_STORAGE_KEY_COST: u64 = 1900;
 
 /// Validate a signed transaction before PQVM/revm execution.
 ///
@@ -522,6 +516,7 @@ impl From<AaValidationError> for TxValidationError {
             AaValidationError::PaymasterValidationFailed(msg) => {
                 Self::PaymasterValidationFailed(msg)
             }
+            AaValidationError::PaymasterGasExceeded => Self::PaymasterGasExceeded,
             AaValidationError::SessionKeyExpired {
                 expiry_block,
                 current_block,

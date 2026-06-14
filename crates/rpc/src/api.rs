@@ -599,6 +599,41 @@ pub trait ShellApi {
         req: crate::types::BatchEstimateRequest,
     ) -> Result<serde_json::Value, jsonrpsee::types::ErrorObjectOwned>;
 
+    /// Reports paymaster validation gas capability for contract paymasters.
+    ///
+    /// Current node builds return a versioned cap-only response for the
+    /// protocol `validatePaymasterOp` gas limit. They do not perform a full EVM
+    /// staticcall dry-run from this RPC path yet. Clients must inspect
+    /// `simulation_status` and only enable contract-paymaster UX when it is
+    /// upgraded from `"cap_only"`.
+    ///
+    /// **Input** (`paymaster_context` is the opaque bytes forwarded to the contract):
+    /// ```json
+    /// {
+    ///   "paymaster": "0x…",
+    ///   "sender": "0x…",
+    ///   "inner_calls_data": "0x…",
+    ///   "max_fee_per_gas": "0x…",
+    ///   "paymaster_context": "0x…"
+    /// }
+    /// ```
+    ///
+    /// **Response**:
+    /// - `validation_gas` — `null` while `simulation_status` is `"cap_only"`
+    /// - `paymaster_gas_cap` — hard cap enforced by the node (50 000)
+    /// - `within_cap` — `null` while no staticcall simulation has run
+    /// - `paymaster` — the paymaster address queried
+    /// - `simulation_status` — currently `"cap_only"`
+    /// - `simulation_version` — response contract version
+    /// - `capability` — current node capability string
+    ///
+    /// **Future error** (`-32000`): EVM simulation failed or paymaster contract reverted.
+    #[method(name = "estimatePaymasterGas")]
+    async fn estimate_paymaster_gas(
+        &self,
+        req: crate::types::PaymasterGasEstimateRequest,
+    ) -> Result<serde_json::Value, jsonrpsee::types::ErrorObjectOwned>;
+
     /// Returns Native-AA paymaster policy for an address.
     ///
     /// In v0.18.0 Phase 1, paymasters are plain EOAs; the "policy" is

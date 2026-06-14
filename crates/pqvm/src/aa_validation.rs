@@ -1,6 +1,7 @@
 use alloy_primitives::Bytes as AlBytes;
 use revm::context::result::ExecutionResult;
 use revm::context::{BlockEnv, CfgEnv, Context, Evm, TxEnv};
+use revm::context_interface::result::HaltReason;
 use revm::database_interface::Database;
 use revm::handler::instructions::EthInstructions;
 use revm::handler::{ExecuteEvm, MainnetContext};
@@ -79,6 +80,9 @@ pub enum AaValidationError {
 
     #[error("contract paymaster validation failed: {0}")]
     PaymasterValidationFailed(String),
+
+    #[error("contract paymaster validation exceeded gas budget (50k limit)")]
+    PaymasterGasExceeded,
 
     #[error("session key expired at block {expiry_block} (current {current_block})")]
     SessionKeyExpired {
@@ -651,9 +655,15 @@ fn call_paymaster_validate<S: KvStore + 'static>(
                 hex::encode(output)
             )))
         }
-        ExecutionResult::Halt { reason, .. } => Err(AaValidationError::PaymasterValidationFailed(
-            format!("halted: {reason:?}"),
-        )),
+        ExecutionResult::Halt { reason, .. } => {
+            if matches!(reason, HaltReason::OutOfGas(_)) {
+                Err(AaValidationError::PaymasterGasExceeded)
+            } else {
+                Err(AaValidationError::PaymasterValidationFailed(format!(
+                    "halted: {reason:?}",
+                )))
+            }
+        }
     }
 }
 

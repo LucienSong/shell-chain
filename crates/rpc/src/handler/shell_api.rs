@@ -721,6 +721,54 @@ impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
         }))
     }
 
+    async fn estimate_paymaster_gas(
+        &self,
+        req: crate::types::PaymasterGasEstimateRequest,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        use shell_pqvm::PAYMASTER_VALIDATE_GAS_CAP;
+
+        // Parse optional fields, applying defaults.
+        let inner_calls_data = match req.inner_calls_data.as_deref() {
+            Some(hex) if !hex.is_empty() && hex != "0x" => {
+                hex::decode(hex.trim_start_matches("0x")).map_err(|_| {
+                    invalid_params("estimatePaymasterGas: invalid inner_calls_data hex")
+                })?
+            }
+            _ => vec![],
+        };
+        let max_fee_per_gas: u64 = match req.max_fee_per_gas.as_deref() {
+            Some(hex) => parse_hex_u64(hex)?,
+            None => 1_000_000_000, // 1 gwei default
+        };
+        let paymaster_context = match req.paymaster_context.as_deref() {
+            Some(hex) if !hex.is_empty() && hex != "0x" => {
+                hex::decode(hex.trim_start_matches("0x")).map_err(|_| {
+                    invalid_params("estimatePaymasterGas: invalid paymaster_context hex")
+                })?
+            }
+            _ => vec![],
+        };
+
+        // Current RPC handlers do not yet expose the full EVM staticcall
+        // executor needed to run validatePaymasterOp from this read-only path.
+        // Return an explicit cap-only response so clients can gate sponsored
+        // flows without mistaking this for a successful contract simulation.
+        let _ = (inner_calls_data, max_fee_per_gas, paymaster_context); // used in full impl
+
+        Ok(serde_json::json!({
+            "paymaster": req.paymaster,
+            "sender": req.sender,
+            "validation_gas": serde_json::Value::Null,
+            "paymaster_gas_cap": hex_u64(PAYMASTER_VALIDATE_GAS_CAP),
+            "within_cap": serde_json::Value::Null,
+            "simulation_status": "cap_only",
+            "simulation_version": 1u64,
+            "capability": "paymaster_cap_only",
+            "reason": "validatePaymasterOp staticcall simulation is not exposed by this RPC handler yet",
+            "note": "Current response reports the protocol gas cap only. Use shell_estimateBatch for bundle gas estimation and gate contract-paymaster UX on simulation_status.",
+        }))
+    }
+
     async fn get_paymaster_policy(
         &self,
         address: Address,
