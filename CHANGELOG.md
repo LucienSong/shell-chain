@@ -4,6 +4,32 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.24.0] — 2026-06-15 — PQVM, AA/session, and post-audit release
+
+### Added
+
+- Focused protocol invariant Make targets for network message serde/bandwidth,
+  transaction hash and signing, AA/paymaster, STARK/pruning, and RPC/witness
+  regression packs.
+- PQVM terminology and crate alignment for the native post-quantum execution
+  path.
+- Expanded AA, session-key, paymaster, STARK settlement, pruning, and operator
+  recovery coverage across node, RPC, and storage tests.
+
+### Changed
+
+- Current release line is aligned with `shell-sdk v0.10.0` for PQ-HD wallet and
+  session-key SDK support.
+- Release validation now uses the workspace compatibility gate across chain,
+  SDK, wallet, DEX, explorer, and site.
+
+### Fixed
+
+- Fixed the network attestation serde round-trip test by removing a duplicate
+  `round` field.
+- Made network bandwidth token-bucket tests deterministic under real-time
+  refill jitter.
+
 ## [0.23.0] — 2026-05-22 — Round 3 completion
 
 ### Added

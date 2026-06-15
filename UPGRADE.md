@@ -1,12 +1,12 @@
 # Upgrade Guide
 
-## v0.15.0 → v0.23.0 (M14–M17: STARK hardening, R3 completion)
+## v0.15.0 → v0.24.0 (M14–M18: STARK hardening, R3 completion, PQVM release)
 
 ### Overview
 
-This covers all breaking and notable changes from v0.15.0 through v0.23.0.
+This covers all breaking and notable changes from v0.15.0 through v0.24.0.
 
-> **Current v0.23.0 note:** the live implementation uses canonical 32-byte `0x...` addresses again. Older `pq1...` guidance below is historical migration context only and does not describe the current R3 codebase.
+> **Current v0.24.0 note:** the live implementation uses canonical 32-byte `0x...` addresses again. Older `pq1...` guidance below is historical migration context only and does not describe the current R3 codebase.
 
 | Area | Change |
 |------|--------|
@@ -49,7 +49,7 @@ still work as overrides but are no longer recommended as primary configuration.
 ### Docker image
 
 ```yaml
-image: ghcr.io/shelldao/shell-chain:0.23.0
+image: ghcr.io/shelldao/shell-chain:0.24.0
 ```
 
 ---
