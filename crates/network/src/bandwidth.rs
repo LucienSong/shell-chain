@@ -203,10 +203,10 @@ mod tests {
 
     #[test]
     fn inbound_limit_triggers() {
-        let tracker = BandwidthTracker::new(100, 0);
-        assert!(tracker.record_inbound(50));
-        assert!(tracker.record_inbound(50)); // exactly at limit
-        assert!(!tracker.record_inbound(1)); // over limit
+        // Use limit=1 so a rejected retry cannot be made flaky by sub-ms refill.
+        let tracker = BandwidthTracker::new(1, 0);
+        assert!(tracker.record_inbound(1));
+        assert!(!tracker.record_inbound(1));
     }
 
     #[test]
@@ -229,8 +229,8 @@ mod tests {
 
     #[test]
     fn reset_clears_window_counters() {
-        let tracker = BandwidthTracker::new(100, 100);
-        assert!(tracker.record_inbound(100));
+        let tracker = BandwidthTracker::new(1, 100);
+        assert!(tracker.record_inbound(1));
         assert!(!tracker.record_inbound(1));
 
         // Force a reset by backdating both the stats window and limiter clock.
@@ -245,7 +245,7 @@ mod tests {
         tracker.reset_if_needed();
 
         // Window counters are zeroed; should be allowed again.
-        assert!(tracker.record_inbound(100));
+        assert!(tracker.record_inbound(1));
     }
 
     #[test]
@@ -306,17 +306,14 @@ mod tests {
 
     #[test]
     fn token_bucket_allows_smoothed_burst_after_idle_refill() {
-        let tracker = BandwidthTracker::new(100, 0);
-        assert!(tracker.record_inbound(100));
-        assert!(!tracker.record_inbound(1));
+        let now = Instant::now();
+        let mut bucket = TokenBucket::new(100);
+        bucket.last_refill = now;
+        assert!(bucket.allow(100, now));
+        assert!(!bucket.allow(1, now));
 
-        {
-            let mut limiter = tracker.inbound_limiter.as_ref().unwrap().lock().unwrap();
-            limiter.last_refill = Instant::now() - Duration::from_millis(1500);
-        }
-
-        assert!(tracker.record_inbound(150));
-        assert!(!tracker.record_inbound(1));
+        assert!(bucket.allow(150, now + Duration::from_millis(1500)));
+        assert!(!bucket.allow(1, now + Duration::from_millis(1500)));
     }
 
     #[test]
