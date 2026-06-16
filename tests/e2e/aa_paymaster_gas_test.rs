@@ -74,6 +74,13 @@ fn inner_call(to: Address) -> InnerCall {
     }
 }
 
+fn current_account_nonce(env: &TestEnv, address: &Address) -> u64 {
+    env.world_state
+        .read()
+        .get_nonce(address)
+        .expect("funded account nonce should be readable")
+}
+
 // ---------------------------------------------------------------------------
 // Test 1: Paymaster gas metering — within limit
 // ---------------------------------------------------------------------------
@@ -97,10 +104,15 @@ async fn paymaster_gas_metering_within_limit_success() {
     let paymaster_addr = compute_contract_addr(&acc.address, 0);
 
     // Create a sponsored bundle that calls the paymaster
-    let tx = make_sponsored_tx(&acc, 1, paymaster_addr, vec![inner_call(paymaster_addr)]);
+    let tx = make_sponsored_tx(
+        &acc,
+        current_account_nonce(&env, &acc.address),
+        paymaster_addr,
+        vec![inner_call(paymaster_addr)],
+    );
 
     // Execute: paymaster should accept (returns 0x01, gas < 50k)
-    let result = rpc.shell_sendBundle(tx.into()).await;
+    let result = ShellApiServer::send_transaction(rpc, tx).await;
     assert!(result.is_ok(), "Paymaster within gas limit should succeed");
 }
 
@@ -125,10 +137,15 @@ async fn paymaster_gas_metering_exceeds_limit_rejected() {
     let paymaster_addr = compute_contract_addr(&acc.address, 0);
 
     // Create a sponsored bundle
-    let tx = make_sponsored_tx(&acc, 1, paymaster_addr, vec![inner_call(paymaster_addr)]);
+    let tx = make_sponsored_tx(
+        &acc,
+        current_account_nonce(&env, &acc.address),
+        paymaster_addr,
+        vec![inner_call(paymaster_addr)],
+    );
 
     // Execute: paymaster should reject (gas > 50k)
-    let result = rpc.shell_sendBundle(tx.into()).await;
+    let result = ShellApiServer::send_transaction(rpc, tx).await;
     assert!(
         result.is_err(),
         "Paymaster exceeding gas limit should fail with PaymasterGasExceeded"
@@ -165,10 +182,15 @@ async fn paymaster_gas_metering_at_limit_boundary_success() {
     let paymaster_addr = compute_contract_addr(&acc.address, 0);
 
     // Create a sponsored bundle
-    let tx = make_sponsored_tx(&acc, 1, paymaster_addr, vec![inner_call(paymaster_addr)]);
+    let tx = make_sponsored_tx(
+        &acc,
+        current_account_nonce(&env, &acc.address),
+        paymaster_addr,
+        vec![inner_call(paymaster_addr)],
+    );
 
     // Execute: paymaster at boundary should succeed (<=50k)
-    let result = rpc.shell_sendBundle(tx.into()).await;
+    let result = ShellApiServer::send_transaction(rpc, tx).await;
     assert!(
         result.is_ok() || result.is_err(), // Either success or clear gas exceeded error
         "Boundary condition should be deterministic"
@@ -197,11 +219,16 @@ async fn paymaster_gas_metering_with_session_key_combined() {
 
     // Create a sponsored bundle with session key (if implemented)
     // For now, this is a placeholder for future integration
-    let tx = make_sponsored_tx(&acc, 2, paymaster_addr, vec![inner_call(paymaster_addr)]);
+    let tx = make_sponsored_tx(
+        &acc,
+        current_account_nonce(&env, &acc.address),
+        paymaster_addr,
+        vec![inner_call(paymaster_addr)],
+    );
 
     // Execute: both paymaster and session key validations should succeed
     // (assuming session key implementation is complete)
-    let result = rpc.shell_sendBundle(tx.into()).await;
+    let result = ShellApiServer::send_transaction(rpc, tx).await;
     assert!(
         result.is_ok() || result.is_err(),
         "Combined paymaster + session key should validate consistently"
