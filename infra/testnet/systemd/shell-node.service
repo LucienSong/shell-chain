@@ -1,0 +1,33 @@
+[Unit]
+Description=Shell Chain Testnet Node
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=600
+StartLimitBurst=2
+
+[Service]
+Type=simple
+User=shellchain
+Group=shellchain
+EnvironmentFile=-/etc/default/shell-node
+ExecStart=/usr/local/bin/shell-node-start.sh
+Restart=on-failure
+RestartSec=120
+LimitNOFILE=65535
+TasksMax=128
+
+# Guardrails for 2 vCPU / 4 GiB class testnet validators.
+MemoryHigh=1600M
+MemoryMax=1900M
+CPUQuota=90%
+IOWeight=20
+IOSchedulingClass=idle
+OOMPolicy=stop
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/mnt/shell-data /opt/shell /var/log
+
+[Install]
+WantedBy=multi-user.target

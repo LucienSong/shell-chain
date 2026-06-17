@@ -47,11 +47,16 @@ services:
       --rpc-addr 0.0.0.0:8545
       --ws
       --ws-port 8546
-      --p2p-port 30303
+      --p2p
+      --p2p-addr 0.0.0.0:30303
       --keystore /keystore.json
       --network testnet
       --metrics-addr 0.0.0.0:9090
       --storage-profile full
+      --state-cache-size-mb 32
+      --max-idle-interval 600
+      --rpc-rate-limit 50
+      --node-role validator
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8545", "-d", '{"jsonrpc":"2.0","method":"shell_blockNumber","params":[],"id":1}', "-H", "Content-Type: application/json"]
       interval: 15s
@@ -77,12 +82,17 @@ services:
       --rpc-addr 0.0.0.0:8545
       --ws
       --ws-port 8546
-      --p2p-port 30303
+      --p2p
+      --p2p-addr 0.0.0.0:30303
       --keystore /keystore.json
       --network testnet
       --metrics-addr 0.0.0.0:9090
       --storage-profile full
-      --boot-nodes /ip4/${EXTERNAL_IP:-127.0.0.1}/tcp/30303/p2p/REPLACE_WITH_NODE1_PEER_ID
+      --state-cache-size-mb 32
+      --max-idle-interval 600
+      --rpc-rate-limit 50
+      --node-role validator
+      --bootnodes /ip4/${EXTERNAL_IP:-127.0.0.1}/tcp/30303/p2p/REPLACE_WITH_NODE1_PEER_ID
 
   node3:
     <<: *node-defaults
@@ -103,12 +113,17 @@ services:
       --rpc-addr 0.0.0.0:8545
       --ws
       --ws-port 8546
-      --p2p-port 30303
+      --p2p
+      --p2p-addr 0.0.0.0:30303
       --keystore /keystore.json
       --network testnet
       --metrics-addr 0.0.0.0:9090
       --storage-profile full
-      --boot-nodes /ip4/${EXTERNAL_IP:-127.0.0.1}/tcp/30303/p2p/REPLACE_WITH_NODE1_PEER_ID
+      --state-cache-size-mb 32
+      --max-idle-interval 600
+      --rpc-rate-limit 50
+      --node-role validator
+      --bootnodes /ip4/${EXTERNAL_IP:-127.0.0.1}/tcp/30303/p2p/REPLACE_WITH_NODE1_PEER_ID
 
   prometheus:
     image: prom/prometheus:v2.52.0

@@ -82,7 +82,7 @@ shell-node [GLOBAL FLAGS] run [OPTIONS]
 | `--storage-profile <PROFILE>` | `full` | Storage classification: `archive`, `full`, or `light` |
 | `--witness-retention <N>` | profile default | Override witness bundle retention (0 = keep forever) |
 | `--body-retention <N>` | profile default | Override TX body retention (0 = keep forever) |
-| `--enable-stark-aggregation` | `true` | Enable STARK aggregate proof generation (expensive; default `true` since v0.21.0) |
+| `--enable-stark-aggregation` | `false` | Enable local STARK aggregate proof generation. Expensive; use only on prover or validator-prover nodes. |
 | `--consensus-engine <ENGINE>` | `poa` | Consensus engine: `poa` or `wpoa` |
 
 **Network Profile Defaults:**

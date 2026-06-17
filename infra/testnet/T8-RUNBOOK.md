@@ -51,7 +51,7 @@ docker compose logs node1 2>&1 | grep -E "peer_id|PeerId|listening"
 ### Node2 + Node3
 
 ```bash
-# On each: update docker-compose.yml boot-nodes line with node1's peer ID
+# On each: update docker-compose.yml bootnodes line with node1's peer ID
 # Replace REPLACE_WITH_NODE1_PEER_ID → actual peer ID
 
 docker compose up -d node2   # on node2 VM

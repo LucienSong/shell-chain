@@ -149,7 +149,8 @@ All notable changes to this project will be documented in this file.
     `shell_last_finalized_number`, and `shell_finality_lag_blocks`.
 
 - **STARK aggregate proof infrastructure** (STK.1–STK.5):
-  - `--enable-stark-aggregation` now defaults to **`true`** (was `false`).
+  - `--enable-stark-aggregation` defaults to **`false`** so ordinary validators
+    do not run local proof work unless explicitly configured as prover-capable.
   - `RpcHandler` gains a `proof_amendment_store` field; `block_to_rpc` fallback queries
     the `ProofAmendmentStore` when `sig_aggregate_proof` is `None` in the block header.
   - New RPC method `shell_getProofAmendment(blockHash)` — returns the STARK proof

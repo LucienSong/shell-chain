@@ -442,7 +442,7 @@ A `prover` node syncs the chain, generates `ProofAmendment` proofs, and propagat
 | `--body-retention <N>` | profile default | Override block body retention window (blocks; 0 = forever) |
 | `--witness-retention <N>` | profile default | Override PQ witness retention window (blocks; 0 = forever) |
 | `--node-role <ROLE>` | `validator` | `validator`, `validator-prover`, or `prover` |
-| `--enable-stark-aggregation` | profile default | Enable STARK proof aggregation |
+| `--enable-stark-aggregation` | `false` | Enable local STARK proof aggregation. Use only on prover or validator-prover nodes. |
 | `--max-concurrent-proofs <N>` | `1` | Parallel proof jobs (prover roles only) |
 | `--checkpoint-url <URL>` | — | Checkpoint sync URL |
 | `--rpc-cors <ORIGINS>` | — | CORS allowed origins |
@@ -567,30 +567,34 @@ shell-node --datadir shell-data run \
 
 ### Running as a systemd service
 
-Create `/etc/systemd/system/shell-node.service`:
+For small testnet validators, use the checked-in templates under
+`infra/testnet/systemd/`. They persist the production guardrails validated on
+2 vCPU / 4 GiB instances:
 
-```ini
-[Unit]
-Description=Shell-Chain Node
-After=network.target
-
-[Service]
-Type=simple
-User=shellchain
-ExecStart=/usr/local/bin/shell-node run \
-  --config /etc/shell-chain/config.toml
-Restart=on-failure
-RestartSec=5
-LimitNOFILE=65535
-
-[Install]
-WantedBy=multi-user.target
-```
+- `SHELL_NODE_ROLE=validator`
+- `SHELL_ENABLE_STARK_AGGREGATION=false`
+- `SHELL_STATE_CACHE_SIZE_MB=32`
+- `SHELL_RPC_RATE_LIMIT=50`
+- `SHELL_RPC_ADDR=127.0.0.1:8545`
+- `SHELL_MAX_IDLE_INTERVAL_SECS=600`
+- systemd memory, CPU, IO, task, and restart limits
 
 ```bash
+cd infra/testnet/systemd
+id -u shellchain >/dev/null 2>&1 || sudo useradd --system --home /var/lib/shell-chain --shell /usr/sbin/nologin shellchain
+sudo install -d -o shellchain -g shellchain /mnt/shell-data /opt/shell
+sudo install -m 0755 shell-node-start.sh /usr/local/bin/shell-node-start.sh
+sudo install -m 0644 shell-node.service /etc/systemd/system/shell-node.service
+sudo install -m 0644 shell-node.env.example /etc/default/shell-node
 sudo systemctl daemon-reload
 sudo systemctl enable --now shell-node
 ```
+
+Edit `/etc/default/shell-node` per host for datadir, keystore, password file,
+RPC CORS, and bootnodes. Keep RPC on loopback unless it is protected by a
+firewall or reverse proxy. Use a separate larger host for proof work, then set
+`SHELL_NODE_ROLE=validator-prover` or `SHELL_NODE_ROLE=prover` and
+`SHELL_ENABLE_STARK_AGGREGATION=true`.
 
 ---
 

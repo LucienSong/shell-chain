@@ -130,35 +130,25 @@ secrets:
 
 ### 3.2 systemd unit with an environment file
 
-```ini
-# /etc/systemd/system/shell-node.service
-[Unit]
-Description=Shell-chain validator node
-After=network.target
-
-[Service]
-User=shell
-EnvironmentFile=/etc/shell/node.env
-ExecStart=/usr/local/bin/shell-node \
-    --password-file /etc/shell/ks-password \
-    run \
-    --keystore /opt/shell/keystore/validator.json \
-    --rpc-addr 0.0.0.0:8545 \
-    --network testnet \
-    --db rocksdb \
-    --p2p \
-    --p2p-addr 0.0.0.0:30303
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
+For testnet validators, prefer the maintained templates in
+`infra/testnet/systemd/` instead of writing a unit from scratch. They include
+the low-resource validator defaults, slow restart policy, and systemd
+CPU/memory/IO guardrails.
 
 ```bash
-# /etc/shell/ks-password  (mode 0600, owned by shell user)
-my-secure-validator-password
+cd infra/testnet/systemd
+id -u shellchain >/dev/null 2>&1 || sudo useradd --system --home /var/lib/shell-chain --shell /usr/sbin/nologin shellchain
+sudo install -d -o shellchain -g shellchain /mnt/shell-data /opt/shell
+sudo install -m 0755 shell-node-start.sh /usr/local/bin/shell-node-start.sh
+sudo install -m 0644 shell-node.service /etc/systemd/system/shell-node.service
+sudo install -m 0644 shell-node.env.example /etc/default/shell-node
+sudo systemctl daemon-reload
+sudo systemctl enable --now shell-node
 ```
+
+Edit `/etc/default/shell-node` for the host-specific datadir, keystore, password
+file, RPC CORS, and bootnodes. Keep the password file mode `0600`, and keep RPC
+on loopback unless it is protected by a firewall or reverse proxy.
 
 ---
 
