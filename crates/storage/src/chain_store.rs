@@ -1216,17 +1216,15 @@ impl<S: KvStore> ChainStore<S> {
                 ))
             })?;
             total_gas = total_gas.saturating_add(U256::from(header.gas_used));
-            scanned_system_txs = scanned_system_txs
-                .saturating_add(self.get_system_transactions(&hash)?.len() as u64);
 
-            match (scanned_txs.as_mut(), self.get_block_by_hash(&hash)?) {
-                (Some(total), Some(block)) => {
+            if let Some(total) = scanned_txs.as_mut() {
+                if let Some(block) = self.get_block_by_hash(&hash)? {
                     *total = total.saturating_add(block.transactions.len() as u64);
-                }
-                (Some(_), None) => {
+                    scanned_system_txs = scanned_system_txs
+                        .saturating_add(self.get_system_transactions(&hash)?.len() as u64);
+                } else {
                     scanned_txs = None;
                 }
-                (None, _) => {}
             }
         }
         let total_txs = match scanned_txs {
