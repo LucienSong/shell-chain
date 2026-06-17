@@ -1196,7 +1196,7 @@ mod tests {
     use super::*;
     use crate::api::ShellApiServer;
     use crate::dev_control::DevRpcControl;
-    use shell_core::{Block, BlockHeader, Transaction, TransactionReceipt};
+    use shell_core::{Block, BlockHeader, SystemTransaction, Transaction, TransactionReceipt};
     use shell_crypto::{DilithiumSigner, Signer};
     use shell_primitives::Bytes;
     use shell_storage::{MemoryDb, ProofAmendmentStore, WitnessStore};
@@ -3388,6 +3388,91 @@ mod tests {
         assert_eq!(result["blockHeight"], 1002);
         assert_eq!(result["totalTransactions"], 1);
         assert_eq!(result["gasUsedTotal"], "0x3ea");
+    }
+
+    #[tokio::test]
+    async fn get_chain_stats_counts_explorer_visible_system_transactions() {
+        let handler = setup();
+
+        let genesis = make_genesis_block();
+        let genesis_hash = genesis.hash();
+        handler.chain_store.put_block(&genesis).unwrap();
+        handler.chain_store.set_canonical(0, &genesis_hash).unwrap();
+        handler.chain_store.set_head(&genesis_hash).unwrap();
+
+        let from = test_address(b"chain-stats-visible-from");
+        let tx = SignedTransaction::new(
+            from,
+            Transaction {
+                chain_id: 42,
+                nonce: 0,
+                max_priority_fee_per_gas: 0,
+                max_fee_per_gas: 0,
+                gas_limit: 21_000,
+                to: Some(test_address(b"chain-stats-visible-to")),
+                value: U256::from(1u64),
+                data: Bytes::default(),
+                access_list: None,
+                tx_type: 2,
+                max_fee_per_blob_gas: None,
+                blob_versioned_hashes: None,
+            },
+            shell_crypto::PQSignature::new(shell_crypto::SignatureType::Dilithium3, vec![]),
+        );
+        let reward = SystemTransaction::block_gas_reward(
+            42,
+            1,
+            0,
+            test_address(b"chain-stats-visible-reward"),
+            U256::from(10u64),
+            genesis_hash,
+        );
+        let block1 = Block {
+            header: BlockHeader {
+                parent_hash: genesis_hash,
+                state_root: ShellHash::default(),
+                transactions_root: ShellHash::default(),
+                receipts_root: ShellHash::default(),
+                logs_bloom: Bytes::default(),
+                number: 1,
+                gas_limit: 30_000_000,
+                gas_used: 21_000,
+                timestamp: 1_700_000_003,
+                extra_data: Bytes::default(),
+                proposer: test_address(b"proposer-key-data"),
+                sig_aggregate_proof: None,
+                base_fee_per_gas: 1_000_000_000,
+                withdrawals_root: ShellHash::ZERO,
+                parent_beacon_block_root: ShellHash::ZERO,
+                blob_gas_used: 0,
+                excess_blob_gas: 0,
+                witness_root: None,
+            },
+            transactions: vec![tx],
+            system_transactions: vec![reward],
+            proposer_seal: None,
+        };
+        let hash1 = block1.hash();
+        handler.chain_store.put_block(&block1).unwrap();
+        handler
+            .chain_store
+            .put_system_transactions(&hash1, 1, &block1.system_transactions)
+            .unwrap();
+        handler.chain_store.set_canonical(1, &hash1).unwrap();
+        handler.chain_store.set_head(&hash1).unwrap();
+
+        let stats = ShellApiServer::get_chain_stats(&handler).await.unwrap();
+        assert_eq!(stats["totalTransactions"], 2);
+
+        let block = ShellApiServer::shell_get_block_by_number(
+            &handler,
+            "0x1".into(),
+            Some("summary".into()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(block.transactions.as_array().unwrap().len(), 2);
     }
 
     // ── F-072: RpcBlock new Ethereum fields ──────────────────────────

@@ -427,9 +427,10 @@ impl<S: KvStore + 'static> Node<S> {
         }
 
         // Update canonical aggregate counters for shell_* stats RPCs.
+        let visible_tx_count = block.transactions.len() + block.system_transactions.len();
         block_store.update_chain_totals(
             block.number(),
-            block.transactions.len() as u64,
+            visible_tx_count as u64,
             block.header.gas_used,
         )?;
 

@@ -1202,6 +1202,7 @@ impl<S: KvStore> ChainStore<S> {
     pub fn rebuild_chain_totals(&self, head_number: u64) -> Result<(u64, U256), StorageError> {
         let fallback_tx_count = self.get_total_tx_count_opt()?;
         let mut scanned_txs = Some(0u64);
+        let mut scanned_system_txs = 0u64;
         let mut total_gas = U256::ZERO;
         for number in 0..=head_number {
             let hash = self.get_block_hash_by_number(number)?.ok_or_else(|| {
@@ -1215,6 +1216,8 @@ impl<S: KvStore> ChainStore<S> {
                 ))
             })?;
             total_gas = total_gas.saturating_add(U256::from(header.gas_used));
+            scanned_system_txs = scanned_system_txs
+                .saturating_add(self.get_system_transactions(&hash)?.len() as u64);
 
             match (scanned_txs.as_mut(), self.get_block_by_hash(&hash)?) {
                 (Some(total), Some(block)) => {
@@ -1227,7 +1230,7 @@ impl<S: KvStore> ChainStore<S> {
             }
         }
         let total_txs = match scanned_txs {
-            Some(total) => total,
+            Some(total) => total.saturating_add(scanned_system_txs),
             None => fallback_tx_count.ok_or_else(|| {
                 StorageError::Codec(
                     "cannot rebuild transaction total because canonical block bodies are pruned"
