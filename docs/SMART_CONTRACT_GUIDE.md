@@ -34,7 +34,7 @@ For retained non-cryptographic opcodes, Shell-Chain keeps EVM-familiar behavior.
 | Network | RPC URL | Chain ID |
 |---------|---------|----------|
 | **Local** | `http://localhost:8545` | 1337 |
-| **Alpha Testnet** | `http://testnet.shell.xyz` | 10 |
+| **Public Testnet** | `https://testnet-rpc.shell.org` | 10 |
 
 The local endpoint is the default JSON-RPC server started by `shell-node run`. The alpha testnet endpoint is served via nginx reverse proxy (see [Testnet Operator Guide](TESTNET_OPERATOR_GUIDE.md)).
 
@@ -63,7 +63,7 @@ module.exports = {
       chainId: 1337,
     },
     shellAlpha: {
-      url: "http://testnet.shell.xyz",
+      url: "https://testnet-rpc.shell.org",
       chainId: 10,
     }
   }
@@ -102,7 +102,7 @@ forge create --rpc-url http://localhost:8545 --chain-id 1337 src/Counter.sol:Cou
 For the alpha testnet:
 
 ```bash
-forge create --rpc-url http://testnet.shell.xyz --chain-id 10 src/Counter.sol:Counter
+forge create --rpc-url https://testnet-rpc.shell.org --chain-id 10 src/Counter.sol:Counter
 ```
 
 ---
@@ -447,4 +447,4 @@ Shell-Chain uses the **EIP-1559** gas model:
 
 ---
 
-*Last updated: 2026-05-13*
+*Last updated: 2026-06-17*

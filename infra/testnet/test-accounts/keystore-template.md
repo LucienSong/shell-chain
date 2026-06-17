@@ -8,7 +8,7 @@ Actual keystore files (`account-*.json`) are gitignored.
 ```json
 {
   "version": 1,
-  "address": "pq1<bech32m-encoded>",
+  "address": "0x<64-lowercase-hex>",
   "key_type": "dilithium3",
   "kdf": "argon2id",
   "kdf_params": {
@@ -26,7 +26,7 @@ Actual keystore files (`account-*.json`) are gitignored.
 }
 ```
 
-> **F-PQ1-ONLY**: The `address` field is now `pq1...` bech32m format (not `0x` hex).
+> The `address` field uses the canonical Shell Chain format: `0x` + 64 lowercase hex chars.
 
 See `docs/keystore-format.md` for the full specification.
 
@@ -37,7 +37,7 @@ Each account is allocated in genesis as:
 ```json
 {
   "alloc": {
-    "pq1<account-address>": {
+    "0x<account-address-64-hex>": {
       "balance": "0xde0b6b3a7640000",
       "nonce": 0
     }
@@ -45,16 +45,14 @@ Each account is allocated in genesis as:
 }
 ```
 
-All alloc map keys must be `pq1...` bech32m addresses (F-PQ1-ONLY).
-Legacy `0x` hex keys are **rejected** by the genesis parser.
+All alloc map keys must be canonical `0x` + 64 lowercase hex addresses.
 
 ## Address Format
 
-Addresses are stored in keystores and genesis files as `pq1...` bech32m (canonical).
+Addresses are stored in keystores and genesis files as `0x` + 64 lowercase hex.
 
 To view the address from a keystore:
 ```bash
 shell-node key inspect account-1.json
-# Address: pq1...
+# Address: 0x...
 ```
-

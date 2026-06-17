@@ -1,6 +1,6 @@
-# Shell-Node CLI Reference
+# Shell Node CLI Reference
 
-> `shell-node` v0.22.2 — post-quantum blockchain node (ML-DSA-65 / Dilithium3)
+> `shell-node` v0.24.3 — post-quantum blockchain node (ML-DSA-65 primary, Dilithium3 legacy-compatible)
 
 ---
 
@@ -55,7 +55,7 @@ shell-node [GLOBAL FLAGS] run [OPTIONS]
 | `--block-time <MS>` | profile default | Block production interval in milliseconds (overrides profile) |
 | `--keystore <PATH>` | — | Path to encrypted keystore file |
 | `--chain-id <ID>` | `1337` | Chain ID |
-| `--db <BACKEND>` | `memory` | Storage backend: `memory` or `rocksdb` |
+| `--db <BACKEND>` | profile default | Storage backend: `memory` or `rocksdb` (`dev` defaults to `memory`; `testnet`/`mainnet` default to `rocksdb`) |
 | `--ws` | `false` | Enable WebSocket RPC server |
 | `--ws-port <PORT>` | `8546` | WebSocket RPC port (used with `--ws`) |
 | `--p2p` | `false` | Enable libp2p P2P networking |
@@ -89,7 +89,7 @@ shell-node [GLOBAL FLAGS] run [OPTIONS]
 
 | Profile | Block Time | Chain ID default |
 |---------|-----------|------------------|
-| `dev` | 2 000 ms | 1337 |
+| `dev` | 30 000 ms | 1337 |
 | `testnet` | 2 000 ms | 10 |
 | `mainnet` | 2 000 ms | 1 |
 
@@ -125,7 +125,7 @@ shell-node \
 ### 2.2 `init` — Initialize Data Directory
 
 ```
-shell-node init [OPTIONS]
+shell-node [GLOBAL FLAGS] init [OPTIONS]
 ```
 
 | Flag | Default | Description |
@@ -138,8 +138,9 @@ shell-node init [OPTIONS]
 
 ```bash
 shell-node --datadir /opt/shell/data init \
-    --genesis /opt/shell/testnet-genesis.json \
-    --network testnet
+  --genesis /opt/shell/testnet-genesis.json \
+  --chain-id 10 \
+  --network testnet
 ```
 
 ---
@@ -153,7 +154,7 @@ shell-node [GLOBAL FLAGS] key generate [OPTIONS]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--output <PATH>` | `keystore.json` | Output path for keystore file |
-| `--algorithm <ALGO>` | `dilithium3` | PQ algorithm: `dilithium3` or `mldsa65` (FIPS 204) |
+| `--algorithm <ALGO>` | `dilithium3` | PQ algorithm: `mldsa65` (FIPS 204, recommended) or `dilithium3` (legacy-compatible) |
 
 The command prompts for a password unless a non-interactive source is configured.
 
@@ -183,7 +184,7 @@ Prints the Shell-chain address for a keystore. No password required (address is 
 
 ```bash
 shell-node key inspect validator.json
-# Address: pq1q92dxh9a243vlgampz4cxscrg7750rmzautc48ja
+# Address: 0x9f0b8f6d0a0c2d4e5f60718293a4b5c6d7e8f90123456789abcdef0123456789
 ```
 
 ---
@@ -200,21 +201,20 @@ shell-node [GLOBAL FLAGS] tx <send|deploy|call> [OPTIONS]
 | `tx deploy` | Deploy a smart contract |
 | `tx call` | Call a contract (read-only or state-changing) |
 
-Common flags: `--keystore`, `--to`, `--value`, `--rpc`, `--gas`, `--gas-price`, `--nonce`.
+Common flags include `--keystore`, `--to`, `--value`, `--rpc-url`, `--gas`, `--gas-price`, `--nonce`, and optional `--chain-id`.
 
 ---
 
 ### 2.6 `account` Subcommands
 
 ```
-shell-node account <list|balance|nonce> [OPTIONS]
+shell-node account <balance|nonce> [OPTIONS]
 ```
 
 | Subcommand | Description |
 |-----------|-------------|
-| `account list` | List all keystores in `--datadir` |
-| `account balance --address <ADDR> --rpc <URL>` | Query account balance |
-| `account nonce --address <ADDR> --rpc <URL>` | Query account nonce |
+| `account balance <ADDR> --rpc-url <URL>` | Query account balance |
+| `account nonce <ADDR> --rpc-url <URL>` | Query account nonce |
 
 ---
 
@@ -261,7 +261,7 @@ Removes the chain database directory. `--force` skips the confirmation prompt.
 ### 2.11 `version`
 
 ```
-shell-node version
+shell-node --version
 ```
 
 Prints the binary version and build metadata.

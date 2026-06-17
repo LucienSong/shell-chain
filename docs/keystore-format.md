@@ -44,7 +44,7 @@ and the TypeScript SDK (`shell-sdk`).
 ```json
 {
   "version": 1,
-  "address": "pq1<bech32m-encoded>",
+  "address": "0x<64-lowercase-hex>",
   "key_type": "<algorithm>",
   "kdf": "argon2id",
   "kdf_params": {
@@ -69,7 +69,7 @@ and the TypeScript SDK (`shell-sdk`).
 | Field | Type | Description |
 |-------|------|-------------|
 | `version` | `u32` | Always `1`. Future breaking changes increment this. |
-| `address` | `string` | `pq1`-prefixed bech32m address derived from the public key (see §7). |
+| `address` | `string` | Canonical `0x` + 64 lowercase hex address derived from the public key (see §7). |
 | `key_type` | `string` | Algorithm identifier: `"dilithium3"` or `"mldsa65"` (see §4). |
 | `kdf` | `string` | Always `"argon2id"`. |
 | `kdf_params.m_cost` | `u32` | Argon2id memory cost in KiB (CLI default: `65536` = 64 MiB). |
@@ -120,7 +120,7 @@ dk = argon2id(
 The derived key `dk` is 32 bytes and is used directly as the XChaCha20-Poly1305 key.
 It is zeroed from memory immediately after use.
 
-**CLI defaults** (v0.22.2):
+**CLI defaults** (v0.24.3):
 
 | Parameter | Default | Notes |
 |-----------|---------|-------|
@@ -153,8 +153,8 @@ corrupted data.
 ## 7. Address Derivation
 
 ```
-address_bytes = blake3(version || algo_id || public_key_bytes)[0..20]   // first 20 bytes
-address_pq1   = bech32m_encode("pq1", address_bytes)
+address_bytes = blake3(algo_id || public_key_bytes)   // full 32-byte BLAKE3 output
+address       = "0x" + lowercase_hex(address_bytes)
 ```
 
 The `algo_id` used in the address derivation scheme:
@@ -164,9 +164,10 @@ The `algo_id` used in the address derivation scheme:
 | `dilithium3` | `0` |
 | `mldsa65` | `1` |
 
-Shell-chain addresses are encoded in bech32m form (`pq1...`) everywhere — in the CLI,
-explorer, RPC, and in the keystore `address` field. There is no longer a supported
-hex `0x` address format for user-facing addresses.
+Shell Chain addresses are encoded as `0x` + 64 lowercase hex everywhere user-facing:
+CLI, explorer, RPC, genesis, SDK APIs, and the keystore `address` field. Legacy
+keystores with a `pq1...` address field can still be inspected and decrypted when the
+public key is valid; run `shell-node key migrate` to rewrite them in the canonical format.
 
 ---
 
@@ -178,9 +179,9 @@ hex `0x` address format for user-facing addresses.
 1. Generate random salt (32 bytes) and nonce (24 bytes)
 2. dk = argon2id(password, salt, m_cost, t_cost, p_cost, 32)
 3. derive public_key from secret_key
-4. address_bytes = blake3(version || algo_id || public_key)[0..20]
-5. address = bech32m_encode("pq1", address_bytes)
-6. Write JSON: version=1, address=pq1-encoded, key_type, kdf_params+salt,
+4. address_bytes = blake3(algo_id || public_key)
+5. address = "0x" + lowercase_hex(address_bytes)
+6. Write JSON: version=1, address=0x-encoded, key_type, kdf_params+salt,
               cipher_params+nonce, ciphertext=hex(ciphertext), public_key=hex(public_key)
 7. Zeroize dk
 ```
@@ -210,7 +211,7 @@ hex `0x` address format for user-facing addresses.
 ```json
 {
   "version": 1,
-  "address": "pq1qsfd7hzggn7tqm3nkjl...",
+  "address": "0x1111111111111111111111111111111111111111111111111111111111111111",
   "key_type": "dilithium3",
   "kdf": "argon2id",
   "kdf_params": {

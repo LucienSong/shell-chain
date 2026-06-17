@@ -760,7 +760,7 @@ Returns the client identifier string.
 
 **Parameters:** None
 
-**Returns:** `String` — `"shell-chain/0.22.2"`.
+**Returns:** `String` — `"shell-chain/0.24.3"`.
 
 ```bash
 curl -s http://localhost:8545 \
@@ -769,7 +769,7 @@ curl -s http://localhost:8545 \
 ```
 
 ```json
-{"jsonrpc":"2.0","id":1,"result":"shell-chain/0.22.2"}
+{"jsonrpc":"2.0","id":1,"result":"shell-chain/0.24.3"}
 ```
 
 ---
@@ -991,7 +991,7 @@ Returns node status information.
 **Returns:**
 ```json
 {
-  "version": "ShellChain/v0.22.2/rust",
+  "version": "ShellChain/v0.24.3/rust",
   "chainId": 1337,
   "blockHeight": 42,
   "peerCount": 0,
@@ -1525,4 +1525,4 @@ For the canonical method list (currently 79 methods across `web3_`, `net_`, `eth
 
 ---
 
-*Last updated: 2026-05-22*
+*Last updated: 2026-06-17*

@@ -1,7 +1,7 @@
 # Shell-Node CLI Automation Guide
 
 > Covers non-interactive password handling, CI/CD integration, and scripting patterns for
-> `shell-node` v0.22.2+.
+> `shell-node` v0.24.3+.
 
 ---
 
@@ -94,7 +94,7 @@ shell-node key inspect ./infra/validator.json
 echo "$KEYSTORE_PASSWORD" | \
   shell-node --password-stdin tx send \
     --keystore ./infra/sender.json \
-    --to pq1... \
+    --to 0x<RECIPIENT_ADDRESS_64_HEX> \
     --value 1000000000000000000 \
     --rpc http://47.97.111.158/rpc
 ```
@@ -109,7 +109,7 @@ echo "$KEYSTORE_PASSWORD" | \
 # docker-compose.yml
 services:
   validator:
-    image: shell-chain:0.22.2
+    image: shell-chain:0.24.3
     command:
       - shell-node
       - --password-file=/run/secrets/ks-password
@@ -210,7 +210,7 @@ PASSWORD_FILE=./secrets/ks-password
 
 shell-node --password-file "$PASSWORD_FILE" tx send \
     --keystore ./account-1.json \
-    --to pq1q92dxh9a243vlgampz4cxscrg7750rmzautc48ja \
+    --to 0x<RECIPIENT_ADDRESS_64_HEX> \
     --value 1000000000 \
     --rpc http://47.97.111.158/rpc
 ```
