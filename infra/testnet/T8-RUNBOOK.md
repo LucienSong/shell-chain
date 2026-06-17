@@ -10,7 +10,7 @@ Bring up the 3-validator wPoA testnet (chain_id=10) and observe stable block pro
 - [ ] Ports open: 30303/tcp (P2P), 8545/tcp (RPC), 9090/tcp (metrics)
 - [ ] DNS configured: `rpc.testnet.shell.network` → node1 IP
 - [ ] Keystores for all 3 validators generated and backed up
-- [ ] `SHELL_IMAGE=ghcr.io/shelldao/shell-chain:0.22.2` available or built locally
+- [ ] `SHELL_IMAGE=ghcr.io/shelldao/shell-chain:0.24.3` available or built locally
 
 ## Step-by-Step Bring-Up
 
@@ -21,7 +21,7 @@ Bring up the 3-validator wPoA testnet (chain_id=10) and observe stable block pro
 ssh user@<node1-ip>
 
 # Clone infra
-git clone https://github.com/LucienSong/shell-chain.git
+git clone https://github.com/ShellDAO/shell-chain.git
 cd shell-chain/infra/testnet
 
 # Copy genesis
@@ -33,7 +33,7 @@ cp /path/to/node1-validator.key keys/node1.key
 
 # Configure
 cat > .env << 'EOF'
-SHELL_IMAGE=ghcr.io/shelldao/shell-chain:0.22.2
+SHELL_IMAGE=ghcr.io/shelldao/shell-chain:0.24.3
 NODE1_KEY_PATH=./keys/node1.key
 KEY_PASSWORD=<secure-password>
 EXTERNAL_IP=<node1-public-ip>

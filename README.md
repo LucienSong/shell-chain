@@ -1,6 +1,6 @@
 # shell-chain
 
-<!-- [![Build Status](https://img.shields.io/github/actions/workflow/status/LucienSong/shell-chain/ci.yml?branch=main)](https://github.com/LucienSong/shell-chain/actions) -->
+<!-- [![Build Status](https://img.shields.io/github/actions/workflow/status/ShellDAO/shell-chain/ci.yml?branch=main)](https://github.com/ShellDAO/shell-chain/actions) -->
 <!-- [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE) -->
 <!-- [![Version](https://img.shields.io/badge/version-0.24.3-green.svg)](CHANGELOG.md) -->
 
@@ -31,13 +31,13 @@ See [docs/QUICKSTART.md](docs/QUICKSTART.md) for a complete guide to running a l
 
 ```bash
 # Build
-cargo build --release
+cargo build --release -p shell-cli --bin shell-node
 
-# Initialize a new chain
-./target/release/shell-node init --datadir ./data
+# Initialize a new dev chain with built-in genesis
+./target/release/shell-node --datadir ./data init --network dev --chain-id 1337
 
 # Run a node
-./target/release/shell-node run --datadir ./data
+./target/release/shell-node --datadir ./data run --network dev --db memory
 ```
 
 For production deployments with Docker, see the [Operator Guide](docs/TESTNET_OPERATOR_GUIDE.md).

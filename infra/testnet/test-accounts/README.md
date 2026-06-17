@@ -51,7 +51,7 @@ Or add accounts one-by-one:
 ```bash
 shell-node genesis add-alloc \
     --genesis infra/testnet-genesis.json \
-    --address pq1<account-address> \
+    --address 0x<account-address-64-hex> \
     --balance 1000000000000000000
 ```
 
@@ -69,5 +69,5 @@ shell-node genesis add-alloc \
 The validator uses a separate ML-DSA-65 keystore:
 
 - File: `/opt/shell/keystore/validator.json` (on server)
-- Address: `pq1q92dxh9a243vlgampz4cxscrg7750rmzautc48ja`
+- Address: `0x<validator-address-64-hex>`
 - Algorithm: `mldsa65` (FIPS 204)

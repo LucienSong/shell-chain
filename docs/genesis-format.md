@@ -21,7 +21,7 @@ format — the BLAKE3 derivation `addr = BLAKE3(algo_id || pubkey)` rendered as 
 {
   "chain_id": <u64>,
   "chain_name": "<string>",
-  "network_type": "Mainnet" | "Testnet" | "Devnet",
+  "network_type": "Mainnet" | "Testnet" | "Dev",
   "timestamp": <u64 — Unix seconds for block 0>,
   "gas_limit": <u64>,
   "extra_data": "<string — arbitrary label, max 32 bytes>",
@@ -39,9 +39,9 @@ format — the BLAKE3 derivation `addr = BLAKE3(algo_id || pubkey)` rendered as 
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `chain_id` | `u64` | ✅ | EIP-155 chain ID. Testnet: `10`. Devnet: `1337`. |
+| `chain_id` | `u64` | ✅ | EIP-155 chain ID. Testnet: `10`. Dev: `1337`. |
 | `chain_name` | `string` | ✅ | Human-readable chain name (e.g. `"shell-testnet-wpoa"`). |
-| `network_type` | enum | ✅ | `"Mainnet"`, `"Testnet"`, or `"Devnet"`. |
+| `network_type` | enum | ✅ | `"Mainnet"`, `"Testnet"`, or `"Dev"`. Defaults to `"Dev"` if omitted. |
 | `timestamp` | `u64` | ✅ | Genesis block timestamp (Unix seconds). |
 | `gas_limit` | `u64` | ✅ | Block gas limit for block 0. Recommend `30_000_000`. |
 | `extra_data` | `string` | ✅ | Arbitrary genesis label, stored in block 0 `extra_data`. |
@@ -176,9 +176,9 @@ cp examples/genesis-testnet-wpoa.json my-genesis.json
 
 # Add a faucet account
 shell-node genesis add-alloc \
-    --genesis my-genesis.json \
-    --address 0x<32-byte-faucet-address> \
-    --balance 1000000000000000000000000
+  --genesis my-genesis.json \
+  --address 0x<64-hex-faucet-address> \
+  --balance 1000000000000000000000000
 ```
 
 ### 3. genesis-builder agent
@@ -194,7 +194,7 @@ node agents/genesis-builder/genesis-builder.mjs \
 ### 4. Initialize the node
 
 ```bash
-shell-node init --genesis my-genesis.json --data-dir /var/lib/shell
+shell-node --datadir /var/lib/shell init --genesis my-genesis.json --chain-id 10 --network testnet
 ```
 
 ---
@@ -215,7 +215,7 @@ The node enforces these rules when loading a genesis file (F-082):
 ## References
 
 - `crates/cli/src/commands/genesis.rs` — `genesis add-alloc` subcommand
-- `crates/core/src/genesis.rs` — Genesis struct and parser
+- `crates/genesis/src/config.rs` — Genesis struct and parser
 - `examples/genesis-testnet-wpoa.json` — Production testnet template
 - `agents/genesis-builder/` — Batch alloc generator
 - `docs/TESTNET_OPERATOR_GUIDE.md` — Full testnet setup guide

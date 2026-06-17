@@ -10,8 +10,8 @@ This guide covers everything you need to run a shell-chain testnet node — from
 
 1. [System Requirements](#system-requirements)
 2. [Installation from Source](#installation-from-source)
-3. [Docker Deployment](#docker-deployment)
-4. [Alpha Testnet Deployment](#alpha-testnet-deployment)
+3. [Docker Deployment](#docker-deployment-legacy-reference)
+4. [Public Testnet Deployment](#public-testnet-deployment)
 5. [Configuration](#configuration)
 6. [Key Generation](#key-generation)
 7. [Genesis Initialization](#genesis-initialization)
@@ -51,7 +51,7 @@ This guide covers everything you need to run a shell-chain testnet node — from
 - **Rust** 1.75+ (with `cargo`)
 - **Git**
 - **Docker** & **Docker Compose** (for containerized deployment)
-- **RocksDB** system library (for persistent storage backend)
+- **C/C++ build tools**, `pkg-config`, `clang`, `cmake`, and `protobuf-compiler` for native dependencies
 
 ---
 
@@ -68,14 +68,14 @@ rustup update stable
 ### 2. Clone the repository
 
 ```bash
-git clone https://github.com/LucienSong/shell-chain.git
+git clone https://github.com/ShellDAO/shell-chain.git
 cd shell-chain
 ```
 
 ### 3. Build the release binary
 
 ```bash
-cargo build --release
+cargo build --release -p shell-cli --bin shell-node
 ```
 
 The binary is produced at `target/release/shell-node`.
@@ -89,14 +89,16 @@ cp target/release/shell-node /usr/local/bin/
 ### 4. Verify the installation
 
 ```bash
-shell-node version
+shell-node --version
 ```
 
 ---
 
-## Docker Deployment
+## Docker Deployment (Legacy Reference)
 
-Shell-chain ships with a production-ready Docker Compose file (`docker-compose.prod.yml`) that deploys:
+> The public testnet and production validator topology use systemd-managed bare-metal nodes. The Docker Compose files remain useful for local multi-node experiments and as deployment references.
+
+Shell Chain ships with a Docker Compose file (`docker-compose.prod.yml`) that can deploy:
 
 - **3 validator nodes** (node1, node2, node3)
 - **1 RPC-only node** (rpc-node)
@@ -144,45 +146,58 @@ All nodes use an `eth_blockNumber` JSON-RPC health check (10s interval, 5s timeo
 
 ---
 
-## Alpha Testnet Deployment
+## Public Testnet Deployment
 
-Shell-Chain provides a dedicated `docker-compose.alpha.yml` for joining the public alpha testnet. At v0.22.x, this file is for reference only; the production topology is systemd-based — see `infra/testnet/setup-systemd.sh`.
+> **Live public testnet:** RPC `https://testnet-rpc.shell.org` · WSS `wss://testnet-rpc.shell.org/ws` · Faucet `https://faucet.shell.org` · Explorer `https://explorer.shell.org` · Chain ID `10`
 
-### Quick start
+Shell Chain testnet is deployed using systemd on bare-metal Linux. See [Starting a Node](#starting-a-node) for the recommended startup commands with `--network testnet`.
 
-```bash
-# Copy the environment template and configure
-cp .env.example .env
-# Edit .env to set your node name, RPC settings, etc.
-
-# Start the alpha testnet node
-docker compose -f docker-compose.alpha.yml up -d
-```
-
-The `.env.example` file contains all configurable environment variables with sensible defaults. Review and adjust before starting:
+### Joining the testnet
 
 ```bash
-cat .env.example
+shell-node --datadir /var/lib/shell-chain \
+  --password-file /etc/shell-chain/validator-password \
+  run \
+  --network testnet \
+  --keystore /etc/shell-chain/validator-key.json \
+  --max-idle-interval 0 \
+  --p2p \
+  --bootnode /dns4/testnet.shell.org/tcp/30303 \
+  --rpc-addr 0.0.0.0:8545 \
+  --ws --ws-port 8546 \
+  --rpc-api eth,net,web3,shell \
+  --log-format json
 ```
 
 ### Verify the node is running
 
 ```bash
-# Check container status
-docker compose -f docker-compose.alpha.yml ps
-
-# Check block height
 curl -s http://localhost:8545 \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
 ```
 
-### Upgrading
+### v0.24.x upgrade notes
+
+v0.24.0 changed the BLAKE3 wire format. RocksDB data written by v0.23.x is incompatible with v0.24.x and requires a fresh genesis. Back up any state you need before upgrading from v0.23.x or earlier.
 
 ```bash
+# Stop the node
+sudo systemctl stop shell-node
+
+# Pull and build
 git pull origin main
-docker compose -f docker-compose.alpha.yml build
-docker compose -f docker-compose.alpha.yml up -d
+cargo build --release -p shell-cli --bin shell-node
+sudo install -m 0755 target/release/shell-node /usr/local/bin/shell-node
+
+# Only for v0.23.x -> v0.24.x incompatible database upgrades:
+shell-node --datadir /var/lib/shell-chain removedb --force
+shell-node --datadir /var/lib/shell-chain init \
+  --genesis /etc/shell-chain/genesis.json \
+  --chain-id 10 \
+  --network testnet
+
+sudo systemctl start shell-node
 ```
 
 ---
@@ -202,7 +217,7 @@ curl http://localhost:9090/health
 **Response (200 OK):**
 
 ```json
-{"status":"ok","version":"0.22.2","block_height":1234}
+{"status":"ok","version":"0.24.3","block_height":1234}
 ```
 
 The node is considered alive if the process is running and can respond to HTTP requests.
@@ -258,11 +273,7 @@ The provided `docker/nginx.conf` handles:
 ### Example setup
 
 ```bash
-# The alpha testnet docker-compose includes nginx
-docker compose -f docker-compose.alpha.yml up -d
-
-# Verify the proxy is working
-curl http://testnet.shell.xyz \
+curl https://testnet-rpc.shell.org \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
 ```
@@ -278,7 +289,7 @@ upstream shell_rpc {
 
 server {
     listen 80;
-    server_name testnet.shell.xyz;
+    server_name testnet-rpc.shell.org;
 
     location / {
         proxy_pass http://shell_rpc;
@@ -347,7 +358,7 @@ Reference configs are provided in `examples/`:
 ```toml
 [node]
 datadir = "/data"               # Data directory for chain storage and keystore
-chain_id = 31337                # Chain ID
+chain_id = 10                   # Chain ID
 block_time = 2000               # Block production interval (milliseconds)
 keystore = "/data/keystore.json" # Path to encrypted keystore file (validators only)
 db = "rocksdb"                  # Storage backend: "memory" or "rocksdb"
@@ -371,8 +382,8 @@ bootnodes = []                  # Bootstrap peer multiaddrs
 enable_mdns = true              # mDNS local peer discovery (disable in cloud)
 
 [consensus]
-engine = "poa"                  # Consensus engine (Proof of Authority)
-enable_stark_aggregation = false  # Enable async STARK proof generation (see PROVER_GUIDE.md)
+engine = "wpoa"                 # Consensus engine (Weighted Proof of Authority)
+enable_stark_aggregation = true # Enable async STARK proof generation (see PROVER_GUIDE.md)
 
 [prover]
 max_concurrent_proofs = 1       # Parallel proof jobs (validator-prover / prover roles only)
@@ -413,12 +424,12 @@ A `prover` node syncs the chain, generates `ProofAmendment` proofs, and propagat
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--config <PATH>` | — | Path to TOML config file |
-| `--datadir <PATH>` | `shell-data` | Data directory |
+| `--datadir <PATH>` | `shell-data` | Global flag: data directory |
 | `--rpc-addr <ADDR>` | `127.0.0.1:8545` | RPC listen address |
-| `--block-time <MS>` | `2000` | Block interval (ms) |
+| `--block-time <MS>` | profile default | Block interval (ms): `dev` defaults to 30000, `testnet`/`mainnet` to 2000 |
 | `--keystore <PATH>` | — | Keystore file path |
-| `--chain-id <ID>` | `1337` | Chain ID |
-| `--db <BACKEND>` | `memory` | `memory` or `rocksdb` |
+| `--chain-id <ID>` | `1337` | Chain ID; use `10` for public testnet |
+| `--db <BACKEND>` | profile default | `memory` for `--network dev`; `rocksdb` for `testnet`/`mainnet` |
 | `--ws` | disabled | Enable WebSocket RPC |
 | `--ws-port <PORT>` | `8546` | WebSocket port |
 | `--p2p` | disabled | Enable P2P networking |
@@ -431,7 +442,7 @@ A `prover` node syncs the chain, generates `ProofAmendment` proofs, and propagat
 | `--body-retention <N>` | profile default | Override block body retention window (blocks; 0 = forever) |
 | `--witness-retention <N>` | profile default | Override PQ witness retention window (blocks; 0 = forever) |
 | `--node-role <ROLE>` | `validator` | `validator`, `validator-prover`, or `prover` |
-| `--stark` | disabled | Enable STARK proof aggregation |
+| `--enable-stark-aggregation` | profile default | Enable STARK proof aggregation |
 | `--max-concurrent-proofs <N>` | `1` | Parallel proof jobs (prover roles only) |
 | `--checkpoint-url <URL>` | — | Checkpoint sync URL |
 | `--rpc-cors <ORIGINS>` | — | CORS allowed origins |
@@ -445,17 +456,18 @@ A `prover` node syncs the chain, generates `ProofAmendment` proofs, and propagat
 
 ## Key Generation
 
-Shell-chain uses **CRYSTALS-Dilithium3** post-quantum signatures (see [PQ Crypto Guide](PQ_CRYPTO_GUIDE.md)). Generate a keypair:
+Shell Chain uses **ML-DSA-65** as its primary post-quantum signature scheme (see [PQ Crypto Guide](PQ_CRYPTO_GUIDE.md)). Generate a keypair:
 
 ```bash
-shell-node key generate --output my-validator-key.json
+shell-node key generate --algorithm mldsa65 --output my-validator-key.json
+chmod 600 my-validator-key.json
 ```
 
 You will be prompted for an encryption password. The command creates an encrypted keystore file containing:
 
-- Dilithium3 public key (1,952 bytes)
+- ML-DSA-65 public key (1,952 bytes)
 - Encrypted secret key (4,032 bytes, encrypted with XChaCha20-Poly1305)
-- Derived 20-byte address
+- Derived 32-byte address (`0x` + 64 lowercase hex)
 
 ### Inspect a keystore
 
@@ -477,19 +489,20 @@ This displays the address associated with the keystore without requiring the pas
 {
   "chain_id": 1337,
   "chain_name": "shell-testnet",
-  "timestamp": 1700000000,
+  "network_type": "Dev",
+  "timestamp": 1735689600,
   "gas_limit": 30000000,
   "extra_data": "shell-genesis",
   "consensus": {
     "engine": "poa",
     "authorities": [
-      "pq1YOUR_VALIDATOR_ADDRESS_HERE"
+      "0x<YOUR_VALIDATOR_ADDRESS_64_HEX>"
     ],
     "block_time_secs": 2,
     "epoch_length": 0
   },
   "alloc": {
-    "pq1YOUR_VALIDATOR_ADDRESS_HERE": {
+    "0x<YOUR_VALIDATOR_ADDRESS_64_HEX>": {
       "balance": "0x3635c9adc5dea00000"
     }
   },
@@ -502,7 +515,7 @@ The `authorities` array lists the initial validator addresses (derived from keys
 ### 2. Initialize the data directory
 
 ```bash
-shell-node init --genesis genesis.json --chain-id 1337 --datadir shell-data
+shell-node --datadir shell-data init --genesis genesis.json --chain-id 1337 --network dev
 ```
 
 This creates the data directory structure and writes the genesis block.
@@ -516,10 +529,9 @@ This creates the data directory structure and writes the genesis block.
 A validator requires a keystore and produces blocks:
 
 ```bash
-shell-node run \
+shell-node --datadir shell-data run \
   --config examples/config-validator.toml \
   --keystore my-validator-key.json \
-  --datadir shell-data \
   --db rocksdb \
   --p2p \
   --p2p-addr 0.0.0.0:30303 \
@@ -539,9 +551,8 @@ You will be prompted for the keystore password on startup.
 An RPC node syncs the chain but does not produce blocks. Omit `--keystore`:
 
 ```bash
-shell-node run \
+shell-node --datadir shell-data run \
   --config examples/config-rpc.toml \
-  --datadir shell-data \
   --db rocksdb \
   --p2p \
   --p2p-addr 0.0.0.0:30303 \
@@ -567,8 +578,7 @@ After=network.target
 Type=simple
 User=shellchain
 ExecStart=/usr/local/bin/shell-node run \
-  --config /etc/shell-chain/config.toml \
-  --datadir /var/lib/shell-chain
+  --config /etc/shell-chain/config.toml
 Restart=on-failure
 RestartSec=5
 LimitNOFILE=65535
@@ -663,21 +673,21 @@ docker compose -f docker-compose.prod.yml up -d
 **Export state snapshot:**
 
 ```bash
-shell-node export-state --datadir shell-data --output snapshot.jsonl
+shell-node --datadir shell-data export-state --output snapshot.jsonl
 # Export at a specific block:
-shell-node export-state --datadir shell-data --block 1000 --output snapshot.jsonl
+shell-node --datadir shell-data export-state --block 1000 --output snapshot.jsonl
 ```
 
 **Import state snapshot:**
 
 ```bash
-shell-node import-state --datadir shell-data --snapshot snapshot.jsonl
+shell-node --datadir shell-data import-state --snapshot snapshot.jsonl
 ```
 
 **Remove the database:**
 
 ```bash
-shell-node removedb --datadir shell-data --force
+shell-node --datadir shell-data removedb --force
 ```
 
 ### Log rotation
@@ -691,17 +701,17 @@ shell-node run --config config.toml --log-format json 2>&1 | \
 
 ---
 
-## v0.22.x STARK Settlement Operations
+## v0.24.x STARK Settlement Operations
 
 ### SettledSourceIndex warm-up
 
-On the first boot after upgrading to v0.22.x, `SettledSourceIndex` is rebuilt from genesis automatically. Expect a one-time longer startup (seconds to minutes depending on chain length). Normal operation resumes once backfill completes.
+On the first boot after upgrading from older STARK settlement releases, `SettledSourceIndex` is rebuilt from genesis automatically. Expect a one-time longer startup (seconds to minutes depending on chain length). Normal operation resumes once backfill completes.
 
 ### STARK frontier monitoring
 
 Monitor `shell_stark_frontier_lag` (the difference in blocks between the chain tip and the highest continuously-settled STARK layer). Alert if it exceeds **100 blocks** — this indicates the prover is falling behind.
 
-### New v0.22.x metrics
+### STARK metrics
 
 | Metric | Type | Description |
 |--------|------|-------------|
@@ -711,7 +721,7 @@ Monitor `shell_stark_frontier_lag` (the difference in blocks between the chain t
 
 ### StarkReward system transactions
 
-v0.22.x introduces `StarkReward` system transactions that carry STARK proof settlement payloads. These appear as ordinary transactions in blocks with `shellType: "starkReward"`. Block explorers may need to update their rendering to decode the `decodedInput` field returned by `eth_getTransactionByHash`.
+`StarkReward` system transactions carry STARK proof settlement payloads. These appear as ordinary transactions in blocks with `shellType: "starkReward"`. Block explorers should decode the `decodedInput` field returned by `eth_getTransactionByHash`.
 
 ---
 
@@ -766,4 +776,4 @@ curl -s http://localhost:8545 \
 
 ---
 
-*Last updated: 2026-04-20*
+*Last updated: 2026-06-17*

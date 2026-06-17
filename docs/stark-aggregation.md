@@ -56,7 +56,7 @@ P2P gossip. Peers store the amendment so future block importers can skip per-sig
     "batch_root_bytes": "...(hex)...",
     "proof_bytes": "...(hex STARK proof)..."
   },
-  "prover": "pq1...",
+  "prover": "0x<PROVER_ADDRESS_64_HEX>",
   "prover_signature": "...(hex PQ signature)..."
 }
 ```
@@ -68,7 +68,7 @@ Fields:
 | `block_hash` | `ShellHash` | Hash of the block this proof covers. |
 | `block_number` | `u64` | Height of the block (allows cheap range queries). |
 | `proof` | `SigBatchProof` | STARK batch commitment proof over all tx signatures. |
-| `prover` | `Address` (`pq1...`) | The prover's registered address. |
+| `prover` | `Address` (`0x` + 64 lowercase hex) | The prover's registered address. |
 | `prover_signature` | `Bytes` | PQ signature over `"proof-amendment" ‖ block_hash ‖ block_number_le ‖ proof.batch_root_bytes`. |
 
 ---
@@ -127,7 +127,7 @@ curl -X POST http://localhost:8545 \
     "block_hash": "0x...",
     "block_number": 12345,
     "proof_version": 1,
-    "prover": "pq1...",
+    "prover": "0x<PROVER_ADDRESS_64_HEX>",
     "proof": "0x...(hex STARK bytes)..."
   }
 }
