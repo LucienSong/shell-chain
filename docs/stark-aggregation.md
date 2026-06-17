@@ -85,12 +85,15 @@ To enable proving, start the node with:
 
 ```bash
 shell-node run \
-  --role validator-prover \
+  --node-role validator-prover \
   --enable-stark-aggregation \
   --keystore authority.json
 ```
 
-As of **v0.21.0**, `--enable-stark-aggregation` defaults to **`true`** for `testnet` and `mainnet` profiles (previously `false` everywhere). The `dev` profile still defaults to `false`.
+`--enable-stark-aggregation` defaults to **`false`**. Ordinary validators should
+stay on `--node-role validator` and leave local proving disabled. Run proof work
+only on a dedicated `prover` node or on an explicitly sized `validator-prover`
+node.
 
 ---
 

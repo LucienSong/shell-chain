@@ -20,19 +20,12 @@ This covers all breaking and notable changes from v0.15.0 through v0.23.0.
 | Storage | `prune_state_trie()` can prune unreachable state snapshots for `StorageProfile::Light` |
 | Governance | ValidatorRegistry can propose/activate/deprecate algorithms and expose them via `shell_getAlgorithmRegistry` |
 
-### STARK aggregation — `enable_stark_aggregation` default
+### STARK aggregation default
 
-In v0.15.0, STARK aggregation was disabled by default (`false`). From v0.21.0+, the
-default depends on the **network profile**:
-
-| Profile | Default |
-|---------|---------|
-| `mainnet` | `true` |
-| `testnet` | `true` |
-| `dev` | `false` |
-
-If you were previously setting `--enable-stark-aggregation` explicitly and have upgraded
-to a testnet/mainnet profile, the flag is no longer needed.
+`--enable-stark-aggregation` defaults to `false` for all profiles. Ordinary
+validators should run with `--node-role validator` and leave local proof work
+disabled. Enable STARK aggregation only on explicitly sized `prover` or
+`validator-prover` nodes.
 
 ### New RocksDB column families (auto-created on first start)
 
@@ -191,9 +184,12 @@ shell-node key generate --algorithm mldsa65 --output new-keystore.json
 
 All **Dilithium3** keystores (`algo_id=0`) are unaffected.
 
-### New: `--enable-stark-aggregation` default changed
+### Changed: `--enable-stark-aggregation` default is disabled on validators
 
-`--enable-stark-aggregation` now defaults to **`true`** (was `false`). To keep the prover disabled, explicitly pass `--enable-stark-aggregation=false` or set `enable_stark_aggregation = false` in `config.toml`.
+`--enable-stark-aggregation` now defaults to **`false`**. This prevents ordinary
+testnet/mainnet validators from also running local proof work on small instances.
+Run proof work only by explicitly starting a dedicated `--node-role prover` or
+`--node-role validator-prover` process with `--enable-stark-aggregation`.
 
 ### New RPC methods
 

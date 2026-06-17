@@ -230,8 +230,9 @@ enum Commands {
         body_retention: Option<u64>,
 
         /// Enable STARK aggregate proof generation during block production.
-        /// WARNING: expensive (~150ms per block). On by default for testnet.
-        #[arg(long, default_value = "true")]
+        /// WARNING: expensive. Keep disabled on ordinary validators; use a
+        /// dedicated prover or validator-prover node when proof work is needed.
+        #[arg(long, default_value = "false")]
         enable_stark_aggregation: bool,
 
         /// L2 STARK aggregation mode: disabled, scaffold, or active.
@@ -803,5 +804,40 @@ async fn main() {
     if let Err(e) = result {
         eprintln!("Error: {e}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stark_aggregation_is_opt_in_for_run() {
+        let cli = Cli::try_parse_from(["shell-node", "run"]).unwrap();
+
+        match cli.command {
+            Commands::Run {
+                enable_stark_aggregation,
+                node_role,
+                ..
+            } => {
+                assert!(!enable_stark_aggregation);
+                assert_eq!(node_role, "validator");
+            }
+            _ => panic!("expected run command"),
+        }
+    }
+
+    #[test]
+    fn stark_aggregation_flag_enables_local_proving() {
+        let cli = Cli::try_parse_from(["shell-node", "run", "--enable-stark-aggregation"]).unwrap();
+
+        match cli.command {
+            Commands::Run {
+                enable_stark_aggregation,
+                ..
+            } => assert!(enable_stark_aggregation),
+            _ => panic!("expected run command"),
+        }
     }
 }
