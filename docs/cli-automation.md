@@ -137,6 +137,8 @@ CPU/memory/IO guardrails.
 
 ```bash
 cd infra/testnet/systemd
+id -u shellchain >/dev/null 2>&1 || sudo useradd --system --home /var/lib/shell-chain --shell /usr/sbin/nologin shellchain
+sudo install -d -o shellchain -g shellchain /mnt/shell-data /opt/shell
 sudo install -m 0755 shell-node-start.sh /usr/local/bin/shell-node-start.sh
 sudo install -m 0644 shell-node.service /etc/systemd/system/shell-node.service
 sudo install -m 0644 shell-node.env.example /etc/default/shell-node
@@ -145,7 +147,8 @@ sudo systemctl enable --now shell-node
 ```
 
 Edit `/etc/default/shell-node` for the host-specific datadir, keystore, password
-file, RPC CORS, and bootnodes. Keep the password file mode `0600`.
+file, RPC CORS, and bootnodes. Keep the password file mode `0600`, and keep RPC
+on loopback unless it is protected by a firewall or reverse proxy.
 
 ---
 

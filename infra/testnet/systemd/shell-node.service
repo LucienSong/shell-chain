@@ -7,7 +7,8 @@ StartLimitBurst=2
 
 [Service]
 Type=simple
-User=root
+User=shellchain
+Group=shellchain
 EnvironmentFile=-/etc/default/shell-node
 ExecStart=/usr/local/bin/shell-node-start.sh
 Restart=on-failure

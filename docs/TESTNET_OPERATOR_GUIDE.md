@@ -575,11 +575,14 @@ For small testnet validators, use the checked-in templates under
 - `SHELL_ENABLE_STARK_AGGREGATION=false`
 - `SHELL_STATE_CACHE_SIZE_MB=32`
 - `SHELL_RPC_RATE_LIMIT=50`
+- `SHELL_RPC_ADDR=127.0.0.1:8545`
 - `SHELL_MAX_IDLE_INTERVAL_SECS=600`
 - systemd memory, CPU, IO, task, and restart limits
 
 ```bash
 cd infra/testnet/systemd
+id -u shellchain >/dev/null 2>&1 || sudo useradd --system --home /var/lib/shell-chain --shell /usr/sbin/nologin shellchain
+sudo install -d -o shellchain -g shellchain /mnt/shell-data /opt/shell
 sudo install -m 0755 shell-node-start.sh /usr/local/bin/shell-node-start.sh
 sudo install -m 0644 shell-node.service /etc/systemd/system/shell-node.service
 sudo install -m 0644 shell-node.env.example /etc/default/shell-node
@@ -588,7 +591,8 @@ sudo systemctl enable --now shell-node
 ```
 
 Edit `/etc/default/shell-node` per host for datadir, keystore, password file,
-RPC CORS, and bootnodes. Use a separate larger host for proof work, then set
+RPC CORS, and bootnodes. Keep RPC on loopback unless it is protected by a
+firewall or reverse proxy. Use a separate larger host for proof work, then set
 `SHELL_NODE_ROLE=validator-prover` or `SHELL_NODE_ROLE=prover` and
 `SHELL_ENABLE_STARK_AGGREGATION=true`.
 

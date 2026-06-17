@@ -6,7 +6,7 @@ set -euo pipefail
 : "${SHELL_DATADIR:=/mnt/shell-data/data/node2}"
 : "${SHELL_KEYSTORE:=/opt/shell/keys/validator.json}"
 : "${SHELL_PASSWORD_FILE:=/opt/shell/secrets/v1-pw}"
-: "${SHELL_RPC_ADDR:=0.0.0.0:8545}"
+: "${SHELL_RPC_ADDR:=127.0.0.1:8545}"
 : "${SHELL_WS_PORT:=8546}"
 : "${SHELL_METRICS_ADDR:=127.0.0.1:9090}"
 : "${SHELL_RPC_API:=eth,net,web3,shell}"
@@ -52,4 +52,14 @@ if [[ -n "$SHELL_BOOTNODES" ]]; then
   args+=(--bootnodes "$SHELL_BOOTNODES")
 fi
 
-exec ionice -c3 nice -n 10 /usr/local/bin/shell-node "${args[@]}"
+runner=(/usr/local/bin/shell-node)
+
+if command -v nice >/dev/null 2>&1; then
+  runner=(nice -n 10 "${runner[@]}")
+fi
+
+if command -v ionice >/dev/null 2>&1; then
+  runner=(ionice -c3 "${runner[@]}")
+fi
+
+exec "${runner[@]}" "${args[@]}"

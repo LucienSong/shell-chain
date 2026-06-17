@@ -47,7 +47,8 @@ services:
       --rpc-addr 0.0.0.0:8545
       --ws
       --ws-port 8546
-      --p2p-port 30303
+      --p2p
+      --p2p-addr 0.0.0.0:30303
       --keystore /keystore.json
       --network testnet
       --metrics-addr 0.0.0.0:9090
@@ -81,7 +82,8 @@ services:
       --rpc-addr 0.0.0.0:8545
       --ws
       --ws-port 8546
-      --p2p-port 30303
+      --p2p
+      --p2p-addr 0.0.0.0:30303
       --keystore /keystore.json
       --network testnet
       --metrics-addr 0.0.0.0:9090
@@ -90,7 +92,7 @@ services:
       --max-idle-interval 600
       --rpc-rate-limit 50
       --node-role validator
-      --boot-nodes /ip4/${EXTERNAL_IP:-127.0.0.1}/tcp/30303/p2p/REPLACE_WITH_NODE1_PEER_ID
+      --bootnodes /ip4/${EXTERNAL_IP:-127.0.0.1}/tcp/30303/p2p/REPLACE_WITH_NODE1_PEER_ID
 
   node3:
     <<: *node-defaults
@@ -111,7 +113,8 @@ services:
       --rpc-addr 0.0.0.0:8545
       --ws
       --ws-port 8546
-      --p2p-port 30303
+      --p2p
+      --p2p-addr 0.0.0.0:30303
       --keystore /keystore.json
       --network testnet
       --metrics-addr 0.0.0.0:9090
@@ -120,7 +123,7 @@ services:
       --max-idle-interval 600
       --rpc-rate-limit 50
       --node-role validator
-      --boot-nodes /ip4/${EXTERNAL_IP:-127.0.0.1}/tcp/30303/p2p/REPLACE_WITH_NODE1_PEER_ID
+      --bootnodes /ip4/${EXTERNAL_IP:-127.0.0.1}/tcp/30303/p2p/REPLACE_WITH_NODE1_PEER_ID
 
   prometheus:
     image: prom/prometheus:v2.52.0
