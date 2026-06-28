@@ -1523,6 +1523,101 @@ mod tests {
         assert_eq!(v2.items.len(), 1);
         assert_eq!(v2.items[0]["blockNumber"], "0x2");
         assert!(v2.items[0].get("input").is_none());
+        assert!(v2.items[0].get("signature").is_none());
+
+        let second_page = ShellApiServer::get_transactions_by_address_v2(
+            &handler,
+            from,
+            Some(RpcAddressTransactionsV2Options {
+                from_block: Some(0),
+                to_block: Some(2),
+                cursor: v2.next_cursor.clone(),
+                limit: Some(1),
+                include_total: Some(false),
+                ..RpcAddressTransactionsV2Options::default()
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(second_page.total, None);
+        assert!(!second_page.has_more);
+        assert_eq!(second_page.items.len(), 1);
+        assert_eq!(second_page.items[0]["blockNumber"], "0x1");
+    }
+
+    #[tokio::test]
+    async fn blocks_range_clamps_limits_and_supports_direction() {
+        let handler = setup();
+        let genesis = make_genesis_block();
+        let genesis_hash = genesis.hash();
+        handler.chain_store.put_block(&genesis).unwrap();
+        handler
+            .chain_store
+            .set_canonical(genesis.number(), &genesis_hash)
+            .unwrap();
+
+        let block1 = Block {
+            header: BlockHeader {
+                parent_hash: genesis_hash,
+                state_root: ShellHash::default(),
+                transactions_root: ShellHash::default(),
+                receipts_root: ShellHash::default(),
+                logs_bloom: Bytes::default(),
+                number: 1,
+                gas_limit: 30_000_000,
+                gas_used: 0,
+                timestamp: 1_700_000_001,
+                extra_data: Bytes::default(),
+                proposer: test_address(b"proposer-range"),
+                sig_aggregate_proof: None,
+                base_fee_per_gas: 0,
+                withdrawals_root: ShellHash::ZERO,
+                parent_beacon_block_root: ShellHash::ZERO,
+                blob_gas_used: 0,
+                excess_blob_gas: 0,
+                witness_root: None,
+            },
+            transactions: vec![],
+            system_transactions: vec![],
+            proposer_seal: None,
+        };
+        let block1_hash = block1.hash();
+        handler.chain_store.put_block(&block1).unwrap();
+        handler.chain_store.set_canonical(1, &block1_hash).unwrap();
+        handler.chain_store.set_head(&block1_hash).unwrap();
+
+        let desc = ShellApiServer::get_blocks_range(
+            &handler,
+            "latest".into(),
+            Some(RpcBlocksRangeOptions {
+                direction: RpcListDirection::Desc,
+                limit: Some(250),
+                tx_detail: RpcV2TxDetail::None,
+                tx_limit: Some(250),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(desc.limit, 100);
+        assert_eq!(desc.blocks.len(), 2);
+        assert_eq!(desc.blocks[0].number, "0x1");
+        assert_eq!(desc.blocks[1].number, "0x0");
+        assert!(desc.blocks[0].transactions.as_array().unwrap().is_empty());
+
+        let asc = ShellApiServer::get_blocks_range(
+            &handler,
+            "0x0".into(),
+            Some(RpcBlocksRangeOptions {
+                direction: RpcListDirection::Asc,
+                limit: Some(2),
+                tx_detail: RpcV2TxDetail::Summary,
+                tx_limit: Some(1),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(asc.blocks[0].number, "0x0");
+        assert_eq!(asc.blocks[1].number, "0x1");
     }
 
     #[tokio::test]
