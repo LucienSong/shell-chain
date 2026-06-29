@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.25.1] — 2026-06-29 — RPC v2 correctness fixes
+
+### Fixed
+
+- Removed stale canonical transaction/address index entries during reorg and
+  dev snapshot revert paths, so RPC v2 address history no longer returns
+  orphaned-branch transactions.
+- Re-indexed side-fork blocks when they become canonical during reorg.
+- Fixed `shell_getBlocksRange` pagination so `nextStart` is only returned when
+  a real next canonical block exists.
+- Updated audited Rust dependency lock entries for `anyhow` and
+  `bitcoin_hashes`.
+
 ## [0.25.0] — 2026-06-29 — RPC v2 and PQVM contract readiness
 
 ### Added
