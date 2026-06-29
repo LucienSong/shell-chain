@@ -450,6 +450,7 @@ impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
         };
         let mut current = self.resolve_block_number_for_v2(&start)?;
         let mut blocks = Vec::new();
+        let mut has_next_candidate = false;
         for _ in 0..limit {
             let Some(block) = self
                 .chain_store
@@ -464,13 +465,25 @@ impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
             }
             blocks.push(rpc);
             match options.direction {
-                RpcListDirection::Desc if current == 0 => break,
-                RpcListDirection::Desc => current = current.saturating_sub(1),
-                RpcListDirection::Asc => current = current.saturating_add(1),
+                RpcListDirection::Desc if current == 0 => {
+                    has_next_candidate = false;
+                    break;
+                }
+                RpcListDirection::Desc => {
+                    current = current.saturating_sub(1);
+                    has_next_candidate = true;
+                }
+                RpcListDirection::Asc => {
+                    current = current.saturating_add(1);
+                    has_next_candidate = true;
+                }
             }
         }
-        let next_start = if blocks.len() as u64 == limit {
-            Some(hex_u64(current))
+        let next_start = if blocks.len() as u64 == limit && has_next_candidate {
+            self.chain_store
+                .get_block_by_number(current)
+                .map_err(internal_err)?
+                .map(|_| hex_u64(current))
         } else {
             None
         };

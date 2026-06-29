@@ -121,6 +121,10 @@ impl ReorgEngine {
             }
         }
 
+        for hash in old_chain {
+            chain_store.delete_block_transaction_indexes(hash)?;
+        }
+
         let mut applied = 0;
         let mut new_head = ancestor_hash;
         let mut tip_state_root = ancestor_block.header.state_root;
@@ -130,6 +134,7 @@ impl ReorgEngine {
             })?;
 
             chain_store.set_canonical(block.number(), hash)?;
+            chain_store.index_block_transactions(&block)?;
             tip_state_root = block.header.state_root;
             new_head = *hash;
             applied += 1;
@@ -615,6 +620,54 @@ mod tests {
         // Canonical mapping at height 6 should now point to the new block.
         let canon = chain_store.get_block_by_number(6).unwrap().unwrap();
         assert_eq!(canon.hash(), new_hash);
+    }
+
+    #[test]
+    fn test_reorg_replaces_canonical_transaction_indexes() {
+        let (store, chain_store, world_state, root) = setup_chain();
+
+        let ancestor = make_block(5, make_hash(0), root);
+        chain_store.put_block(&ancestor).unwrap();
+        let ancestor_hash = ancestor.hash();
+
+        let tx = make_tx();
+        let tx_hash = tx.hash();
+        let sender = tx.sender();
+        let mut old6 = make_block(6, ancestor_hash, root);
+        old6.transactions.push(tx);
+        chain_store.put_block(&old6).unwrap();
+        let old_hash = old6.hash();
+        chain_store.set_canonical(6, &old_hash).unwrap();
+        chain_store.set_head(&old_hash).unwrap();
+
+        assert_eq!(
+            chain_store.get_tx_location(&tx_hash).unwrap(),
+            Some((old_hash, 0))
+        );
+
+        let mut new6 = make_block(6, ancestor_hash, root);
+        new6.header.timestamp += 42;
+        chain_store.put_side_fork_block(&new6).unwrap();
+        let new_hash = new6.hash();
+
+        ReorgEngine::execute(
+            &chain_store,
+            &world_state,
+            &store,
+            ancestor_hash,
+            5,
+            &[old_hash],
+            &[new_hash],
+            0,
+        )
+        .unwrap();
+
+        assert!(chain_store.get_tx_location(&tx_hash).unwrap().is_none());
+        assert!(chain_store
+            .get_txs_by_address_cursor(&sender, 0, u64::MAX, None, 10, true)
+            .unwrap()
+            .0
+            .is_empty());
     }
 
     #[test]

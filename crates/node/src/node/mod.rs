@@ -1072,6 +1072,10 @@ impl<S: KvStore + 'static> Node<S> {
             .ok_or(NodeError::NoGenesis)?;
         if current_head.number() > snapshot.head_number {
             for number in (snapshot.head_number + 1)..=current_head.number() {
+                if let Some(block) = self.chain_store.get_block_by_number(number)? {
+                    self.chain_store
+                        .delete_block_transaction_indexes(&block.hash())?;
+                }
                 self.chain_store.delete_canonical(number)?;
             }
         }

@@ -1602,7 +1602,24 @@ mod tests {
         assert_eq!(desc.blocks.len(), 2);
         assert_eq!(desc.blocks[0].number, "0x1");
         assert_eq!(desc.blocks[1].number, "0x0");
+        assert_eq!(desc.next_start, None);
         assert!(desc.blocks[0].transactions.as_array().unwrap().is_empty());
+
+        let genesis_only = ShellApiServer::get_blocks_range(
+            &handler,
+            "0x0".into(),
+            Some(RpcBlocksRangeOptions {
+                direction: RpcListDirection::Desc,
+                limit: Some(1),
+                tx_detail: RpcV2TxDetail::None,
+                tx_limit: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(genesis_only.blocks.len(), 1);
+        assert_eq!(genesis_only.blocks[0].number, "0x0");
+        assert_eq!(genesis_only.next_start, None);
 
         let asc = ShellApiServer::get_blocks_range(
             &handler,
@@ -1618,6 +1635,7 @@ mod tests {
         .unwrap();
         assert_eq!(asc.blocks[0].number, "0x0");
         assert_eq!(asc.blocks[1].number, "0x1");
+        assert_eq!(asc.next_start, None);
     }
 
     #[tokio::test]
