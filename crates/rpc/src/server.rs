@@ -284,12 +284,12 @@ pub async fn start_rpc_server<S: KvStore + 'static>(
 
     // Build middleware stack:
     //   1. CORS
-    //   2. Optional global request rate limit (req/sec)
-    //   3. Optional Bearer API key authentication
+    //   2. Optional Bearer API key authentication
+    //   3. Optional request rate limit keyed by bearer token/public bucket
     let middleware = tower::ServiceBuilder::new()
         .layer(cors)
-        .layer(RateLimitLayer::from_config(config.rate_limit_per_sec))
-        .layer(ApiKeyLayer::new(config.api_key.clone()));
+        .layer(ApiKeyLayer::new(config.api_key.clone()))
+        .layer(RateLimitLayer::from_config(config.rate_limit_per_sec));
 
     // Conditionally merge RPC modules based on enabled namespaces.
     let ns = &config.api_namespaces;

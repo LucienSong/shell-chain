@@ -454,11 +454,23 @@ impl<S: KvStore + 'static> Node<S> {
             // re-registration because validate_tx_for_import performs no writes.
             let pre_verified = PreVerified;
             let mut validation_pubkeys: HashMap<Address, Vec<u8>> = HashMap::new();
+            let mut validation_nonces: HashMap<Address, u64> = HashMap::new();
             for (idx, tx) in block.transactions.iter().enumerate() {
                 // Skip full validation for txs whose pubkey could not be
                 // resolved (unresolvable Reference-mode from historical blocks).
                 // Correctness is guaranteed by the state-root check below.
                 if resolved_pks[idx].is_empty() || tx.signature.data.is_empty() {
+                    let world_state = evm.state_db_mut().world_state_mut();
+                    let expected_nonce = match validation_nonces.get(&tx.from) {
+                        Some(next_nonce) => *next_nonce,
+                        None => world_state.get_nonce(&tx.from)?,
+                    };
+                    let next_nonce = if tx.tx.nonce >= expected_nonce {
+                        tx.tx.nonce.saturating_add(1)
+                    } else {
+                        expected_nonce
+                    };
+                    validation_nonces.insert(tx.from, next_nonce);
                     continue;
                 }
 
@@ -470,12 +482,19 @@ impl<S: KvStore + 'static> Node<S> {
                     }
                 }
 
-                validate_tx_for_import(
+                let world_state = evm.state_db_mut().world_state_mut();
+                let expected_nonce = match validation_nonces.get(&tx.from) {
+                    Some(next_nonce) => *next_nonce,
+                    None => world_state.get_nonce(&tx.from)?,
+                };
+
+                validate_tx_for_import_with_expected_nonce(
                     &tx_for_validation,
-                    evm.state_db_mut().world_state_mut(),
+                    world_state,
                     &import_cs,
                     &pre_verified,
                     self.config.chain_id,
+                    expected_nonce,
                 )
                 .map_err(|e| {
                     NodeError::Startup(format!(
@@ -483,6 +502,7 @@ impl<S: KvStore + 'static> Node<S> {
                         block.number()
                     ))
                 })?;
+                validation_nonces.insert(tx.from, expected_nonce.saturating_add(1));
 
                 if let shell_core::PubkeyMode::Embedded(pk) = &tx.pubkey_mode {
                     validation_pubkeys

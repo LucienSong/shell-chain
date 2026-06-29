@@ -1473,13 +1473,25 @@ impl SignedTransaction {
         Some(shell_primitives::blake3_hash(&buf))
     }
 
-    /// Canonical transaction ID — the simple tx signing hash, independent of AA bundle.
-    /// AA bundle senders sign `batch_signing_hash()`, but the chain indexes txs by this hash.
+    /// Legacy transaction ID: the simple tx signing hash independent of AA bundle.
+    ///
+    /// This remains useful for compatibility and migration logic. New canonical
+    /// AA transaction identity must include the bundle, otherwise two AA
+    /// envelopes with different inner calls collide in mempool/storage indexes.
+    pub fn legacy_hash(&self) -> ShellHash {
+        self.tx.signing_hash(self.signature.sig_type.as_u8())
+    }
+
+    /// Canonical transaction ID.
+    ///
+    /// For AA bundles this is the bundle-aware signing hash. For all other
+    /// transactions it remains the simple tx signing hash.
     /// Cached after first computation via `OnceLock`.
     pub fn hash(&self) -> ShellHash {
-        *self
-            .tx_hash
-            .get_or_init(|| self.tx.signing_hash(self.signature.sig_type.as_u8()))
+        *self.tx_hash.get_or_init(|| {
+            self.batch_signing_hash()
+                .unwrap_or_else(|| self.legacy_hash())
+        })
     }
 
     pub fn public_key(&self) -> Option<&[u8]> {
@@ -2883,9 +2895,43 @@ mod tests {
                 .unwrap();
 
         let batch_hash = signed.batch_signing_hash().expect("aa tx");
-        let legacy_hash = signed.hash();
+        let legacy_hash = signed.legacy_hash();
         // Domain byte + bundle bytes guarantee distinct hashes.
         assert_ne!(batch_hash, legacy_hash);
+        assert_eq!(signed.hash(), batch_hash);
+    }
+
+    #[test]
+    fn aa_canonical_hash_changes_with_inner_calls() {
+        let tx = sample_aa_tx();
+        let from = Address::from([0x42; 20]);
+        let sig = PQSignature::new(SignatureType::Dilithium3, vec![0xBB; 50]);
+        let bundle_a = AaBundle {
+            inner_calls: vec![sample_inner_call(1)],
+            paymaster: None,
+            paymaster_signature: None,
+            ..Default::default()
+        };
+        let bundle_b = AaBundle {
+            inner_calls: vec![sample_inner_call(2)],
+            paymaster: None,
+            paymaster_signature: None,
+            ..Default::default()
+        };
+        let signed_a = SignedTransaction::with_aa_bundle(
+            from,
+            tx.clone(),
+            sig.clone(),
+            PubkeyMode::Reference,
+            bundle_a,
+        )
+        .unwrap();
+        let signed_b =
+            SignedTransaction::with_aa_bundle(from, tx, sig, PubkeyMode::Reference, bundle_b)
+                .unwrap();
+
+        assert_eq!(signed_a.legacy_hash(), signed_b.legacy_hash());
+        assert_ne!(signed_a.hash(), signed_b.hash());
     }
 
     #[test]

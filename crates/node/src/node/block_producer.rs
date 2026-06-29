@@ -83,7 +83,8 @@ impl<S: KvStore + 'static> Node<S> {
                 continue;
             }
             // F-302: Re-validate before execution (algorithm restrictions may have
-            // changed since admission). Uses import-path validator (skips nonce/balance).
+            // changed since admission). Uses import-path validator (checks nonce,
+            // skips balance because execution enforces spendability).
             let pre_verifier = PreVerified;
             if let Err(e) = validate_tx_for_import(
                 tx,

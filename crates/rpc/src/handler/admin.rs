@@ -37,20 +37,11 @@ impl<S: KvStore + 'static> AdminApiServer for RpcHandler<S> {
     async fn peers(&self) -> Result<Vec<PeerInfo>, ErrorObjectOwned> {
         // The RPC handler receives only an atomic peer count from the network
         // layer; full per-peer detail (remote addr, client version) requires
-        // a richer channel which is wired in Batch 5 network observability.
-        // For now, return a count-accurate summary with placeholder per-peer
-        // data so `admin_peers` is callable and returns valid JSON.
-        let count = self.peer_count.load(Ordering::Relaxed);
-        let peers = (0..count)
-            .map(|i| PeerInfo {
-                id: format!("peer-{i}"),
-                remote_addr: String::new(),
-                client_version: String::new(),
-                block_height: 0,
-                connected_seconds: 0,
-            })
-            .collect();
-        Ok(peers)
+        // a richer network snapshot channel. Do not synthesize peer IDs here:
+        // fake rows mislead operators and monitoring systems.
+        Err(crate::error::method_not_found(
+            "admin_peers requires network peer detail snapshots; use admin_nodeInfo.peer_count for now",
+        ))
     }
 
     async fn add_peer(&self, _multiaddr: String) -> Result<bool, ErrorObjectOwned> {

@@ -372,7 +372,7 @@ listen_addr = "0.0.0.0:8545"   # JSON-RPC HTTP listen address
 ws_enabled = true               # Enable WebSocket RPC
 ws_port = 8546                  # WebSocket listen port
 cors_origins = ["*"]            # CORS allowed origins (⚠️ restrict in production!)
-rate_limit = 100                # Max RPC requests per second per connection
+rate_limit = 100                # Max RPC requests/sec per bearer token or public bucket
 api_modules = ["eth", "net", "web3", "shell"]  # Enabled API namespaces
 
 [p2p]
@@ -398,6 +398,12 @@ level = "info"                  # Log level (trace, debug, info, warn, error)
 format = "json"                 # Log format: "text" or "json"
 ```
 
+P2P payloads use a two-level size policy. The absolute raw-message ceiling is
+50 MiB so PQ-signed block/body sync responses can still move over the network.
+After decoding, tighter per-message limits apply: transaction gossip is capped
+at 1 MiB, consensus/proof messages at 2 MiB, and control messages at 64 KiB.
+Oversized messages are rejected and repeated violations count against the peer.
+
 ### Node roles
 
 Shell-Chain supports three operational roles, set via `node.node_role` or `--node-role`:
@@ -417,7 +423,7 @@ A `prover` node syncs the chain, generates `ProofAmendment` proofs, and propagat
 | `node.keystore` | **Required** (path to keystore) | Omit (no block production) |
 | `node.block_time` | Set (e.g., `2000`) | Not needed |
 | `rpc.api_modules` | `["eth", "net", "web3", "shell"]` | `["eth", "net", "web3", "shell", "debug", "trace"]` |
-| `rpc.rate_limit` | `100` | `50` (lower to protect from abuse) |
+| `rpc.rate_limit` | `100` | `50` (per bearer token/public bucket; lower to protect from abuse) |
 
 ### CLI flag reference (for `shell-node run`)
 

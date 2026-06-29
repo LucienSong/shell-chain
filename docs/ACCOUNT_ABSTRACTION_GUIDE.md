@@ -118,35 +118,56 @@ This is the hook for advanced account policies such as:
 
 ## 4. Custom validator contract interface
 
-Shell-Chain's native AA path calls a validation function with the transaction
-hash and signature material:
+Shell-Chain's native AA path first calls the V2 validation function. V2 gives
+the validator enough transaction context to enforce target, value, gas, data,
+and bundle policies without guessing from an opaque hash:
 
 ```solidity
 interface IAccountValidator {
-    function validateTransaction(
+    function validateTransactionV2(
         bytes32 txHash,
+        bytes32 from,
+        uint64 nonce,
+        bytes32 to,
+        uint256 value,
+        uint64 gasLimit,
+        uint64 maxFeePerGas,
+        uint64 chainId,
+        bytes32 dataHash,
+        bytes32 aaBundleHash,
         bytes calldata sig,
         bytes calldata pubkey
     ) external returns (bytes1);
 }
 ```
 
+For compatibility with existing validators, the node falls back to the legacy
+V1 selector only when the V2 call reverts or halts:
+
+```solidity
+function validateTransaction(
+    bytes32 txHash,
+    bytes calldata sig,
+    bytes calldata pubkey
+) external returns (bytes1);
+```
+
 ### Validation call behavior
 
 - **target:** the account address being validated
 - **gas cap:** `500_000`
-- **input:** `validateTransaction(bytes32,bytes,bytes)`
+- **preferred input:** `validateTransactionV2(bytes32,bytes32,uint64,bytes32,uint256,uint64,uint64,uint64,bytes32,bytes32,bytes,bytes)`
+- **legacy fallback:** `validateTransaction(bytes32,bytes,bytes)` only after V2 reverts or halts
 - **execution model:** isolated validation dry-run against a world-state snapshot
 - **replay guard:** protocol nonce equality is still enforced before execution
 
-### Current limitation
+### Compatibility and nonce policy
 
-Custom validators currently receive only `txHash`, `sig`, and `pubkey`.
-That is enough for custom signature / policy checks, but **not** enough to
-safely replace canonical nonce handling. Because of that, Shell-Chain keeps the
-protocol nonce check as the baseline replay guard even when
-`validation_code_hash` is set. Richer custom nonce schemes are deferred until
-the validator ABI carries more transaction context.
+V2 validators receive enough typed context to enforce application policy, but
+Shell-Chain still keeps protocol nonce equality as the baseline replay guard
+when `validation_code_hash` is set. Legacy V1 validators receive only
+`txHash`, `sig`, and `pubkey`; they remain supported for compatibility but
+should be upgraded to V2 for new deployments.
 
 Validation succeeds when the return value is interpreted as **true / valid**.
 Current node logic accepts the common "magic valid" encodings:

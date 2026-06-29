@@ -10,12 +10,15 @@ use shell_primitives::ShellHash;
 
 use crate::error::NetworkError;
 
-/// Default maximum message size: 4 MiB.
+/// Absolute raw-message ceiling before deserialization.
 ///
-/// This matches the GossipSub `max_transmit_size` and prevents memory
-/// exhaustion from oversized payloads before deserialization is attempted.
-/// 50 MiB — PQ-signed blocks (ML-DSA-65 ~3.3 KB sig per tx) can exceed 4 MiB.
+/// PQ-signed block/body sync responses can exceed 4 MiB, so the raw transport
+/// ceiling remains high. After decoding, each message variant is checked
+/// against a tighter type-specific limit via [`NetworkMessage::max_serialized_size`].
 pub const MAX_MESSAGE_SIZE: usize = 50 * 1024 * 1024;
+pub const MAX_TX_GOSSIP_SIZE: usize = 1024 * 1024;
+pub const MAX_CONSENSUS_MESSAGE_SIZE: usize = 2 * 1024 * 1024;
+pub const MAX_CONTROL_MESSAGE_SIZE: usize = 64 * 1024;
 
 /// Unique identifier for a network peer.
 #[derive(Debug, Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]
@@ -161,6 +164,29 @@ pub enum NetworkTopic {
 }
 
 impl NetworkMessage {
+    /// Maximum serialized size allowed for this specific message kind.
+    pub fn max_serialized_size(&self) -> usize {
+        match self {
+            Self::NewBlock(_) | Self::BlockResponse { .. } | Self::BodyResponse { .. } => {
+                MAX_MESSAGE_SIZE
+            }
+            Self::NewTransaction(_) => MAX_TX_GOSSIP_SIZE,
+            Self::NewAttestation(_)
+            | Self::ProofAmendment { .. }
+            | Self::ProofAck { .. }
+            | Self::EquivocationEvidence(_)
+            | Self::ProofChallenge(_)
+            | Self::ProofChallengeResponse(_)
+            | Self::WPoaVote { .. }
+            | Self::WPoaViewChange(_) => MAX_CONSENSUS_MESSAGE_SIZE,
+            Self::BlockRequest { .. }
+            | Self::BodyRequest { .. }
+            | Self::Ping
+            | Self::Pong
+            | Self::StorageCapability { .. } => MAX_CONTROL_MESSAGE_SIZE,
+        }
+    }
+
     /// Returns the propagation topic for this message type.
     ///
     /// Returns `None` for messages that don't map to a specific topic
@@ -215,7 +241,10 @@ pub fn validate_message_size(data: &[u8], limit: usize) -> Result<(), NetworkErr
 /// Combines size validation and JSON deserialization in a single call.
 pub fn deserialize_checked(data: &[u8], limit: usize) -> Result<NetworkMessage, NetworkError> {
     validate_message_size(data, limit)?;
-    serde_json::from_slice(data).map_err(|e| NetworkError::Serialization(e.to_string()))
+    let msg: NetworkMessage =
+        serde_json::from_slice(data).map_err(|e| NetworkError::Serialization(e.to_string()))?;
+    validate_message_size(data, msg.max_serialized_size())?;
+    Ok(msg)
 }
 
 #[cfg(test)]
@@ -490,6 +519,24 @@ mod tests {
     #[test]
     fn max_message_size_constant() {
         assert_eq!(MAX_MESSAGE_SIZE, 50 * 1024 * 1024);
+    }
+
+    #[test]
+    fn deserialize_checked_rejects_oversized_transaction_gossip() {
+        let mut signed = test_signed_tx();
+        signed.tx.data = Bytes::from(vec![0xAA; MAX_TX_GOSSIP_SIZE + 1]);
+        let msg = NetworkMessage::NewTransaction(Box::new(signed));
+        let json = serde_json::to_vec(&msg).unwrap();
+        assert!(json.len() < MAX_MESSAGE_SIZE);
+
+        let err = deserialize_checked(&json, MAX_MESSAGE_SIZE).unwrap_err();
+        assert!(matches!(
+            err,
+            NetworkError::MessageTooLarge {
+                limit: MAX_TX_GOSSIP_SIZE,
+                ..
+            }
+        ));
     }
 
     #[test]

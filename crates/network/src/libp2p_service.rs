@@ -710,7 +710,10 @@ async fn handle_swarm_event(
                 return;
             }
             let peer = PeerId(propagation_source.to_string());
-            match serde_json::from_slice::<NetworkMessage>(&message.data) {
+            match crate::message::deserialize_checked(
+                &message.data,
+                crate::message::MAX_MESSAGE_SIZE,
+            ) {
                 Ok(msg) => {
                     // F-062: accept valid message so gossipsub propagates it.
                     swarm
@@ -977,6 +980,7 @@ impl NetworkService for Libp2pNetwork {
 
         let data =
             serde_json::to_vec(&msg).map_err(|e| NetworkError::Serialization(e.to_string()))?;
+        crate::message::validate_message_size(&data, msg.max_serialized_size())?;
 
         self.cmd_tx
             .send(SwarmCommand::Publish { topic, data })

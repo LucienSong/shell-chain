@@ -305,7 +305,7 @@ pub fn validate_tx<S: KvStore + 'static, V: Verifier>(
 ///
 /// Unlike [`validate_tx`], this function:
 /// - Does NOT register pubkeys (read-only)
-/// - Does NOT check nonce/balance (validated implicitly by EVM re-execution)
+/// - Does NOT check balances (validated by the block state-root transition)
 ///
 /// Checks performed:
 /// 1. Chain ID
@@ -315,12 +315,56 @@ pub fn validate_tx<S: KvStore + 'static, V: Verifier>(
 /// 5. Pubkey binding conflict
 /// 6. Address derivation
 /// 7. Signature verification
+/// 8. Protocol nonce equality
 pub fn validate_tx_for_import<S: KvStore + 'static, V: Verifier>(
     signed_tx: &SignedTransaction,
     world_state: &mut WorldState<S>,
     chain_store: &ChainStore<S>,
     verifier: &V,
     expected_chain_id: u64,
+) -> Result<(), TxValidationError> {
+    validate_tx_for_import_inner(
+        signed_tx,
+        world_state,
+        chain_store,
+        verifier,
+        expected_chain_id,
+        None,
+    )
+}
+
+/// Validate a transaction during block import using a caller-supplied expected
+/// nonce.
+///
+/// Block import validates a whole block before executing it. For multiple
+/// transactions from the same sender in one block, the second transaction's
+/// expected nonce is the previous transaction's nonce plus one, even though the
+/// isolated pre-execution world state still contains the parent-block nonce.
+pub fn validate_tx_for_import_with_expected_nonce<S: KvStore + 'static, V: Verifier>(
+    signed_tx: &SignedTransaction,
+    world_state: &mut WorldState<S>,
+    chain_store: &ChainStore<S>,
+    verifier: &V,
+    expected_chain_id: u64,
+    expected_nonce: u64,
+) -> Result<(), TxValidationError> {
+    validate_tx_for_import_inner(
+        signed_tx,
+        world_state,
+        chain_store,
+        verifier,
+        expected_chain_id,
+        Some(expected_nonce),
+    )
+}
+
+fn validate_tx_for_import_inner<S: KvStore + 'static, V: Verifier>(
+    signed_tx: &SignedTransaction,
+    world_state: &mut WorldState<S>,
+    chain_store: &ChainStore<S>,
+    verifier: &V,
+    expected_chain_id: u64,
+    expected_nonce: Option<u64>,
 ) -> Result<(), TxValidationError> {
     let tx = &signed_tx.tx;
 
@@ -355,7 +399,20 @@ pub fn validate_tx_for_import<S: KvStore + 'static, V: Verifier>(
         return Err(TxValidationError::GasTooLow(tx.gas_limit));
     }
 
-    let _ = validate_aa_tx(signed_tx, world_state, chain_store, verifier)?;
+    let validation = validate_aa_tx(signed_tx, world_state, chain_store, verifier)?;
+
+    if validation.protocol_checks_nonce {
+        let account_nonce = match expected_nonce {
+            Some(expected) => expected,
+            None => world_state.get_nonce(&signed_tx.from)?,
+        };
+        if tx.nonce != account_nonce {
+            return Err(TxValidationError::NonceMismatch {
+                expected: account_nonce,
+                got: tx.nonce,
+            });
+        }
+    }
 
     // Paymaster PQ signature already verified inside validate_aa_tx above
     // (aa_validation.rs:154-164). No additional verify_paymaster_signature
@@ -578,6 +635,15 @@ mod tests {
         ws.set_account(addr, &account).unwrap();
     }
 
+    fn fixture_account_sequence(addr: &Address) -> u64 {
+        addr.as_bytes()
+            .iter()
+            .copied()
+            .find(|byte| *byte != u8::default())
+            .map(u64::from)
+            .unwrap_or_else(|| u64::from(u8::MAX))
+    }
+
     fn simple_transfer(chain_id: u64, nonce: u64) -> Transaction {
         Transaction {
             chain_id,
@@ -785,6 +851,52 @@ mod tests {
                 got: 5
             })
         ));
+    }
+
+    #[test]
+    fn validate_import_rejects_nonce_mismatch() {
+        let signer = make_signer();
+        let (mut ws, cs) = setup_stores();
+        let from = signer_address(&signer);
+        fund_account(&mut ws, &from, U256::from(1_000_000));
+
+        let mismatched_sequence = fixture_account_sequence(&from);
+        let tx = simple_transfer(test_chain_id(), mismatched_sequence);
+        let signed = sign_tx(&signer, tx, true);
+
+        let verifier = DilithiumVerifier;
+        let result = validate_tx_for_import(&signed, &mut ws, &cs, &verifier, test_chain_id());
+        assert!(
+            matches!(
+                result,
+                Err(TxValidationError::NonceMismatch { expected, got })
+                    if expected == 0 && got == mismatched_sequence
+            ),
+            "got {result:?}"
+        );
+    }
+
+    #[test]
+    fn validate_import_accepts_caller_supplied_expected_nonce() {
+        let signer = make_signer();
+        let (mut ws, cs) = setup_stores();
+        let from = signer_address(&signer);
+        fund_account(&mut ws, &from, U256::from(1_000_000));
+
+        let block_sequence = fixture_account_sequence(&from);
+        let tx = simple_transfer(test_chain_id(), block_sequence);
+        let signed = sign_tx(&signer, tx, true);
+
+        let verifier = DilithiumVerifier;
+        validate_tx_for_import_with_expected_nonce(
+            &signed,
+            &mut ws,
+            &cs,
+            &verifier,
+            test_chain_id(),
+            block_sequence,
+        )
+        .unwrap();
     }
 
     #[test]
@@ -1371,8 +1483,8 @@ mod tests {
             bundle.clone(),
         )
         .unwrap();
-        // Sign the WRONG hash (legacy `hash()` instead of batch_signing_hash).
-        let wrong_sig = signer.sign(placeholder.hash().as_bytes()).unwrap();
+        // Sign the WRONG hash (legacy hash instead of batch_signing_hash).
+        let wrong_sig = signer.sign(placeholder.legacy_hash().as_bytes()).unwrap();
         let signed = SignedTransaction::with_aa_bundle(
             from,
             tx,
@@ -1384,6 +1496,41 @@ mod tests {
         let verifier = DilithiumVerifier;
         let res = validate_tx(&signed, &mut ws, &cs, &verifier, test_chain_id());
         assert!(matches!(res, Err(TxValidationError::SignatureInvalid)));
+    }
+
+    #[test]
+    fn validate_import_rejects_aa_nonce_mismatch() {
+        let signer = make_signer();
+        let (mut ws, cs) = setup_stores();
+        let from = signer_address(&signer);
+        fund_account(&mut ws, &from, U256::from(1_000_000));
+
+        let bundle = AaBundle {
+            inner_calls: vec![inner(0, 50_000)],
+            paymaster: None,
+            paymaster_signature: None,
+            ..Default::default()
+        };
+        let mismatched_sequence = fixture_account_sequence(&from);
+        let signed = sign_aa(
+            &signer,
+            aa_outer_tx(test_chain_id(), mismatched_sequence, 200_000, 0),
+            bundle,
+            true,
+        );
+
+        let verifier = DilithiumVerifier;
+        let res = validate_tx_for_import(&signed, &mut ws, &cs, &verifier, test_chain_id());
+        assert!(
+            matches!(
+                res,
+                Err(TxValidationError::NonceMismatch {
+                    expected: 0,
+                    got
+                }) if got == mismatched_sequence
+            ),
+            "got {res:?}"
+        );
     }
 
     // --- kind_str() tests: assert static labels contain no account-state values.
