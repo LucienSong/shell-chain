@@ -30,7 +30,7 @@ listen_addr = "0.0.0.0:9000"   # default
 ```json
 {
   "status": "ok",
-  "version": "0.24.3",
+  "version": "0.25.0",
   "block_height": 12345,
   "peer_count": 4,
   "syncing": false

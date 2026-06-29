@@ -4,6 +4,39 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.25.0] — 2026-06-29 — RPC v2 and PQVM contract readiness
+
+### Added
+
+- Efficient Shell RPC v2 endpoints for explorers, wallets, dApps, and node
+  operators: `shell_rpcCapabilities`, `shell_getChainSnapshot`,
+  `shell_getBlocksRange`, `shell_getAddressSummary`,
+  `shell_getTransactionsByAddressV2`, `shell_getTransactionSummary`, and
+  `shell_getValidatorSnapshot`.
+- Lightweight address-history storage index with cursor pagination support,
+  avoiding full-chain scan-and-sort behavior for high-traffic address queries.
+- PQVM native address opcode support for Shell smart contract execution.
+- Testnet resource guardrails and systemd operator examples for safer SG3-style
+  deployments.
+
+### Changed
+
+- RPC list-style APIs now enforce bounded ranges and summary-first responses
+  for the new v2 surface, reducing explorer fan-out and response size.
+- Documentation and runbooks were refreshed so quickstart, CLI automation,
+  JSON-RPC, keystore, node CLI, observability, and testnet operator tutorials
+  match the current node behavior.
+
+### Fixed
+
+- Block production now preserves isolated world-state behavior and rolls back
+  correctly on production failures.
+- New-account nonce handling now uses the default nonce path instead of
+  requiring pre-existing account state.
+- Chain stats count visible system transactions consistently.
+- PQVM contract tests derive nonces from state instead of relying on hard-coded
+  values.
+
 ## [0.24.3] — 2026-06-13 — CI parity hardening
 
 ### Fixed
