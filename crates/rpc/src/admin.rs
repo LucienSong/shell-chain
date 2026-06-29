@@ -3,7 +3,7 @@
 //! Provides node administration methods for operators:
 //!
 //! - `admin_nodeInfo` — static metadata about this node instance.
-//! - `admin_peers`    — list of currently connected P2P peers.
+//! - `admin_peers`    — reserved for future per-peer snapshots; currently returns method-not-found.
 //! - `admin_addPeer`  — dynamically add a bootnode / dial-out peer.
 //!
 //! The `admin` namespace is **opt-in** via `--rpc-api admin` and should
@@ -60,6 +60,9 @@ pub trait AdminApi {
     async fn node_info(&self) -> Result<NodeInfo, jsonrpsee::types::ErrorObjectOwned>;
 
     /// Returns the list of currently connected peers.
+    ///
+    /// Currently returns method-not-found until the network layer exposes real
+    /// per-peer snapshots. Use `admin_nodeInfo.peer_count` for aggregate count.
     #[method(name = "peers")]
     async fn peers(&self) -> Result<Vec<PeerInfo>, jsonrpsee::types::ErrorObjectOwned>;
 

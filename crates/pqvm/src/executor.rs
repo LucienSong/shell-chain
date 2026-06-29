@@ -40,6 +40,9 @@ pub enum ExecutorError {
 
     #[error("aa bundle must be executed via execute_aa_bundle; submit as tx_type=0x7E: {0}")]
     AaBundleNotYetExecutable(String),
+
+    #[error("nonce mismatch: expected {expected}, got {got}")]
+    NonceMismatch { expected: u64, got: u64 },
 }
 
 /// Result of executing a single transaction.
@@ -346,6 +349,15 @@ impl<S: KvStore + 'static> ShellPqvm<S> {
             )));
         }
 
+        let sender_pre_nonce = self.state_db.world_state().get_nonce(&sender)?;
+        if tx.nonce != sender_pre_nonce {
+            return Err(ExecutorError::NonceMismatch {
+                expected: sender_pre_nonce,
+                got: tx.nonce,
+            });
+        }
+        let sender_nonce_after = sender_pre_nonce.saturating_add(1);
+
         // Capture pre-bundle state root for atomic rollback on inner failure.
         let pre_root = self.state_db.world_state_mut().state_root()?;
 
@@ -371,7 +383,22 @@ impl<S: KvStore + 'static> ShellPqvm<S> {
         let gas_reserve = U256::from(tx.gas_limit).saturating_mul(max_fee);
         if payer_pre_bal < gas_reserve {
             // Bump nonce, charge nothing, emit failure receipt.
-            self.state_db.world_state_mut().increment_nonce(&sender)?;
+            let mut account = self
+                .state_db
+                .world_state()
+                .get_account(&sender)?
+                .unwrap_or_else(|| Account {
+                    pq_pubkey_hash: ShellHash::default(),
+                    nonce: 0,
+                    balance: U256::ZERO,
+                    validation_code_hash: None,
+                    code_hash: None,
+                    storage_root: ShellHash::ZERO,
+                });
+            account.nonce = sender_nonce_after;
+            self.state_db
+                .world_state_mut()
+                .set_account(&sender, &account)?;
             let receipt = TransactionReceipt {
                 tx_hash: signed_tx.hash(),
                 block_number: header.number,
@@ -532,14 +559,29 @@ impl<S: KvStore + 'static> ShellPqvm<S> {
                 });
             p_acct.balance = payer_pre_bal.saturating_sub(charge);
             if !is_sponsored {
-                p_acct.nonce = tx.nonce.saturating_add(1);
+                p_acct.nonce = sender_nonce_after;
             }
             self.state_db
                 .world_state_mut()
                 .set_account(&payer, &p_acct)?;
             if is_sponsored {
                 // Bump sender nonce separately.
-                self.state_db.world_state_mut().increment_nonce(&sender)?;
+                let mut s_acct = self
+                    .state_db
+                    .world_state()
+                    .get_account(&sender)?
+                    .unwrap_or_else(|| Account {
+                        pq_pubkey_hash: ShellHash::default(),
+                        nonce: 0,
+                        balance: U256::ZERO,
+                        validation_code_hash: None,
+                        code_hash: None,
+                        storage_root: ShellHash::ZERO,
+                    });
+                s_acct.nonce = sender_nonce_after;
+                self.state_db
+                    .world_state_mut()
+                    .set_account(&sender, &s_acct)?;
             }
         } else {
             // Success: force canonical balances & nonce.
@@ -576,7 +618,7 @@ impl<S: KvStore + 'static> ShellPqvm<S> {
                         storage_root: ShellHash::ZERO,
                     });
                 s_acct.balance = sender_pre_bal.saturating_sub(successful_values_sum);
-                s_acct.nonce = tx.nonce.saturating_add(1);
+                s_acct.nonce = sender_nonce_after;
                 p_acct.balance = payer_pre_bal.saturating_sub(gas_cost);
                 self.state_db
                     .world_state_mut()
@@ -588,7 +630,7 @@ impl<S: KvStore + 'static> ShellPqvm<S> {
                 s_acct.balance = sender_pre_bal
                     .saturating_sub(successful_values_sum)
                     .saturating_sub(gas_cost);
-                s_acct.nonce = tx.nonce.saturating_add(1);
+                s_acct.nonce = sender_nonce_after;
                 self.state_db
                     .world_state_mut()
                     .set_account(&sender, &s_acct)?;
@@ -981,6 +1023,27 @@ mod tests {
             code_hash: None,
             storage_root: ShellHash::ZERO,
         };
+        evm.state_db_mut()
+            .world_state_mut()
+            .set_account(addr, &account)
+            .unwrap();
+    }
+
+    fn set_nonce(evm: &mut ShellPqvm<MemoryDb>, addr: &ShellAddress, nonce: u64) {
+        let mut account = evm
+            .state_db_mut()
+            .world_state_mut()
+            .get_account(addr)
+            .unwrap()
+            .unwrap_or_else(|| Account {
+                pq_pubkey_hash: ShellHash::ZERO,
+                nonce: 0,
+                balance: U256::ZERO,
+                validation_code_hash: None,
+                code_hash: None,
+                storage_root: ShellHash::ZERO,
+            });
+        account.nonce = nonce;
         evm.state_db_mut()
             .world_state_mut()
             .set_account(addr, &account)
@@ -3739,6 +3802,7 @@ mod tests {
         let mut evm = setup_evm();
         let sender = ShellAddress::from([0x42; 20]);
         fund_account(&mut evm, &sender, U256::from(100_000_000u64));
+        set_nonce(&mut evm, &sender, 7);
 
         let inner_calls = (0..5u8)
             .map(|i| InnerCall {
@@ -3754,6 +3818,38 @@ mod tests {
         let res = evm.execute_aa_bundle(&signed, &header, 0, 0).unwrap();
         assert_eq!(res.receipt.status, 1);
         assert_eq!(get_nonce(&mut evm, &sender), 8);
+    }
+
+    #[test]
+    fn execute_aa_bundle_rejects_stale_nonce_without_mutating_state() {
+        use shell_core::InnerCall;
+        use shell_primitives::Bytes as PBytes;
+
+        let mut evm = setup_evm();
+        let sender = ShellAddress::from([0x42; 20]);
+        let dst = ShellAddress::from([0xAA; 20]);
+        fund_account(&mut evm, &sender, U256::from(100_000_000u64));
+        set_nonce(&mut evm, &sender, 3);
+
+        let inner_calls = vec![InnerCall {
+            to: Some(dst),
+            value: U256::from(1u64),
+            data: PBytes::new(),
+            gas_limit: 50_000,
+        }];
+        let signed = make_aa_signed(sender, 1, 200_000, 10, inner_calls, None);
+
+        let header = sample_header();
+        let res = evm.execute_aa_bundle(&signed, &header, 0, 0);
+        assert!(matches!(
+            res,
+            Err(ExecutorError::NonceMismatch {
+                expected: 3,
+                got: 1
+            })
+        ));
+        assert_eq!(get_nonce(&mut evm, &sender), 3);
+        assert_eq!(get_balance(&mut evm, &dst), U256::ZERO);
     }
 
     /// Regression test: native transfer to a fresh 32-byte PQ address must store

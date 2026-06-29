@@ -66,7 +66,7 @@ shell-node [GLOBAL FLAGS] run [OPTIONS]
 | `--pruning <N>` | `0` | Retain last N state roots (0 = archive, keep all) |
 | `--checkpoint-url <URL>` | — | Download snapshot from URL on first start |
 | `--rpc-cors <ORIGINS>` | — | CORS allowed origins (comma-separated, `*` for all) |
-| `--rpc-rate-limit <N>` | — | RPC rate limit requests/second/connection |
+| `--rpc-rate-limit <N>` | — | RPC rate limit requests/second per bearer token or public bucket |
 | `--rpc-api <NAMESPACES>` | all | Enabled namespaces: `eth,net,web3,shell,evm,debug,trace` |
 | `--rpc-api-key <TOKEN>` | — | Bearer token required on every RPC request |
 | `--rpc-tls-cert <PATH>` | — | PEM TLS certificate for HTTPS/WSS |

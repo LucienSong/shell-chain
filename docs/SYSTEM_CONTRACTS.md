@@ -155,7 +155,8 @@ interface IAccountManager {
 
     /// Set a custom validator contract for this account.
     /// validationCodeHash: keccak256 hash of the deployed validator bytecode.
-    ///   The contract at that address must implement IAccountValidator.
+    ///   New validators should implement IAccountValidator.validateTransactionV2.
+    ///   Legacy validateTransaction(bytes32,bytes,bytes) is used only as fallback.
     function setValidationCode(bytes32 validationCodeHash) external;
 
     /// Remove the custom validator — revert to default PQ signature check.

@@ -74,10 +74,10 @@ If `--rpc-api` is not specified, all namespaces registered by the node are avail
 
 ## Rate Limiting
 
-Per-connection rate limiting is available via `--rpc-rate-limit`:
+RPC rate limiting is available via `--rpc-rate-limit`:
 
 ```bash
-shell-node run --rpc-rate-limit 100  # 100 requests/sec per connection
+shell-node run --rpc-rate-limit 100  # 100 requests/sec per bearer token/public bucket
 ```
 
 Or in TOML config:
@@ -86,7 +86,10 @@ Or in TOML config:
 rate_limit = 100
 ```
 
-When the limit is exceeded, the server returns an HTTP 429 response.
+When an API key is configured, authentication is evaluated before rate limiting,
+so bad unauthenticated requests do not consume the authenticated bucket. Valid
+Bearer tokens get independent buckets; no-token public requests share a public
+bucket. When the limit is exceeded, the server returns an HTTP 429 response.
 
 ## WebSocket Support
 

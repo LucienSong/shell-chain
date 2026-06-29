@@ -3,6 +3,7 @@
 //! Both `RateLimitLayer` and `ApiKeyLayer` are `Clone` by design so they
 //! can be composed with jsonrpsee's `set_http_middleware`.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
@@ -12,19 +13,14 @@ use parking_lot::Mutex;
 use tower::{Layer, Service};
 
 // ---------------------------------------------------------------------------
-// RateLimitLayer — server-wide fixed-window request rate limiter
+// RateLimitLayer — fixed-window request rate limiter keyed by auth context
 // ---------------------------------------------------------------------------
 
-/// Shared state for the server-wide fixed-window rate limiter.
-/// All connections share a single counter; this prevents a single burst of
-/// global traffic from overloading the server.
+/// Shared state for one fixed-window rate-limit bucket.
 ///
-/// Note: this is a **server-wide** (not per-IP) limiter. All clients share
-/// the same request budget. A per-IP limiter would require extracting the
-/// remote address from the connection-level context (e.g. via a
-/// `ConnectInfo` extension), which is not available at the HTTP middleware
-/// layer. Operators who need per-IP limiting should use a reverse proxy
-/// (e.g. nginx/HAProxy) in front of the RPC server.
+/// Buckets are keyed by bearer token when present. Public/no-auth requests use
+/// a separate `public` bucket. This keeps anonymous traffic from exhausting an
+/// authenticated caller's quota without trusting forwarded IP headers.
 struct RateLimiterState {
     max_per_sec: u32,
     window_start: Instant,
@@ -59,13 +55,15 @@ impl RateLimiterState {
 /// Clone-compatible: all clones share the same `Arc<Mutex<RateLimiterState>>`.
 #[derive(Clone)]
 pub struct RateLimitLayer {
-    state: Arc<Mutex<RateLimiterState>>,
+    buckets: Arc<Mutex<HashMap<String, RateLimiterState>>>,
+    max_per_sec: u32,
 }
 
 impl RateLimitLayer {
     pub fn new(max_per_sec: u32) -> Self {
         Self {
-            state: Arc::new(Mutex::new(RateLimiterState::new(max_per_sec))),
+            buckets: Arc::new(Mutex::new(HashMap::new())),
+            max_per_sec,
         }
     }
 
@@ -82,7 +80,8 @@ impl<S> Layer<S> for RateLimitLayer {
     fn layer(&self, inner: S) -> Self::Service {
         RateLimitService {
             inner,
-            state: Arc::clone(&self.state),
+            buckets: Arc::clone(&self.buckets),
+            max_per_sec: self.max_per_sec,
         }
     }
 }
@@ -91,7 +90,8 @@ impl<S> Layer<S> for RateLimitLayer {
 #[derive(Clone)]
 pub struct RateLimitService<S> {
     inner: S,
-    state: Arc<Mutex<RateLimiterState>>,
+    buckets: Arc<Mutex<HashMap<String, RateLimiterState>>>,
+    max_per_sec: u32,
 }
 
 impl<S, ReqBody, ResBody> Service<Request<ReqBody>> for RateLimitService<S>
@@ -113,7 +113,16 @@ where
     }
 
     fn call(&mut self, req: Request<ReqBody>) -> Self::Future {
-        if self.state.lock().check_and_record() {
+        let bucket_key = rate_limit_bucket_key(&req);
+        let allowed = {
+            let mut buckets = self.buckets.lock();
+            buckets
+                .entry(bucket_key)
+                .or_insert_with(|| RateLimiterState::new(self.max_per_sec))
+                .check_and_record()
+        };
+
+        if allowed {
             futures_util::future::Either::Left(self.inner.call(req))
         } else {
             let mut resp = Response::new(ResBody::default());
@@ -121,6 +130,16 @@ where
             futures_util::future::Either::Right(std::future::ready(Ok(resp)))
         }
     }
+}
+
+fn rate_limit_bucket_key<B>(req: &Request<B>) -> String {
+    req.headers()
+        .get(http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|auth| auth.strip_prefix("Bearer "))
+        .filter(|token| !token.is_empty())
+        .map(|token| format!("bearer:{token}"))
+        .unwrap_or_else(|| "public".to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -259,6 +278,31 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn rate_limit_separates_bearer_token_buckets() {
+        let layer = RateLimitLayer::new(1);
+        let mut svc = layer.layer(OkService);
+        let req_a1 = Request::builder()
+            .header(http::header::AUTHORIZATION, "Bearer a")
+            .body(())
+            .unwrap();
+        let req_a2 = Request::builder()
+            .header(http::header::AUTHORIZATION, "Bearer a")
+            .body(())
+            .unwrap();
+        let req_b = Request::builder()
+            .header(http::header::AUTHORIZATION, "Bearer b")
+            .body(())
+            .unwrap();
+
+        let first = svc.ready().await.unwrap().call(req_a1).await.unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+        let second_same_token = svc.ready().await.unwrap().call(req_a2).await.unwrap();
+        assert_eq!(second_same_token.status(), StatusCode::TOO_MANY_REQUESTS);
+        let other_token = svc.ready().await.unwrap().call(req_b).await.unwrap();
+        assert_eq!(other_token.status(), StatusCode::OK);
     }
 
     #[tokio::test]

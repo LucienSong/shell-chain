@@ -25,7 +25,8 @@ pub const PAYMASTER_VALIDATE_GAS_CAP: u64 = 50_000;
 
 const VALIDATE_PAYMASTER_OP_SIGNATURE: &[u8] = b"validatePaymasterOp(address,bytes,uint256,bytes)";
 
-const VALIDATE_TRANSACTION_SIGNATURE: &[u8] = b"validateTransaction(bytes32,bytes,bytes)";
+const VALIDATE_TRANSACTION_SIGNATURE: &[u8] = b"validateTransactionV2(bytes32,bytes32,uint64,bytes32,uint256,uint64,uint64,uint64,bytes32,bytes32,bytes,bytes)";
+const VALIDATE_TRANSACTION_V1_SIGNATURE: &[u8] = b"validateTransaction(bytes32,bytes,bytes)";
 
 #[derive(Debug)]
 pub struct AaValidationOutcome {
@@ -278,6 +279,52 @@ fn validate_custom_contract<S: KvStore + 'static>(
         ));
     }
 
+    let v2_calldata =
+        encode_validate_transaction_calldata(signed_tx, &signed_tx.signature.data, pubkey);
+    let output = match call_custom_validation_contract(
+        signed_tx,
+        world_state,
+        chain_store,
+        validation_code_hash,
+        v2_calldata,
+    ) {
+        Ok(output) => output,
+        Err(AaValidationError::ValidationContractRejected(msg))
+            if msg.starts_with("reverted:") || msg.starts_with("halted:") =>
+        {
+            let v1_calldata = encode_validate_transaction_v1_calldata(
+                &signed_tx.sender_signing_hash(),
+                &signed_tx.signature.data,
+                pubkey,
+            );
+            call_custom_validation_contract(
+                signed_tx,
+                world_state,
+                chain_store,
+                validation_code_hash,
+                v1_calldata,
+            )?
+        }
+        Err(err) => return Err(err),
+    };
+
+    if !is_magic_valid(&output) {
+        return Err(AaValidationError::ValidationContractRejected(format!(
+            "unexpected return: 0x{}",
+            hex::encode(output)
+        )));
+    }
+
+    Ok(())
+}
+
+fn call_custom_validation_contract<S: KvStore + 'static>(
+    signed_tx: &SignedTransaction,
+    world_state: &mut WorldState<S>,
+    chain_store: &ChainStore<S>,
+    validation_code_hash: ShellHash,
+    calldata: Vec<u8>,
+) -> Result<Vec<u8>, AaValidationError> {
     let snapshot = world_state.snapshot()?;
     let validation_chain_store = ChainStore::new(chain_store.store().clone());
     let state_db = ValidationStateDb::new(
@@ -305,11 +352,7 @@ fn validate_custom_contract<S: KvStore + 'static>(
         .gas_priority_fee(Some(0))
         .kind(TxKind::Call(signed_tx.from.into()))
         .value(alloy_primitives::U256::ZERO)
-        .data(AlBytes::from(encode_validate_transaction_calldata(
-            &signed_tx.sender_signing_hash(),
-            &signed_tx.signature.data,
-            pubkey,
-        )))
+        .data(AlBytes::from(calldata))
         .nonce(0)
         .chain_id(Some(signed_tx.tx.chain_id))
         .build_fill();
@@ -348,35 +391,76 @@ fn validate_custom_contract<S: KvStore + 'static>(
         .map_err(|e| AaValidationError::ValidationContractExecution(format!("{e:?}")))?
         .result;
 
-    let output = match exec_result {
+    match exec_result {
         ExecutionResult::Success { output, .. } => match output {
-            revm::context::result::Output::Call(bytes) => bytes.to_vec(),
-            revm::context::result::Output::Create(bytes, _) => bytes.to_vec(),
+            revm::context::result::Output::Call(bytes) => Ok(bytes.to_vec()),
+            revm::context::result::Output::Create(bytes, _) => Ok(bytes.to_vec()),
         },
         ExecutionResult::Revert { output, .. } => {
-            return Err(AaValidationError::ValidationContractRejected(format!(
+            Err(AaValidationError::ValidationContractRejected(format!(
                 "reverted: 0x{}",
                 hex::encode(output)
-            )));
+            )))
         }
-        ExecutionResult::Halt { reason, .. } => {
-            return Err(AaValidationError::ValidationContractRejected(format!(
-                "halted: {reason:?}"
-            )));
-        }
-    };
-
-    if !is_magic_valid(&output) {
-        return Err(AaValidationError::ValidationContractRejected(format!(
-            "unexpected return: 0x{}",
-            hex::encode(output)
-        )));
+        ExecutionResult::Halt { reason, .. } => Err(AaValidationError::ValidationContractRejected(
+            format!("halted: {reason:?}"),
+        )),
     }
-
-    Ok(())
 }
 
 fn encode_validate_transaction_calldata(
+    signed_tx: &SignedTransaction,
+    signature: &[u8],
+    pubkey: &[u8],
+) -> Vec<u8> {
+    const STATIC_WORDS: usize = 12;
+    let tx = &signed_tx.tx;
+    let tx_hash = signed_tx.sender_signing_hash();
+    let to = tx.to.unwrap_or(Address::ZERO);
+    let data_hash = blake3_hash(tx.data.as_ref());
+    let aa_bundle_hash = signed_tx
+        .aa_bundle()
+        .map(|bundle| {
+            let mut encoded = Vec::with_capacity(bundle.signing_length());
+            bundle.encode_for_signing(&mut encoded);
+            blake3_hash(&encoded)
+        })
+        .unwrap_or(ShellHash::ZERO);
+
+    let sig_offset: usize = 32usize.saturating_mul(STATIC_WORDS);
+    let sig_len = 32usize.saturating_add(padded_len(signature.len()));
+    let pubkey_offset = sig_offset.saturating_add(sig_len);
+
+    let capacity = 4usize
+        .saturating_add(32usize.saturating_mul(STATIC_WORDS))
+        .saturating_add(sig_len)
+        .saturating_add(32)
+        .saturating_add(padded_len(pubkey.len()));
+    let mut out = Vec::with_capacity(capacity);
+    out.extend_from_slice(
+        keccak256(VALIDATE_TRANSACTION_SIGNATURE)
+            .as_bytes()
+            .get(..4)
+            .unwrap_or_else(|| unreachable!("keccak256 is 32 bytes")),
+    );
+    out.extend_from_slice(tx_hash.as_bytes());
+    out.extend_from_slice(signed_tx.from.as_bytes());
+    out.extend_from_slice(&abi_word(tx.nonce));
+    out.extend_from_slice(to.as_bytes());
+    out.extend_from_slice(&tx.value.to_be_bytes::<32>());
+    out.extend_from_slice(&abi_word(tx.gas_limit));
+    out.extend_from_slice(&abi_word(tx.max_fee_per_gas));
+    out.extend_from_slice(&abi_word(tx.chain_id));
+    out.extend_from_slice(data_hash.as_bytes());
+    out.extend_from_slice(aa_bundle_hash.as_bytes());
+    out.extend_from_slice(&abi_word(sig_offset as u64));
+    out.extend_from_slice(&abi_word(pubkey_offset as u64));
+    encode_bytes(signature, &mut out);
+    encode_bytes(pubkey, &mut out);
+    out
+}
+
+fn encode_validate_transaction_v1_calldata(
     tx_hash: &ShellHash,
     signature: &[u8],
     pubkey: &[u8],
@@ -392,7 +476,7 @@ fn encode_validate_transaction_calldata(
         .saturating_add(padded_len(pubkey.len()));
     let mut out = Vec::with_capacity(capacity);
     out.extend_from_slice(
-        keccak256(VALIDATE_TRANSACTION_SIGNATURE)
+        keccak256(VALIDATE_TRANSACTION_V1_SIGNATURE)
             .as_bytes()
             .get(..4)
             .unwrap_or_else(|| unreachable!("keccak256 is 32 bytes")),
@@ -869,6 +953,53 @@ mod tests {
 
     fn validator_returns_false() -> Vec<u8> {
         vec![0x60, 0x00, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xf3]
+    }
+
+    fn read_abi_u64(word: &[u8]) -> u64 {
+        u64::from_be_bytes(word[24..32].try_into().unwrap())
+    }
+
+    #[test]
+    fn custom_validator_v2_calldata_carries_full_tx_context() {
+        let signer = DilithiumSigner::generate();
+        let from = signer_address(&signer);
+        let mut tx = base_tx(1337, 9);
+        tx.value = U256::from(42u64);
+        tx.data = Bytes::from(vec![1, 2, 3, 4]);
+        tx.gas_limit = 123_456;
+        tx.max_fee_per_gas = 77;
+        let signature = PQSignature::new(SignatureType::Dilithium3, vec![0xAB; 64]);
+        let signed = SignedTransaction::with_pubkey(
+            from,
+            tx.clone(),
+            signature,
+            signer.public_key().to_vec(),
+        );
+
+        let calldata = encode_validate_transaction_calldata(
+            &signed,
+            &signed.signature.data,
+            signer.public_key(),
+        );
+        let selector = keccak256(VALIDATE_TRANSACTION_SIGNATURE);
+        assert_eq!(&calldata[0..4], &selector.as_bytes()[..4]);
+        assert_eq!(&calldata[4..36], signed.sender_signing_hash().as_bytes());
+        assert_eq!(&calldata[36..68], from.as_bytes());
+        assert_eq!(read_abi_u64(&calldata[68..100]), 9);
+        assert_eq!(&calldata[100..132], tx.to.unwrap().as_bytes());
+        assert_eq!(&calldata[132..164], &U256::from(42u64).to_be_bytes::<32>());
+        assert_eq!(read_abi_u64(&calldata[164..196]), 123_456);
+        assert_eq!(read_abi_u64(&calldata[196..228]), 77);
+        assert_eq!(read_abi_u64(&calldata[228..260]), 1337);
+        assert_eq!(
+            &calldata[260..292],
+            blake3_hash(tx.data.as_ref()).as_bytes()
+        );
+        assert_eq!(&calldata[292..324], ShellHash::ZERO.as_bytes());
+        assert_eq!(read_abi_u64(&calldata[324..356]), 384);
+        assert_eq!(read_abi_u64(&calldata[356..388]), 480);
+        assert_eq!(read_abi_u64(&calldata[388..420]), 64);
+        assert_eq!(&calldata[420..484], signed.signature.data.as_slice());
     }
 
     #[test]

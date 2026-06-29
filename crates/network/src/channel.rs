@@ -111,6 +111,7 @@ impl NetworkService for ChannelNetwork {
             serde_json::to_vec(&msg).map_err(|e| NetworkError::Serialization(e.to_string()))?;
         // F-069: validate outbound message size.
         crate::message::validate_message_size(&data, CHANNEL_MAX_MESSAGE_SIZE)?;
+        crate::message::validate_message_size(&data, msg.max_serialized_size())?;
         self.bus_tx
             .send((self.peer_id.clone(), data))
             .map_err(|_| NetworkError::ChannelClosed)?;
