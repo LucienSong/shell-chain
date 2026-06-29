@@ -323,6 +323,49 @@ pub fn validate_tx_for_import<S: KvStore + 'static, V: Verifier>(
     verifier: &V,
     expected_chain_id: u64,
 ) -> Result<(), TxValidationError> {
+    validate_tx_for_import_inner(
+        signed_tx,
+        world_state,
+        chain_store,
+        verifier,
+        expected_chain_id,
+        None,
+    )
+}
+
+/// Validate a transaction during block import using a caller-supplied expected
+/// nonce.
+///
+/// Block import validates a whole block before executing it. For multiple
+/// transactions from the same sender in one block, the second transaction's
+/// expected nonce is the previous transaction's nonce plus one, even though the
+/// isolated pre-execution world state still contains the parent-block nonce.
+pub fn validate_tx_for_import_with_expected_nonce<S: KvStore + 'static, V: Verifier>(
+    signed_tx: &SignedTransaction,
+    world_state: &mut WorldState<S>,
+    chain_store: &ChainStore<S>,
+    verifier: &V,
+    expected_chain_id: u64,
+    expected_nonce: u64,
+) -> Result<(), TxValidationError> {
+    validate_tx_for_import_inner(
+        signed_tx,
+        world_state,
+        chain_store,
+        verifier,
+        expected_chain_id,
+        Some(expected_nonce),
+    )
+}
+
+fn validate_tx_for_import_inner<S: KvStore + 'static, V: Verifier>(
+    signed_tx: &SignedTransaction,
+    world_state: &mut WorldState<S>,
+    chain_store: &ChainStore<S>,
+    verifier: &V,
+    expected_chain_id: u64,
+    expected_nonce: Option<u64>,
+) -> Result<(), TxValidationError> {
     let tx = &signed_tx.tx;
 
     // 1. Chain ID
@@ -359,7 +402,10 @@ pub fn validate_tx_for_import<S: KvStore + 'static, V: Verifier>(
     let validation = validate_aa_tx(signed_tx, world_state, chain_store, verifier)?;
 
     if validation.protocol_checks_nonce {
-        let account_nonce = world_state.get_nonce(&signed_tx.from)?;
+        let account_nonce = match expected_nonce {
+            Some(expected) => expected,
+            None => world_state.get_nonce(&signed_tx.from)?,
+        };
         if tx.nonce != account_nonce {
             return Err(TxValidationError::NonceMismatch {
                 expected: account_nonce,
@@ -828,6 +874,29 @@ mod tests {
             ),
             "got {result:?}"
         );
+    }
+
+    #[test]
+    fn validate_import_accepts_caller_supplied_expected_nonce() {
+        let signer = make_signer();
+        let (mut ws, cs) = setup_stores();
+        let from = signer_address(&signer);
+        fund_account(&mut ws, &from, U256::from(1_000_000));
+
+        let block_sequence = fixture_account_sequence(&from);
+        let tx = simple_transfer(test_chain_id(), block_sequence);
+        let signed = sign_tx(&signer, tx, true);
+
+        let verifier = DilithiumVerifier;
+        validate_tx_for_import_with_expected_nonce(
+            &signed,
+            &mut ws,
+            &cs,
+            &verifier,
+            test_chain_id(),
+            block_sequence,
+        )
+        .unwrap();
     }
 
     #[test]
