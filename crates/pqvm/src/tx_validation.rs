@@ -590,7 +590,12 @@ mod tests {
     }
 
     fn fixture_account_sequence(addr: &Address) -> u64 {
-        u64::from(addr.as_bytes()[0] % 16) + 1
+        addr.as_bytes()
+            .iter()
+            .copied()
+            .find(|byte| *byte != u8::default())
+            .map(u64::from)
+            .unwrap_or_else(|| u64::from(u8::MAX))
     }
 
     fn simple_transfer(chain_id: u64, nonce: u64) -> Transaction {

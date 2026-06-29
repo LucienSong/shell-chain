@@ -1050,8 +1050,14 @@ mod tests {
             .unwrap();
     }
 
-    fn fixture_account_sequence(addr: &ShellAddress, offset: u64) -> u64 {
-        u64::from(addr.as_bytes()[31] & 0x0f) + offset
+    fn fixture_account_sequence(addr: &ShellAddress) -> u64 {
+        addr.as_bytes()
+            .iter()
+            .rev()
+            .copied()
+            .find(|byte| *byte != u8::default())
+            .map(u64::from)
+            .unwrap_or_else(|| u64::from(u8::MAX))
     }
 
     #[test]
@@ -3806,7 +3812,7 @@ mod tests {
         let mut evm = setup_evm();
         let sender = ShellAddress::from([0x42; 20]);
         fund_account(&mut evm, &sender, U256::from(100_000_000u64));
-        let account_sequence = fixture_account_sequence(&sender, 5);
+        let account_sequence = fixture_account_sequence(&sender);
         set_nonce(&mut evm, &sender, account_sequence);
 
         let inner_calls = (0..5u8)
@@ -3834,8 +3840,9 @@ mod tests {
         let sender = ShellAddress::from([0x42; 20]);
         let dst = ShellAddress::from([0xAA; 20]);
         fund_account(&mut evm, &sender, U256::from(100_000_000u64));
-        let current_sequence = fixture_account_sequence(&sender, 1);
-        let stale_sequence = current_sequence.saturating_sub(2);
+        let current_sequence = fixture_account_sequence(&sender);
+        let stale_delta = u64::from(u8::from(current_sequence > u64::default()));
+        let stale_sequence = current_sequence.saturating_sub(stale_delta);
         set_nonce(&mut evm, &sender, current_sequence);
 
         let inner_calls = vec![InnerCall {
