@@ -125,10 +125,10 @@ mod prefix {
     pub const CHAIN_CONFIG: &[u8] = b"CFG";
     pub const CODE_BY_HASH: &[u8] = b"c/";
     pub const PUBKEY_BY_ADDR: &[u8] = b"pk/";
-    /// Address → tx_hash index: key = "a/" + address(20) + block_number(8) + tx_index(4)
+    /// Address → tx_hash index: key = "a/" + address(32) + block_number(8) + tx_index(4)
     pub const ADDR_TX_INDEX: &[u8] = b"a/";
     /// Address → tx_hash newest-first index:
-    /// key = "ar/" + address(20) + inverted_block_number(8) + tx_index(4)
+    /// key = "ar/" + address(32) + inverted_block_number(8) + tx_index(4)
     pub const ADDR_TX_INDEX_REV: &[u8] = b"ar/";
     /// Guardian config: key = "gc/" + address(20) → JSON-encoded GuardianConfig
     pub const GUARDIAN_CONFIG: &[u8] = b"gc/";
@@ -270,9 +270,9 @@ impl<S: KvStore> ChainStore<S> {
         [prefix::SIDE_FORK_BY_NUMBER, &number.to_be_bytes()].concat()
     }
 
-    /// Key for address→tx index: "a/" + address(20) + block_number(8 BE) + tx_index(4 BE)
+    /// Key for address→tx index: "a/" + address(32) + block_number(8 BE) + tx_index(4 BE)
     fn addr_tx_key(address: &Address, block_number: u64, tx_index: u32) -> Vec<u8> {
-        let mut key = Vec::with_capacity(2 + 20 + 8 + 4);
+        let mut key = Vec::with_capacity(2 + 32 + 8 + 4);
         key.extend_from_slice(prefix::ADDR_TX_INDEX);
         key.extend_from_slice(address.as_ref());
         key.extend_from_slice(&block_number.to_be_bytes());
@@ -283,7 +283,7 @@ impl<S: KvStore> ChainStore<S> {
     /// Key for newest-first address history. Ascending key order yields higher
     /// block numbers first because the block number is bitwise inverted.
     fn addr_tx_rev_key(address: &Address, block_number: u64, tx_index: u32) -> Vec<u8> {
-        let mut key = Vec::with_capacity(3 + 20 + 8 + 4);
+        let mut key = Vec::with_capacity(3 + 32 + 8 + 4);
         key.extend_from_slice(prefix::ADDR_TX_INDEX_REV);
         key.extend_from_slice(address.as_ref());
         key.extend_from_slice(&(!block_number).to_be_bytes());
@@ -293,14 +293,14 @@ impl<S: KvStore> ChainStore<S> {
 
     /// Prefix for scanning all txs of a given address.
     fn addr_tx_prefix(address: &Address) -> Vec<u8> {
-        let mut key = Vec::with_capacity(2 + 20);
+        let mut key = Vec::with_capacity(2 + 32);
         key.extend_from_slice(prefix::ADDR_TX_INDEX);
         key.extend_from_slice(address.as_ref());
         key
     }
 
     fn addr_tx_rev_prefix(address: &Address) -> Vec<u8> {
-        let mut key = Vec::with_capacity(3 + 20);
+        let mut key = Vec::with_capacity(3 + 32);
         key.extend_from_slice(prefix::ADDR_TX_INDEX_REV);
         key.extend_from_slice(address.as_ref());
         key
@@ -410,7 +410,6 @@ impl<S: KvStore> ChainStore<S> {
 
     fn append_block_parts(batch: &mut WriteBatch, block: &Block, index_transactions: bool) {
         let block_hash = block.hash();
-        let block_number = block.number();
 
         // Store header (RLP with version prefix)
         let header_bytes = encode_rlp(&block.header);
@@ -431,19 +430,23 @@ impl<S: KvStore> ChainStore<S> {
         }
 
         if index_transactions {
-            // Transaction → (block_hash, tx_index) mapping + address index
-            for (i, tx) in block.transactions.iter().enumerate() {
-                let tx_hash = tx.hash();
-                let mut index_value = block_hash.as_bytes().to_vec();
-                index_value.extend_from_slice(&(i as u32).to_be_bytes());
-                batch.put(Self::tx_index_key(&tx_hash), index_value);
+            Self::append_transaction_indexes(batch, block, &block_hash);
+        }
+    }
 
-                let idx = i as u32;
-                Self::append_addr_tx_index(batch, &tx.sender(), block_number, idx, &tx_hash);
-                if let Some(to) = tx.tx.to {
-                    if to != tx.sender() {
-                        Self::append_addr_tx_index(batch, &to, block_number, idx, &tx_hash);
-                    }
+    fn append_transaction_indexes(batch: &mut WriteBatch, block: &Block, block_hash: &ShellHash) {
+        let block_number = block.number();
+        for (i, tx) in block.transactions.iter().enumerate() {
+            let tx_hash = tx.hash();
+            let mut index_value = block_hash.as_bytes().to_vec();
+            index_value.extend_from_slice(&(i as u32).to_be_bytes());
+            batch.put(Self::tx_index_key(&tx_hash), index_value);
+
+            let idx = i as u32;
+            Self::append_addr_tx_index(batch, &tx.sender(), block_number, idx, &tx_hash);
+            if let Some(to) = tx.tx.to {
+                if to != tx.sender() {
+                    Self::append_addr_tx_index(batch, &to, block_number, idx, &tx_hash);
                 }
             }
         }
@@ -470,6 +473,66 @@ impl<S: KvStore> ChainStore<S> {
     fn put_block_parts(&self, block: &Block, index_transactions: bool) -> Result<(), StorageError> {
         let mut batch = WriteBatch::new();
         Self::append_block_parts(&mut batch, block, index_transactions);
+        self.store.write_batch(batch)
+    }
+
+    /// Add canonical transaction/address lookup indexes for an already stored block.
+    ///
+    /// This is used when a side-fork block becomes canonical during reorg. The
+    /// block header/body records are left untouched.
+    pub fn index_block_transactions(&self, block: &Block) -> Result<(), StorageError> {
+        let mut batch = WriteBatch::new();
+        Self::append_transaction_indexes(&mut batch, block, &block.hash());
+        self.append_system_transactions(
+            &mut batch,
+            &block.hash(),
+            block.number(),
+            &block.system_transactions,
+        )?;
+        self.store.write_batch(batch)
+    }
+
+    fn delete_addr_tx_index(
+        batch: &mut WriteBatch,
+        address: &Address,
+        block_number: u64,
+        tx_index: u32,
+    ) {
+        batch.delete(Self::addr_tx_key(address, block_number, tx_index));
+        batch.delete(Self::addr_tx_rev_key(address, block_number, tx_index));
+    }
+
+    /// Delete canonical transaction/address lookup indexes for a stored block.
+    ///
+    /// Block body/header, receipts, and system transaction payloads remain
+    /// available by block hash; only canonical lookup indexes are removed.
+    pub fn delete_block_transaction_indexes(
+        &self,
+        block_hash: &ShellHash,
+    ) -> Result<(), StorageError> {
+        let Some(block) = self.get_block_by_hash(block_hash)? else {
+            return Ok(());
+        };
+        let block_number = block.number();
+        let mut batch = WriteBatch::new();
+
+        for (i, tx) in block.transactions.iter().enumerate() {
+            let tx_hash = tx.hash();
+            let tx_index = i as u32;
+            batch.delete(Self::tx_index_key(&tx_hash));
+            Self::delete_addr_tx_index(&mut batch, &tx.sender(), block_number, tx_index);
+            if let Some(to) = tx.tx.to {
+                if to != tx.sender() {
+                    Self::delete_addr_tx_index(&mut batch, &to, block_number, tx_index);
+                }
+            }
+        }
+
+        for tx in self.get_system_transactions(block_hash)? {
+            batch.delete(Self::tx_index_key(&tx.hash()));
+            Self::delete_addr_tx_index(&mut batch, &tx.to, block_number, tx.tx_index);
+        }
+
         self.store.write_batch(batch)
     }
 
@@ -2578,6 +2641,79 @@ mod tests {
         assert_eq!(filtered.len(), 2);
         assert_eq!(filtered[0].block_number, 3);
         assert_eq!(filtered[1].block_number, 2);
+    }
+
+    #[test]
+    fn address_tx_index_keys_use_shell_address_width() {
+        let address = Address::from_public_key(b"shell-address-width", 0);
+        assert_eq!(
+            ChainStore::<MemoryDb>::addr_tx_key(&address, 1, 2).len(),
+            prefix::ADDR_TX_INDEX.len() + 32 + 8 + 4
+        );
+        assert_eq!(
+            ChainStore::<MemoryDb>::addr_tx_rev_key(&address, 1, 2).len(),
+            prefix::ADDR_TX_INDEX_REV.len() + 32 + 8 + 4
+        );
+    }
+
+    #[test]
+    fn delete_block_transaction_indexes_removes_user_and_system_history() {
+        use shell_primitives::U256;
+
+        let db = Arc::new(MemoryDb::new());
+        let cs = ChainStore::new(db);
+        let mut block = make_block_with_txs(5);
+        let reward_to = Address::from_public_key(b"system-reward-recipient", 0);
+        let reward = SystemTransaction::block_gas_reward(
+            1,
+            block.number(),
+            1,
+            reward_to,
+            U256::from(10u64),
+            block.header.parent_hash,
+        );
+        block.system_transactions.push(reward.clone());
+        let block_hash = block.hash();
+        let user_tx_hash = block.transactions[0].hash();
+        let user_sender = block.transactions[0].sender();
+
+        cs.commit_canonical_block(&block, None).unwrap();
+        assert_eq!(
+            cs.get_tx_location(&user_tx_hash).unwrap(),
+            Some((block_hash, 0))
+        );
+        assert_eq!(
+            cs.get_tx_location(&reward.hash()).unwrap(),
+            Some((block_hash, reward.tx_index))
+        );
+        assert_eq!(
+            cs.get_txs_by_address_cursor(&user_sender, 0, u64::MAX, None, 10, true)
+                .unwrap()
+                .0
+                .len(),
+            1
+        );
+        assert_eq!(
+            cs.get_txs_by_address_cursor(&reward_to, 0, u64::MAX, None, 10, true)
+                .unwrap()
+                .0
+                .len(),
+            1
+        );
+
+        cs.delete_block_transaction_indexes(&block_hash).unwrap();
+        assert!(cs.get_tx_location(&user_tx_hash).unwrap().is_none());
+        assert!(cs.get_tx_location(&reward.hash()).unwrap().is_none());
+        assert!(cs
+            .get_txs_by_address_cursor(&user_sender, 0, u64::MAX, None, 10, true)
+            .unwrap()
+            .0
+            .is_empty());
+        assert!(cs
+            .get_txs_by_address_cursor(&reward_to, 0, u64::MAX, None, 10, true)
+            .unwrap()
+            .0
+            .is_empty());
     }
 
     // ── Snapshot round-trip tests ──────────────────────────────────────
