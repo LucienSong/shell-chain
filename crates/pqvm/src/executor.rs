@@ -1050,6 +1050,10 @@ mod tests {
             .unwrap();
     }
 
+    fn fixture_account_sequence(addr: &ShellAddress, offset: u64) -> u64 {
+        u64::from(addr.as_bytes()[31] & 0x0f) + offset
+    }
+
     #[test]
     fn execute_simple_transfer() {
         let mut evm = setup_evm();
@@ -3802,7 +3806,8 @@ mod tests {
         let mut evm = setup_evm();
         let sender = ShellAddress::from([0x42; 20]);
         fund_account(&mut evm, &sender, U256::from(100_000_000u64));
-        set_nonce(&mut evm, &sender, 7);
+        let account_sequence = fixture_account_sequence(&sender, 5);
+        set_nonce(&mut evm, &sender, account_sequence);
 
         let inner_calls = (0..5u8)
             .map(|i| InnerCall {
@@ -3812,12 +3817,12 @@ mod tests {
                 gas_limit: 50_000,
             })
             .collect();
-        let signed = make_aa_signed(sender, 7, 500_000, 10, inner_calls, None);
+        let signed = make_aa_signed(sender, account_sequence, 500_000, 10, inner_calls, None);
 
         let header = sample_header();
         let res = evm.execute_aa_bundle(&signed, &header, 0, 0).unwrap();
         assert_eq!(res.receipt.status, 1);
-        assert_eq!(get_nonce(&mut evm, &sender), 8);
+        assert_eq!(get_nonce(&mut evm, &sender), account_sequence + 1);
     }
 
     #[test]
@@ -3829,7 +3834,9 @@ mod tests {
         let sender = ShellAddress::from([0x42; 20]);
         let dst = ShellAddress::from([0xAA; 20]);
         fund_account(&mut evm, &sender, U256::from(100_000_000u64));
-        set_nonce(&mut evm, &sender, 3);
+        let current_sequence = fixture_account_sequence(&sender, 1);
+        let stale_sequence = current_sequence.saturating_sub(2);
+        set_nonce(&mut evm, &sender, current_sequence);
 
         let inner_calls = vec![InnerCall {
             to: Some(dst),
@@ -3837,18 +3844,18 @@ mod tests {
             data: PBytes::new(),
             gas_limit: 50_000,
         }];
-        let signed = make_aa_signed(sender, 1, 200_000, 10, inner_calls, None);
+        let signed = make_aa_signed(sender, stale_sequence, 200_000, 10, inner_calls, None);
 
         let header = sample_header();
         let res = evm.execute_aa_bundle(&signed, &header, 0, 0);
         assert!(matches!(
             res,
             Err(ExecutorError::NonceMismatch {
-                expected: 3,
-                got: 1
-            })
+                expected,
+                got
+            }) if expected == current_sequence && got == stale_sequence
         ));
-        assert_eq!(get_nonce(&mut evm, &sender), 3);
+        assert_eq!(get_nonce(&mut evm, &sender), current_sequence);
         assert_eq!(get_balance(&mut evm, &dst), U256::ZERO);
     }
 

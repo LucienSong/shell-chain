@@ -589,6 +589,10 @@ mod tests {
         ws.set_account(addr, &account).unwrap();
     }
 
+    fn fixture_account_sequence(addr: &Address) -> u64 {
+        u64::from(addr.as_bytes()[0] % 16) + 1
+    }
+
     fn simple_transfer(chain_id: u64, nonce: u64) -> Transaction {
         Transaction {
             chain_id,
@@ -805,18 +809,20 @@ mod tests {
         let from = signer_address(&signer);
         fund_account(&mut ws, &from, U256::from(1_000_000));
 
-        let tx = simple_transfer(test_chain_id(), 5);
+        let mismatched_sequence = fixture_account_sequence(&from);
+        let tx = simple_transfer(test_chain_id(), mismatched_sequence);
         let signed = sign_tx(&signer, tx, true);
 
         let verifier = DilithiumVerifier;
         let result = validate_tx_for_import(&signed, &mut ws, &cs, &verifier, test_chain_id());
-        assert!(matches!(
-            result,
-            Err(TxValidationError::NonceMismatch {
-                expected: 0,
-                got: 5
-            })
-        ));
+        assert!(
+            matches!(
+                result,
+                Err(TxValidationError::NonceMismatch { expected, got })
+                    if expected == 0 && got == mismatched_sequence
+            ),
+            "got {result:?}"
+        );
     }
 
     #[test]
@@ -1431,9 +1437,10 @@ mod tests {
             paymaster_signature: None,
             ..Default::default()
         };
+        let mismatched_sequence = fixture_account_sequence(&from);
         let signed = sign_aa(
             &signer,
-            aa_outer_tx(test_chain_id(), 2, 200_000, 0),
+            aa_outer_tx(test_chain_id(), mismatched_sequence, 200_000, 0),
             bundle,
             true,
         );
@@ -1445,8 +1452,8 @@ mod tests {
                 res,
                 Err(TxValidationError::NonceMismatch {
                     expected: 0,
-                    got: 2
-                })
+                    got
+                }) if got == mismatched_sequence
             ),
             "got {res:?}"
         );

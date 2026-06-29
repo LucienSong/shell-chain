@@ -959,11 +959,16 @@ mod tests {
         u64::from_be_bytes(word[24..32].try_into().unwrap())
     }
 
+    fn fixture_account_sequence(addr: &Address) -> u64 {
+        u64::from(addr.as_bytes()[0] % 16) + 1
+    }
+
     #[test]
     fn custom_validator_v2_calldata_carries_full_tx_context() {
         let signer = DilithiumSigner::generate();
         let from = signer_address(&signer);
-        let mut tx = base_tx(1337, 9);
+        let account_sequence = fixture_account_sequence(&from);
+        let mut tx = base_tx(1337, account_sequence);
         tx.value = U256::from(42u64);
         tx.data = Bytes::from(vec![1, 2, 3, 4]);
         tx.gas_limit = 123_456;
@@ -985,7 +990,7 @@ mod tests {
         assert_eq!(&calldata[0..4], &selector.as_bytes()[..4]);
         assert_eq!(&calldata[4..36], signed.sender_signing_hash().as_bytes());
         assert_eq!(&calldata[36..68], from.as_bytes());
-        assert_eq!(read_abi_u64(&calldata[68..100]), 9);
+        assert_eq!(read_abi_u64(&calldata[68..100]), account_sequence);
         assert_eq!(&calldata[100..132], tx.to.unwrap().as_bytes());
         assert_eq!(&calldata[132..164], &U256::from(42u64).to_be_bytes::<32>());
         assert_eq!(read_abi_u64(&calldata[164..196]), 123_456);
