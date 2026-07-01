@@ -24,6 +24,12 @@ Operational defaults:
 - `SHELL_RPC_RATE_LIMIT=50`
 - `SHELL_RPC_ADDR=127.0.0.1:8545`
 - `SHELL_MAX_IDLE_INTERVAL_SECS=600`
+- optional `SHELL_EXPECTED_AUTHORITY=0x...` fail-fast check against the
+  configured keystore
+- `SHELL_BOOTNODES` accepts a comma-separated list. Use at least two reachable
+  validators or sentry peers for multi-validator networks, and configure each
+  validator with the other validators' public P2P addresses so recovery does not
+  depend on one node restarting first.
 - systemd `MemoryMax=1900M`, `CPUQuota=90%`, low IO priority, and slow restart
 
 Use a separate larger instance for proving. On that host set

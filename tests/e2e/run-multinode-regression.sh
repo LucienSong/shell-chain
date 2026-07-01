@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+# Repeatable multinode regression entrypoint.
+#
+# Profiles:
+#   sync                  Docker 3-node sync/RPC/health checks.
+#   restart-recovery      Docker crash, partition, leader restart, rapid restart.
+#   validator-prover      Local STARK/prover path smoke test.
+#   single-validator-testnet
+#                         Alias for sync.
+#   two-validator-devnet  Alias for restart-recovery until a dedicated
+#                         generated-key fixture lands.
+#   two-validator-testnet-profile
+#                         Alias for validator-prover.
+#   non-authority-validator-negative
+#                         Runs script-level deployment guard checks.
+#   all                   sync + restart-recovery + validator-prover.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+cd "$PROJECT_DIR"
+
+PROFILE="${1:-all}"
+shift || true
+
+usage() {
+  cat <<'USAGE'
+Usage: ./tests/e2e/run-multinode-regression.sh [profile]
+
+Profiles:
+  sync                  Run Docker 3-node sync/RPC/health checks.
+  restart-recovery      Run Docker crash/partition/restart recovery checks.
+  validator-prover      Run local STARK/prover smoke checks.
+  single-validator-testnet
+                        Alias for sync.
+  two-validator-devnet  Alias for restart-recovery.
+  two-validator-testnet-profile
+                        Alias for validator-prover.
+  non-authority-validator-negative
+                        Validate deployment guard failure paths.
+  all                   Run every profile in order.
+
+Environment:
+  REUSE=true            Reuse existing Docker compose nodes for Docker profiles.
+  NODE_BIN=...          Binary for validator-prover profile.
+  TXS_PER_BATCH=...     Override STARK test transaction count.
+  NUM_BATCHES=...       Override STARK test batch count.
+USAGE
+}
+
+run_profile() {
+  local profile="$1"
+  case "$profile" in
+    sync)
+      if [[ "${REUSE:-false}" == "true" ]]; then
+        "$SCRIPT_DIR/run-e2e.sh" --reuse
+      else
+        "$SCRIPT_DIR/run-e2e.sh"
+      fi
+      ;;
+    restart-recovery)
+      if [[ "${REUSE:-false}" == "true" ]]; then
+        "$SCRIPT_DIR/run-chaos-test.sh" --reuse
+      else
+        "$SCRIPT_DIR/run-chaos-test.sh"
+      fi
+      ;;
+    validator-prover)
+      "$SCRIPT_DIR/run-stark-compression-test.sh" "$@"
+      ;;
+    single-validator-testnet)
+      run_profile sync "$@"
+      ;;
+    two-validator-devnet)
+      run_profile restart-recovery "$@"
+      ;;
+    two-validator-testnet-profile)
+      run_profile validator-prover "$@"
+      ;;
+    non-authority-validator-negative)
+      SHELL_NODE_ROLE=validator \
+        SHELL_KEYSTORE=/tmp/shell-chain-missing-validator.json \
+        SHELL_PASSWORD_FILE=/tmp/shell-chain-missing-validator.pw \
+        "$PROJECT_DIR/infra/testnet/systemd/shell-node-start.sh" >/tmp/shell-node-start-negative.out 2>/tmp/shell-node-start-negative.err
+      ;;
+    *)
+      echo "unknown multinode regression profile: $profile" >&2
+      usage >&2
+      exit 64
+      ;;
+  esac
+}
+
+case "$PROFILE" in
+  --help|-h)
+    usage
+    exit 0
+    ;;
+  all)
+    run_profile sync
+    run_profile restart-recovery
+    run_profile validator-prover "$@"
+    if run_profile non-authority-validator-negative "$@"; then
+      echo "non-authority-validator-negative unexpectedly succeeded" >&2
+      exit 1
+    fi
+    ;;
+  sync|restart-recovery|validator-prover|single-validator-testnet|two-validator-devnet|two-validator-testnet-profile)
+    run_profile "$PROFILE" "$@"
+    ;;
+  non-authority-validator-negative)
+    if run_profile "$PROFILE" "$@"; then
+      echo "non-authority-validator-negative unexpectedly succeeded" >&2
+      exit 1
+    fi
+    ;;
+  *)
+    echo "unknown multinode regression profile: $PROFILE" >&2
+    usage >&2
+    exit 64
+    ;;
+esac

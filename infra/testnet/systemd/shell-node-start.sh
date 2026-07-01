@@ -20,6 +20,49 @@ set -euo pipefail
 : "${SHELL_CONSENSUS_ENGINE:=wpoa}"
 : "${SHELL_ENABLE_STARK_AGGREGATION:=false}"
 : "${SHELL_BOOTNODES:=}"
+: "${SHELL_EXPECTED_AUTHORITY:=}"
+
+case "$SHELL_NODE_ROLE" in
+  validator|validator-prover)
+    if [[ -z "$SHELL_KEYSTORE" ]]; then
+      echo "SHELL_KEYSTORE is required for $SHELL_NODE_ROLE" >&2
+      exit 64
+    fi
+    if [[ -z "$SHELL_PASSWORD_FILE" ]]; then
+      echo "SHELL_PASSWORD_FILE is required for $SHELL_NODE_ROLE" >&2
+      exit 64
+    fi
+    if [[ ! -r "$SHELL_KEYSTORE" ]]; then
+      echo "SHELL_KEYSTORE is not readable: $SHELL_KEYSTORE" >&2
+      exit 66
+    fi
+    if [[ ! -r "$SHELL_PASSWORD_FILE" ]]; then
+      echo "SHELL_PASSWORD_FILE is not readable: $SHELL_PASSWORD_FILE" >&2
+      exit 66
+    fi
+    ;;
+  prover)
+    ;;
+  *)
+    echo "Invalid SHELL_NODE_ROLE: $SHELL_NODE_ROLE" >&2
+    exit 64
+    ;;
+esac
+
+if [[ -n "$SHELL_EXPECTED_AUTHORITY" ]]; then
+  actual_authority="$(
+    /usr/local/bin/shell-node key inspect "$SHELL_KEYSTORE" 2>&1 \
+      | awk '/Address:/ { print $2; exit }'
+  )"
+  if [[ -z "$actual_authority" ]]; then
+    echo "failed to derive authority from SHELL_KEYSTORE: $SHELL_KEYSTORE" >&2
+    exit 65
+  fi
+  if [[ "$actual_authority" != "$SHELL_EXPECTED_AUTHORITY" ]]; then
+    echo "configured validator authority mismatch: expected $SHELL_EXPECTED_AUTHORITY got $actual_authority" >&2
+    exit 65
+  fi
+fi
 
 args=(
   run

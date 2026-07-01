@@ -55,8 +55,8 @@ pub use amendment::{
 };
 pub use availability::{AvailabilityConfig, ProofAvailability, ProofAvailabilityTracker};
 pub use backlog::{
-    L2ProverTask, ProofBacklog, ProofTask, ProverTask, DEFAULT_MAX_L1_RANGE_SOURCES,
-    DEFAULT_WATERMARK_THRESHOLD, MIN_L1_STARK_TXS,
+    L1StallDiagnosis, L2ProverTask, ProofBacklog, ProofTask, ProverTask,
+    DEFAULT_MAX_L1_RANGE_SOURCES, DEFAULT_WATERMARK_THRESHOLD, MIN_L1_STARK_TXS,
 };
 pub use metadata::{
     proof_metadata_key, ProofLevel, ProofMetadata, PROOF_METADATA_KEY_PREFIX,
