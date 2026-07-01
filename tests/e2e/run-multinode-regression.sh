@@ -50,6 +50,7 @@ USAGE
 
 run_profile() {
   local profile="$1"
+  shift
   case "$profile" in
     sync)
       if [[ "${REUSE:-false}" == "true" ]]; then
