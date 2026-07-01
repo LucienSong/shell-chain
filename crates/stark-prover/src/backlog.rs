@@ -121,6 +121,26 @@ pub const MIN_L1_STARK_TXS: usize = 512;
 /// minimum entry threshold.
 pub const DEFAULT_MAX_L1_RANGE_SOURCES: usize = 1024;
 
+/// Explicit reason a L1 backlog front cannot be dispatched yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum L1StallDiagnosis {
+    /// The contiguous front range has too few entries and stops at a missing
+    /// block. If that gap is permanent, the caller may drain the pre-gap range
+    /// and advance to later tasks.
+    GapBeforeThreshold {
+        entries: usize,
+        gap_at_block: u64,
+        contiguous_take: usize,
+    },
+    /// The contiguous front range reaches the queue tail but still has too few
+    /// entries. This is an expected live-chain state: keep waiting for more
+    /// canonical successor blocks rather than proving or draining.
+    AwaitingMoreEntries {
+        entries: usize,
+        contiguous_take: usize,
+    },
+}
+
 /// Async proof backlog — a bounded work queue for the background prover.
 ///
 /// Tasks are queued in FIFO order.  The backlog exposes a *watermark*: the
@@ -212,11 +232,10 @@ impl ProofBacklog {
     /// Pop a contiguous range only when the first range satisfies the configured
     /// L1 minimum entry threshold. L2+ ranges are not threshold-gated.
     ///
-    /// The minimum-entries threshold is only enforced when the current run has
-    /// an immediate contiguous successor in the backlog — meaning more entries
-    /// may arrive before the prover needs to decide. If there is no contiguous
-    /// successor (a gap or end of queue), the prover proves whatever is
-    /// available to avoid a permanent deadlock on sparse or historical ranges.
+    /// The minimum-entries threshold is always enforced for L1. Sparse frontier
+    /// ranges remain queued until enough non-empty canonical successors arrive;
+    /// proving under-threshold ranges would produce settlements that validation
+    /// rejects.
     pub fn pop_contiguous_with_min_entries(
         &mut self,
         max_sources: usize,
@@ -311,6 +330,29 @@ impl ProofBacklog {
         max_sources: usize,
         min_l1_entries: usize,
     ) -> Option<(usize, Option<u64>, usize)> {
+        self.diagnose_l1_stall(max_sources, min_l1_entries)
+            .map(|diagnosis| match diagnosis {
+                L1StallDiagnosis::GapBeforeThreshold {
+                    entries,
+                    gap_at_block,
+                    contiguous_take,
+                } => (entries, Some(gap_at_block), contiguous_take),
+                L1StallDiagnosis::AwaitingMoreEntries {
+                    entries,
+                    contiguous_take,
+                } => (entries, None, contiguous_take),
+            })
+    }
+
+    /// Diagnose why the L1 backlog front cannot be dispatched yet.
+    ///
+    /// Returns `None` when the front range is not L1, threshold checks are
+    /// disabled, or a range could be popped immediately.
+    pub fn diagnose_l1_stall(
+        &self,
+        max_sources: usize,
+        min_l1_entries: usize,
+    ) -> Option<L1StallDiagnosis> {
         let first = self.pending.front()?;
         if first.layer != 1 || min_l1_entries == 0 {
             return None;
@@ -343,11 +385,13 @@ impl ProofBacklog {
                     break;
                 };
                 if next.layer != 1 || next.block_number != end_block.saturating_add(1) {
+                    gap_at = Some(end_block.saturating_add(1));
                     break;
                 }
                 entries = entries.saturating_add(next.entries.len());
                 end_block = next.block_number;
                 scan += 1;
+                take = scan;
                 if entries >= min_l1_entries {
                     return None; // would succeed
                 }
@@ -356,7 +400,17 @@ impl ProofBacklog {
         if entries >= min_l1_entries {
             return None; // would succeed
         }
-        Some((entries, gap_at, take))
+        match gap_at {
+            Some(gap_at_block) => Some(L1StallDiagnosis::GapBeforeThreshold {
+                entries,
+                gap_at_block,
+                contiguous_take: take,
+            }),
+            None => Some(L1StallDiagnosis::AwaitingMoreEntries {
+                entries,
+                contiguous_take: take,
+            }),
+        }
     }
 
     /// Peek at the next task without removing it.
@@ -672,6 +726,70 @@ mod tests {
         );
         // All tasks remain.
         assert_eq!(b.len(), 3, "tasks must stay in backlog");
+    }
+
+    #[test]
+    fn l1_stall_diagnosis_distinguishes_gap_from_tail_wait() {
+        let mut with_gap = ProofBacklog::new();
+        with_gap.push(ProofTask::new([1u8; 32], 1, vec![make_entry(1); 100]));
+        with_gap.push(ProofTask::new([2u8; 32], 2, vec![make_entry(2); 100]));
+        with_gap.push(ProofTask::new([8u8; 32], 8, vec![make_entry(8); 400]));
+
+        assert_eq!(
+            with_gap.diagnose_l1_stall(DEFAULT_MAX_L1_RANGE_SOURCES, MIN_L1_STARK_TXS),
+            Some(L1StallDiagnosis::GapBeforeThreshold {
+                entries: 200,
+                gap_at_block: 3,
+                contiguous_take: 2,
+            })
+        );
+
+        let mut at_tail = ProofBacklog::new();
+        at_tail.push(ProofTask::new([1u8; 32], 1, vec![make_entry(1); 100]));
+        at_tail.push(ProofTask::new([2u8; 32], 2, vec![make_entry(2); 100]));
+
+        assert_eq!(
+            at_tail.diagnose_l1_stall(DEFAULT_MAX_L1_RANGE_SOURCES, MIN_L1_STARK_TXS),
+            Some(L1StallDiagnosis::AwaitingMoreEntries {
+                entries: 200,
+                contiguous_take: 2,
+            })
+        );
+        assert_eq!(
+            at_tail.diagnose_stall(DEFAULT_MAX_L1_RANGE_SOURCES, MIN_L1_STARK_TXS),
+            Some((200, None, 2)),
+            "legacy tuple diagnosis remains compatible"
+        );
+    }
+
+    #[test]
+    fn l1_stall_diagnosis_none_when_threshold_can_pop() {
+        let mut b = ProofBacklog::new();
+        b.push(ProofTask::new([1u8; 32], 1, vec![make_entry(1); 400]));
+        b.push(ProofTask::new([2u8; 32], 2, vec![make_entry(2); 112]));
+
+        assert_eq!(
+            b.diagnose_l1_stall(DEFAULT_MAX_L1_RANGE_SOURCES, MIN_L1_STARK_TXS),
+            None
+        );
+    }
+
+    #[test]
+    fn l1_stall_diagnosis_reports_gap_after_extension_scan() {
+        let mut b = ProofBacklog::new();
+        b.push(ProofTask::new([1u8; 32], 1, vec![make_entry(1); 100]));
+        b.push(ProofTask::new([2u8; 32], 2, vec![make_entry(2); 100]));
+        b.push(ProofTask::new([5u8; 32], 5, vec![make_entry(5); 400]));
+
+        assert_eq!(
+            b.diagnose_l1_stall(1, MIN_L1_STARK_TXS),
+            Some(L1StallDiagnosis::GapBeforeThreshold {
+                entries: 200,
+                gap_at_block: 3,
+                contiguous_take: 2,
+            }),
+            "gaps found after scanning past max_sources must be drainable"
+        );
     }
 
     /// A L1 window with 1 entry per block pops as soon as MIN_L1_STARK_TXS is

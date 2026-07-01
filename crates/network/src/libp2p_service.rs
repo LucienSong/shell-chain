@@ -31,6 +31,8 @@ use crate::error::NetworkError;
 use crate::message::{NetworkEvent, NetworkMessage, PeerId};
 use crate::service::NetworkService;
 
+const BOOTNODE_REDIAL_INTERVAL_SECS: u64 = 30;
+
 /// Topic category for gossipsub routing.
 enum TopicKind {
     Blocks,
@@ -106,31 +108,9 @@ impl Libp2pNetwork {
             .listen_on(listen_addr)
             .map_err(|e| NetworkError::Transport(e.to_string()))?;
 
-        // Dial boot nodes and seed Kademlia routing table.
-        for addr_str in &config.boot_nodes {
-            // Validate bootnode multiaddr structure before dialing (F-069).
-            if !crate::config::validate_bootnode_multiaddr(addr_str) {
-                warn!(
-                    "Skipping invalid boot node address '{addr_str}': \
-                     must contain IP, transport, and peer ID components"
-                );
-                continue;
-            }
-            match addr_str.parse::<Multiaddr>() {
-                Ok(addr) => {
-                    info!("Dialing boot node: {addr}");
-                    // Extract PeerId from /p2p/<peer_id> component for Kademlia.
-                    if let Some(peer_id) = extract_peer_id(&addr) {
-                        if let Some(kad) = swarm.behaviour_mut().kademlia.as_mut() {
-                            kad.add_address(&peer_id, addr.clone());
-                        }
-                    }
-                    if let Err(e) = swarm.dial(addr) {
-                        warn!("Failed to dial boot node: {e}");
-                    }
-                }
-                Err(e) => warn!("Invalid boot node address '{addr_str}': {e}"),
-            }
+        let boot_nodes = parse_boot_nodes(&config.boot_nodes);
+        for addr in &boot_nodes {
+            seed_and_dial_boot_node(&mut swarm, addr, "startup");
         }
 
         // Trigger initial Kademlia bootstrap if we have boot nodes.
@@ -145,19 +125,16 @@ impl Libp2pNetwork {
         let blocks_topic = IdentTopic::new(&config.blocks_topic);
         let txs_topic = IdentTopic::new(&config.txs_topic);
         let attestation_topic = IdentTopic::new(&config.attestation_topic);
-        let pc = peer_count.clone();
-        let bw = bandwidth.clone();
-
-        tokio::spawn(swarm_loop(
-            swarm,
-            cmd_rx,
-            event_tx,
-            pc,
+        let loop_config = SwarmLoopConfig {
+            peer_count: Arc::clone(&peer_count),
             blocks_topic,
             txs_topic,
             attestation_topic,
-            bw,
-        ));
+            bandwidth: Arc::clone(&bandwidth),
+            boot_nodes,
+        };
+
+        tokio::spawn(swarm_loop(swarm, cmd_rx, event_tx, loop_config));
 
         Ok(Self {
             cmd_tx,
@@ -230,6 +207,7 @@ fn load_or_create_identity(path: Option<&Path>) -> Result<libp2p::identity::Keyp
     }
 }
 
+#[cfg(test)]
 fn build_swarm(config: &NetworkConfig) -> Result<Swarm<ShellBehaviour>, NetworkError> {
     build_swarm_with_identity(config, libp2p::identity::Keypair::generate_ed25519())
 }
@@ -545,32 +523,45 @@ fn build_swarm_with_identity(
     Ok(swarm)
 }
 
-/// Background task that drives the libp2p Swarm.
-async fn swarm_loop(
-    mut swarm: Swarm<ShellBehaviour>,
-    mut cmd_rx: mpsc::Receiver<SwarmCommand>,
-    event_tx: mpsc::Sender<NetworkEvent>,
+struct SwarmLoopConfig {
     peer_count: Arc<AtomicUsize>,
     blocks_topic: IdentTopic,
     txs_topic: IdentTopic,
     attestation_topic: IdentTopic,
     bandwidth: Arc<BandwidthTracker>,
+    boot_nodes: Vec<Multiaddr>,
+}
+
+/// Background task that drives the libp2p Swarm.
+async fn swarm_loop(
+    mut swarm: Swarm<ShellBehaviour>,
+    mut cmd_rx: mpsc::Receiver<SwarmCommand>,
+    event_tx: mpsc::Sender<NetworkEvent>,
+    loop_config: SwarmLoopConfig,
 ) {
     // F-305: Initialize peer tracking and ban list.
     let mut peer_tracker = crate::security::PeerTracker::new(128);
     let mut peer_ban_list = crate::security::PeerBanList::new(5, Duration::from_secs(600));
 
     // Subscribe to gossipsub topics.
-    if let Err(e) = swarm.behaviour_mut().gossipsub.subscribe(&blocks_topic) {
+    if let Err(e) = swarm
+        .behaviour_mut()
+        .gossipsub
+        .subscribe(&loop_config.blocks_topic)
+    {
         warn!("Failed to subscribe to blocks topic: {e}");
     }
-    if let Err(e) = swarm.behaviour_mut().gossipsub.subscribe(&txs_topic) {
+    if let Err(e) = swarm
+        .behaviour_mut()
+        .gossipsub
+        .subscribe(&loop_config.txs_topic)
+    {
         warn!("Failed to subscribe to txs topic: {e}");
     }
     if let Err(e) = swarm
         .behaviour_mut()
         .gossipsub
-        .subscribe(&attestation_topic)
+        .subscribe(&loop_config.attestation_topic)
     {
         warn!("Failed to subscribe to attestation topic: {e}");
     }
@@ -579,6 +570,12 @@ async fn swarm_loop(
     let mut kad_bootstrap_interval = interval(Duration::from_secs(300));
     // Skip the first immediate tick — bootstrap was already triggered on startup.
     kad_bootstrap_interval.tick().await;
+
+    // Bootnodes must be treated as persistent anchors, not one-shot startup
+    // dials. A validator that restarts should reconnect without requiring the
+    // surviving peer to restart its own swarm.
+    let mut bootnode_redial_interval = interval(Duration::from_secs(BOOTNODE_REDIAL_INTERVAL_SECS));
+    bootnode_redial_interval.tick().await;
 
     // Periodic peer score logging (every 60 seconds).
     let mut score_log_interval = interval(Duration::from_secs(60));
@@ -595,12 +592,12 @@ async fn swarm_loop(
                     Some(SwarmCommand::Publish { topic, data }) => {
                         let data_len = data.len() as u64;
                         let ident = match topic {
-                            TopicKind::Blocks => blocks_topic.clone(),
-                            TopicKind::Transactions => txs_topic.clone(),
-                            TopicKind::Attestation => attestation_topic.clone(),
+                            TopicKind::Blocks => loop_config.blocks_topic.clone(),
+                            TopicKind::Transactions => loop_config.txs_topic.clone(),
+                            TopicKind::Attestation => loop_config.attestation_topic.clone(),
                         };
                         // F-065: skip publish when outbound bandwidth exceeded.
-                        if !bandwidth.record_outbound(data_len) {
+                        if !loop_config.bandwidth.record_outbound(data_len) {
                             warn!(
                                 bytes = data_len,
                                 "Outbound bandwidth limit exceeded — skipping publish"
@@ -628,8 +625,8 @@ async fn swarm_loop(
                     event,
                     &mut swarm,
                     &event_tx,
-                    &peer_count,
-                    &bandwidth,
+                    &loop_config.peer_count,
+                    &loop_config.bandwidth,
                     &mut peer_tracker,
                     &mut peer_ban_list,
                 ).await;
@@ -640,13 +637,71 @@ async fn swarm_loop(
                     let _ = kad.bootstrap();
                 }
             }
+            _ = bootnode_redial_interval.tick(), if !loop_config.boot_nodes.is_empty() => {
+                let connected = swarm.connected_peers().count();
+                if connected == 0 {
+                    for addr in &loop_config.boot_nodes {
+                        seed_and_dial_boot_node(&mut swarm, addr, "redial");
+                    }
+                } else {
+                    for addr in &loop_config.boot_nodes {
+                        if let Some(peer_id) = extract_peer_id(addr) {
+                            if !swarm.is_connected(&peer_id) {
+                                seed_and_dial_boot_node(&mut swarm, addr, "redial");
+                            }
+                        }
+                    }
+                }
+            }
             _ = score_log_interval.tick() => {
                 log_peer_scores(&swarm);
             }
             _ = bw_tick.tick() => {
-                bandwidth.reset_if_needed();
+                loop_config.bandwidth.reset_if_needed();
             }
         }
+    }
+}
+
+fn parse_boot_nodes(raw: &[String]) -> Vec<Multiaddr> {
+    raw.iter()
+        .filter_map(|addr_str| {
+            if !crate::config::validate_bootnode_multiaddr(addr_str) {
+                warn!(
+                    "Skipping invalid boot node address '{addr_str}': \
+                     must contain IP, transport, and peer ID components"
+                );
+                return None;
+            }
+            match addr_str.parse::<Multiaddr>() {
+                Ok(addr) => Some(addr),
+                Err(e) => {
+                    warn!("Invalid boot node address '{addr_str}': {e}");
+                    None
+                }
+            }
+        })
+        .collect()
+}
+
+fn seed_and_dial_boot_node(
+    swarm: &mut Swarm<ShellBehaviour>,
+    addr: &Multiaddr,
+    reason: &'static str,
+) {
+    if let Some(peer_id) = extract_peer_id(addr) {
+        if let Some(kad) = swarm.behaviour_mut().kademlia.as_mut() {
+            kad.add_address(&peer_id, addr.clone());
+        }
+        if swarm.is_connected(&peer_id) {
+            debug!(%peer_id, %addr, reason, "boot node already connected");
+            return;
+        }
+    }
+
+    info!(%addr, reason, "dialing boot node");
+    if let Err(e) = swarm.dial(addr.clone()) {
+        debug!(%addr, reason, error = %e, "boot node dial not started");
     }
 }
 
@@ -1297,6 +1352,51 @@ mod tests {
         assert!(
             entry_count >= 1,
             "boot node should be added to Kademlia routing table"
+        );
+    }
+
+    #[test]
+    fn parse_boot_nodes_filters_invalid_addresses() {
+        let keypair = libp2p::identity::Keypair::generate_ed25519();
+        let peer_id = keypair.public().to_peer_id();
+        let valid = format!("/ip4/10.0.0.1/tcp/30303/p2p/{peer_id}");
+        let raw = vec![
+            valid.clone(),
+            "not-a-multiaddr".to_string(),
+            "/ip4/10.0.0.1/tcp/30303".to_string(),
+        ];
+
+        let parsed = parse_boot_nodes(&raw);
+
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].to_string(), valid);
+    }
+
+    #[tokio::test]
+    async fn seed_and_dial_boot_node_adds_bootnode_to_kademlia() {
+        let keypair = libp2p::identity::Keypair::generate_ed25519();
+        let peer_id = keypair.public().to_peer_id();
+        let boot_addr: Multiaddr = format!("/ip4/10.0.0.1/tcp/30303/p2p/{peer_id}")
+            .parse()
+            .unwrap();
+        let config = NetworkConfig {
+            enable_mdns: false,
+            enable_kademlia: true,
+            enable_peer_scoring: false,
+            enable_relay: false,
+            enable_dcutr: false,
+            enable_autonat: false,
+            ..Default::default()
+        };
+        let mut swarm = build_swarm(&config).expect("build_swarm should succeed");
+
+        seed_and_dial_boot_node(&mut swarm, &boot_addr, "test");
+
+        let kad = swarm.behaviour_mut().kademlia.as_mut().unwrap();
+        let entry_count: usize = kad.kbuckets().map(|b| b.num_entries()).sum();
+        assert!(
+            entry_count >= 1,
+            "boot node should remain seeded for later redial/bootstrap"
         );
     }
 

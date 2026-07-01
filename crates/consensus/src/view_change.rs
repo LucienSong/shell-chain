@@ -123,12 +123,10 @@ impl ViewChangeState {
             return false;
         }
 
-        let validator_weight = self
-            .validator_weights
-            .get(&msg.validator)
-            .copied()
-            .unwrap_or(1)
-            .max(1);
+        let Some(validator_weight) = self.validator_weights.get(&msg.validator).copied() else {
+            return false;
+        };
+        let validator_weight = validator_weight.max(1);
 
         let messages = self.pending_view_changes.entry(msg.view).or_default();
         if messages
@@ -227,6 +225,20 @@ mod tests {
 
         assert!(!state.record_view_change(first));
         assert!(state.record_view_change(second));
+    }
+
+    #[test]
+    fn record_view_change_rejects_unknown_validator() {
+        let mut state = ViewChangeState::new();
+        state.configure_quorum(HashMap::from([(addr(1), 1), (addr(2), 1), (addr(3), 1)]), 3);
+
+        let unknown = ViewChangeMessage::new(0, 7, 0, ShellHash::ZERO, addr(99), vec![9]);
+
+        assert!(!state.record_view_change(unknown));
+        assert!(
+            state.pending_view_changes.is_empty(),
+            "unknown validators must not be recorded or counted toward quorum"
+        );
     }
 
     #[test]

@@ -98,8 +98,16 @@ struct DevAuthorityKeyFile {
     secret_key: String,
 }
 
-fn proposer_address_for_role(role: NodeRole, authority: Address) -> Option<Address> {
-    role.is_validator().then_some(authority)
+fn proposer_address_for_role(
+    role: NodeRole,
+    authority: Address,
+    active_authorities: &[Address],
+) -> Option<Address> {
+    if role.is_validator() && active_authorities.contains(&authority) {
+        Some(authority)
+    } else {
+        None
+    }
 }
 
 fn validate_role_authority(
@@ -111,7 +119,10 @@ fn validate_role_authority(
         warn!(
             role = ?role,
             %authority,
-            "validator role address is not in genesis; node may produce only after a validator-set transition makes it active"
+            authority_active = false,
+            block_production = false,
+            voting = false,
+            "validator role address is not in genesis; downgrading local block production and voting until restart with an active authority"
         );
     }
     Ok(())
@@ -624,7 +635,7 @@ async fn run_with_store<S: KvStore + 'static>(
         },
         rpc_enabled: true,
         network: NetworkConfig::default(),
-        proposer_address: proposer_address_for_role(node_role, authority),
+        proposer_address: proposer_address_for_role(node_role, authority, &authorities),
         block_time_ms: args.block_time,
         data_dir: args.datadir.to_string_lossy().into(),
         pruning: {
@@ -951,26 +962,37 @@ mod tests {
     }
 
     #[test]
-    fn prover_role_has_no_proposer_address() {
+    fn proposer_address_requires_validator_role_and_active_authority() {
         let authority = Address::from([1u8; 20]);
+        let other = Address::from([2u8; 20]);
 
         assert_eq!(
-            proposer_address_for_role(NodeRole::Prover, authority),
+            proposer_address_for_role(NodeRole::Prover, authority, &[authority]),
             None,
             "prover-only nodes must never be configured as block producers"
         );
         assert_eq!(
-            proposer_address_for_role(NodeRole::Validator, authority),
+            proposer_address_for_role(NodeRole::Validator, authority, &[authority]),
             Some(authority)
         );
         assert_eq!(
-            proposer_address_for_role(NodeRole::ValidatorProver, authority),
+            proposer_address_for_role(NodeRole::ValidatorProver, authority, &[authority]),
             Some(authority)
+        );
+        assert_eq!(
+            proposer_address_for_role(NodeRole::Validator, authority, &[other]),
+            None,
+            "inactive validators must not propose"
+        );
+        assert_eq!(
+            proposer_address_for_role(NodeRole::ValidatorProver, authority, &[other]),
+            None,
+            "inactive validator-provers must not propose or vote"
         );
     }
 
     #[test]
-    fn validator_roles_allow_post_genesis_activation() {
+    fn validator_roles_downgrade_when_not_active() {
         let authority = Address::from([1u8; 20]);
         let other = Address::from([2u8; 20]);
 
@@ -980,7 +1002,31 @@ mod tests {
         );
         assert!(validate_role_authority(NodeRole::Prover, authority, &[other]).is_ok());
 
+        // The CLI accepts this configuration so an operator can run an observer
+        // with the intended key, but proposer_address_for_role keeps it harmless.
         assert!(validate_role_authority(NodeRole::ValidatorProver, authority, &[other]).is_ok());
+    }
+
+    #[test]
+    fn systemd_start_script_keeps_validator_key_guards() {
+        let script = include_str!("../../../../infra/testnet/systemd/shell-node-start.sh");
+
+        assert!(
+            script.contains("--keystore \"$SHELL_KEYSTORE\""),
+            "systemd script must pass the configured validator keystore"
+        );
+        assert!(
+            script.contains("--password-file \"$SHELL_PASSWORD_FILE\""),
+            "systemd script must pass the configured password file"
+        );
+        assert!(
+            script.contains("SHELL_EXPECTED_AUTHORITY"),
+            "systemd script must support expected authority validation"
+        );
+        assert!(
+            script.contains("key inspect \"$SHELL_KEYSTORE\""),
+            "expected authority validation must derive the keystore address"
+        );
     }
 
     fn test_genesis(authority: Address) -> GenesisConfig {

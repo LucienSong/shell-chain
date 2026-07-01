@@ -32,7 +32,7 @@ use tracing::{debug, error, info, warn};
 use parking_lot::Mutex;
 use shell_primitives::{Bytes, ShellHash};
 use shell_stark_prover::{
-    prove_sig_batch, L2ProverTask, ProofAmendment, ProofBacklog, ProofTask,
+    prove_sig_batch, L1StallDiagnosis, L2ProverTask, ProofAmendment, ProofBacklog, ProofTask,
     DEFAULT_MAX_L1_RANGE_SOURCES, MIN_L1_STARK_TXS, PROOF_AMENDMENT_VERSION,
 };
 use shell_storage::{KvStore, ProofAmendmentStore};
@@ -243,9 +243,13 @@ impl<S: KvStore + Send + Sync + 'static> ProverService<S> {
                             let first_block = backlog.min_block_number_for_layer(1).unwrap_or(0);
                             let last_block = backlog.max_block_number_for_layer(1).unwrap_or(0);
                             let stall_info = backlog
-                                .diagnose_stall(DEFAULT_MAX_L1_RANGE_SOURCES, MIN_L1_STARK_TXS);
+                                .diagnose_l1_stall(DEFAULT_MAX_L1_RANGE_SOURCES, MIN_L1_STARK_TXS);
                             match stall_info {
-                                Some((entries, Some(gap), take)) => {
+                                Some(L1StallDiagnosis::GapBeforeThreshold {
+                                    entries,
+                                    gap_at_block: gap,
+                                    contiguous_take: take,
+                                }) => {
                                     warn!(
                                         depth,
                                         first_block,
@@ -302,14 +306,18 @@ impl<S: KvStore + Send + Sync + 'static> ProverService<S> {
                                         );
                                     }
                                 }
-                                Some((entries, None, take)) => {
-                                    warn!(
+                                Some(L1StallDiagnosis::AwaitingMoreEntries {
+                                    entries,
+                                    contiguous_take: take,
+                                }) => {
+                                    info!(
                                         depth,
                                         first_block,
                                         last_block,
                                         entries,
                                         contiguous_take = take,
-                                        "STARK prover stalled: not enough entries in full backlog range (all 0-tx blocks?)"
+                                        min_entries = MIN_L1_STARK_TXS,
+                                        "STARK prover waiting: L1 backlog tail is below proof threshold; awaiting more canonical non-empty blocks"
                                     );
                                 }
                                 None => {
