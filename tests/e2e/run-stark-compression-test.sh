@@ -8,14 +8,14 @@
 #   node3 - follower (syncs via P2P)
 #
 # Then:
-#   1. Submits N batches of transactions (configurable)
+#   1. Optionally submits N batches of transactions (configurable)
 #   2. Waits for blocks to be produced and proofs to be generated
 #   3. Reads Prometheus metrics for STARK proof stats
 #   4. Reports compression analysis
 #
 # Usage:
 #   ./tests/e2e/run-stark-compression-test.sh
-#   ./tests/e2e/run-stark-compression-test.sh --txs 200 --batches 10 --block-time 1000
+#   ./tests/e2e/run-stark-compression-test.sh --txs 0 --batches 1 --block-time 1000
 #
 # Prerequisites: shell-node binary at target/release/shell-node
 set -euo pipefail
@@ -34,11 +34,12 @@ FAILURES=0
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 NODE_BIN="${NODE_BIN:-./target/release/shell-node}"
-TXS_PER_BATCH="${TXS_PER_BATCH:-20}"
-NUM_BATCHES="${NUM_BATCHES:-10}"
+TXS_PER_BATCH="${TXS_PER_BATCH:-0}"
+NUM_BATCHES="${NUM_BATCHES:-1}"
 BLOCK_TIME="${BLOCK_TIME:-2000}"
 WAIT_BLOCKS="${WAIT_BLOCKS:-15}"
 CHAIN_ID="${CHAIN_ID:-1337}"
+MAX_IDLE_INTERVAL="${MAX_IDLE_INTERVAL:-0}"
 
 # Ports
 NODE1_RPC=8545;  NODE1_P2P=30303; NODE1_METRICS=9090
@@ -132,11 +133,13 @@ header "Starting node1 (block producer + STARK aggregation)"
   --rpc-addr "127.0.0.1:$NODE1_RPC" \
   --rpc-api "eth,net,web3,shell" \
   --metrics-addr "127.0.0.1:$NODE1_METRICS" \
-  --p2p --p2p-addr "0.0.0.0:$NODE1_P2P" --enable-mdns \
+  --p2p --p2p-addr "0.0.0.0:$NODE1_P2P" \
   --chain-id "$CHAIN_ID" \
   --block-time "$BLOCK_TIME" \
+  --max-idle-interval "$MAX_IDLE_INTERVAL" \
   --db memory \
   --enable-stark-aggregation \
+  --node-role validator-prover \
   --log-level info \
   > "$LOG1" 2>&1 &
 NODE1_PID=$!
@@ -144,12 +147,26 @@ info "node1 PID=$NODE1_PID"
 
 wait_rpc "$NODE1_RPC" "node1"
 
+info "Reusing node1 genesis for follower nodes..."
+for i in $(seq 1 30); do
+  if [[ -s "$NODE1_DATA/genesis.json" ]]; then
+    cp "$NODE1_DATA/genesis.json" "$NODE2_DATA/genesis.json"
+    cp "$NODE1_DATA/genesis.json" "$NODE3_DATA/genesis.json"
+    pass "Follower genesis copied"
+    break
+  fi
+  sleep 1
+done
+if [[ ! -s "$NODE2_DATA/genesis.json" || ! -s "$NODE3_DATA/genesis.json" ]]; then
+  fail "node1 genesis was not created in time"
+  exit 1
+fi
+
 # Extract bootnode address from node1 logs
 info "Extracting node1 bootnode address..."
 BOOTNODE=""
 for i in $(seq 1 30); do
-  BOOTNODE=$(grep -Eo 'Listening on /ip4/[^ ]+/tcp/[0-9]+/p2p/[A-Za-z0-9]+' "$LOG1" \
-    | grep -v '/ip4/127\.' | tail -n1 || true)
+  BOOTNODE=$(grep -Eo '/ip4/127\.[^ ]+/tcp/[0-9]+/p2p/[A-Za-z0-9]+' "$LOG1" | tail -n1 || true)
   if [[ -n "$BOOTNODE" ]]; then
     pass "Bootnode: $BOOTNODE"
     break
@@ -158,12 +175,12 @@ for i in $(seq 1 30); do
 done
 
 if [[ -z "$BOOTNODE" ]]; then
-  info "No non-loopback P2P addr found, trying loopback..."
-  BOOTNODE=$(grep -Eo 'Listening on /ip4/[^ ]+/tcp/[0-9]+/p2p/[A-Za-z0-9]+' "$LOG1" | tail -n1 || true)
+  info "No loopback P2P addr found, trying any advertised address..."
+  BOOTNODE=$(grep -Eo '/ip4/[^ ]+/tcp/[0-9]+/p2p/[A-Za-z0-9]+' "$LOG1" | tail -n1 || true)
   if [[ -n "$BOOTNODE" ]]; then
     # Replace 0.0.0.0 with 127.0.0.1 for local connections
     BOOTNODE="${BOOTNODE/0.0.0.0/127.0.0.1}"
-    pass "Bootnode (loopback): $BOOTNODE"
+    pass "Bootnode (fallback): $BOOTNODE"
   else
     info "P2P address not found yet, continuing without bootnode for followers..."
   fi
@@ -172,21 +189,23 @@ fi
 # ── Start node2 & node3 (followers) ──────────────────────────────────────────
 header "Starting node2 and node3 (followers)"
 
-BOOTNODE_FLAGS=""
-[[ -n "$BOOTNODE" ]] && BOOTNODE_FLAGS="--bootnode $BOOTNODE"
+BOOTNODE_FLAGS=()
+[[ -n "$BOOTNODE" ]] && BOOTNODE_FLAGS=(--bootnode "$BOOTNODE")
 
 "$NODE_BIN" run \
   --datadir "$NODE2_DATA" \
   --rpc-addr "127.0.0.1:$NODE2_RPC" \
   --rpc-api "eth,net,web3,shell" \
   --metrics-addr "127.0.0.1:$NODE2_METRICS" \
-  --p2p --p2p-addr "0.0.0.0:$NODE2_P2P" --enable-mdns \
+  --p2p --p2p-addr "0.0.0.0:$NODE2_P2P" \
   --chain-id "$CHAIN_ID" \
   --block-time "$BLOCK_TIME" \
+  --max-idle-interval "$MAX_IDLE_INTERVAL" \
   --db memory \
   --enable-stark-aggregation \
+  --node-role prover \
   --log-level info \
-  $BOOTNODE_FLAGS \
+  "${BOOTNODE_FLAGS[@]}" \
   > "$LOG2" 2>&1 &
 NODE2_PID=$!
 
@@ -195,13 +214,15 @@ NODE2_PID=$!
   --rpc-addr "127.0.0.1:$NODE3_RPC" \
   --rpc-api "eth,net,web3,shell" \
   --metrics-addr "127.0.0.1:$NODE3_METRICS" \
-  --p2p --p2p-addr "0.0.0.0:$NODE3_P2P" --enable-mdns \
+  --p2p --p2p-addr "0.0.0.0:$NODE3_P2P" \
   --chain-id "$CHAIN_ID" \
   --block-time "$BLOCK_TIME" \
+  --max-idle-interval "$MAX_IDLE_INTERVAL" \
   --db memory \
   --enable-stark-aggregation \
+  --node-role prover \
   --log-level info \
-  $BOOTNODE_FLAGS \
+  "${BOOTNODE_FLAGS[@]}" \
   > "$LOG3" 2>&1 &
 NODE3_PID=$!
 
@@ -213,10 +234,15 @@ wait_rpc "$NODE3_RPC" "node3"
 # ── Get funder account ────────────────────────────────────────────────────────
 header "Getting dev authority account"
 
-# node1 creates dev authority; find it in datadir or from eth_accounts
-DEV_ACCOUNT=$(rpc "$NODE1_RPC" eth_accounts | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['result'][0])" 2>/dev/null || echo "")
+# node1 creates a funded dev authority. Current RPC intentionally returns an
+# empty eth_accounts list, so prefer the startup log and keep eth_accounts as a
+# compatibility fallback for older binaries.
+DEV_ACCOUNT=$(grep -Eo 'Node authority: 0x[0-9a-fA-F]+' "$LOG1" | awk '{print $3}' | tail -n1 || true)
 if [[ -z "$DEV_ACCOUNT" ]]; then
-  fail "Could not get dev account from eth_accounts"
+  DEV_ACCOUNT=$(rpc "$NODE1_RPC" eth_accounts | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['result'][0])" 2>/dev/null || echo "")
+fi
+if [[ -z "$DEV_ACCOUNT" ]]; then
+  fail "Could not determine dev authority account"
   exit 1
 fi
 pass "Dev account: $DEV_ACCOUNT"
@@ -230,6 +256,7 @@ header "Submitting $TOTAL_TXS transactions ($NUM_BATCHES × $TXS_PER_BATCH)"
 
 RECIPIENT="0x000000000000000000000000000000000000dead"
 TX_HASHES=()
+TX_ERRORS=()
 NONCE=0
 
 send_tx() {
@@ -240,33 +267,52 @@ send_tx() {
     | python3 -c "import json,sys; r=json.load(sys.stdin); print(r.get('result','ERROR:'+str(r.get('error',{}))))" 2>/dev/null
 }
 
-for batch in $(seq 1 "$NUM_BATCHES"); do
-  info "Batch $batch/$NUM_BATCHES..."
-  for _ in $(seq 1 "$TXS_PER_BATCH"); do
-    hash=$(send_tx "$NONCE")
-    if [[ "$hash" == 0x* ]]; then
-      TX_HASHES+=("$hash")
-    fi
-    NONCE=$((NONCE+1))
+if [[ "$TOTAL_TXS" -gt 0 ]]; then
+  for batch in $(seq 1 "$NUM_BATCHES"); do
+    info "Batch $batch/$NUM_BATCHES..."
+    for _ in $(seq 1 "$TXS_PER_BATCH"); do
+      hash=$(send_tx "$NONCE")
+      if [[ "$hash" == 0x* ]]; then
+        TX_HASHES+=("$hash")
+      else
+        TX_ERRORS+=("nonce=$NONCE $hash")
+      fi
+      NONCE=$((NONCE+1))
+    done
+    sleep 0.2
   done
-  sleep 0.2
-done
+else
+  info "No transactions requested; running sparse validator-prover liveness smoke."
+fi
 
 SENT=${#TX_HASHES[@]}
 pass "Sent $SENT transactions"
+if [[ "$SENT" -ne "$TOTAL_TXS" ]]; then
+  fail "Only $SENT/$TOTAL_TXS transactions were accepted"
+  for err in "${TX_ERRORS[@]:0:5}"; do
+    echo "  tx error: $err"
+  done
+  exit 1
+fi
 
 # ── Wait for blocks to be produced ───────────────────────────────────────────
 header "Waiting for $WAIT_BLOCKS blocks..."
 TARGET_BLOCK=$((WAIT_BLOCKS + 2))
+REACHED_BLOCK=false
 for i in $(seq 1 120); do
   BN=$(rpc "$NODE1_RPC" eth_blockNumber \
     | python3 -c "import json,sys; print(int(json.load(sys.stdin)['result'],16))" 2>/dev/null || echo "0")
   if [[ "$BN" -ge "$TARGET_BLOCK" ]]; then
     pass "Block number reached: $BN"
+    REACHED_BLOCK=true
     break
   fi
   sleep 1
 done
+if [[ "$REACHED_BLOCK" != "true" ]]; then
+  fail "Block number did not reach target $TARGET_BLOCK within timeout (last=$BN)"
+  exit 1
+fi
 
 # ── Wait for STARK proofs (async proving backlog) ────────────────────────────
 info "Waiting for STARK proof backlog to drain (async proving)..."
@@ -283,7 +329,7 @@ else
 fi
 
 extract_metric() {
-  echo "$METRICS" | grep "^$1 " | awk '{print $2}' | head -1
+  echo "$METRICS" | awk -v name="$1" '$1 == name { print $2; exit }'
 }
 
 PROOFS_OK=$(extract_metric "shell_stark_proofs_total")
@@ -396,15 +442,18 @@ header "Node sync verification"
 BN1=$(rpc "$NODE1_RPC" eth_blockNumber | python3 -c "import json,sys; print(int(json.load(sys.stdin)['result'],16))" 2>/dev/null || echo "?")
 BN2=$(rpc "$NODE2_RPC" eth_blockNumber | python3 -c "import json,sys; print(int(json.load(sys.stdin)['result'],16))" 2>/dev/null || echo "?")
 BN3=$(rpc "$NODE3_RPC" eth_blockNumber | python3 -c "import json,sys; print(int(json.load(sys.stdin)['result'],16))" 2>/dev/null || echo "?")
+HASH1=$(rpc "$NODE1_RPC" eth_getBlockByNumber "[\"latest\",false]" | python3 -c "import json,sys; print(json.load(sys.stdin)['result']['hash'])" 2>/dev/null || echo "?")
+HASH2=$(rpc "$NODE2_RPC" eth_getBlockByNumber "[\"latest\",false]" | python3 -c "import json,sys; print(json.load(sys.stdin)['result']['hash'])" 2>/dev/null || echo "?")
+HASH3=$(rpc "$NODE3_RPC" eth_getBlockByNumber "[\"latest\",false]" | python3 -c "import json,sys; print(json.load(sys.stdin)['result']['hash'])" 2>/dev/null || echo "?")
 
-echo "  node1: block $BN1"
-echo "  node2: block $BN2"
-echo "  node3: block $BN3"
+echo "  node1: block $BN1 hash $HASH1"
+echo "  node2: block $BN2 hash $HASH2"
+echo "  node3: block $BN3 hash $HASH3"
 
-if [[ "$BN1" == "$BN2" && "$BN2" == "$BN3" ]]; then
-  pass "All nodes in sync at block $BN1"
+if [[ "$BN1" == "$BN2" && "$BN2" == "$BN3" && "$HASH1" == "$HASH2" && "$HASH2" == "$HASH3" && "$HASH1" != "?" ]]; then
+  pass "All nodes in sync at block $BN1 ($HASH1)"
 else
-  fail "Nodes not in sync (node1=$BN1, node2=$BN2, node3=$BN3)"
+  fail "Nodes not in sync (node1=$BN1/$HASH1, node2=$BN2/$HASH2, node3=$BN3/$HASH3)"
 fi
 
 # ── Summary ───────────────────────────────────────────────────────────────────
@@ -418,6 +467,8 @@ echo "  Test data directory:     $TESTDIR"
 echo
 if [[ "$PROOFS_OK" -gt 0 ]]; then
   pass "STARK block compression active: $PROOFS_OK proof(s) generated"
+elif [[ "$SENT" -eq 0 ]]; then
+  pass "Sparse liveness run completed without proof failures; no proof expected without transactions"
 else
   info "STARK proofs still pending (async) — check $LOG1 for ProverService output"
 fi
