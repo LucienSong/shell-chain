@@ -3497,6 +3497,18 @@ mod tests {
         assert_eq!(result, format!("0x{}", hex::encode(expected.0)));
     }
 
+    #[tokio::test]
+    async fn web3_sha3_rejects_unprefixed_data_as_invalid_params() {
+        let handler = setup();
+
+        let err = Web3ApiServer::sha3(&handler, hex::encode(b"hello"))
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code(), jsonrpsee::types::error::INVALID_PARAMS_CODE);
+        assert!(err.message().contains("0x-prefixed"));
+    }
+
     // ── net_* tests ───────────────────────────────────────────────────
 
     #[tokio::test]

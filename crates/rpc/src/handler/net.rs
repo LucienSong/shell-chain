@@ -7,7 +7,9 @@ impl<S: KvStore + 'static> Web3ApiServer for RpcHandler<S> {
     }
 
     async fn sha3(&self, data: String) -> Result<String, ErrorObjectOwned> {
-        let raw = data.strip_prefix("0x").unwrap_or(&data);
+        let Some(raw) = data.strip_prefix("0x") else {
+            return Err(invalid_params_err("web3_sha3 data must be 0x-prefixed"));
+        };
         // Limit input to 32 KB to prevent DoS via large allocations.
         const MAX_HEX_LEN: usize = 32 * 1024 * 2; // 32 KB decoded = 64 KB hex
         if raw.len() > MAX_HEX_LEN {
