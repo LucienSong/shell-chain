@@ -3941,6 +3941,32 @@ mod tests {
         assert!(json.get("mixHash").is_some());
     }
 
+    #[tokio::test]
+    async fn get_block_receipts_rejects_invalid_hash_as_invalid_params() {
+        let handler = setup();
+        let invalid_hash = format!("0x{}zz", "00".repeat(31));
+
+        let err = EthApiServer::get_block_receipts(&handler, invalid_hash)
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code(), -32602);
+        assert!(err.message().contains("invalid block hash hex"));
+    }
+
+    #[tokio::test]
+    async fn witness_queries_reject_invalid_hash_as_invalid_params() {
+        let handler = setup();
+        let invalid_hash = format!("0x{}zz", "00".repeat(31));
+
+        let err = ShellApiServer::get_witness(&handler, invalid_hash)
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code(), -32602);
+        assert!(err.message().contains("invalid block hash hex"));
+    }
+
     // ── F-073: bloom false positive metric ──────────────────────────
 
     #[tokio::test]

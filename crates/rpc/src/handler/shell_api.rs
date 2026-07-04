@@ -1559,10 +1559,10 @@ fn resolve_witness_block<S: KvStore + 'static>(
 ) -> Result<Option<(ShellHash, BlockHeader)>, ErrorObjectOwned> {
     let block_hash = if block.starts_with("0x") && block.len() == 66 {
         let bytes = hex::decode(&block[2..])
-            .map_err(|e| internal_err(format!("invalid block hash hex: {e}")))?;
+            .map_err(|e| invalid_params(format!("invalid block hash hex: {e}")))?;
         let arr: [u8; 32] = bytes
             .try_into()
-            .map_err(|_| internal_err("block hash must be 32 bytes"))?;
+            .map_err(|_| invalid_params("block hash must be 32 bytes"))?;
         ShellHash::from(arr)
     } else {
         let tag = parse_block_tag(block)?;

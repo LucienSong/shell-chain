@@ -379,9 +379,9 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
         let block_obj = if block.starts_with("0x") && block.len() == 66 {
             let hex_str = block.strip_prefix("0x").unwrap_or(&block);
             let hash_bytes = hex::decode(hex_str)
-                .map_err(|e| internal_err(format!("invalid block hash hex: {e}")))?;
+                .map_err(|e| invalid_params_err(format!("invalid block hash hex: {e}")))?;
             let hash = ShellHash::try_from_slice(&hash_bytes)
-                .map_err(|e| internal_err(format!("invalid block hash: {e}")))?;
+                .map_err(|e| invalid_params_err(format!("invalid block hash: {e}")))?;
             self.chain_store
                 .get_block_by_hash(&hash)
                 .map_err(internal_err)?
