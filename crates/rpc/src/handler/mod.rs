@@ -481,11 +481,14 @@ impl<S: KvStore + 'static> RpcHandler<S> {
             .data
             .as_deref()
             .map(|s| {
-                let s = s.strip_prefix("0x").unwrap_or(s);
-                hex::decode(s).map(Bytes::from)
+                let Some(s) = s.strip_prefix("0x") else {
+                    return Err(invalid_params_err("call data must be 0x-prefixed"));
+                };
+                hex::decode(s)
+                    .map(Bytes::from)
+                    .map_err(|e| invalid_params_err(format!("invalid call data hex: {e}")))
             })
-            .transpose()
-            .map_err(|e| invalid_params_err(format!("invalid call data hex: {e}")))?
+            .transpose()?
             .unwrap_or_default();
 
         let access_list = req
@@ -3031,6 +3034,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn eth_call_rejects_unprefixed_data_as_invalid_params() {
+        let handler = setup();
+        let err = EthApiServer::call(
+            &handler,
+            crate::types::CallRequest {
+                from: None,
+                to: None,
+                data: Some("00".into()),
+                value: None,
+                gas: None,
+                access_list: None,
+            },
+            None,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.code(), jsonrpsee::types::error::INVALID_PARAMS_CODE);
+        assert!(err.message().contains("0x-prefixed"));
+    }
+
+    #[tokio::test]
     async fn eth_estimate_gas_rejects_invalid_data_hex_as_invalid_params() {
         let handler = setup();
         let err = EthApiServer::estimate_gas(
@@ -3049,6 +3074,27 @@ mod tests {
 
         assert_eq!(err.code(), -32602);
         assert!(err.message().contains("invalid call data hex"));
+    }
+
+    #[tokio::test]
+    async fn eth_estimate_gas_rejects_unprefixed_data_as_invalid_params() {
+        let handler = setup();
+        let err = EthApiServer::estimate_gas(
+            &handler,
+            crate::types::CallRequest {
+                from: None,
+                to: None,
+                data: Some("00".into()),
+                value: None,
+                gas: None,
+                access_list: None,
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.code(), jsonrpsee::types::error::INVALID_PARAMS_CODE);
+        assert!(err.message().contains("0x-prefixed"));
     }
 
     // ── eth_getLogs tests ────────────────────────────────────────
