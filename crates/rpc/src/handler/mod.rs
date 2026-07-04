@@ -1679,6 +1679,43 @@ mod tests {
         assert_eq!(second_page.next_cursor, None);
         assert_eq!(second_page.items.len(), 1);
         assert_eq!(second_page.items[0]["blockNumber"], "0x1");
+
+        let asc = ShellApiServer::get_transactions_by_address_v2(
+            &handler,
+            from,
+            Some(RpcAddressTransactionsV2Options {
+                from_block: Some(0),
+                to_block: Some(2),
+                limit: Some(1),
+                direction: RpcListDirection::Asc,
+                ..RpcAddressTransactionsV2Options::default()
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(asc.has_more);
+        assert!(asc.next_cursor.is_some());
+        assert_eq!(asc.items.len(), 1);
+        assert_eq!(asc.items[0]["blockNumber"], "0x1");
+
+        let asc_second_page = ShellApiServer::get_transactions_by_address_v2(
+            &handler,
+            from,
+            Some(RpcAddressTransactionsV2Options {
+                from_block: Some(0),
+                to_block: Some(2),
+                cursor: asc.next_cursor,
+                limit: Some(1),
+                direction: RpcListDirection::Asc,
+                ..RpcAddressTransactionsV2Options::default()
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(!asc_second_page.has_more);
+        assert_eq!(asc_second_page.next_cursor, None);
+        assert_eq!(asc_second_page.items.len(), 1);
+        assert_eq!(asc_second_page.items[0]["blockNumber"], "0x2");
     }
 
     #[tokio::test]

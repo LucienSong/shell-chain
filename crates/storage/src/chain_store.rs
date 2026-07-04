@@ -2758,6 +2758,28 @@ mod tests {
         assert_eq!(filtered.len(), 2);
         assert_eq!(filtered[0].block_number, 3);
         assert_eq!(filtered[1].block_number, 2);
+
+        let (first_asc, has_more) = cs
+            .get_txs_by_address_cursor(&address, 0, u64::MAX, None, 2, false)
+            .unwrap();
+        assert!(has_more);
+        assert_eq!(first_asc.len(), 2);
+        assert_eq!(first_asc[0].block_number, 1);
+        assert_eq!(first_asc[1].block_number, 2);
+
+        let (second_asc, has_more) = cs
+            .get_txs_by_address_cursor(
+                &address,
+                0,
+                u64::MAX,
+                first_asc.last().map(|entry| entry.cursor.as_str()),
+                2,
+                false,
+            )
+            .unwrap();
+        assert!(!has_more);
+        assert_eq!(second_asc.len(), 1);
+        assert_eq!(second_asc[0].block_number, 3);
     }
 
     #[test]
