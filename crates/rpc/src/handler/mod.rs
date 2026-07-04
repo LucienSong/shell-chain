@@ -5254,6 +5254,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn estimate_paymaster_gas_rejects_unprefixed_byte_fields() {
+        let handler = setup();
+        let paymaster = Address::from([0xAA; 20]);
+        let sender = Address::from([0xBB; 20]);
+
+        for (inner_calls_data, paymaster_context, expected) in [
+            (
+                Some("01".into()),
+                None,
+                "inner_calls_data must be 0x-prefixed",
+            ),
+            (
+                None,
+                Some("01".into()),
+                "paymaster_context must be 0x-prefixed",
+            ),
+        ] {
+            let err = ShellApiServer::estimate_paymaster_gas(
+                &handler,
+                PaymasterGasEstimateRequest {
+                    paymaster,
+                    sender,
+                    inner_calls_data,
+                    max_fee_per_gas: Some("0x1".into()),
+                    paymaster_context,
+                },
+            )
+            .await
+            .unwrap_err();
+
+            assert_eq!(err.code(), -32602);
+            assert!(err.message().contains(expected));
+        }
+    }
+
+    #[tokio::test]
+    async fn estimate_paymaster_gas_rejects_invalid_byte_fields() {
+        let handler = setup();
+        let paymaster = Address::from([0xAA; 20]);
+        let sender = Address::from([0xBB; 20]);
+
+        for (inner_calls_data, paymaster_context, expected) in [
+            (Some("0xzz".into()), None, "inner_calls_data invalid hex"),
+            (None, Some("0xzz".into()), "paymaster_context invalid hex"),
+        ] {
+            let err = ShellApiServer::estimate_paymaster_gas(
+                &handler,
+                PaymasterGasEstimateRequest {
+                    paymaster,
+                    sender,
+                    inner_calls_data,
+                    max_fee_per_gas: Some("0x1".into()),
+                    paymaster_context,
+                },
+            )
+            .await
+            .unwrap_err();
+
+            assert_eq!(err.code(), -32602);
+            assert!(err.message().contains(expected));
+        }
+    }
+
+    #[tokio::test]
     async fn is_sponsored_returns_not_found_for_unknown_hash() {
         let handler = setup();
         let res = ShellApiServer::is_sponsored(&handler, ShellHash::from_slice(&[0u8; 32]))

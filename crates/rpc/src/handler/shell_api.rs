@@ -1345,27 +1345,18 @@ impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         use shell_pqvm::PAYMASTER_VALIDATE_GAS_CAP;
 
-        // Parse optional fields, applying defaults.
-        let inner_calls_data = match req.inner_calls_data.as_deref() {
-            Some(hex) if !hex.is_empty() && hex != "0x" => {
-                hex::decode(hex.trim_start_matches("0x")).map_err(|_| {
-                    invalid_params("estimatePaymasterGas: invalid inner_calls_data hex")
-                })?
-            }
-            _ => vec![],
-        };
+        let inner_calls_data = parse_optional_hex_bytes(
+            req.inner_calls_data.as_deref(),
+            "estimatePaymasterGas: inner_calls_data",
+        )?;
         let max_fee_per_gas: u64 = match req.max_fee_per_gas.as_deref() {
             Some(hex) => parse_hex_u64(hex)?,
             None => 1_000_000_000, // 1 gwei default
         };
-        let paymaster_context = match req.paymaster_context.as_deref() {
-            Some(hex) if !hex.is_empty() && hex != "0x" => {
-                hex::decode(hex.trim_start_matches("0x")).map_err(|_| {
-                    invalid_params("estimatePaymasterGas: invalid paymaster_context hex")
-                })?
-            }
-            _ => vec![],
-        };
+        let paymaster_context = parse_optional_hex_bytes(
+            req.paymaster_context.as_deref(),
+            "estimatePaymasterGas: paymaster_context",
+        )?;
 
         // Current RPC handlers do not yet expose the full EVM staticcall
         // executor needed to run validatePaymasterOp from this read-only path.
@@ -1555,6 +1546,19 @@ impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
             .collect();
         Ok(serde_json::Value::Array(entries))
     }
+}
+
+fn parse_optional_hex_bytes(value: Option<&str>, field: &str) -> Result<Vec<u8>, ErrorObjectOwned> {
+    let Some(value) = value else {
+        return Ok(vec![]);
+    };
+    if value.is_empty() || value == "0x" {
+        return Ok(vec![]);
+    }
+    let Some(hex) = value.strip_prefix("0x") else {
+        return Err(invalid_params(format!("{field} must be 0x-prefixed")));
+    };
+    hex::decode(hex).map_err(|e| invalid_params(format!("{field} invalid hex: {e}")))
 }
 
 fn resolve_witness_block<S: KvStore + 'static>(
