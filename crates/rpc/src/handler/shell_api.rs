@@ -104,7 +104,10 @@ impl<S: KvStore + 'static> RpcHandler<S> {
                 limit as usize,
                 descending,
             )
-            .map_err(internal_err)?;
+            .map_err(|e| match e {
+                shell_storage::StorageError::InvalidInput(msg) => invalid_params(msg),
+                other => internal_err(other),
+            })?;
         let mut items = Vec::with_capacity(entries.len());
         for entry in &entries {
             let Some((block_hash, tx_index)) = self
