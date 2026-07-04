@@ -730,13 +730,13 @@ pub(crate) fn parse_hex_hash(s: &str) -> Result<ShellHash, ErrorObjectOwned> {
 
 /// Parse a hex string "0x..." into u64.
 pub(crate) fn parse_hex_u64(s: &str) -> Result<u64, ErrorObjectOwned> {
-    let s = s.strip_prefix("0x").unwrap_or(s);
+    let s = canonical_hex_quantity_digits(s, "u64")?;
     u64::from_str_radix(s, 16).map_err(|_| invalid_params_err(format!("invalid hex u64: 0x{s}")))
 }
 
 /// Parse a hex string "0x..." into U256.
 pub(crate) fn parse_hex_u256(s: &str) -> Result<U256, ErrorObjectOwned> {
-    let s = s.strip_prefix("0x").unwrap_or(s);
+    let s = canonical_hex_quantity_digits(s, "U256")?;
     // F-066: reject oversized input to prevent silent truncation.
     if s.len() > 64 {
         return Err(invalid_params_err(format!(
@@ -751,6 +751,33 @@ pub(crate) fn parse_hex_u256(s: &str) -> Result<U256, ErrorObjectOwned> {
     })
     .map_err(|_| invalid_params_err(format!("invalid hex U256: 0x{s}")))?;
     Ok(U256::from_be_slice(&bytes))
+}
+
+fn canonical_hex_quantity_digits<'a>(
+    value: &'a str,
+    type_name: &str,
+) -> Result<&'a str, ErrorObjectOwned> {
+    let Some(hex) = value.strip_prefix("0x") else {
+        return Err(invalid_params_err(format!(
+            "invalid hex {type_name}: missing 0x prefix"
+        )));
+    };
+    if hex.is_empty() {
+        return Err(invalid_params_err(format!(
+            "invalid hex {type_name}: empty quantity"
+        )));
+    }
+    if hex.len() > 1 && hex.starts_with('0') {
+        return Err(invalid_params_err(format!(
+            "invalid hex {type_name}: quantity has leading zeroes"
+        )));
+    }
+    if !hex.as_bytes().iter().all(u8::is_ascii_hexdigit) {
+        return Err(invalid_params_err(format!(
+            "invalid hex {type_name}: 0x{hex}"
+        )));
+    }
+    Ok(hex)
 }
 
 /// Parsed block number tag.
@@ -773,9 +800,7 @@ pub(crate) fn parse_block_tag(s: &str) -> Result<BlockTag, ErrorObjectOwned> {
         "safe" | "finalized" => Ok(BlockTag::Finalized),
         "pending" => Ok(BlockTag::Pending),
         "earliest" => Ok(BlockTag::Number(0)),
-        hex if hex.starts_with("0x") => u64::from_str_radix(&hex[2..], 16)
-            .map(BlockTag::Number)
-            .map_err(|_| invalid_params_err(format!("invalid block number: {hex}"))),
+        hex if hex.starts_with("0x") => parse_hex_u64(hex).map(BlockTag::Number),
         _ => Err(invalid_params_err(format!("invalid block number: {s}"))),
     }
 }
@@ -789,8 +814,7 @@ pub(crate) fn validate_state_block_is_latest(s: &str) -> Result<(), ErrorObjectO
             "historical state queries are not supported; use latest or pending",
         )),
         hex if hex.starts_with("0x") => {
-            let _ = u64::from_str_radix(&hex[2..], 16)
-                .map_err(|_| invalid_params_err(format!("invalid block number: {hex}")))?;
+            let _ = parse_hex_u64(hex)?;
             Err(invalid_params_err(
                 "historical state queries are not supported; use latest or pending",
             ))
@@ -1302,6 +1326,70 @@ mod tests {
         let handler = setup();
         let result = EthApiServer::block_number(&handler).await.unwrap();
         assert_eq!(result, "0x0");
+    }
+
+    #[test]
+    fn rpc_quantity_parsers_reject_non_canonical_hex() {
+        for value in ["42", "0x", "0x00", "0x01", "0x-1", "0xgg"] {
+            assert!(
+                parse_hex_u64(value).is_err(),
+                "u64 quantity should reject {value}"
+            );
+            assert!(
+                parse_hex_u256(value).is_err(),
+                "U256 quantity should reject {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn rpc_quantity_parsers_accept_canonical_hex() {
+        assert_eq!(parse_hex_u64("0x0").unwrap(), 0);
+        assert_eq!(parse_hex_u64("0xa").unwrap(), 10);
+        assert_eq!(parse_hex_u64("0xA").unwrap(), 10);
+        assert_eq!(parse_hex_u256("0x0").unwrap(), U256::ZERO);
+        assert_eq!(parse_hex_u256("0x2a").unwrap(), U256::from(42u64));
+        assert_eq!(
+            parse_hex_u256("0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")
+                .unwrap(),
+            U256::from_be_slice(&[0xff; 32])
+        );
+    }
+
+    #[test]
+    fn block_tag_parser_rejects_non_canonical_quantities() {
+        assert!(matches!(
+            parse_block_tag("0xa").unwrap(),
+            BlockTag::Number(10)
+        ));
+        assert!(matches!(
+            parse_block_tag("latest").unwrap(),
+            BlockTag::Latest
+        ));
+
+        for value in ["10", "0x", "0x00", "0x01", "0xzz"] {
+            assert!(
+                parse_block_tag(value).is_err(),
+                "block tag should reject {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn state_block_validation_rejects_invalid_quantities_before_history_error() {
+        assert!(validate_state_block_is_latest("latest").is_ok());
+        assert!(validate_state_block_is_latest("pending").is_ok());
+
+        let historical = validate_state_block_is_latest("0x1").unwrap_err();
+        assert!(historical.message().contains("historical state"));
+
+        for value in ["1", "0x", "0x00", "0x01"] {
+            let err = validate_state_block_is_latest(value).unwrap_err();
+            assert!(
+                !err.message().contains("historical state"),
+                "invalid tag {value} should fail before historical-state handling"
+            );
+        }
     }
 
     #[tokio::test]
