@@ -154,7 +154,7 @@ impl RawLogFilter {
     }
 
     /// Convert to a resolved `LogFilter`, resolving block tags to numbers.
-    pub fn into_filter(self, latest_block: u64) -> LogFilter {
+    pub fn into_filter(self, latest_block: u64) -> Result<LogFilter, String> {
         let RawLogFilter {
             from_block: from_block_tag,
             to_block: to_block_tag,
@@ -163,32 +163,40 @@ impl RawLogFilter {
         } = self;
         let topics = Self::into_topics(raw_topics);
 
-        let resolve = |tag: &str| -> Option<u64> {
+        let resolve = |field: &str, tag: &str| -> Result<u64, String> {
             match tag {
-                "latest" | "pending" => Some(latest_block),
-                "earliest" => Some(0),
+                "latest" | "pending" => Ok(latest_block),
+                "earliest" => Ok(0),
                 hex => {
-                    let hex = hex.strip_prefix("0x").unwrap_or(hex);
-                    u64::from_str_radix(hex, 16).ok()
+                    let Some(hex) = hex.strip_prefix("0x") else {
+                        return Err(format!(
+                            "{field} must be a block tag or 0x-prefixed quantity"
+                        ));
+                    };
+                    if hex.is_empty() {
+                        return Err(format!("{field} must not be an empty quantity"));
+                    }
+                    u64::from_str_radix(hex, 16)
+                        .map_err(|_| format!("{field} has invalid hex quantity: 0x{hex}"))
                 }
             }
         };
 
-        let from_block = from_block_tag
-            .as_deref()
-            .and_then(resolve)
-            .or(Some(latest_block));
-        let to_block = to_block_tag
-            .as_deref()
-            .and_then(resolve)
-            .or(Some(latest_block));
+        let from_block = match from_block_tag.as_deref() {
+            Some(tag) => Some(resolve("fromBlock", tag)?),
+            None => Some(latest_block),
+        };
+        let to_block = match to_block_tag.as_deref() {
+            Some(tag) => Some(resolve("toBlock", tag)?),
+            None => Some(latest_block),
+        };
 
-        LogFilter {
+        Ok(LogFilter {
             from_block,
             to_block,
             address,
             topics,
-        }
+        })
     }
 
     /// Convert to a `LogFilter` matcher without resolving block range tags.
@@ -407,7 +415,7 @@ mod tests {
             "address": Address::from([0x01; 20]),
         });
         let raw: RawLogFilter = serde_json::from_value(json).unwrap();
-        let filter = raw.into_filter(100);
+        let filter = raw.into_filter(100).unwrap();
         assert_eq!(filter.from_block, Some(1));
         assert_eq!(filter.to_block, Some(5));
         assert_eq!(filter.address.as_ref().unwrap().len(), 1);
@@ -422,7 +430,7 @@ mod tests {
             ]
         });
         let raw: RawLogFilter = serde_json::from_value(json).unwrap();
-        let filter = raw.into_filter(100);
+        let filter = raw.into_filter(100).unwrap();
         assert_eq!(filter.address.as_ref().unwrap().len(), 2);
     }
 
@@ -430,7 +438,7 @@ mod tests {
     fn raw_filter_topics() {
         let json = r#"{"topics":[null,"0x0000000000000000000000000000000000000000000000000000000000000001"]}"#;
         let raw: RawLogFilter = serde_json::from_str(json).unwrap();
-        let filter = raw.into_filter(100);
+        let filter = raw.into_filter(100).unwrap();
         assert!(filter.topics[0].is_none());
         assert!(filter.topics[1].is_some());
         assert_eq!(filter.topics[1].as_ref().unwrap().len(), 1);
@@ -440,9 +448,22 @@ mod tests {
     fn raw_filter_defaults_to_latest() {
         let json = r#"{}"#;
         let raw: RawLogFilter = serde_json::from_str(json).unwrap();
-        let filter = raw.into_filter(42);
+        let filter = raw.into_filter(42).unwrap();
         assert_eq!(filter.from_block, Some(42));
         assert_eq!(filter.to_block, Some(42));
+    }
+
+    #[test]
+    fn raw_filter_rejects_invalid_block_tags() {
+        let raw: RawLogFilter =
+            serde_json::from_str(r#"{"fromBlock":"not-a-block","toBlock":"0x1"}"#).unwrap();
+        let err = raw.into_filter(42).unwrap_err();
+        assert!(err.contains("fromBlock"));
+
+        let raw: RawLogFilter =
+            serde_json::from_str(r#"{"fromBlock":"0x1","toBlock":"0x"}"#).unwrap();
+        let err = raw.into_filter(42).unwrap_err();
+        assert!(err.contains("toBlock"));
     }
 
     #[test]
