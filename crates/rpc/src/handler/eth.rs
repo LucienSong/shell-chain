@@ -802,6 +802,7 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
         if filter.from_block.is_none() {
             filter.from_block = Some(format!("0x{:x}", latest));
         }
+        filter.clone().into_filter(latest).map_err(invalid_params)?;
         let id = self
             .filter_registry
             .new_filter(FilterKind::Log(filter), latest)
