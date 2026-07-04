@@ -582,7 +582,12 @@ impl<S: KvStore + 'static> RpcHandler<S> {
         ),
         ErrorObjectOwned,
     > {
-        let hex_str = tx_hash.strip_prefix("0x").unwrap_or(tx_hash);
+        let Some(hex_str) = tx_hash.strip_prefix("0x") else {
+            return Err(invalid_params_err("tx hash must be 0x-prefixed"));
+        };
+        if hex_str.len() != 64 {
+            return Err(invalid_params_err("tx hash must be 32 bytes"));
+        }
         let hash_bytes = hex::decode(hex_str)
             .map_err(|e| invalid_params_err(format!("invalid tx hash hex: {e}")))?;
         let hash = ShellHash::try_from_slice(&hash_bytes)
@@ -4688,6 +4693,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn debug_trace_transaction_rejects_unprefixed_hash_as_invalid_params() {
+        let handler = setup();
+        let fake_hash = "aa".repeat(32);
+
+        let err = DebugApiServer::trace_transaction(&handler, fake_hash, None)
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code(), jsonrpsee::types::error::INVALID_PARAMS_CODE);
+        assert!(err.message().contains("0x-prefixed"));
+    }
+
+    #[tokio::test]
     async fn debug_trace_block_by_number_returns_traces() {
         let handler = setup();
         store_block_with_tx(&handler, 0, true);
@@ -4787,6 +4805,19 @@ mod tests {
         let result = TraceApiServer::trace_oe_transaction(&handler, fake_hash).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().message().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn trace_oe_transaction_rejects_unprefixed_hash_as_invalid_params() {
+        let handler = setup();
+        let fake_hash = "cc".repeat(32);
+
+        let err = TraceApiServer::trace_oe_transaction(&handler, fake_hash)
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code(), jsonrpsee::types::error::INVALID_PARAMS_CODE);
+        assert!(err.message().contains("0x-prefixed"));
     }
 
     #[tokio::test]
