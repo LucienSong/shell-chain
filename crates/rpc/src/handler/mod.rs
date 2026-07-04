@@ -4355,6 +4355,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn new_filter_rejects_invalid_block_tag_as_invalid_params() {
+        let handler = setup();
+        let raw: crate::filter::RawLogFilter =
+            serde_json::from_str(r#"{"fromBlock":"not-a-block","toBlock":"0x1"}"#).unwrap();
+
+        let err = EthApiServer::new_filter(&handler, raw).await.unwrap_err();
+
+        assert_eq!(err.code(), -32602);
+        assert!(err.message().contains("fromBlock"));
+    }
+
+    #[tokio::test]
     async fn block_filter_tracks_new_blocks() {
         let handler = setup();
 
