@@ -485,7 +485,7 @@ impl<S: KvStore + 'static> RpcHandler<S> {
                 hex::decode(s).map(Bytes::from)
             })
             .transpose()
-            .map_err(|e| internal_err(format!("invalid call data hex: {e}")))?
+            .map_err(|e| invalid_params_err(format!("invalid call data hex: {e}")))?
             .unwrap_or_default();
 
         let access_list = req
@@ -2833,6 +2833,49 @@ mod tests {
         assert!(gas >= 21_000, "estimated gas too low: {gas}");
     }
 
+    #[tokio::test]
+    async fn eth_call_rejects_invalid_data_hex_as_invalid_params() {
+        let handler = setup();
+        let err = EthApiServer::call(
+            &handler,
+            crate::types::CallRequest {
+                from: None,
+                to: None,
+                data: Some("0xzz".into()),
+                value: None,
+                gas: None,
+                access_list: None,
+            },
+            None,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.code(), -32602);
+        assert!(err.message().contains("invalid call data hex"));
+    }
+
+    #[tokio::test]
+    async fn eth_estimate_gas_rejects_invalid_data_hex_as_invalid_params() {
+        let handler = setup();
+        let err = EthApiServer::estimate_gas(
+            &handler,
+            crate::types::CallRequest {
+                from: None,
+                to: None,
+                data: Some("0xzz".into()),
+                value: None,
+                gas: None,
+                access_list: None,
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.code(), -32602);
+        assert!(err.message().contains("invalid call data hex"));
+    }
+
     // ── eth_getLogs tests ────────────────────────────────────────
 
     /// Helper: store a block with receipts that contain logs and return the block hash.
@@ -5119,6 +5162,30 @@ mod tests {
         )
         .unwrap();
         assert!(gas >= 21_000, "expected simulated gas ≥ 21_000, got {gas}");
+    }
+
+    #[tokio::test]
+    async fn estimate_batch_rejects_invalid_inner_data_hex_as_invalid_params() {
+        let handler = setup();
+        let dst = Address::from([0xAA; 20]);
+        let err = ShellApiServer::estimate_batch(
+            &handler,
+            crate::types::BatchEstimateRequest {
+                from: Some(Address::ZERO),
+                paymaster: None,
+                inner_calls: vec![crate::types::BatchInnerCallRequest {
+                    to: Some(dst),
+                    value: Some("0x0".into()),
+                    data: Some("0xzz".into()),
+                    gas_limit: None,
+                }],
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.code(), -32602);
+        assert!(err.message().contains("invalid call data hex"));
     }
 
     #[tokio::test]

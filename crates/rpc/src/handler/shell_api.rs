@@ -1295,9 +1295,13 @@ impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
                         access_list: None,
                     };
                     let (_out, used) = self.execute_call(&call_req).map_err(|e| {
-                        server_error(format!(
-                            "estimateBatch: simulation for inner[{idx}] failed: {e}"
-                        ))
+                        if e.code() == -32602 {
+                            e
+                        } else {
+                            server_error(format!(
+                                "estimateBatch: simulation for inner[{idx}] failed: {e}"
+                            ))
+                        }
                     })?;
                     let buffered = ((used as f64) * 1.2) as u64;
                     (std::cmp::max(buffered, PER_INNER_DEFAULT_FLOOR), true)
