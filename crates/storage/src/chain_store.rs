@@ -308,9 +308,9 @@ impl<S: KvStore> ChainStore<S> {
 
     fn addr_tx_rev_cursor_key(address: &Address, cursor: &str) -> Result<Vec<u8>, StorageError> {
         let raw = cursor.strip_prefix("0x").unwrap_or(cursor);
-        let bytes = hex::decode(raw).map_err(|e| StorageError::Codec(e.to_string()))?;
+        let bytes = hex::decode(raw).map_err(|e| StorageError::InvalidInput(e.to_string()))?;
         if bytes.len() != 12 {
-            return Err(StorageError::Codec(
+            return Err(StorageError::InvalidInput(
                 "address tx cursor must encode 12 bytes".into(),
             ));
         }
@@ -321,9 +321,9 @@ impl<S: KvStore> ChainStore<S> {
 
     fn addr_tx_cursor_key(address: &Address, cursor: &str) -> Result<Vec<u8>, StorageError> {
         let raw = cursor.strip_prefix("0x").unwrap_or(cursor);
-        let bytes = hex::decode(raw).map_err(|e| StorageError::Codec(e.to_string()))?;
+        let bytes = hex::decode(raw).map_err(|e| StorageError::InvalidInput(e.to_string()))?;
         if bytes.len() != 12 {
-            return Err(StorageError::Codec(
+            return Err(StorageError::InvalidInput(
                 "address tx cursor must encode 12 bytes".into(),
             ));
         }
@@ -1103,7 +1103,7 @@ impl<S: KvStore> ChainStore<S> {
                 let key = Self::addr_tx_rev_cursor_key(address, cursor)?;
                 let block_number = Self::block_number_from_addr_rev_index_key(prefix.len(), &key)?;
                 if block_number < from_block || block_number > to_block {
-                    return Err(StorageError::Codec(
+                    return Err(StorageError::InvalidInput(
                         "address tx cursor is outside requested block range".into(),
                     ));
                 }
@@ -1113,7 +1113,7 @@ impl<S: KvStore> ChainStore<S> {
                 let key = Self::addr_tx_cursor_key(address, cursor)?;
                 let block_number = Self::block_number_from_addr_index_key(prefix.len(), &key)?;
                 if block_number < from_block || block_number > to_block {
-                    return Err(StorageError::Codec(
+                    return Err(StorageError::InvalidInput(
                         "address tx cursor is outside requested block range".into(),
                     ));
                 }

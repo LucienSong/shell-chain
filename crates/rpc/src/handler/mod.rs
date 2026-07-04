@@ -1727,6 +1727,124 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_transactions_by_address_v2_rejects_invalid_cursor_as_invalid_params() {
+        let handler = setup();
+        let address = test_address(b"v2-bad-cursor");
+
+        for cursor in ["0xzz", "0x0102"] {
+            let err = ShellApiServer::get_transactions_by_address_v2(
+                &handler,
+                address,
+                Some(RpcAddressTransactionsV2Options {
+                    cursor: Some(cursor.into()),
+                    ..RpcAddressTransactionsV2Options::default()
+                }),
+            )
+            .await
+            .unwrap_err();
+
+            assert_eq!(err.code(), -32602);
+        }
+    }
+
+    #[tokio::test]
+    async fn get_transactions_by_address_v2_rejects_out_of_range_cursor_as_invalid_params() {
+        let handler = setup();
+        let from = test_address(b"v2-cursor-range-from");
+        let to = Address::from([0x42; 20]);
+        let signer = shell_crypto::DilithiumSigner::generate();
+        let pubkey = signer.public_key().to_vec();
+
+        let genesis = make_genesis_block();
+        let genesis_hash = genesis.hash();
+        handler.chain_store.put_block(&genesis).unwrap();
+        handler
+            .chain_store
+            .set_canonical(genesis.number(), &genesis_hash)
+            .unwrap();
+        handler.chain_store.set_head(&genesis_hash).unwrap();
+
+        let tx = SignedTransaction::with_pubkey(
+            from,
+            Transaction {
+                chain_id: 1,
+                nonce: 0,
+                to: Some(to),
+                value: U256::from(1u64),
+                data: Bytes::default(),
+                gas_limit: 21_000,
+                max_fee_per_gas: 1,
+                max_priority_fee_per_gas: 0,
+                access_list: None,
+                tx_type: 2,
+                max_fee_per_blob_gas: None,
+                blob_versioned_hashes: None,
+            },
+            signer.sign(b"v2-cursor-range").unwrap(),
+            pubkey,
+        );
+        let block = Block {
+            header: BlockHeader {
+                parent_hash: genesis_hash,
+                state_root: ShellHash::default(),
+                transactions_root: ShellHash::default(),
+                receipts_root: ShellHash::default(),
+                logs_bloom: Bytes::default(),
+                number: 1,
+                gas_limit: 30_000_000,
+                gas_used: 21_000,
+                timestamp: 1_700_000_001,
+                extra_data: Bytes::default(),
+                proposer: test_address(b"v2-cursor-range-proposer"),
+                sig_aggregate_proof: None,
+                base_fee_per_gas: 0,
+                withdrawals_root: ShellHash::ZERO,
+                parent_beacon_block_root: ShellHash::ZERO,
+                blob_gas_used: 0,
+                excess_blob_gas: 0,
+                witness_root: None,
+            },
+            transactions: vec![tx],
+            system_transactions: vec![],
+            proposer_seal: None,
+        };
+        handler
+            .chain_store
+            .commit_canonical_block(&block, None)
+            .unwrap();
+
+        let first_page = ShellApiServer::get_transactions_by_address_v2(
+            &handler,
+            from,
+            Some(RpcAddressTransactionsV2Options {
+                from_block: Some(0),
+                to_block: Some(1),
+                limit: Some(1),
+                ..RpcAddressTransactionsV2Options::default()
+            }),
+        )
+        .await
+        .unwrap();
+
+        let err = ShellApiServer::get_transactions_by_address_v2(
+            &handler,
+            from,
+            Some(RpcAddressTransactionsV2Options {
+                from_block: Some(2),
+                to_block: Some(3),
+                cursor: first_page.next_cursor,
+                limit: Some(1),
+                ..RpcAddressTransactionsV2Options::default()
+            }),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.code(), -32602);
+        assert!(err.message().contains("outside requested block range"));
+    }
+
+    #[tokio::test]
     async fn blocks_range_clamps_limits_and_supports_direction() {
         let handler = setup();
         let genesis = make_genesis_block();
