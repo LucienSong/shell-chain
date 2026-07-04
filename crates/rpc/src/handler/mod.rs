@@ -3136,6 +3136,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_logs_rejects_noncanonical_block_quantity_as_invalid_params() {
+        let handler = setup();
+        let raw: crate::filter::RawLogFilter =
+            serde_json::from_str(r#"{"fromBlock":"0x01","toBlock":"0x1"}"#).unwrap();
+
+        let err = EthApiServer::get_logs(&handler, raw).await.unwrap_err();
+
+        assert_eq!(err.code(), -32602);
+        assert!(err.message().contains("fromBlock"));
+    }
+
+    #[tokio::test]
     async fn get_logs_matches_specific_address() {
         let handler = setup();
         let target = Address::from([0xAA; 20]);
