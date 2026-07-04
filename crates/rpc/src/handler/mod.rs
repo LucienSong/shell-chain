@@ -1422,6 +1422,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn set_balance_requires_dev_control() {
+        let handler = setup();
+        let addr = test_address(b"set-balance-no-dev");
+
+        let err = ShellApiServer::set_balance(&handler, addr, "0x1".into())
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code(), -32002);
+        assert!(err.message().contains("dev mode"));
+    }
+
+    #[tokio::test]
+    async fn set_balance_accepts_canonical_hex_quantity() {
+        let handler = setup().with_dev_control(Arc::new(MockDevControl::default()));
+        let addr = test_address(b"set-balance-canonical");
+
+        assert!(ShellApiServer::set_balance(&handler, addr, "0x2a".into())
+            .await
+            .unwrap());
+
+        let balance = handler.world_state.read().get_balance(&addr).unwrap();
+        assert_eq!(balance, U256::from(42u64));
+    }
+
+    #[tokio::test]
+    async fn set_balance_rejects_non_canonical_quantities() {
+        let handler = setup().with_dev_control(Arc::new(MockDevControl::default()));
+        let addr = test_address(b"set-balance-invalid");
+
+        for value in ["42", "0x", "0x00", "0x01", "0xgg"] {
+            let err = ShellApiServer::set_balance(&handler, addr, value.into())
+                .await
+                .unwrap_err();
+            assert_eq!(err.code(), -32602, "setBalance should reject {value}");
+        }
+    }
+
+    #[tokio::test]
     async fn chain_id() {
         let handler = setup();
         let result = EthApiServer::chain_id(&handler).await.unwrap();
