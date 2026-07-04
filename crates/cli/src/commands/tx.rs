@@ -402,12 +402,7 @@ fn submit_tx(
     });
 
     let result = rpc_post(rpc_url, &body)?;
-    if let Some(err) = result.get("error") {
-        return Err(format!("RPC error: {err}").into());
-    }
-    let tx_hash = result["result"]
-        .as_str()
-        .ok_or("unexpected eth_sendRawTransaction response")?;
+    let tx_hash = rpc_result_str(&result, "eth_sendRawTransaction")?;
     Ok(tx_hash.to_string())
 }
 
@@ -438,9 +433,7 @@ fn rpc_chain_id(url: &str) -> Result<u64, Box<dyn std::error::Error>> {
         "id": 1
     });
     let result = rpc_post(url, &body)?;
-    let hex_str = result["result"]
-        .as_str()
-        .ok_or("unexpected eth_chainId response")?;
+    let hex_str = rpc_result_str(&result, "eth_chainId")?;
     parse_rpc_quantity(hex_str)
 }
 
@@ -452,9 +445,7 @@ fn rpc_get_nonce(url: &str, addr: &Address) -> Result<u64, Box<dyn std::error::E
         "id": 1
     });
     let result = rpc_post(url, &body)?;
-    let hex_str = result["result"]
-        .as_str()
-        .ok_or("unexpected eth_getTransactionCount response")?;
+    let hex_str = rpc_result_str(&result, "eth_getTransactionCount")?;
     parse_rpc_quantity(hex_str)
 }
 
@@ -466,9 +457,7 @@ fn rpc_gas_price(url: &str) -> Result<u64, Box<dyn std::error::Error>> {
         "id": 1
     });
     let result = rpc_post(url, &body)?;
-    let hex_str = result["result"]
-        .as_str()
-        .ok_or("unexpected eth_gasPrice response")?;
+    let hex_str = rpc_result_str(&result, "eth_gasPrice")?;
     parse_rpc_quantity(hex_str)
 }
 
@@ -495,10 +484,21 @@ fn rpc_estimate_gas(
         "id": 1
     });
     let result = rpc_post(url, &body)?;
-    let hex_str = result["result"]
-        .as_str()
-        .ok_or("unexpected eth_estimateGas response")?;
+    let hex_str = rpc_result_str(&result, "eth_estimateGas")?;
     parse_rpc_quantity(hex_str)
+}
+
+fn rpc_result_str<'a>(
+    response: &'a serde_json::Value,
+    method: &str,
+) -> Result<&'a str, Box<dyn std::error::Error>> {
+    if let Some(err) = response.get("error") {
+        return Err(format!("RPC error from {method}: {err}").into());
+    }
+    response
+        .get("result")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| format!("unexpected {method} response").into())
 }
 
 fn parse_rpc_quantity(s: &str) -> Result<u64, Box<dyn std::error::Error>> {
@@ -507,6 +507,9 @@ fn parse_rpc_quantity(s: &str) -> Result<u64, Box<dyn std::error::Error>> {
         .ok_or_else(|| format!("RPC quantity must be 0x-prefixed: {s}"))?;
     if hex.is_empty() {
         return Err("RPC quantity must not be empty".into());
+    }
+    if hex.len() > 1 && hex.starts_with('0') {
+        return Err(format!("RPC quantity must be canonical without leading zeroes: {s}").into());
     }
     if hex.len() > 16 {
         return Err(format!("RPC quantity overflows u64: {s}").into());
@@ -571,6 +574,33 @@ mod tests {
         assert!(parse_rpc_quantity("").is_err());
         assert!(parse_rpc_quantity("0x").is_err());
         assert!(parse_rpc_quantity("ff").is_err());
+        assert!(parse_rpc_quantity("0x00").is_err());
+        assert!(parse_rpc_quantity("0x01").is_err());
         assert!(parse_rpc_quantity("0x10000000000000000").is_err());
+    }
+
+    #[test]
+    fn rpc_result_str_surfaces_rpc_errors() {
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "error": {"code": -32000, "message": "boom"},
+            "id": 1
+        });
+
+        let err = rpc_result_str(&response, "eth_chainId").unwrap_err();
+        assert!(err.to_string().contains("RPC error from eth_chainId"));
+    }
+
+    #[test]
+    fn rpc_result_str_requires_string_result() {
+        let missing = serde_json::json!({"jsonrpc": "2.0", "id": 1});
+        assert!(rpc_result_str(&missing, "eth_chainId").is_err());
+
+        let non_string = serde_json::json!({
+            "jsonrpc": "2.0",
+            "result": 1,
+            "id": 1
+        });
+        assert!(rpc_result_str(&non_string, "eth_chainId").is_err());
     }
 }
