@@ -441,8 +441,7 @@ fn rpc_chain_id(url: &str) -> Result<u64, Box<dyn std::error::Error>> {
     let hex_str = result["result"]
         .as_str()
         .ok_or("unexpected eth_chainId response")?;
-    let hex_str = hex_str.strip_prefix("0x").unwrap_or(hex_str);
-    Ok(u64::from_str_radix(hex_str, 16)?)
+    parse_rpc_quantity(hex_str)
 }
 
 fn rpc_get_nonce(url: &str, addr: &Address) -> Result<u64, Box<dyn std::error::Error>> {
@@ -456,8 +455,7 @@ fn rpc_get_nonce(url: &str, addr: &Address) -> Result<u64, Box<dyn std::error::E
     let hex_str = result["result"]
         .as_str()
         .ok_or("unexpected eth_getTransactionCount response")?;
-    let hex_str = hex_str.strip_prefix("0x").unwrap_or(hex_str);
-    Ok(u64::from_str_radix(hex_str, 16)?)
+    parse_rpc_quantity(hex_str)
 }
 
 fn rpc_gas_price(url: &str) -> Result<u64, Box<dyn std::error::Error>> {
@@ -471,8 +469,7 @@ fn rpc_gas_price(url: &str) -> Result<u64, Box<dyn std::error::Error>> {
     let hex_str = result["result"]
         .as_str()
         .ok_or("unexpected eth_gasPrice response")?;
-    let hex_str = hex_str.strip_prefix("0x").unwrap_or(hex_str);
-    Ok(u64::from_str_radix(hex_str, 16)?)
+    parse_rpc_quantity(hex_str)
 }
 
 fn rpc_estimate_gas(
@@ -501,8 +498,20 @@ fn rpc_estimate_gas(
     let hex_str = result["result"]
         .as_str()
         .ok_or("unexpected eth_estimateGas response")?;
-    let hex_str = hex_str.strip_prefix("0x").unwrap_or(hex_str);
-    Ok(u64::from_str_radix(hex_str, 16)?)
+    parse_rpc_quantity(hex_str)
+}
+
+fn parse_rpc_quantity(s: &str) -> Result<u64, Box<dyn std::error::Error>> {
+    let hex = s
+        .strip_prefix("0x")
+        .ok_or_else(|| format!("RPC quantity must be 0x-prefixed: {s}"))?;
+    if hex.is_empty() {
+        return Err("RPC quantity must not be empty".into());
+    }
+    if hex.len() > 16 {
+        return Err(format!("RPC quantity overflows u64: {s}").into());
+    }
+    Ok(u64::from_str_radix(hex, 16)?)
 }
 
 #[cfg(test)]
@@ -549,5 +558,19 @@ mod tests {
     fn parse_hex_bytes_works() {
         let bytes = parse_hex_bytes("0xdeadbeef").unwrap();
         assert_eq!(bytes, vec![0xde, 0xad, 0xbe, 0xef]);
+    }
+
+    #[test]
+    fn parse_rpc_quantity_accepts_prefixed_hex() {
+        assert_eq!(parse_rpc_quantity("0x0").unwrap(), 0);
+        assert_eq!(parse_rpc_quantity("0xff").unwrap(), 255);
+    }
+
+    #[test]
+    fn parse_rpc_quantity_rejects_invalid_values() {
+        assert!(parse_rpc_quantity("").is_err());
+        assert!(parse_rpc_quantity("0x").is_err());
+        assert!(parse_rpc_quantity("ff").is_err());
+        assert!(parse_rpc_quantity("0x10000000000000000").is_err());
     }
 }
