@@ -173,7 +173,9 @@ impl<S: KvStore + 'static> RpcHandler<S> {
             limit,
             direction: options.direction,
             total,
-            next_cursor: entries.last().map(|entry| entry.cursor.clone()),
+            next_cursor: has_more
+                .then(|| entries.last().map(|entry| entry.cursor.clone()))
+                .flatten(),
             has_more,
             items,
         })

@@ -1654,6 +1654,7 @@ mod tests {
         .unwrap();
         assert_eq!(v2.total, Some(2));
         assert!(v2.has_more);
+        assert!(v2.next_cursor.is_some());
         assert_eq!(v2.items.len(), 1);
         assert_eq!(v2.items[0]["blockNumber"], "0x2");
         assert!(v2.items[0].get("input").is_none());
@@ -1675,6 +1676,7 @@ mod tests {
         .unwrap();
         assert_eq!(second_page.total, None);
         assert!(!second_page.has_more);
+        assert_eq!(second_page.next_cursor, None);
         assert_eq!(second_page.items.len(), 1);
         assert_eq!(second_page.items[0]["blockNumber"], "0x1");
     }
@@ -1825,6 +1827,7 @@ mod tests {
         )
         .await
         .unwrap();
+        let cursor = first_page.items[0]["cursor"].as_str().unwrap().to_string();
 
         let err = ShellApiServer::get_transactions_by_address_v2(
             &handler,
@@ -1832,7 +1835,7 @@ mod tests {
             Some(RpcAddressTransactionsV2Options {
                 from_block: Some(2),
                 to_block: Some(3),
-                cursor: first_page.next_cursor,
+                cursor: Some(cursor),
                 limit: Some(1),
                 ..RpcAddressTransactionsV2Options::default()
             }),
