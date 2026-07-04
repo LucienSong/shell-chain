@@ -2845,8 +2845,20 @@ mod tests {
     #[tokio::test]
     async fn send_raw_transaction_rejects_invalid_hex() {
         let handler = setup();
-        let result = EthApiServer::send_raw_transaction(&handler, "not-hex".into()).await;
+        let result = EthApiServer::send_raw_transaction(&handler, "0xnot-hex".into()).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn send_raw_transaction_rejects_unprefixed_data_as_invalid_params() {
+        let handler = setup();
+
+        let err = EthApiServer::send_raw_transaction(&handler, "00".into())
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code(), jsonrpsee::types::error::INVALID_PARAMS_CODE);
+        assert!(err.message().contains("0x-prefixed"));
     }
 
     #[tokio::test]
