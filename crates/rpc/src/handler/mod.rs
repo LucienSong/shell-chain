@@ -729,7 +729,9 @@ pub(crate) fn parse_address(s: &str) -> Result<Address, ErrorObjectOwned> {
 
 /// Parse a 32-byte hex string into `ShellHash`.
 pub(crate) fn parse_hex_hash(s: &str) -> Result<ShellHash, ErrorObjectOwned> {
-    let hex_str = s.strip_prefix("0x").unwrap_or(s);
+    let Some(hex_str) = s.strip_prefix("0x") else {
+        return Err(invalid_params_err("hash must be 0x-prefixed"));
+    };
     let bytes =
         hex::decode(hex_str).map_err(|e| invalid_params_err(format!("invalid hash hex: {e}")))?;
     ShellHash::try_from_slice(&bytes)
@@ -3056,6 +3058,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn eth_call_rejects_unprefixed_access_list_storage_key_as_invalid_params() {
+        let handler = setup();
+        let err = EthApiServer::call(
+            &handler,
+            crate::types::CallRequest {
+                from: None,
+                to: None,
+                data: None,
+                value: None,
+                gas: None,
+                access_list: Some(vec![crate::types::RpcAccessListItem {
+                    address: Address::ZERO,
+                    storage_keys: vec!["00".repeat(32)],
+                }]),
+            },
+            None,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.code(), jsonrpsee::types::error::INVALID_PARAMS_CODE);
+        assert!(err.message().contains("0x-prefixed"));
+    }
+
+    #[tokio::test]
     async fn eth_estimate_gas_rejects_invalid_data_hex_as_invalid_params() {
         let handler = setup();
         let err = EthApiServer::estimate_gas(
@@ -3088,6 +3115,30 @@ mod tests {
                 value: None,
                 gas: None,
                 access_list: None,
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.code(), jsonrpsee::types::error::INVALID_PARAMS_CODE);
+        assert!(err.message().contains("0x-prefixed"));
+    }
+
+    #[tokio::test]
+    async fn eth_estimate_gas_rejects_unprefixed_access_list_storage_key_as_invalid_params() {
+        let handler = setup();
+        let err = EthApiServer::estimate_gas(
+            &handler,
+            crate::types::CallRequest {
+                from: None,
+                to: None,
+                data: None,
+                value: None,
+                gas: None,
+                access_list: Some(vec![crate::types::RpcAccessListItem {
+                    address: Address::ZERO,
+                    storage_keys: vec!["00".repeat(32)],
+                }]),
             },
         )
         .await
