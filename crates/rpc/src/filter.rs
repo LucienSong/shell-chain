@@ -176,6 +176,12 @@ impl RawLogFilter {
                     if hex.is_empty() {
                         return Err(format!("{field} must not be an empty quantity"));
                     }
+                    if hex.len() > 1 && hex.starts_with('0') {
+                        return Err(format!("{field} quantity must not have leading zeroes"));
+                    }
+                    if !hex.as_bytes().iter().all(u8::is_ascii_hexdigit) {
+                        return Err(format!("{field} has invalid hex quantity: 0x{hex}"));
+                    }
                     u64::from_str_radix(hex, 16)
                         .map_err(|_| format!("{field} has invalid hex quantity: 0x{hex}"))
                 }
@@ -462,6 +468,16 @@ mod tests {
 
         let raw: RawLogFilter =
             serde_json::from_str(r#"{"fromBlock":"0x1","toBlock":"0x"}"#).unwrap();
+        let err = raw.into_filter(42).unwrap_err();
+        assert!(err.contains("toBlock"));
+
+        let raw: RawLogFilter =
+            serde_json::from_str(r#"{"fromBlock":"0x01","toBlock":"0x1"}"#).unwrap();
+        let err = raw.into_filter(42).unwrap_err();
+        assert!(err.contains("fromBlock"));
+
+        let raw: RawLogFilter =
+            serde_json::from_str(r#"{"fromBlock":"0x1","toBlock":"0x0g"}"#).unwrap();
         let err = raw.into_filter(42).unwrap_err();
         assert!(err.contains("toBlock"));
     }
