@@ -992,14 +992,7 @@ impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
         self.dev_control
             .as_ref()
             .ok_or_else(|| dev_mode_required("shell_setBalance requires dev mode"))?;
-        let value = if let Some(hex_str) = balance.strip_prefix("0x") {
-            U256::from_str_radix(hex_str, 16)
-                .map_err(|e| internal_err(format!("invalid hex balance: {e}")))?
-        } else {
-            balance
-                .parse::<U256>()
-                .map_err(|e| internal_err(format!("invalid balance: {e}")))?
-        };
+        let value = parse_hex_u256(&balance)?;
         let mut ws = self.world_state.write();
         ws.set_balance(&address, value).map_err(internal_err)?;
         Ok(true)
