@@ -747,7 +747,7 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
         }
 
         // Cap range to prevent DoS.
-        if to - from + 1 > MAX_BLOCK_RANGE {
+        if to.saturating_sub(from).saturating_add(1) > MAX_BLOCK_RANGE {
             return Err(limit_exceeded(format!(
                 "query returned more than {} blocks; cap the range",
                 MAX_BLOCK_RANGE
