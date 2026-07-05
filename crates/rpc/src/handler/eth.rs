@@ -162,12 +162,13 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
                 let tx_size: usize = pending_txs.iter().map(|tx| tx.length()).sum();
                 let header_size = head.header.length();
                 let size = header_size + tx_size;
+                let pending_number = head.header.number.saturating_add(1);
 
                 let transactions = if full_txs {
                     serde_json::to_value(
                         pending_txs
                             .iter()
-                            .map(|tx| tx_to_rpc(tx, None, Some(head.header.number + 1), None, None))
+                            .map(|tx| tx_to_rpc(tx, None, Some(pending_number), None, None))
                             .collect::<Vec<_>>(),
                     )
                     .unwrap_or_default()
@@ -184,7 +185,7 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
                 let pending_block = RpcBlock {
                     hash: ShellHash::ZERO,
                     parent_hash: head.hash(),
-                    number: hex_u64(head.header.number + 1),
+                    number: hex_u64(pending_number),
                     timestamp: hex_u64(now),
                     gas_limit: hex_u64(head.header.gas_limit),
                     gas_used: hex_u64(0),
