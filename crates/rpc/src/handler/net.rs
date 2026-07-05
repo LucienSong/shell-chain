@@ -45,9 +45,7 @@ impl<S: KvStore + 'static> DebugApiServer for RpcHandler<S> {
         tx_hash: String,
         opts: Option<serde_json::Value>,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let _trace_opts: TraceOptions = opts
-            .map(|v| serde_json::from_value(v).unwrap_or_default())
-            .unwrap_or_default();
+        let _trace_opts = parse_trace_options(opts)?;
 
         let (_block, tx, receipt, _tx_index) = self.lookup_tx_with_block(&tx_hash)?;
 
@@ -92,9 +90,7 @@ impl<S: KvStore + 'static> DebugApiServer for RpcHandler<S> {
         block_number: String,
         opts: Option<serde_json::Value>,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let _trace_opts: TraceOptions = opts
-            .map(|v| serde_json::from_value(v).unwrap_or_default())
-            .unwrap_or_default();
+        let _trace_opts = parse_trace_options(opts)?;
 
         let block = self.resolve_block(&block_number)?;
         let block_hash = block.hash();
@@ -143,4 +139,11 @@ impl<S: KvStore + 'static> DebugApiServer for RpcHandler<S> {
 
         serde_json::to_value(&traces).map_err(|e| internal_err(format!("serialization error: {e}")))
     }
+}
+
+fn parse_trace_options(opts: Option<serde_json::Value>) -> Result<TraceOptions, ErrorObjectOwned> {
+    opts.map(serde_json::from_value)
+        .transpose()
+        .map_err(|e| invalid_params_err(format!("invalid trace options: {e}")))
+        .map(|opts| opts.unwrap_or_default())
 }
