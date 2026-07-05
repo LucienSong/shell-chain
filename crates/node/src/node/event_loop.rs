@@ -1515,10 +1515,12 @@ impl<S: KvStore + 'static> Node<S> {
                                     // If any block failed (mismatch or store error), re-request from
                                     // the first gap so missing blocks are never permanently skipped.
                                     // If all succeeded, continue from last_stored + 1.
-                                    // If the entire batch was bad, skip it to avoid stalling.
-                                    let next_start = first_gap
-                                        .or_else(|| last_stored.map(|n| n + 1))
-                                        .or_else(|| batch_start.map(|s| s.saturating_add(128)));
+                                    // If the entire batch was bad, skip it when there is room.
+                                    let next_start = body_backfill_next_start(
+                                        first_gap,
+                                        last_stored,
+                                        batch_start,
+                                    );
                                     if let Some(next) = next_start {
                                         if next <= head_number {
                                             // More blocks needed — request next batch.
@@ -2277,6 +2279,20 @@ impl<S: KvStore + 'static> Node<S> {
     }
 }
 
+fn body_backfill_next_start(
+    first_gap: Option<u64>,
+    last_stored: Option<u64>,
+    batch_start: Option<u64>,
+) -> Option<u64> {
+    if let Some(gap) = first_gap {
+        return Some(gap);
+    }
+    if let Some(stored) = last_stored {
+        return stored.checked_add(1);
+    }
+    batch_start.and_then(|start| start.checked_add(128))
+}
+
 #[cfg(test)]
 mod cadence_tests {
     use super::*;
@@ -2298,5 +2314,28 @@ mod cadence_tests {
     fn block_time_elapsed_gates_heartbeat_from_parent_timestamp() {
         assert!(!Node::<MemoryDb>::block_time_elapsed(1_000, 1_599, 600_000));
         assert!(Node::<MemoryDb>::block_time_elapsed(1_000, 1_600, 600_000));
+    }
+
+    #[test]
+    fn body_backfill_next_start_does_not_wrap_after_max_stored_block() {
+        assert_eq!(
+            body_backfill_next_start(None, Some(u64::MAX), Some(u64::MAX - 1)),
+            None
+        );
+    }
+
+    #[test]
+    fn body_backfill_next_start_does_not_repeat_max_bad_batch() {
+        assert_eq!(body_backfill_next_start(None, None, Some(u64::MAX)), None);
+    }
+
+    #[test]
+    fn body_backfill_next_start_prefers_gap_and_advances_normal_batches() {
+        assert_eq!(
+            body_backfill_next_start(Some(9), Some(10), Some(1)),
+            Some(9)
+        );
+        assert_eq!(body_backfill_next_start(None, Some(10), Some(1)), Some(11));
+        assert_eq!(body_backfill_next_start(None, None, Some(10)), Some(138));
     }
 }
