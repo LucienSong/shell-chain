@@ -2,6 +2,8 @@ use super::*;
 
 const MAX_EXACT_ADDRESS_TOTAL_BLOCK_RANGE: u64 = 10_000;
 const MAX_LEGACY_ADDRESS_TX_OFFSET: u64 = 10_000;
+const DEFAULT_VALIDATOR_SNAPSHOT_PROPOSER_WINDOW: u64 = 200;
+const MAX_VALIDATOR_SNAPSHOT_PROPOSER_WINDOW: u64 = 1000;
 
 fn ensure_exact_address_total_allowed(
     from_block: u64,
@@ -17,6 +19,18 @@ fn ensure_exact_address_total_allowed(
         )));
     }
     Ok(())
+}
+
+fn normalize_validator_snapshot_proposer_window(
+    proposer_window: Option<u64>,
+) -> Result<u64, ErrorObjectOwned> {
+    let proposer_window = proposer_window.unwrap_or(DEFAULT_VALIDATOR_SNAPSHOT_PROPOSER_WINDOW);
+    if proposer_window == 0 {
+        return Err(invalid_params_err(
+            "validator snapshot proposerWindow must be at least 1",
+        ));
+    }
+    Ok(proposer_window.min(MAX_VALIDATOR_SNAPSHOT_PROPOSER_WINDOW))
 }
 
 impl<S: KvStore + 'static> RpcHandler<S> {
@@ -631,11 +645,9 @@ impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
         &self,
         options: Option<RpcValidatorSnapshotOptions>,
     ) -> Result<RpcValidatorSnapshot, ErrorObjectOwned> {
-        let proposer_window = options
-            .unwrap_or_default()
-            .proposer_window
-            .unwrap_or(200)
-            .min(1000);
+        let proposer_window = normalize_validator_snapshot_proposer_window(
+            options.unwrap_or_default().proposer_window,
+        )?;
         let consensus = ShellApiServer::consensus_info(self).await?;
         let head_number = consensus
             .get("block_number")

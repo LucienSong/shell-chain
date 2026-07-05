@@ -1527,6 +1527,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn validator_snapshot_rejects_zero_proposer_window_as_invalid_params() {
+        let handler = setup();
+        let err = ShellApiServer::get_validator_snapshot(
+            &handler,
+            Some(RpcValidatorSnapshotOptions {
+                proposer_window: Some(0),
+            }),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.code(), jsonrpsee::types::error::INVALID_PARAMS_CODE);
+        assert!(err.message().contains("at least 1"));
+    }
+
+    #[tokio::test]
+    async fn validator_snapshot_caps_oversized_proposer_window() {
+        let handler = setup();
+        let result = ShellApiServer::get_validator_snapshot(
+            &handler,
+            Some(RpcValidatorSnapshotOptions {
+                proposer_window: Some(1001),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.proposer_window, 1000);
+    }
+
+    #[tokio::test]
     async fn get_transactions_by_address_total_counts_all_matches() {
         let handler = setup();
         let sender = DilithiumSigner::generate();
