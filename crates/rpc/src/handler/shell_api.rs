@@ -1602,8 +1602,15 @@ fn resolve_witness_block<S: KvStore + 'static>(
     } else {
         let tag = parse_block_tag(block)?;
         let blk = match tag {
-            BlockTag::Latest | BlockTag::Finalized | BlockTag::Pending => {
+            BlockTag::Latest | BlockTag::Pending => {
                 handler.chain_store.get_head_block().map_err(internal_err)?
+            }
+            BlockTag::Finalized => {
+                let finalized = *handler.finalized_number.read();
+                handler
+                    .chain_store
+                    .get_block_by_number(finalized)
+                    .map_err(internal_err)?
             }
             BlockTag::Number(n) => handler
                 .chain_store
