@@ -4959,6 +4959,40 @@ mod tests {
         assert_eq!(result["failed"], false);
     }
 
+    #[tokio::test]
+    async fn debug_trace_transaction_rejects_invalid_options_as_invalid_params() {
+        let handler = setup();
+        let (_block_hash, tx_hash) = store_block_with_tx(&handler, 0, true);
+
+        let err = DebugApiServer::trace_transaction(
+            &handler,
+            format!("0x{}", hex::encode(tx_hash.as_bytes())),
+            Some(serde_json::json!({ "disableStack": "yes" })),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.code(), jsonrpsee::types::error::INVALID_PARAMS_CODE);
+        assert!(err.message().contains("invalid trace options"));
+    }
+
+    #[tokio::test]
+    async fn debug_trace_block_by_number_rejects_invalid_options_as_invalid_params() {
+        let handler = setup();
+        store_block_with_tx(&handler, 0, true);
+
+        let err = DebugApiServer::trace_block_by_number(
+            &handler,
+            "0x0".into(),
+            Some(serde_json::json!({ "disableMemory": "no" })),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.code(), jsonrpsee::types::error::INVALID_PARAMS_CODE);
+        assert!(err.message().contains("invalid trace options"));
+    }
+
     // ════════════════════════════════════════════════════════════
     //  M5-A6: RPC eth_* response format compatibility tests
     // ════════════════════════════════════════════════════════════
