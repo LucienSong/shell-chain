@@ -51,7 +51,7 @@ pub struct BodyPruneResult {
 /// and cheap.
 #[derive(Debug)]
 pub struct BodyPruner {
-    /// Blocks `< (current_head + 1) - retention_count` are eligible for expiry.
+    /// Blocks `< current_head.saturating_add(1) - retention_count` are eligible for expiry.
     /// Zero means archive mode (never prune).
     retention_count: u64,
     /// The highest block number whose body has already been pruned + 1.
@@ -78,7 +78,7 @@ impl BodyPruner {
     /// Prune block bodies for blocks that have aged past the retention window.
     ///
     /// Bodies for block numbers in `[pruned_below, expiry_horizon)` are
-    /// deleted, where `expiry_horizon = (current_head + 1)
+    /// deleted, where `expiry_horizon = current_head.saturating_add(1)
     /// .saturating_sub(retention_count)`.
     ///
     /// Returns a [`BodyPruneResult`] summary.  Missing bodies (already pruned
@@ -93,7 +93,9 @@ impl BodyPruner {
         }
 
         // Expiry horizon: prune everything strictly before this block number.
-        let expiry_horizon = (current_head + 1).saturating_sub(self.retention_count);
+        let expiry_horizon = current_head
+            .saturating_add(1)
+            .saturating_sub(self.retention_count);
 
         if expiry_horizon <= self.pruned_below {
             // Nothing new to prune.
@@ -278,5 +280,26 @@ mod tests {
         // 5 blocks checked, 4 pruned (block 2 skipped), 1 missing
         assert_eq!(result.blocks_checked, 5);
         assert_eq!(result.bodies_pruned, 4);
+    }
+
+    #[test]
+    fn prune_before_saturates_head_plus_one_near_u64_max() {
+        let cs = setup_chain(0);
+        let number = u64::MAX - 2;
+        let mut block = empty_block(0);
+        block.header.number = number;
+        block.header.timestamp = 0;
+        let hash = block.hash();
+        cs.put_block(&block).unwrap();
+        cs.set_canonical(number, &hash).unwrap();
+
+        let mut pruner = BodyPruner::new(1);
+        pruner.pruned_below = number;
+        let result = pruner.prune_before(u64::MAX, &cs).unwrap();
+
+        assert_eq!(result.blocks_checked, 1);
+        assert_eq!(result.bodies_pruned, 1);
+        assert_eq!(pruner.pruned_below(), u64::MAX - 1);
+        assert!(cs.get_block_by_hash(&hash).unwrap().is_none());
     }
 }

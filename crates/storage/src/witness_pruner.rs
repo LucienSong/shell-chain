@@ -73,7 +73,7 @@ impl WitnessPruner {
     /// retention window.
     ///
     /// `current_head` is the block number of the latest finalized block.
-    /// Bundles for blocks `< (current_head + 1).saturating_sub(retention_count)`
+    /// Bundles for blocks `< current_head.saturating_add(1).saturating_sub(retention_count)`
     /// are deleted, subject to the STARK proving guard.
     ///
     /// `stark_frontier` is the first block number that has NOT yet been
@@ -95,7 +95,9 @@ impl WitnessPruner {
         }
 
         // Retention-based cutoff: blocks below this are old enough to prune.
-        let retention_cutoff = (current_head + 1).saturating_sub(self.retention_count);
+        let retention_cutoff = current_head
+            .saturating_add(1)
+            .saturating_sub(self.retention_count);
 
         // STARK guard: never prune witnesses for blocks that haven't been proved yet.
         // stark_frontier == 0 means the guard is disabled (prune normally).
@@ -380,5 +382,27 @@ mod tests {
         let mut pruner = WitnessPruner::new(4);
         let result = pruner.prune_before(9, 0, &cs, &ws).unwrap();
         assert_eq!(result.pruned_count, 6);
+    }
+
+    #[test]
+    fn prune_before_saturates_head_plus_one_near_u64_max() {
+        let (_db, cs, ws) = make_store();
+        let number = u64::MAX - 2;
+        let mut block = dummy_block(0);
+        block.header.number = number;
+        block.header.timestamp = 0;
+        let hash = block.hash();
+        cs.put_block(&block).unwrap();
+        cs.set_canonical(number, &hash).unwrap();
+        store_bundle(&ws, &hash);
+
+        let mut pruner = WitnessPruner::new(1);
+        pruner.pruned_below = number;
+        let result = pruner.prune_before(u64::MAX, 0, &cs, &ws).unwrap();
+
+        assert_eq!(result.pruned_count, 1);
+        assert_eq!(result.not_found_count, 0);
+        assert_eq!(pruner.pruned_below(), u64::MAX - 1);
+        assert!(!ws.has_bundle(&hash).unwrap());
     }
 }
