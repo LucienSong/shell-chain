@@ -732,6 +732,9 @@ pub(crate) fn parse_hex_hash(s: &str) -> Result<ShellHash, ErrorObjectOwned> {
     let Some(hex_str) = s.strip_prefix("0x") else {
         return Err(invalid_params_err("hash must be 0x-prefixed"));
     };
+    if hex_str.len() != 64 {
+        return Err(invalid_params_err("hash must be 32 bytes"));
+    }
     let bytes =
         hex::decode(hex_str).map_err(|e| invalid_params_err(format!("invalid hash hex: {e}")))?;
     ShellHash::try_from_slice(&bytes)
@@ -1371,6 +1374,30 @@ mod tests {
                 .unwrap(),
             U256::from_be_slice(&[0xff; 32])
         );
+    }
+
+    #[test]
+    fn rpc_hash_parser_requires_exact_hash_length_before_decode() {
+        let valid = format!("0x{}", "11".repeat(32));
+        assert_eq!(parse_hex_hash(&valid).unwrap(), ShellHash::from([0x11; 32]));
+
+        let short = parse_hex_hash("0x11").unwrap_err();
+        assert_eq!(short.code(), jsonrpsee::types::error::INVALID_PARAMS_CODE);
+        assert!(short.message().contains("32 bytes"));
+
+        let oversized = format!("0x{}", "aa".repeat(512));
+        let err = parse_hex_hash(&oversized).unwrap_err();
+        assert_eq!(err.code(), jsonrpsee::types::error::INVALID_PARAMS_CODE);
+        assert!(err.message().contains("32 bytes"));
+        assert!(
+            !err.message().contains(&"aa".repeat(64)),
+            "error should not reflect large hash inputs"
+        );
+
+        let invalid_hex = format!("0x{}zz", "00".repeat(31));
+        let err = parse_hex_hash(&invalid_hex).unwrap_err();
+        assert_eq!(err.code(), jsonrpsee::types::error::INVALID_PARAMS_CODE);
+        assert!(err.message().contains("invalid hash hex"));
     }
 
     #[test]
