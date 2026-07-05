@@ -289,7 +289,8 @@ pub trait TraceApi {
 /// surface; it is not the Shell-Chain execution model name.
 #[rpc(server, namespace = "evm")]
 pub trait LegacyEvmApi {
-    /// Mine one or more blocks immediately.
+    /// Mine one or more blocks immediately. The block count defaults to 1 and
+    /// is capped at 256 per request.
     #[method(name = "mine")]
     async fn mine(
         &self,
