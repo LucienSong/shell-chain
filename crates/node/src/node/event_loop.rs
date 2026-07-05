@@ -730,7 +730,7 @@ impl<S: KvStore + 'static> Node<S> {
                                 continue;
                             }
                             let view = self.consensus.read().current_view();
-                            let block_number = self.head_number() + 1;
+                            let block_number = self.head_number().saturating_add(1);
                             let chain_id = self.config.chain_id;
                             let highest_qc_hash = *self.finality.read().last_finalized_hash();
                             let signing_message = ViewChangeMessage::signing_message(
