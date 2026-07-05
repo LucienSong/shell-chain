@@ -157,6 +157,15 @@ impl ReorgEngine {
         // Step 4: Update head pointer
         chain_store.set_head(&new_head)?;
 
+        // If aggregate counters are already initialized, refresh them against
+        // the new canonical chain. Same-height reorgs otherwise leave
+        // chain_totals_head unchanged while tx/gas totals still describe the
+        // old canonical branch.
+        if chain_store.get_chain_totals_head()?.is_some() {
+            let new_tip_number = ancestor_number.saturating_add(new_chain.len() as u64);
+            chain_store.rebuild_chain_totals(new_tip_number)?;
+        }
+
         // Step 5: Remove transactions that already exist in the new chain
         let new_chain_tx_hashes: std::collections::HashSet<ShellHash> = new_chain
             .iter()
@@ -668,6 +677,56 @@ mod tests {
             .unwrap()
             .0
             .is_empty());
+    }
+
+    #[test]
+    fn test_reorg_refreshes_chain_totals_for_same_height_fork() {
+        let (store, chain_store, world_state, root) = setup_chain();
+
+        let ancestor = make_block(0, make_hash(0), root);
+        chain_store.put_block(&ancestor).unwrap();
+        let ancestor_hash = ancestor.hash();
+        chain_store.set_canonical(0, &ancestor_hash).unwrap();
+
+        let mut old1 = make_block(1, ancestor_hash, root);
+        old1.header.gas_used = 21_000;
+        old1.transactions.push(make_tx());
+        chain_store.put_block(&old1).unwrap();
+        let old_hash = old1.hash();
+        chain_store.set_canonical(1, &old_hash).unwrap();
+        chain_store.set_head(&old_hash).unwrap();
+        chain_store.set_total_tx_count(1).unwrap();
+        chain_store
+            .set_total_gas_used(U256::from(21_000u64))
+            .unwrap();
+        chain_store.set_chain_totals_head(1).unwrap();
+
+        let mut tx_b = make_tx();
+        tx_b.tx.nonce = 1;
+        let mut new1 = make_block(1, ancestor_hash, root);
+        new1.header.timestamp += 1;
+        new1.header.gas_used = 42_000;
+        new1.transactions.push(make_tx());
+        new1.transactions.push(tx_b);
+        chain_store.put_side_fork_block(&new1).unwrap();
+        let new_hash = new1.hash();
+
+        ReorgEngine::execute(
+            &chain_store,
+            &world_state,
+            &store,
+            ancestor_hash,
+            0,
+            &[old_hash],
+            &[new_hash],
+            0,
+        )
+        .unwrap();
+
+        let (total_txs, total_gas) = chain_store.get_chain_totals(1).unwrap();
+        assert_eq!(total_txs, 2);
+        assert_eq!(total_gas, U256::from(42_000u64));
+        assert_eq!(chain_store.get_chain_totals_head().unwrap(), Some(1));
     }
 
     #[test]
