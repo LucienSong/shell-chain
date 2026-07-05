@@ -180,10 +180,18 @@ impl RawLogFilter {
                         return Err(format!("{field} quantity must not have leading zeroes"));
                     }
                     if !hex.as_bytes().iter().all(u8::is_ascii_hexdigit) {
-                        return Err(format!("{field} has invalid hex quantity: 0x{hex}"));
+                        return Err(format!(
+                            "{field} has invalid hex quantity: contains non-hex characters"
+                        ));
+                    }
+                    if hex.len() > 16 {
+                        return Err(format!(
+                            "{field} hex quantity is too long for u64: {} chars (max 16)",
+                            hex.len()
+                        ));
                     }
                     u64::from_str_radix(hex, 16)
-                        .map_err(|_| format!("{field} has invalid hex quantity: 0x{hex}"))
+                        .map_err(|_| format!("{field} has invalid hex quantity"))
                 }
             }
         };
@@ -480,6 +488,24 @@ mod tests {
             serde_json::from_str(r#"{"fromBlock":"0x1","toBlock":"0x0g"}"#).unwrap();
         let err = raw.into_filter(42).unwrap_err();
         assert!(err.contains("toBlock"));
+
+        let raw: RawLogFilter =
+            serde_json::from_str(r#"{"fromBlock":"0x10000000000000000","toBlock":"0x1"}"#).unwrap();
+        let err = raw.into_filter(42).unwrap_err();
+        assert!(err.contains("fromBlock"));
+        assert!(err.contains("too long"));
+
+        let invalid = format!(
+            r#"{{"fromBlock":"0x{}z","toBlock":"0x1"}}"#,
+            "f".repeat(512)
+        );
+        let raw: RawLogFilter = serde_json::from_str(&invalid).unwrap();
+        let err = raw.into_filter(42).unwrap_err();
+        assert!(err.contains("non-hex characters"));
+        assert!(
+            !err.contains(&"f".repeat(128)),
+            "error should not reflect large invalid quantities"
+        );
     }
 
     #[test]
