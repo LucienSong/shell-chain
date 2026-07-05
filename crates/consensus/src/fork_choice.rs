@@ -1,5 +1,5 @@
 use shell_primitives::ShellHash;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Score assigned to a block for fork choice comparison.
 /// Higher score = preferred chain. Compared lexicographically by fields in order.
@@ -226,13 +226,15 @@ impl ForkChoice {
     /// Remove blocks that are below the finalized height and not on the canonical chain.
     /// This prevents unbounded memory growth.
     pub fn prune_below(&mut self, finalized_number: u64) {
+        let protected = self.protected_chain_hashes();
         let to_remove: Vec<ShellHash> = self
             .scores
             .iter()
-            .filter(|(_, score)| {
+            .filter(|(hash, score)| {
                 score.block_number < finalized_number
                     && score.is_finalized == 0
                     && score.block_number > 0 // never prune genesis
+                    && !protected.contains(hash)
             })
             .map(|(hash, _)| *hash)
             .collect();
@@ -241,6 +243,31 @@ impl ForkChoice {
             self.scores.remove(&hash);
             self.parent_map.remove(&hash);
         }
+    }
+
+    fn protected_chain_hashes(&self) -> HashSet<ShellHash> {
+        let mut protected = HashSet::new();
+        let roots = self
+            .scores
+            .iter()
+            .filter_map(|(hash, score)| (score.is_finalized == 1).then_some(*hash))
+            .chain(std::iter::once(self.head));
+
+        for root in roots {
+            let mut current = root;
+            let max_depth = self.parent_map.len().saturating_add(1);
+            for _ in 0..max_depth {
+                if !protected.insert(current) {
+                    break;
+                }
+                match self.parent_map.get(&current) {
+                    Some(parent) if *parent != ShellHash::ZERO => current = *parent,
+                    _ => break,
+                }
+            }
+        }
+
+        protected
     }
 
     /// Number of tracked blocks.
@@ -383,9 +410,10 @@ mod tests {
         fc.add_block(hash(3), hash(0), 1, 0, false); // fork, not finalized
         fc.prune_below(2);
         assert!(!fc.contains(&hash(3))); // pruned
-        assert!(!fc.contains(&hash(1))); // pruned
+        assert!(fc.contains(&hash(1))); // kept as finalized chain ancestor
         assert!(fc.contains(&hash(2))); // kept (finalized)
         assert!(fc.contains(&hash(0))); // kept (genesis, block_number=0)
+        assert_eq!(fc.chain_between(&hash(2), &hash(0)), vec![hash(1), hash(2)]);
     }
 
     #[test]
@@ -615,9 +643,38 @@ mod tests {
             "non-finalized fork block below finalized should be pruned"
         );
         assert!(
-            !fc.contains(&hash(1)),
-            "non-finalized block below finalized should be pruned"
+            fc.contains(&hash(1)),
+            "ancestor of finalized block must survive pruning"
         );
+        assert_eq!(
+            fc.chain_between(&hash(3), &hash(0)),
+            vec![hash(1), hash(2), hash(3)]
+        );
+    }
+
+    #[test]
+    fn prune_removes_side_fork_but_keeps_finalized_ancestors() {
+        let mut fc = ForkChoice::new(hash(0));
+        fc.add_block(hash(1), hash(0), 1, 0, false);
+        fc.add_block(hash(2), hash(1), 2, 0, false);
+        fc.add_block(hash(3), hash(0), 1, 0, false);
+        fc.add_block(hash(4), hash(3), 2, 0, false);
+
+        fc.mark_finalized(&hash(2));
+        fc.prune_below(3);
+
+        assert!(fc.contains(&hash(1)), "canonical ancestor should remain");
+        assert!(fc.contains(&hash(2)), "finalized block should remain");
+        assert!(
+            !fc.contains(&hash(3)),
+            "side fork ancestor should be pruned"
+        );
+        assert!(
+            !fc.contains(&hash(4)),
+            "side fork block below finalized height should be pruned"
+        );
+        assert_eq!(fc.find_common_ancestor(&hash(2), &hash(0)), Some(hash(0)));
+        assert_eq!(fc.chain_between(&hash(2), &hash(0)), vec![hash(1), hash(2)]);
     }
 
     #[test]
