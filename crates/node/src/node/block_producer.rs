@@ -505,7 +505,7 @@ impl<S: KvStore + 'static> Node<S> {
         )?;
 
         // Track the new state root for pruning decisions.
-        self.record_finalized_state_root(block.number(), block.header.state_root);
+        self.record_canonical_state_root(block.number(), block.header.state_root);
 
         // Update offline-slash tracker with this freshly proposed block.
         self.last_proposed_by

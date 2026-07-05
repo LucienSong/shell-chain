@@ -715,7 +715,7 @@ impl<S: KvStore + 'static> Node<S> {
         }
 
         // Track the imported state root for pruning decisions.
-        self.record_finalized_state_root(block.number(), block.header.state_root);
+        self.record_canonical_state_root(block.number(), block.header.state_root);
         self.reload_authorities_if_boundary(block.number())?;
 
         // I4: Advance the proof window manager to the new block height.
