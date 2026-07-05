@@ -187,8 +187,7 @@ impl<S: KvStore + 'static> HistoricalBodySync<S> {
             }
         }
 
-        if let Some(last) = last_stored {
-            let next_start = last + 1;
+        if let Some(next_start) = last_stored.and_then(|last| last.checked_add(1)) {
             if next_start <= head_number {
                 // Check if there are still missing bodies ahead.
                 if self
@@ -260,6 +259,9 @@ impl<S: KvStore + 'static> HistoricalBodySync<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use parking_lot::Mutex;
+    use shell_core::{Block, BlockHeader};
+    use shell_storage::MemoryDb;
 
     #[test]
     fn peer_capability_richness_ordering() {
@@ -311,5 +313,30 @@ mod tests {
         tracker.record(PeerId("a".into()), "full".into(), 0);
         tracker.remove(&PeerId("a".into()));
         assert!(tracker.best_peer_for_block(0).is_none());
+    }
+
+    #[test]
+    fn handle_response_does_not_request_past_max_block() {
+        let chain_store = Arc::new(ChainStore::new(Arc::new(MemoryDb::new())));
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let sent_messages = Arc::clone(&sent);
+        let sync = HistoricalBodySync {
+            chain_store,
+            peers: PeerCapabilityTracker::new(),
+            send_fn: Arc::new(move |_peer, msg| sent_messages.lock().push(msg)),
+        };
+        let block = Block {
+            header: BlockHeader {
+                number: u64::MAX,
+                ..BlockHeader::default()
+            },
+            transactions: Vec::new(),
+            system_transactions: Vec::new(),
+            proposer_seal: None,
+        };
+
+        sync.handle_response(PeerId("peer".into()), vec![block], u64::MAX);
+
+        assert!(sent.lock().is_empty());
     }
 }
