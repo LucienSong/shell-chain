@@ -2487,6 +2487,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn witness_queries_resolve_finality_tags_to_finalized_block() {
+        let handler = setup_with_witness();
+        let genesis = make_genesis_block();
+        let genesis_hash = genesis.hash();
+        handler.chain_store.put_block(&genesis).unwrap();
+        handler.chain_store.set_canonical(0, &genesis_hash).unwrap();
+
+        let block1 = Block {
+            header: BlockHeader {
+                parent_hash: genesis_hash,
+                number: 1,
+                ..make_genesis_block().header
+            },
+            transactions: vec![],
+            system_transactions: vec![],
+            proposer_seal: None,
+        };
+        let block1_hash = block1.hash();
+        handler.chain_store.put_block(&block1).unwrap();
+        handler.chain_store.set_canonical(1, &block1_hash).unwrap();
+        handler.chain_store.set_head(&block1_hash).unwrap();
+        *handler.finalized_number.write() = 0;
+
+        let latest = ShellApiServer::get_block_witnesses(&handler, "latest".to_string())
+            .await
+            .unwrap();
+        assert_eq!(
+            latest["blockHash"],
+            serde_json::to_value(block1_hash).unwrap()
+        );
+
+        for tag in ["safe", "finalized"] {
+            let result = ShellApiServer::get_block_witnesses(&handler, tag.to_string())
+                .await
+                .unwrap();
+            assert_eq!(
+                result["blockHash"],
+                serde_json::to_value(genesis_hash).unwrap()
+            );
+            assert_eq!(result["witnessCount"], 0);
+        }
+    }
+
+    #[tokio::test]
     async fn shell_get_block_summary_includes_stark_metadata_without_proof_bytes() {
         let handler = setup_with_proof_amendment();
         let block = make_genesis_block();
