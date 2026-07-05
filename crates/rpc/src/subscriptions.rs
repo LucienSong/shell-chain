@@ -151,13 +151,29 @@ impl SubscriptionTracker {
 
     /// Release a subscription slot for a specific connection.
     pub fn release_for_connection(&self, conn_id: u32) {
-        self.release();
-        let mut conns = self.per_connection.lock();
-        if let Some(count) = conns.get_mut(&conn_id) {
-            *count = count.saturating_sub(1);
-            if *count == 0 {
-                conns.remove(&conn_id);
+        let released = {
+            let mut conns = self.per_connection.lock();
+            match conns.get_mut(&conn_id) {
+                Some(count) if *count > 1 => {
+                    *count -= 1;
+                    true
+                }
+                Some(_) => {
+                    conns.remove(&conn_id);
+                    true
+                }
+                None => {
+                    tracing::warn!(
+                        conn_id,
+                        "subscription tracker release called for unknown connection"
+                    );
+                    false
+                }
             }
+        };
+
+        if released {
+            self.release();
         }
     }
 
@@ -1064,6 +1080,45 @@ mod tests {
 
         assert_eq!(acquired, 1);
         assert_eq!(tracker.active_count(), 1);
+    }
+
+    #[test]
+    fn subscription_tracker_unknown_connection_release_does_not_free_global_slot() {
+        let tracker = SubscriptionTracker {
+            active: Arc::new(AtomicU32::new(0)),
+            max: 2,
+            per_connection: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            max_per_connection: 2,
+        };
+
+        assert!(tracker.try_acquire_for_connection(1));
+        assert!(tracker.try_acquire_for_connection(2));
+        assert!(!tracker.try_acquire_for_connection(3));
+
+        tracker.release_for_connection(99);
+
+        assert_eq!(tracker.active_count(), 2);
+        assert!(!tracker.try_acquire_for_connection(3));
+    }
+
+    #[test]
+    fn subscription_tracker_double_connection_release_does_not_free_extra_slot() {
+        let tracker = SubscriptionTracker {
+            active: Arc::new(AtomicU32::new(0)),
+            max: 2,
+            per_connection: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            max_per_connection: 2,
+        };
+
+        assert!(tracker.try_acquire_for_connection(1));
+        assert!(tracker.try_acquire_for_connection(2));
+
+        tracker.release_for_connection(1);
+        tracker.release_for_connection(1);
+
+        assert_eq!(tracker.active_count(), 1);
+        assert!(tracker.try_acquire_for_connection(3));
+        assert_eq!(tracker.active_count(), 2);
     }
 
     // -------------------------------------------------------------------
