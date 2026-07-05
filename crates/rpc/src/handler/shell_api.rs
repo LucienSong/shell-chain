@@ -978,7 +978,7 @@ impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
         validators.sort_by_key(|v| v["address"].as_str().unwrap_or("").to_string());
 
         // Current proposer for the next block.
-        let next_number = head_number + 1;
+        let next_number = head_number.saturating_add(1);
         let poa_cfg = engine.poa_config();
         let current_proposer = poa_cfg.proposer_for_block(next_number);
         let epoch = poa_cfg.epoch_of(next_number);

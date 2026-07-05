@@ -1237,6 +1237,7 @@ mod tests {
     use super::*;
     use crate::api::ShellApiServer;
     use crate::dev_control::DevRpcControl;
+    use shell_consensus::{PoaConfig, PoaEngine};
     use shell_core::{Block, BlockHeader, SystemTransaction, Transaction, TransactionReceipt};
     use shell_crypto::{DilithiumSigner, Signer};
     use shell_primitives::Bytes;
@@ -4052,6 +4053,30 @@ mod tests {
 
         let result = ShellApiServer::get_node_info(&handler).await.unwrap();
         assert_eq!(result["isMining"], true);
+    }
+
+    #[tokio::test]
+    async fn consensus_info_saturates_next_block_at_max_head() {
+        let handler = setup();
+        let mut block = make_genesis_block();
+        block.header.number = u64::MAX;
+        let hash = block.hash();
+        handler.chain_store.put_block(&block).unwrap();
+        handler.chain_store.set_canonical(u64::MAX, &hash).unwrap();
+        handler.chain_store.set_head(&hash).unwrap();
+
+        let authority = test_address(b"consensus-info-authority");
+        let engine = Arc::new(parking_lot::RwLock::new(PoaEngine::new(
+            PoaConfig::new(vec![authority], 1).with_epoch_length(10),
+        )));
+        let handler = handler.with_consensus_engine(engine);
+
+        let result = ShellApiServer::consensus_info(&handler).await.unwrap();
+
+        assert_eq!(result["block_number"], u64::MAX);
+        assert_eq!(result["current_proposer"], authority.to_string());
+        assert_eq!(result["epoch"], u64::MAX / 10);
+        assert_eq!(result["epoch_progress"], u64::MAX % 10);
     }
 
     // ── shell_getNetworkStats ──────────────────────────────────────
