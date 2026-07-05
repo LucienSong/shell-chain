@@ -4739,6 +4739,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn new_filter_accepts_finality_block_tags() {
+        let handler = setup();
+        *handler.finalized_number.write() = 7;
+        let raw: crate::filter::RawLogFilter =
+            serde_json::from_str(r#"{"fromBlock":"safe","toBlock":"finalized"}"#).unwrap();
+
+        let id = EthApiServer::new_filter(&handler, raw).await.unwrap();
+
+        assert!(id.starts_with("0x"));
+    }
+
+    #[tokio::test]
     async fn new_filter_rejects_invalid_block_tag_as_invalid_params() {
         let handler = setup();
         let raw: crate::filter::RawLogFilter =
