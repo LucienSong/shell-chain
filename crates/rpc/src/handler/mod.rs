@@ -2034,6 +2034,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn blocks_range_ascending_stops_at_max_height() {
+        let handler = setup();
+        let mut block = make_genesis_block();
+        block.header.number = u64::MAX;
+        let block_hash = block.hash();
+        handler.chain_store.put_block(&block).unwrap();
+        handler
+            .chain_store
+            .set_canonical(u64::MAX, &block_hash)
+            .unwrap();
+        handler.chain_store.set_head(&block_hash).unwrap();
+
+        let page = ShellApiServer::get_blocks_range(
+            &handler,
+            format!("0x{:x}", u64::MAX),
+            Some(RpcBlocksRangeOptions {
+                direction: RpcListDirection::Asc,
+                limit: Some(1),
+                tx_detail: RpcV2TxDetail::Summary,
+                tx_limit: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(page.blocks.len(), 1);
+        assert_eq!(page.blocks[0].number, format!("0x{:x}", u64::MAX));
+        assert_eq!(page.next_start, None);
+    }
+
+    #[tokio::test]
     async fn get_transactions_by_address_returns_system_rewards_with_type() {
         let handler = setup();
         let reward_to = test_address(b"address-history-reward");
@@ -2057,7 +2088,7 @@ mod tests {
         handler.chain_store.set_head(&block_hash).unwrap();
         handler
             .chain_store
-            .put_system_transactions(&block_hash, block.number(), &[reward.clone()])
+            .put_system_transactions(&block_hash, block.number(), std::slice::from_ref(&reward))
             .unwrap();
 
         let result = ShellApiServer::get_transactions_by_address(

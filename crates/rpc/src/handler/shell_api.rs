@@ -512,6 +512,10 @@ impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
                     current = current.saturating_sub(1);
                     has_next_candidate = true;
                 }
+                RpcListDirection::Asc if current == u64::MAX => {
+                    has_next_candidate = false;
+                    break;
+                }
                 RpcListDirection::Asc => {
                     current = current.saturating_add(1);
                     has_next_candidate = true;
