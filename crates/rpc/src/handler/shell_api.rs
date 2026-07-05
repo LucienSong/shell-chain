@@ -4,6 +4,7 @@ const MAX_EXACT_ADDRESS_TOTAL_BLOCK_RANGE: u64 = 10_000;
 const MAX_LEGACY_ADDRESS_TX_OFFSET: u64 = 10_000;
 const DEFAULT_VALIDATOR_SNAPSHOT_PROPOSER_WINDOW: u64 = 200;
 const MAX_VALIDATOR_SNAPSHOT_PROPOSER_WINDOW: u64 = 1000;
+const MAX_OPTIONAL_RPC_BYTE_FIELD_LEN: usize = 32 * 1024;
 
 fn ensure_exact_address_total_allowed(
     from_block: u64,
@@ -1579,6 +1580,11 @@ fn parse_optional_hex_bytes(value: Option<&str>, field: &str) -> Result<Vec<u8>,
     let Some(hex) = value.strip_prefix("0x") else {
         return Err(invalid_params(format!("{field} must be 0x-prefixed")));
     };
+    if hex.len() > MAX_OPTIONAL_RPC_BYTE_FIELD_LEN.saturating_mul(2) {
+        return Err(invalid_params(format!(
+            "{field} exceeds maximum size of {MAX_OPTIONAL_RPC_BYTE_FIELD_LEN} bytes"
+        )));
+    }
     hex::decode(hex).map_err(|e| invalid_params(format!("{field} invalid hex: {e}")))
 }
 

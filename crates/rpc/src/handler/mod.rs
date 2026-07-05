@@ -6030,6 +6030,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn estimate_paymaster_gas_rejects_oversized_byte_fields_before_decode() {
+        let handler = setup();
+        let paymaster = Address::from([0xAA; 20]);
+        let sender = Address::from([0xBB; 20]);
+        let oversized = format!("0x{}", "aa".repeat(32 * 1024 + 1));
+
+        for (inner_calls_data, paymaster_context, expected) in [
+            (
+                Some(oversized.clone()),
+                None,
+                "inner_calls_data exceeds maximum size",
+            ),
+            (
+                None,
+                Some(oversized.clone()),
+                "paymaster_context exceeds maximum size",
+            ),
+        ] {
+            let err = ShellApiServer::estimate_paymaster_gas(
+                &handler,
+                PaymasterGasEstimateRequest {
+                    paymaster,
+                    sender,
+                    inner_calls_data,
+                    max_fee_per_gas: Some("0x1".into()),
+                    paymaster_context,
+                },
+            )
+            .await
+            .unwrap_err();
+
+            assert_eq!(err.code(), -32602);
+            assert!(err.message().contains(expected));
+            assert!(
+                !err.message().contains(&"aa".repeat(64)),
+                "error should not reflect large byte fields"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn is_sponsored_returns_not_found_for_unknown_hash() {
         let handler = setup();
         let res = ShellApiServer::is_sponsored(&handler, ShellHash::from_slice(&[0u8; 32]))
