@@ -520,7 +520,7 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
         &self,
         block_count: String,
         newest_block: String,
-        _reward_percentiles: Option<Vec<f64>>,
+        reward_percentiles: Option<Vec<f64>>,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         let latest = match self.parse_block_number(&newest_block)? {
             Some(n) => n,
@@ -533,12 +533,29 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
             }
         };
 
-        let count = parse_hex_u64(&block_count)?.min(1024);
+        let count = parse_hex_u64(&block_count)?;
+        if count == 0 {
+            return Err(invalid_params_err(
+                "feeHistory blockCount must be at least 1",
+            ));
+        }
+        if count > 1024 {
+            return Err(invalid_params_err(
+                "feeHistory blockCount must be at most 1024",
+            ));
+        }
+        if let Some(percentiles) = reward_percentiles.as_deref() {
+            validate_reward_percentiles(percentiles)?;
+        }
 
         let oldest = latest.saturating_sub(count.saturating_sub(1));
 
         let mut base_fee_per_gas = Vec::new();
         let mut gas_used_ratio = Vec::new();
+        let mut reward = reward_percentiles
+            .as_ref()
+            .filter(|percentiles| !percentiles.is_empty())
+            .map(|_| Vec::with_capacity((latest.saturating_sub(oldest) + 1) as usize));
 
         for num in oldest..=latest {
             match self.chain_store.get_block_by_number(num) {
@@ -556,6 +573,9 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
                     base_fee_per_gas.push(hex_u64(0));
                     gas_used_ratio.push(0.0);
                 }
+            }
+            if let (Some(reward), Some(percentiles)) = (&mut reward, reward_percentiles.as_ref()) {
+                reward.push(vec![hex_u64(0); percentiles.len()]);
             }
         }
 
@@ -575,7 +595,7 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
             "oldestBlock": hex_u64(oldest),
             "baseFeePerGas": base_fee_per_gas,
             "gasUsedRatio": gas_used_ratio,
-            "reward": []
+            "reward": reward.unwrap_or_default()
         }))
     }
 
@@ -942,4 +962,27 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
         let price = shell_core::calc_blob_gas_price(excess);
         Ok(hex_u64(price))
     }
+}
+
+fn validate_reward_percentiles(percentiles: &[f64]) -> Result<(), ErrorObjectOwned> {
+    let mut previous = None;
+    for percentile in percentiles {
+        if !percentile.is_finite() {
+            return Err(invalid_params_err(
+                "feeHistory reward percentiles must be finite",
+            ));
+        }
+        if !(0.0..=100.0).contains(percentile) {
+            return Err(invalid_params_err(
+                "feeHistory reward percentiles must be between 0 and 100",
+            ));
+        }
+        if previous.is_some_and(|previous| *percentile < previous) {
+            return Err(invalid_params_err(
+                "feeHistory reward percentiles must be non-decreasing",
+            ));
+        }
+        previous = Some(*percentile);
+    }
+    Ok(())
 }

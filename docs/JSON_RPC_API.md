@@ -304,9 +304,9 @@ Returns historical base fee and gas usage data.
 **Parameters:**
 | # | Type | Required | Description |
 |---|------|----------|-------------|
-| 1 | `String` | Yes | Block count (hex) — max 1024 |
+| 1 | `String` | Yes | Block count (hex) — 1 to 1024 |
 | 2 | `String` | Yes | Newest block (block tag or hex number) |
-| 3 | `Array<Number>` | No | Reward percentiles |
+| 3 | `Array<Number>` | No | Reward percentiles, 0 to 100 in non-decreasing order |
 
 **Returns:** Object with `oldestBlock`, `baseFeePerGas`, `gasUsedRatio`, `reward`.
 
