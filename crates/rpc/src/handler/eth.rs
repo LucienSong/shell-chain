@@ -1,5 +1,9 @@
 use super::*;
 
+fn capped_filter_poll_to(from: u64, latest: u64) -> u64 {
+    latest.min(from.saturating_add(MAX_BLOCK_RANGE.saturating_sub(1)))
+}
+
 fn rpc_logs_from_core(logs: Vec<shell_core::Log>) -> Vec<RpcLog> {
     logs.into_iter()
         .map(|log| {
@@ -870,7 +874,7 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
             let filter = raw.into_match_filter();
 
             let mut results = Vec::new();
-            let actual_to = latest.min(from + MAX_BLOCK_RANGE - 1);
+            let actual_to = capped_filter_poll_to(from, latest);
 
             for block_num in from..=actual_to {
                 let block = match self
@@ -927,7 +931,7 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
             }
 
             let mut hashes = Vec::new();
-            let actual_to = latest.min(from + MAX_BLOCK_RANGE - 1);
+            let actual_to = capped_filter_poll_to(from, latest);
             for block_num in from..=actual_to {
                 if let Some(block) = self
                     .chain_store
