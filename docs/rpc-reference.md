@@ -346,7 +346,8 @@ Returns traces for a single transaction (OpenEthereum format).
 mine(blocks: Option<u64>, ) → serde_json::Value
 ```
 
-Mine one or more blocks immediately.
+Mine one or more blocks immediately. The `blocks` parameter defaults to `1`
+and is capped at `256` per request.
 
 ### evm_setNextBlockTimestamp
 ```

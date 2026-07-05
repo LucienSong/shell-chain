@@ -1432,6 +1432,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn evm_mine_rejects_excessive_block_count() {
+        let dev = Arc::new(MockDevControl::default());
+        let handler = setup().with_dev_control(dev.clone());
+
+        let err = LegacyEvmApiServer::mine(&handler, Some(257))
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code(), jsonrpsee::types::error::INVALID_PARAMS_CODE);
+        assert!(err.message().contains("at most 256"));
+        assert_eq!(dev.mined.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
     async fn set_balance_requires_dev_control() {
         let handler = setup();
         let addr = test_address(b"set-balance-no-dev");

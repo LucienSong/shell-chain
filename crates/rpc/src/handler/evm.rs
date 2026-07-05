@@ -1,9 +1,16 @@
 use super::*;
 
+const MAX_EVM_MINE_BLOCKS: u64 = 256;
+
 #[jsonrpsee::core::async_trait]
 impl<S: KvStore + 'static> LegacyEvmApiServer for RpcHandler<S> {
     async fn mine(&self, blocks: Option<u64>) -> Result<serde_json::Value, ErrorObjectOwned> {
         let count = blocks.unwrap_or(1).max(1);
+        if count > MAX_EVM_MINE_BLOCKS {
+            return Err(invalid_params_err(format!(
+                "evm_mine blocks must be at most {MAX_EVM_MINE_BLOCKS}"
+            )));
+        }
         let dev = self.dev_control.as_ref().ok_or_else(|| {
             feature_not_enabled("legacy evm dev namespace not enabled on this node")
         })?;
