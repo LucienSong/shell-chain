@@ -42,6 +42,9 @@ fn parse_hash_hex(s: &str) -> Result<ShellHash, jsonrpsee::types::ErrorObjectOwn
     let Some(s) = s.strip_prefix("0x") else {
         return Err(invalid_params_err("log topic must be 0x-prefixed"));
     };
+    if s.len() != 64 {
+        return Err(invalid_params_err("log topic must be 32 bytes"));
+    }
     let bytes =
         hex::decode(s).map_err(|e| invalid_params_err(format!("invalid log topic hex: {e}")))?;
     ShellHash::try_from_slice(&bytes)
@@ -883,6 +886,37 @@ mod tests {
         assert!(filter.matches(&matching_receipt.logs[0]));
         // The non-matching receipt's log should NOT pass.
         assert!(!filter.matches(&non_matching_receipt.logs[0]));
+    }
+
+    #[test]
+    fn logs_filter_topic_parser_requires_exact_hash_length_before_decode() {
+        let valid_topic = format!("0x{}", "11".repeat(32));
+        let filter = LogFilter::from_value(&serde_json::json!({
+            "topics": [valid_topic]
+        }))
+        .unwrap();
+        assert_eq!(filter.topics[0], vec![ShellHash::from([0x11; 32])]);
+
+        for topic in ["0x11".to_string(), format!("0x{}", "aa".repeat(512))] {
+            let err = LogFilter::from_value(&serde_json::json!({
+                "topics": [topic]
+            }))
+            .unwrap_err();
+            assert_eq!(err.code(), jsonrpsee::types::error::INVALID_PARAMS_CODE);
+            assert!(err.message().contains("32 bytes"));
+            assert!(
+                !err.message().contains(&"aa".repeat(64)),
+                "error should not reflect large topic inputs"
+            );
+        }
+
+        let invalid_topic = format!("0x{}zz", "00".repeat(31));
+        let err = LogFilter::from_value(&serde_json::json!({
+            "topics": [invalid_topic]
+        }))
+        .unwrap_err();
+        assert_eq!(err.code(), jsonrpsee::types::error::INVALID_PARAMS_CODE);
+        assert!(err.message().contains("invalid log topic hex"));
     }
 
     // -------------------------------------------------------------------
