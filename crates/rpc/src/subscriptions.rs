@@ -120,21 +120,17 @@ impl SubscriptionTracker {
     /// Try to acquire a subscription slot for a specific connection.
     /// Enforces both global and per-connection limits.
     pub fn try_acquire_for_connection(&self, conn_id: u32) -> bool {
-        // Check per-connection limit first.
-        {
-            let conns = self.per_connection.lock();
-            let count = conns.get(&conn_id).copied().unwrap_or(0);
-            if count >= self.max_per_connection {
-                return false;
-            }
+        let mut conns = self.per_connection.lock();
+        let count = conns.get(&conn_id).copied().unwrap_or(0);
+        if count >= self.max_per_connection {
+            return false;
         }
-        // Then check global limit.
+
         if !self.try_acquire() {
             return false;
         }
-        // Increment per-connection count.
-        let mut conns = self.per_connection.lock();
-        *conns.entry(conn_id).or_insert(0) += 1;
+
+        conns.insert(conn_id, count.saturating_add(1));
         true
     }
 
@@ -1019,6 +1015,55 @@ mod tests {
         // Both clones see the shared count — third should fail.
         assert!(!tracker.try_acquire());
         assert!(!tracker2.try_acquire());
+    }
+
+    #[test]
+    fn subscription_tracker_enforces_per_connection_limit() {
+        let tracker = SubscriptionTracker {
+            active: Arc::new(AtomicU32::new(0)),
+            max: 10,
+            per_connection: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            max_per_connection: 2,
+        };
+
+        assert!(tracker.try_acquire_for_connection(7));
+        assert!(tracker.try_acquire_for_connection(7));
+        assert!(!tracker.try_acquire_for_connection(7));
+        assert_eq!(tracker.active_count(), 2);
+
+        tracker.release_for_connection(7);
+        assert!(tracker.try_acquire_for_connection(7));
+        assert_eq!(tracker.active_count(), 2);
+    }
+
+    #[test]
+    fn subscription_tracker_enforces_per_connection_limit_under_contention() {
+        let tracker = Arc::new(SubscriptionTracker {
+            active: Arc::new(AtomicU32::new(0)),
+            max: 100,
+            per_connection: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            max_per_connection: 1,
+        });
+        let ready = Arc::new(std::sync::Barrier::new(16));
+        let mut handles = Vec::new();
+
+        for _ in 0..16 {
+            let tracker = Arc::clone(&tracker);
+            let ready = Arc::clone(&ready);
+            handles.push(std::thread::spawn(move || {
+                ready.wait();
+                tracker.try_acquire_for_connection(42)
+            }));
+        }
+
+        let acquired = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("subscription worker panicked"))
+            .filter(|acquired| *acquired)
+            .count();
+
+        assert_eq!(acquired, 1);
+        assert_eq!(tracker.active_count(), 1);
     }
 
     // -------------------------------------------------------------------
