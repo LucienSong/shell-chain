@@ -741,6 +741,12 @@ pub(crate) fn parse_hex_hash(s: &str) -> Result<ShellHash, ErrorObjectOwned> {
 /// Parse a hex string "0x..." into u64.
 pub(crate) fn parse_hex_u64(s: &str) -> Result<u64, ErrorObjectOwned> {
     let s = canonical_hex_quantity_digits(s, "u64")?;
+    if s.len() > 16 {
+        return Err(invalid_params_err(format!(
+            "hex string too long for u64: {} chars (max 16)",
+            s.len()
+        )));
+    }
     u64::from_str_radix(s, 16).map_err(|_| invalid_params_err(format!("invalid hex u64: 0x{s}")))
 }
 
@@ -784,7 +790,7 @@ fn canonical_hex_quantity_digits<'a>(
     }
     if !hex.as_bytes().iter().all(u8::is_ascii_hexdigit) {
         return Err(invalid_params_err(format!(
-            "invalid hex {type_name}: 0x{hex}"
+            "invalid hex {type_name}: contains non-hex characters"
         )));
     }
     Ok(hex)
@@ -1374,16 +1380,34 @@ mod tests {
             BlockTag::Number(10)
         ));
         assert!(matches!(
+            parse_block_tag("0xffffffffffffffff").unwrap(),
+            BlockTag::Number(u64::MAX)
+        ));
+        assert!(matches!(
             parse_block_tag("latest").unwrap(),
             BlockTag::Latest
         ));
 
-        for value in ["10", "0x", "0x00", "0x01", "0xzz"] {
+        for value in ["10", "0x", "0x00", "0x01", "0xzz", "0x10000000000000000"] {
             assert!(
                 parse_block_tag(value).is_err(),
                 "block tag should reject {value}"
             );
         }
+    }
+
+    #[test]
+    fn hex_quantity_errors_do_not_echo_large_invalid_input() {
+        let value = format!("0x{}z", "f".repeat(512));
+        let err = match parse_block_tag(&value) {
+            Ok(_) => panic!("oversized invalid quantity should be rejected"),
+            Err(err) => err,
+        };
+        assert!(err.message().contains("non-hex characters"));
+        assert!(
+            !err.message().contains(&"f".repeat(128)),
+            "error should not reflect large invalid quantities"
+        );
     }
 
     #[test]
