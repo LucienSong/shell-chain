@@ -2150,6 +2150,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fee_history_returns_zero_priority_rewards_when_requested() {
+        let handler = setup();
+        let mut block = make_genesis_block();
+        block.header.base_fee_per_gas = 1_000_000_000;
+        block.header.number = 0;
+        let hash = block.hash();
+        handler.chain_store.put_block(&block).unwrap();
+        handler.chain_store.set_canonical(0, &hash).unwrap();
+        handler.chain_store.set_head(&hash).unwrap();
+
+        let result = EthApiServer::fee_history(
+            &handler,
+            "0x1".into(),
+            "latest".into(),
+            Some(vec![25.0, 75.0]),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result["reward"], serde_json::json!([["0x0", "0x0"]]));
+    }
+
+    #[tokio::test]
+    async fn fee_history_empty_reward_percentiles_keeps_empty_reward() {
+        let handler = setup();
+        let result =
+            EthApiServer::fee_history(&handler, "0x1".into(), "latest".into(), Some(Vec::new()))
+                .await
+                .unwrap();
+
+        assert_eq!(result["reward"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn fee_history_rejects_zero_block_count_as_invalid_params() {
+        let handler = setup();
+        let err = EthApiServer::fee_history(&handler, "0x0".into(), "latest".into(), None)
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code(), jsonrpsee::types::error::INVALID_PARAMS_CODE);
+        assert!(err.message().contains("at least 1"));
+    }
+
+    #[tokio::test]
+    async fn fee_history_rejects_oversized_block_count_as_invalid_params() {
+        let handler = setup();
+        let err = EthApiServer::fee_history(&handler, "0x401".into(), "latest".into(), None)
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code(), jsonrpsee::types::error::INVALID_PARAMS_CODE);
+        assert!(err.message().contains("at most 1024"));
+    }
+
+    #[tokio::test]
+    async fn fee_history_rejects_invalid_reward_percentiles_as_invalid_params() {
+        let handler = setup();
+
+        for percentiles in [vec![-1.0], vec![101.0], vec![90.0, 50.0], vec![f64::NAN]] {
+            let err = EthApiServer::fee_history(
+                &handler,
+                "0x1".into(),
+                "latest".into(),
+                Some(percentiles),
+            )
+            .await
+            .unwrap_err();
+
+            assert_eq!(err.code(), jsonrpsee::types::error::INVALID_PARAMS_CODE);
+        }
+    }
+
+    #[tokio::test]
     async fn get_nonexistent_tx_returns_none() {
         let handler = setup();
         let result = EthApiServer::get_transaction_by_hash(&handler, ShellHash::default())
