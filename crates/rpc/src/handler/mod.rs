@@ -4715,6 +4715,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn filter_changes_caps_range_without_overflow_near_u64_max() {
+        let handler = setup();
+        let block = Block {
+            header: BlockHeader {
+                number: u64::MAX,
+                ..make_genesis_block().header
+            },
+            transactions: vec![],
+            system_transactions: vec![],
+            proposer_seal: None,
+        };
+        let hash = block.hash();
+        handler.chain_store.put_block(&block).unwrap();
+        handler.chain_store.set_canonical(u64::MAX, &hash).unwrap();
+        handler.chain_store.set_head(&hash).unwrap();
+
+        let block_filter = handler
+            .filter_registry
+            .new_filter(FilterKind::Block, u64::MAX - 1)
+            .unwrap();
+        let block_changes = EthApiServer::get_filter_changes(&handler, block_filter.clone())
+            .await
+            .unwrap();
+        assert_eq!(block_changes.as_array().unwrap().len(), 1);
+        let (_, last_poll) = handler
+            .filter_registry
+            .get_filter_info(&block_filter)
+            .unwrap();
+        assert_eq!(last_poll, u64::MAX);
+
+        let raw: RawLogFilter = serde_json::from_str(r#"{}"#).unwrap();
+        let log_filter = handler
+            .filter_registry
+            .new_filter(FilterKind::Log(raw), u64::MAX - 1)
+            .unwrap();
+        let log_changes = EthApiServer::get_filter_changes(&handler, log_filter.clone())
+            .await
+            .unwrap();
+        assert!(log_changes.as_array().unwrap().is_empty());
+        let (_, last_poll) = handler
+            .filter_registry
+            .get_filter_info(&log_filter)
+            .unwrap();
+        assert_eq!(last_poll, u64::MAX);
+    }
+
+    #[tokio::test]
     async fn log_filter_returns_matching_logs() {
         let handler = setup();
         let addr = Address::from([0xEE; 20]);
