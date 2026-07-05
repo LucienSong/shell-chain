@@ -1082,11 +1082,19 @@ impl<S: KvStore + 'static> Node<S> {
         let _ = self.shutdown_tx.send(true);
     }
 
-    /// Record a finalised state root, run state pruning, and evict old entries.
-    fn record_finalized_state_root(&self, block_number: u64, state_root: ShellHash) {
+    /// Record a canonical state root, then run pruning bounded by finalized height.
+    fn record_canonical_state_root(&self, block_number: u64, state_root: ShellHash) {
         let profile = StorageProfile::from_pruning_config(&self.config.pruning);
         let keep_recent = self.config.pruning.keep_recent;
         let mut prune_keep_below = None;
+        let finalized_number = match self.chain_store.get_finalized_number() {
+            Ok(stored) => stored.unwrap_or(0),
+            Err(e) => {
+                tracing::warn!(error = %e, "pruning: failed to read finalized height");
+                0
+            }
+        }
+        .max(self.finality.read().last_finalized_number());
 
         {
             let mut tracker = self.state_root_tracker.write();
@@ -1128,8 +1136,8 @@ impl<S: KvStore + 'static> Node<S> {
             let mut pruner = self.state_pruner.write();
             pruner.register_block(block_number, state_root);
             pruner.mark_active(state_root);
-            if pruner.should_prune(block_number) {
-                pruner.mark_prunable(block_number);
+            if finalized_number > 0 && pruner.should_prune(block_number) {
+                pruner.mark_prunable(finalized_number);
                 match pruner.prune(self.store.as_ref()) {
                     Ok(result) => {
                         if result.pruned_count > 0 {
@@ -1137,6 +1145,7 @@ impl<S: KvStore + 'static> Node<S> {
                                 pruned = result.pruned_count,
                                 protected = result.protected_count,
                                 block = block_number,
+                                finalized = finalized_number,
                                 "state pruner: removed old canonical mappings"
                             );
                         }
@@ -1162,7 +1171,7 @@ impl<S: KvStore + 'static> Node<S> {
                     .filter(|(l, _)| *l == 1)
                     .count() as u64;
                 match wpruner.prune_before(
-                    block_number,
+                    finalized_number,
                     stark_frontier,
                     &self.chain_store,
                     &self.witness_store,
@@ -1172,6 +1181,7 @@ impl<S: KvStore + 'static> Node<S> {
                             tracing::info!(
                                 pruned = result.pruned_count,
                                 block = block_number,
+                                finalized = finalized_number,
                                 "witness pruner: removed old witness bundles"
                             );
                         }
@@ -1187,12 +1197,13 @@ impl<S: KvStore + 'static> Node<S> {
         {
             let mut bpruner = self.body_pruner.write();
             if !bpruner.is_archive() {
-                match bpruner.prune_before(block_number, &self.chain_store) {
+                match bpruner.prune_before(finalized_number, &self.chain_store) {
                     Ok(result) => {
                         if result.bodies_pruned > 0 {
                             tracing::info!(
                                 pruned = result.bodies_pruned,
                                 block = block_number,
+                                finalized = finalized_number,
                                 "body pruner: expired old block bodies"
                             );
                         }
@@ -4718,6 +4729,33 @@ mod tests {
         (node, signer)
     }
 
+    fn setup_node_with_retention(
+        body_retention: u64,
+        witness_retention: u64,
+    ) -> (Node<MemoryDb>, DilithiumSigner) {
+        let signer = DilithiumSigner::generate();
+        let pubkey = signer.public_key().to_vec();
+        let authority = Address::from_public_key(&pubkey, signer.sig_type().as_u8());
+
+        let db = Arc::new(MemoryDb::new());
+        let chain_store = Arc::new(ChainStore::new(db.clone()));
+        let world_state = Arc::new(RwLock::new(WorldState::new(db.clone())));
+        let consensus: Arc<RwLock<dyn ConsensusEngine>> = Arc::new(RwLock::new(PoaEngine::new(
+            PoaConfig::new(vec![authority], 1),
+        )));
+        let tx_pool = Arc::new(TxPool::new(MempoolConfig {
+            chain_id: 1337,
+            ..MempoolConfig::default()
+        }));
+
+        let mut config = NodeConfig::dev(authority);
+        config.pruning = PruningConfig::new(128);
+        config.pruning.body_retention = body_retention;
+        config.pruning.witness_retention = witness_retention;
+        let node = Node::new(config, db, chain_store, world_state, tx_pool, consensus);
+        (node, signer)
+    }
+
     #[test]
     fn state_root_history_grows_with_blocks() {
         let (node, signer) = setup_node_with_pruning(128);
@@ -4769,6 +4807,31 @@ mod tests {
         let tracker = node.state_root_tracker.read();
         assert_eq!(tracker.len(), 10, "archive mode keeps all roots");
         assert_eq!(tracker.oldest().unwrap().block_number, 1);
+    }
+
+    #[test]
+    fn body_and_witness_pruning_wait_for_finalized_height() {
+        let (node, signer) = setup_node_with_retention(2, 2);
+        store_genesis(&node);
+
+        for _ in 0..5 {
+            node.produce_block(&signer, 0).unwrap();
+        }
+
+        assert_eq!(node.body_pruner.read().pruned_below(), 0);
+        assert_eq!(node.witness_pruner.read().pruned_below(), 0);
+
+        let finalized = node.chain_store.get_block_by_number(3).unwrap().unwrap();
+        let finalized_hash = finalized.hash();
+        node.chain_store.set_finalized_number(3).unwrap();
+        node.finality
+            .write()
+            .set_finalized_direct(3, finalized_hash);
+
+        node.produce_block(&signer, 0).unwrap();
+
+        assert_eq!(node.body_pruner.read().pruned_below(), 2);
+        assert_eq!(node.witness_pruner.read().pruned_below(), 2);
     }
 
     // ── Block sync integration tests ───────────────────────────────────
