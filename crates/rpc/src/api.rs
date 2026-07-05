@@ -403,7 +403,8 @@ pub trait ShellApi {
         options: Option<crate::types::RpcTransactionSummaryOptions>,
     ) -> Result<crate::types::RpcTransactionSummaryResult, jsonrpsee::types::ErrorObjectOwned>;
 
-    /// Returns validator set, proposer and optional recent proposer stats.
+    /// Returns validator set, proposer, and recent proposer stats.
+    /// `proposerWindow` defaults to 200, is capped at 1000, and must be at least 1.
     #[method(name = "getValidatorSnapshot")]
     async fn get_validator_snapshot(
         &self,

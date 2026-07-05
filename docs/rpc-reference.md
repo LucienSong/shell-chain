@@ -462,7 +462,8 @@ Returns a compact transaction view with optional receipt.
 get_validator_snapshot(options: Option<crate::types::RpcValidatorSnapshotOptions>, ) → crate::types::RpcValidatorSnapshot
 ```
 
-Returns validator set, proposer and optional recent proposer stats.
+Returns validator set, proposer, and recent proposer stats.
+`proposerWindow` defaults to 200, is capped at 1000, and must be at least 1.
 
 ### shell_sendTransaction
 ```
