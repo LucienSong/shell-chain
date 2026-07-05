@@ -135,10 +135,11 @@ impl FilterRegistry {
 
     /// Remove filters that have not been accessed within the TTL window.
     pub fn cleanup_expired(&self) {
-        let cutoff = Instant::now() - std::time::Duration::from_secs(self.ttl_secs);
+        let now = Instant::now();
+        let ttl = std::time::Duration::from_secs(self.ttl_secs);
         self.filters
             .write()
-            .retain(|_, entry| entry.last_access > cutoff);
+            .retain(|_, entry| now.duration_since(entry.last_access) <= ttl);
     }
 
     /// Returns the number of active filters.
@@ -278,6 +279,14 @@ mod tests {
     #[test]
     fn cleanup_keeps_fresh_filters() {
         let reg = FilterRegistry::new(); // default 300s TTL
+        let _id = reg.new_filter(FilterKind::Block, 0).unwrap();
+        reg.cleanup_expired();
+        assert_eq!(reg.len(), 1);
+    }
+
+    #[test]
+    fn cleanup_with_large_ttl_retains_recent_filters() {
+        let reg = FilterRegistry::with_ttl(u64::MAX);
         let _id = reg.new_filter(FilterKind::Block, 0).unwrap();
         reg.cleanup_expired();
         assert_eq!(reg.len(), 1);
