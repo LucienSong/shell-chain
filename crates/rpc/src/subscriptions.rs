@@ -19,6 +19,7 @@ use shell_primitives::{Address, ShellHash};
 use shell_storage::KvStore;
 use tokio::sync::broadcast;
 
+use crate::handler::invalid_params_err;
 use crate::handler::RpcHandler;
 use crate::types::{hex_bytes, hex_u64};
 
@@ -32,15 +33,19 @@ const MAX_SUBSCRIPTIONS_PER_CONNECTION: u32 = 16;
 const MAX_CONSECUTIVE_LAGS: u32 = 3;
 
 /// Parse a user-facing address string (`0x` + 64 lowercase hex) into an `Address`.
-fn parse_address_input(s: &str) -> Option<Address> {
-    Address::parse(s).ok()
+fn parse_address_input(s: &str) -> Result<Address, jsonrpsee::types::ErrorObjectOwned> {
+    Address::parse(s).map_err(|e| invalid_params_err(format!("invalid log filter address: {e}")))
 }
 
 /// Parse a hex hash string like "0x0000..." into a `ShellHash`.
-fn parse_hash_hex(s: &str) -> Option<ShellHash> {
-    let s = s.strip_prefix("0x").unwrap_or(s);
-    let bytes = hex::decode(s).ok()?;
-    ShellHash::try_from_slice(&bytes).ok()
+fn parse_hash_hex(s: &str) -> Result<ShellHash, jsonrpsee::types::ErrorObjectOwned> {
+    let Some(s) = s.strip_prefix("0x") else {
+        return Err(invalid_params_err("log topic must be 0x-prefixed"));
+    };
+    let bytes =
+        hex::decode(s).map_err(|e| invalid_params_err(format!("invalid log topic hex: {e}")))?;
+    ShellHash::try_from_slice(&bytes)
+        .map_err(|e| invalid_params_err(format!("invalid log topic length: {e}")))
 }
 
 // ---------------------------------------------------------------------------
@@ -187,7 +192,7 @@ struct LogFilter {
 }
 
 impl LogFilter {
-    fn from_value(v: &serde_json::Value) -> Self {
+    fn from_value(v: &serde_json::Value) -> Result<Self, jsonrpsee::types::ErrorObjectOwned> {
         let mut filter = LogFilter::default();
 
         if let Some(obj) = v.as_object() {
@@ -195,20 +200,23 @@ impl LogFilter {
             if let Some(addr_val) = obj.get("address") {
                 match addr_val {
                     serde_json::Value::String(s) => {
-                        if let Some(addr) = parse_address_input(s) {
-                            filter.addresses.push(addr);
-                        }
+                        filter.addresses.push(parse_address_input(s)?);
                     }
                     serde_json::Value::Array(arr) => {
                         for item in arr {
-                            if let Some(s) = item.as_str() {
-                                if let Some(addr) = parse_address_input(s) {
-                                    filter.addresses.push(addr);
-                                }
-                            }
+                            let Some(s) = item.as_str() else {
+                                return Err(invalid_params_err(
+                                    "log filter address entries must be strings",
+                                ));
+                            };
+                            filter.addresses.push(parse_address_input(s)?);
                         }
                     }
-                    _ => {}
+                    _ => {
+                        return Err(invalid_params_err(
+                            "log filter address must be a string or array",
+                        ))
+                    }
                 }
             }
 
@@ -220,28 +228,35 @@ impl LogFilter {
                             filter.topics.push(vec![]);
                         }
                         serde_json::Value::String(s) => {
-                            if let Some(hash) = parse_hash_hex(s) {
-                                filter.topics.push(vec![hash]);
-                            } else {
-                                filter.topics.push(vec![]);
-                            }
+                            filter.topics.push(vec![parse_hash_hex(s)?]);
                         }
                         serde_json::Value::Array(arr) => {
                             let hashes: Vec<ShellHash> = arr
                                 .iter()
-                                .filter_map(|v| parse_hash_hex(v.as_str()?))
-                                .collect();
+                                .map(|v| {
+                                    let Some(s) = v.as_str() else {
+                                        return Err(invalid_params_err(
+                                            "log filter topic entries must be strings",
+                                        ));
+                                    };
+                                    parse_hash_hex(s)
+                                })
+                                .collect::<Result<Vec<_>, _>>()?;
                             filter.topics.push(hashes);
                         }
                         _ => {
-                            filter.topics.push(vec![]);
+                            return Err(invalid_params_err(
+                                "log filter topic must be a hash, array, or null",
+                            ))
                         }
                     }
                 }
+            } else if obj.contains_key("topics") {
+                return Err(invalid_params_err("log filter topics must be an array"));
             }
         }
 
-        filter
+        Ok(filter)
     }
 
     /// Returns `true` if the given log matches this filter.
@@ -326,10 +341,15 @@ impl<S: KvStore + 'static> EthPubSubServer for RpcHandler<S> {
             }
             "logs" => {
                 let rx = self.block_event_sender().subscribe();
-                let filter = params
-                    .as_ref()
-                    .map(LogFilter::from_value)
-                    .unwrap_or_default();
+                let filter = match params.as_ref().map(LogFilter::from_value).transpose() {
+                    Ok(Some(filter)) => filter,
+                    Ok(None) => LogFilter::default(),
+                    Err(err) => {
+                        tracker.release_for_connection(conn_id);
+                        pending.reject(err).await;
+                        return Ok(());
+                    }
+                };
                 let sink = pending.accept().await?;
                 let t = tracker.clone();
                 tokio::spawn(async move {
@@ -763,11 +783,21 @@ mod tests {
             "address": Address::from([0xAA; 20]),
             "topics": [null, "0x0000000000000000000000000000000000000000000000000000000000000000"]
         });
-        let filter = LogFilter::from_value(&json);
+        let filter = LogFilter::from_value(&json).unwrap();
         assert_eq!(filter.addresses.len(), 1);
         assert_eq!(filter.topics.len(), 2);
         assert!(filter.topics[0].is_empty()); // null → wildcard
         assert_eq!(filter.topics[1].len(), 1);
+    }
+
+    #[test]
+    fn log_filter_rejects_unprefixed_topic() {
+        let json = serde_json::json!({
+            "topics": ["00".repeat(32)]
+        });
+        let err = LogFilter::from_value(&json).unwrap_err();
+        assert_eq!(err.code(), jsonrpsee::types::error::INVALID_PARAMS_CODE);
+        assert!(err.message().contains("0x-prefixed"));
     }
 
     #[test]
@@ -1070,7 +1100,7 @@ mod tests {
             ],
             "topics": []
         });
-        let filter = LogFilter::from_value(&json);
+        let filter = LogFilter::from_value(&json).unwrap();
         assert_eq!(filter.addresses.len(), 2);
     }
 
@@ -1083,9 +1113,9 @@ mod tests {
             ],
             "topics": []
         });
-        let filter = LogFilter::from_value(&json);
-        // short EVM-style hex is silently ignored; only canonical 32-byte 0x addresses are accepted
-        assert_eq!(filter.addresses.len(), 1);
+        let err = LogFilter::from_value(&json).unwrap_err();
+        assert_eq!(err.code(), jsonrpsee::types::error::INVALID_PARAMS_CODE);
+        assert!(err.message().contains("invalid log filter address"));
     }
 
     #[test]
