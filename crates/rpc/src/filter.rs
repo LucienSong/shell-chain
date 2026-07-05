@@ -154,7 +154,7 @@ impl RawLogFilter {
     }
 
     /// Convert to a resolved `LogFilter`, resolving block tags to numbers.
-    pub fn into_filter(self, latest_block: u64) -> Result<LogFilter, String> {
+    pub fn into_filter(self, latest_block: u64, finalized_block: u64) -> Result<LogFilter, String> {
         let RawLogFilter {
             from_block: from_block_tag,
             to_block: to_block_tag,
@@ -166,6 +166,7 @@ impl RawLogFilter {
         let resolve = |field: &str, tag: &str| -> Result<u64, String> {
             match tag {
                 "latest" | "pending" => Ok(latest_block),
+                "safe" | "finalized" => Ok(finalized_block),
                 "earliest" => Ok(0),
                 hex => {
                     let Some(hex) = hex.strip_prefix("0x") else {
@@ -429,7 +430,7 @@ mod tests {
             "address": Address::from([0x01; 20]),
         });
         let raw: RawLogFilter = serde_json::from_value(json).unwrap();
-        let filter = raw.into_filter(100).unwrap();
+        let filter = raw.into_filter(100, 90).unwrap();
         assert_eq!(filter.from_block, Some(1));
         assert_eq!(filter.to_block, Some(5));
         assert_eq!(filter.address.as_ref().unwrap().len(), 1);
@@ -444,7 +445,7 @@ mod tests {
             ]
         });
         let raw: RawLogFilter = serde_json::from_value(json).unwrap();
-        let filter = raw.into_filter(100).unwrap();
+        let filter = raw.into_filter(100, 90).unwrap();
         assert_eq!(filter.address.as_ref().unwrap().len(), 2);
     }
 
@@ -452,7 +453,7 @@ mod tests {
     fn raw_filter_topics() {
         let json = r#"{"topics":[null,"0x0000000000000000000000000000000000000000000000000000000000000001"]}"#;
         let raw: RawLogFilter = serde_json::from_str(json).unwrap();
-        let filter = raw.into_filter(100).unwrap();
+        let filter = raw.into_filter(100, 90).unwrap();
         assert!(filter.topics[0].is_none());
         assert!(filter.topics[1].is_some());
         assert_eq!(filter.topics[1].as_ref().unwrap().len(), 1);
@@ -462,36 +463,45 @@ mod tests {
     fn raw_filter_defaults_to_latest() {
         let json = r#"{}"#;
         let raw: RawLogFilter = serde_json::from_str(json).unwrap();
-        let filter = raw.into_filter(42).unwrap();
+        let filter = raw.into_filter(42, 7).unwrap();
         assert_eq!(filter.from_block, Some(42));
         assert_eq!(filter.to_block, Some(42));
+    }
+
+    #[test]
+    fn raw_filter_resolves_finality_block_tags() {
+        let raw: RawLogFilter =
+            serde_json::from_str(r#"{"fromBlock":"safe","toBlock":"finalized"}"#).unwrap();
+        let filter = raw.into_filter(42, 7).unwrap();
+        assert_eq!(filter.from_block, Some(7));
+        assert_eq!(filter.to_block, Some(7));
     }
 
     #[test]
     fn raw_filter_rejects_invalid_block_tags() {
         let raw: RawLogFilter =
             serde_json::from_str(r#"{"fromBlock":"not-a-block","toBlock":"0x1"}"#).unwrap();
-        let err = raw.into_filter(42).unwrap_err();
+        let err = raw.into_filter(42, 7).unwrap_err();
         assert!(err.contains("fromBlock"));
 
         let raw: RawLogFilter =
             serde_json::from_str(r#"{"fromBlock":"0x1","toBlock":"0x"}"#).unwrap();
-        let err = raw.into_filter(42).unwrap_err();
+        let err = raw.into_filter(42, 7).unwrap_err();
         assert!(err.contains("toBlock"));
 
         let raw: RawLogFilter =
             serde_json::from_str(r#"{"fromBlock":"0x01","toBlock":"0x1"}"#).unwrap();
-        let err = raw.into_filter(42).unwrap_err();
+        let err = raw.into_filter(42, 7).unwrap_err();
         assert!(err.contains("fromBlock"));
 
         let raw: RawLogFilter =
             serde_json::from_str(r#"{"fromBlock":"0x1","toBlock":"0x0g"}"#).unwrap();
-        let err = raw.into_filter(42).unwrap_err();
+        let err = raw.into_filter(42, 7).unwrap_err();
         assert!(err.contains("toBlock"));
 
         let raw: RawLogFilter =
             serde_json::from_str(r#"{"fromBlock":"0x10000000000000000","toBlock":"0x1"}"#).unwrap();
-        let err = raw.into_filter(42).unwrap_err();
+        let err = raw.into_filter(42, 7).unwrap_err();
         assert!(err.contains("fromBlock"));
         assert!(err.contains("too long"));
 
@@ -500,7 +510,7 @@ mod tests {
             "f".repeat(512)
         );
         let raw: RawLogFilter = serde_json::from_str(&invalid).unwrap();
-        let err = raw.into_filter(42).unwrap_err();
+        let err = raw.into_filter(42, 7).unwrap_err();
         assert!(err.contains("non-hex characters"));
         assert!(
             !err.contains(&"f".repeat(128)),
