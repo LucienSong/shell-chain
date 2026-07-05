@@ -161,6 +161,7 @@ impl TxPool {
         let existing_hash = sender_q.and_then(|q| q.get(&nonce).copied());
         let expected_next_nonce = next_expected_nonce(sender_q, chain_nonce);
         let mut evict_hash = None;
+        let mut evict_descendants = false;
 
         if nonce < chain_nonce {
             return Err(MempoolError::NonceTooLow {
@@ -210,18 +211,12 @@ impl TxPool {
 
         // Pool full — evict lowest priority tx
         if existing_hash.is_none() && inner.by_hash.len() >= self.config.max_pool_size {
-            if let Some((&evict_key, _)) = inner.by_priority.last_key_value() {
-                let incoming_neg = -(priority_fee as i128);
-                if incoming_neg >= evict_key.neg_priority_fee {
-                    return Err(MempoolError::PoolFull {
-                        capacity: self.config.max_pool_size,
-                    });
-                }
-                evict_hash = Some(*inner.by_priority.get(&evict_key).ok_or(
-                    MempoolError::PoolFull {
-                        capacity: self.config.max_pool_size,
-                    },
-                )?);
+            let incoming_neg = -(priority_fee as i128);
+            if let Some(candidate) =
+                Self::capacity_eviction_candidate(&inner, incoming_neg, sender, nonce)
+            {
+                evict_hash = Some(candidate);
+                evict_descendants = true;
             } else {
                 return Err(MempoolError::PoolFull {
                     capacity: self.config.max_pool_size,
@@ -236,7 +231,11 @@ impl TxPool {
         }
 
         if let Some(evict_hash) = evict_hash {
-            Self::remove_entry(&mut inner, &evict_hash);
+            if evict_descendants {
+                Self::remove_entry_and_descendants(&mut inner, &evict_hash);
+            } else {
+                Self::remove_entry(&mut inner, &evict_hash);
+            }
         }
 
         // --- Insert ---
@@ -515,6 +514,50 @@ impl TxPool {
         } else {
             false
         }
+    }
+
+    /// Pick the lowest-priority transaction that the incoming transaction can
+    /// evict without breaking its own sender queue's nonce prerequisites.
+    fn capacity_eviction_candidate(
+        inner: &PoolInner,
+        incoming_neg_priority_fee: i128,
+        incoming_sender: Address,
+        incoming_nonce: u64,
+    ) -> Option<ShellHash> {
+        for (priority_key, hash) in inner.by_priority.iter().rev() {
+            if incoming_neg_priority_fee >= priority_key.neg_priority_fee {
+                return None;
+            }
+
+            let Some(entry) = inner.by_hash.get(hash) else {
+                continue;
+            };
+            if entry.tx.sender() == incoming_sender && entry.tx.tx.nonce <= incoming_nonce {
+                continue;
+            }
+            return Some(*hash);
+        }
+        None
+    }
+
+    /// Remove a pool-capacity eviction candidate and all later transactions
+    /// from the same sender, preserving nonce contiguity for block production.
+    fn remove_entry_and_descendants(inner: &mut PoolInner, hash: &ShellHash) -> usize {
+        let Some(entry) = inner.by_hash.get(hash) else {
+            return 0;
+        };
+        let sender = entry.tx.sender();
+        let nonce = entry.tx.tx.nonce;
+        let hashes: Vec<ShellHash> = inner
+            .by_sender
+            .get(&sender)
+            .map(|queue| queue.range(nonce..).map(|(_nonce, hash)| *hash).collect())
+            .unwrap_or_else(|| vec![*hash]);
+
+        hashes
+            .into_iter()
+            .filter(|hash| Self::remove_entry(inner, hash))
+            .count()
     }
 }
 
@@ -1198,6 +1241,123 @@ mod tests {
 
         assert_eq!(pool.len(), 2);
         assert!(!pool.contains(&low_hash)); // evicted
+    }
+
+    #[test]
+    fn pool_full_eviction_prunes_sender_nonce_tail() {
+        let config = MempoolConfig {
+            max_pool_size: 3,
+            ..make_config()
+        };
+        let pool = TxPool::new(config);
+        let verifier = DilithiumVerifier;
+        let (mut ws, cs) = setup_validation_ctx();
+
+        let signer = DilithiumSigner::generate();
+        let pubkey = signer.public_key().to_vec();
+
+        let sender_low_nonce = make_signed_tx_with_signer(&signer, &pubkey, 0, 10);
+        let sender_high_nonce = make_signed_tx_with_signer(&signer, &pubkey, 1, 100);
+        let low_nonce_hash = sender_low_nonce.hash();
+        let high_nonce_hash = sender_high_nonce.hash();
+        let (other_tx, _) = make_signed_tx(0, 50);
+        let other_hash = other_tx.hash();
+
+        insert_rich(&pool, sender_low_nonce, &verifier, &mut ws, &cs).unwrap();
+        insert_rich(&pool, sender_high_nonce, &verifier, &mut ws, &cs).unwrap();
+        insert_rich(&pool, other_tx, &verifier, &mut ws, &cs).unwrap();
+
+        let (incoming_tx, _) = make_signed_tx(0, 60);
+        let incoming_hash = incoming_tx.hash();
+        insert_rich(&pool, incoming_tx, &verifier, &mut ws, &cs).unwrap();
+
+        assert_eq!(pool.len(), 2);
+        assert!(!pool.contains(&low_nonce_hash));
+        assert!(!pool.contains(&high_nonce_hash));
+        assert!(pool.contains(&other_hash));
+        assert!(pool.contains(&incoming_hash));
+
+        let block_view: Vec<_> = pool
+            .pending_for_block(10)
+            .into_iter()
+            .map(|tx| tx.hash())
+            .collect();
+        assert_eq!(block_view, vec![incoming_hash, other_hash]);
+    }
+
+    #[test]
+    fn pool_full_same_sender_incoming_skips_nonce_prerequisite_eviction() {
+        let config = MempoolConfig {
+            max_pool_size: 3,
+            ..make_config()
+        };
+        let pool = TxPool::new(config);
+        let verifier = DilithiumVerifier;
+        let (mut ws, cs) = setup_validation_ctx();
+
+        let signer = DilithiumSigner::generate();
+        let pubkey = signer.public_key().to_vec();
+
+        let sender_tx0 = make_signed_tx_with_signer(&signer, &pubkey, 0, 10);
+        let sender_tx1 = make_signed_tx_with_signer(&signer, &pubkey, 1, 100);
+        let sender_tx0_hash = sender_tx0.hash();
+        let sender_tx1_hash = sender_tx1.hash();
+        let (other_tx, _) = make_signed_tx(0, 50);
+        let other_hash = other_tx.hash();
+
+        insert_rich(&pool, sender_tx0, &verifier, &mut ws, &cs).unwrap();
+        insert_rich(&pool, sender_tx1, &verifier, &mut ws, &cs).unwrap();
+        insert_rich(&pool, other_tx, &verifier, &mut ws, &cs).unwrap();
+
+        let sender_tx2 = make_signed_tx_with_signer(&signer, &pubkey, 2, 60);
+        let sender_tx2_hash = sender_tx2.hash();
+        insert_rich(&pool, sender_tx2, &verifier, &mut ws, &cs).unwrap();
+
+        assert_eq!(pool.len(), 3);
+        assert!(pool.contains(&sender_tx0_hash));
+        assert!(pool.contains(&sender_tx1_hash));
+        assert!(pool.contains(&sender_tx2_hash));
+        assert!(!pool.contains(&other_hash));
+
+        let block_view: Vec<_> = pool
+            .pending_for_block(10)
+            .into_iter()
+            .map(|tx| tx.hash())
+            .collect();
+        assert_eq!(
+            block_view,
+            vec![sender_tx0_hash, sender_tx1_hash, sender_tx2_hash]
+        );
+    }
+
+    #[test]
+    fn pool_full_rejects_when_only_nonce_prerequisites_are_evictable() {
+        let config = MempoolConfig {
+            max_pool_size: 2,
+            ..make_config()
+        };
+        let pool = TxPool::new(config);
+        let verifier = DilithiumVerifier;
+        let (mut ws, cs) = setup_validation_ctx();
+
+        let signer = DilithiumSigner::generate();
+        let pubkey = signer.public_key().to_vec();
+
+        let sender_tx0 = make_signed_tx_with_signer(&signer, &pubkey, 0, 10);
+        let sender_tx1 = make_signed_tx_with_signer(&signer, &pubkey, 1, 100);
+        let sender_tx0_hash = sender_tx0.hash();
+        let sender_tx1_hash = sender_tx1.hash();
+
+        insert_rich(&pool, sender_tx0, &verifier, &mut ws, &cs).unwrap();
+        insert_rich(&pool, sender_tx1, &verifier, &mut ws, &cs).unwrap();
+
+        let sender_tx2 = make_signed_tx_with_signer(&signer, &pubkey, 2, 60);
+        let err = insert_rich(&pool, sender_tx2, &verifier, &mut ws, &cs).unwrap_err();
+
+        assert!(matches!(err, MempoolError::PoolFull { .. }));
+        assert_eq!(pool.len(), 2);
+        assert!(pool.contains(&sender_tx0_hash));
+        assert!(pool.contains(&sender_tx1_hash));
     }
 
     #[test]
