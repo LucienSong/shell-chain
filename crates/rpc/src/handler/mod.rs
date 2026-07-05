@@ -3495,6 +3495,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_logs_max_range_too_large_returns_error_without_overflow() {
+        let handler = setup();
+        let raw: crate::filter::RawLogFilter = serde_json::from_str(&format!(
+            r#"{{"fromBlock":"0x0","toBlock":"0x{:x}"}}"#,
+            u64::MAX
+        ))
+        .unwrap();
+
+        let err = EthApiServer::get_logs(&handler, raw).await.unwrap_err();
+
+        assert!(err.message().contains("cap the range"));
+    }
+
+    #[tokio::test]
     async fn get_logs_metadata_fields_are_correct() {
         let handler = setup();
         let addr = Address::from([0xCC; 20]);
