@@ -94,14 +94,15 @@ impl ProofWindowManager {
         current_block: u64,
     ) -> Result<(), WindowError> {
         // Check whether the block is still within the proof window.
-        if current_block > block_number + self.config.window_size_blocks {
+        if current_block > block_number.saturating_add(self.config.window_size_blocks) {
             self.windows.insert(block_number, WindowState::Expired);
             return Err(WindowError::WindowExpired { block_number });
         }
 
         match self.windows.get(&block_number) {
             None | Some(WindowState::Unclaimed) => {
-                let expires_at_block = current_block + self.config.claim_timeout_blocks;
+                let expires_at_block =
+                    current_block.saturating_add(self.config.claim_timeout_blocks);
                 self.windows.insert(
                     block_number,
                     WindowState::Claimed {
@@ -121,7 +122,8 @@ impl ProofWindowManager {
                     // Claim has expired — release and re-claim.
                     let expired_claimer = *existing;
                     *self.expired_claims.entry(expired_claimer).or_insert(0) += 1;
-                    let expires_at_block = current_block + self.config.claim_timeout_blocks;
+                    let expires_at_block =
+                        current_block.saturating_add(self.config.claim_timeout_blocks);
                     self.windows.insert(
                         block_number,
                         WindowState::Claimed {
@@ -233,7 +235,8 @@ impl ProofWindowManager {
 
     /// Remove window entries older than `window_size_blocks` from current block.
     pub fn gc(&mut self, current_block: u64) {
-        let cutoff = current_block.saturating_sub(self.config.window_size_blocks + 10);
+        let cutoff =
+            current_block.saturating_sub(self.config.window_size_blocks.saturating_add(10));
         self.windows.retain(|&bn, _| bn > cutoff);
     }
 }
@@ -392,6 +395,18 @@ mod tests {
     }
 
     #[test]
+    fn claim_near_max_block_saturates_window_end_and_timeout() {
+        let mut mgr = default_mgr();
+        let block_number = u64::MAX - 5;
+
+        mgr.claim(block_number, addr(1), u64::MAX).unwrap();
+
+        assert!(
+            matches!(mgr.state(block_number), WindowState::Claimed { expires_at_block, .. } if *expires_at_block == u64::MAX)
+        );
+    }
+
+    #[test]
     fn is_unreliable_after_max_expired_claims() {
         let mut mgr = default_mgr();
         // Simulate 3 expired claims for addr(1).
@@ -408,5 +423,19 @@ mod tests {
         mgr.claim(5, addr(1), 5).unwrap();
         mgr.gc(200); // current_block=200, cutoff = 200-110=90 → removes block 5
         assert_eq!(*mgr.state(5), WindowState::Unclaimed); // removed → default Unclaimed
+    }
+
+    #[test]
+    fn gc_saturates_retention_margin() {
+        let mut mgr = ProofWindowManager::new(WindowConfig {
+            window_size_blocks: u64::MAX,
+            claim_timeout_blocks: 20,
+            max_expired_claims: 3,
+        });
+
+        mgr.claim(5, addr(1), 5).unwrap();
+        mgr.gc(200);
+
+        assert!(matches!(mgr.state(5), WindowState::Claimed { .. }));
     }
 }
