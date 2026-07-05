@@ -634,7 +634,7 @@ impl<S: KvStore + 'static> Node<S> {
             .get_head_block()
             .ok()
             .flatten()
-            .map(|b| b.number() + 1)
+            .map(|b| b.number().saturating_add(1))
             .unwrap_or(1);
         if msg.block_number != expected_block {
             return Err(NodeError::Startup(format!(

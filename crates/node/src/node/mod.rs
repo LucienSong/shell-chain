@@ -6415,6 +6415,58 @@ mod tests {
             );
         }
 
+        #[test]
+        fn wpoa_view_change_validates_max_head_height() {
+            let (node, signer) = setup_wpoa_node();
+            let authority = node.config.proposer_address.unwrap();
+            node.register_authority_pubkey(authority, signer.public_key().to_vec());
+
+            let block = Block {
+                header: BlockHeader {
+                    parent_hash: ShellHash::default(),
+                    state_root: ShellHash::default(),
+                    transactions_root: ShellHash::default(),
+                    receipts_root: ShellHash::default(),
+                    logs_bloom: Bytes::default(),
+                    number: u64::MAX,
+                    gas_limit: 30_000_000,
+                    gas_used: 0,
+                    timestamp: 1_700_000_000,
+                    extra_data: Bytes::default(),
+                    proposer: authority,
+                    sig_aggregate_proof: None,
+                    base_fee_per_gas: 0,
+                    withdrawals_root: ShellHash::ZERO,
+                    parent_beacon_block_root: ShellHash::ZERO,
+                    blob_gas_used: 0,
+                    excess_blob_gas: 0,
+                    witness_root: None,
+                },
+                transactions: vec![],
+                system_transactions: vec![],
+                proposer_seal: None,
+            };
+            let hash = block.hash();
+            node.chain_store.put_block(&block).unwrap();
+            node.chain_store.set_canonical(u64::MAX, &hash).unwrap();
+            node.chain_store.set_head(&hash).unwrap();
+
+            let highest_qc_hash = *node.finality.read().last_finalized_hash();
+            let signing_message =
+                ViewChangeMessage::signing_message(1337, u64::MAX, 0, &highest_qc_hash);
+            let signature = signer.sign(&signing_message).unwrap();
+            let msg = ViewChangeMessage::new(
+                1337,
+                u64::MAX,
+                0,
+                highest_qc_hash,
+                authority,
+                signature.data,
+            );
+
+            assert!(node.handle_wpoa_view_change(msg, &MultiVerifier).is_ok());
+        }
+
         // ── 6. Serde: NetworkMessage::WPoaVote roundtrip ──────────────────────
 
         #[test]
