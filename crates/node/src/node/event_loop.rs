@@ -1,5 +1,11 @@
 use super::*;
 
+const MAX_BLOCK_SYNC_RESPONSE_BLOCKS: usize = 128;
+
+fn block_response_import_allowed(block_count: usize, commit_certificate_count: usize) -> bool {
+    block_count <= MAX_BLOCK_SYNC_RESPONSE_BLOCKS && commit_certificate_count <= block_count
+}
+
 struct NodeTaskLifecycle {
     tasks: tokio::task::JoinSet<()>,
     prover_service: Option<ProverServiceHandle>,
@@ -971,8 +977,8 @@ impl<S: KvStore + 'static> Node<S> {
                                     }
                                 }
                                 NetworkMessage::BlockRequest { start_number, count, nonce } => {
-                                    const MAX_BLOCK_RESPONSE: u64 = 128;
-                                    let safe_count = count.min(MAX_BLOCK_RESPONSE);
+                                    let safe_count =
+                                        count.min(MAX_BLOCK_SYNC_RESPONSE_BLOCKS as u64);
                                     debug!(
                                         %peer,
                                         start_number,
@@ -1018,6 +1024,19 @@ impl<S: KvStore + 'static> Node<S> {
                                     let _ = network.send_to_peer(&peer, resp).await;
                                 }
                                 NetworkMessage::BlockResponse { blocks, commit_certificates, nonce } => {
+                                    if !block_response_import_allowed(
+                                        blocks.len(),
+                                        commit_certificates.len(),
+                                    ) {
+                                        warn!(
+                                            %peer,
+                                            count = blocks.len(),
+                                            commit_certificates = commit_certificates.len(),
+                                            max_blocks = MAX_BLOCK_SYNC_RESPONSE_BLOCKS,
+                                            "dropping oversized BlockResponse"
+                                        );
+                                        continue;
+                                    }
                                     info!(
                                         count = blocks.len(),
                                         nonce,
@@ -2337,5 +2356,23 @@ mod cadence_tests {
         );
         assert_eq!(body_backfill_next_start(None, Some(10), Some(1)), Some(11));
         assert_eq!(body_backfill_next_start(None, None, Some(10)), Some(138));
+    }
+
+    #[test]
+    fn block_response_import_allows_bounded_responses() {
+        assert!(block_response_import_allowed(0, 0));
+        assert!(block_response_import_allowed(
+            MAX_BLOCK_SYNC_RESPONSE_BLOCKS,
+            MAX_BLOCK_SYNC_RESPONSE_BLOCKS
+        ));
+    }
+
+    #[test]
+    fn block_response_import_rejects_oversized_responses() {
+        assert!(!block_response_import_allowed(
+            MAX_BLOCK_SYNC_RESPONSE_BLOCKS + 1,
+            0
+        ));
+        assert!(!block_response_import_allowed(1, 2));
     }
 }
