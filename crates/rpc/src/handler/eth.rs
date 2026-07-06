@@ -143,8 +143,9 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
                     Some(b) => b,
                     None => return Ok(None),
                 };
-                let all_pending = self.tx_pool.pending(1000);
-                // F-101: cap pending txs by gas_limit to prevent oversized pseudo-blocks.
+                let all_pending = self.tx_pool.pending_for_block(1000);
+                // F-101: cap pending block candidates by gas_limit to prevent
+                // oversized pseudo-blocks.
                 let gas_limit = head.header.gas_limit;
                 let mut cumulative_gas: u64 = 0;
                 let pending_txs: Vec<_> = all_pending

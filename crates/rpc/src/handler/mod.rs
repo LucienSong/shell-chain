@@ -4778,6 +4778,120 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pending_block_uses_block_candidate_nonce_order() {
+        let handler = setup();
+        let block = make_genesis_block();
+        let hash = block.hash();
+        handler.chain_store.put_block(&block).unwrap();
+        handler.chain_store.set_canonical(0, &hash).unwrap();
+        handler.chain_store.set_head(&hash).unwrap();
+
+        let sender_signer = DilithiumSigner::generate();
+        let sender_addr = signer_address(&sender_signer);
+        let other_signer = DilithiumSigner::generate();
+        let other_addr = signer_address(&other_signer);
+        {
+            let mut ws = handler.world_state.write();
+            ws.add_balance(&sender_addr, U256::from(100_000_000_000_000u64))
+                .unwrap();
+            ws.add_balance(&other_addr, U256::from(100_000_000_000_000u64))
+                .unwrap();
+        }
+        handler
+            .chain_store
+            .put_pubkey(&sender_addr, sender_signer.public_key())
+            .unwrap();
+        handler
+            .chain_store
+            .put_pubkey(&other_addr, other_signer.public_key())
+            .unwrap();
+
+        let make_tx = |signer: &DilithiumSigner,
+                       from: Address,
+                       nonce: u64,
+                       priority_fee: u64,
+                       seed: &[u8]| {
+            let tx = Transaction {
+                chain_id: 42,
+                nonce,
+                max_priority_fee_per_gas: priority_fee,
+                max_fee_per_gas: 1_000_000_000,
+                gas_limit: 21_000,
+                to: Some(test_address(seed)),
+                value: U256::ZERO,
+                data: Bytes::default(),
+                access_list: None,
+                tx_type: 2,
+                max_fee_per_blob_gas: None,
+                blob_versioned_hashes: None,
+            };
+            let sig = signer.sign(tx.hash().0.as_slice()).unwrap();
+            SignedTransaction::new(from, tx, sig)
+        };
+
+        let sender_tx0 = make_tx(
+            &sender_signer,
+            sender_addr,
+            0,
+            10,
+            b"pending-sender-nonce-0",
+        );
+        let sender_tx1 = make_tx(
+            &sender_signer,
+            sender_addr,
+            1,
+            100,
+            b"pending-sender-nonce-1",
+        );
+        let other_tx = make_tx(&other_signer, other_addr, 0, 50, b"pending-other-nonce-0");
+
+        let sender_tx0_hash = sender_tx0.hash();
+        let sender_tx1_hash = sender_tx1.hash();
+        let other_hash = other_tx.hash();
+
+        {
+            let mut ws = handler.world_state.write();
+            handler
+                .tx_pool
+                .insert(
+                    sender_tx0,
+                    &mut ws,
+                    handler.chain_store.as_ref(),
+                    &MultiVerifier,
+                )
+                .unwrap();
+            handler
+                .tx_pool
+                .insert(
+                    sender_tx1,
+                    &mut ws,
+                    handler.chain_store.as_ref(),
+                    &MultiVerifier,
+                )
+                .unwrap();
+            handler
+                .tx_pool
+                .insert(
+                    other_tx,
+                    &mut ws,
+                    handler.chain_store.as_ref(),
+                    &MultiVerifier,
+                )
+                .unwrap();
+        }
+
+        let rpc = EthApiServer::get_block_by_number(&handler, "pending".into(), false)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            rpc.transactions,
+            serde_json::json!([other_hash, sender_tx0_hash, sender_tx1_hash])
+        );
+    }
+
+    #[tokio::test]
     async fn pending_block_number_saturates_at_max_head() {
         let handler = setup();
         let mut block = make_genesis_block();
