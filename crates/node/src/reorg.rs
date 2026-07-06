@@ -74,6 +74,21 @@ impl ReorgEngine {
             "starting chain reorganization"
         );
 
+        Self::validate_chain_segment(
+            chain_store.as_ref(),
+            ancestor_hash,
+            ancestor_number,
+            old_chain,
+            "old_chain",
+        )?;
+        Self::validate_chain_segment(
+            chain_store.as_ref(),
+            ancestor_hash,
+            ancestor_number,
+            new_chain,
+            "new_chain",
+        )?;
+
         // Step 1: Collect transactions from blocks being rolled back (newest first)
         let mut reverted_txs = Vec::new();
         for hash in old_chain.iter().rev() {
@@ -101,25 +116,6 @@ impl ReorgEngine {
         // Full EVM re-execution is not performed here; instead we trust the
         // stored state roots which were validated at block import time.
         // The world state is set to the tip block's state root.
-
-        // Safety: verify that new_chain forms a contiguous descendant chain
-        // before mutating any canonical pointers. This prevents a malformed
-        // call from leaving canonical state partially written.
-        {
-            let mut expected_parent = ancestor_hash;
-            for hash in new_chain {
-                let block = chain_store.get_block_by_hash(hash)?.ok_or_else(|| {
-                    NodeError::Startup(format!("new chain block not found: {:?}", hash))
-                })?;
-                if block.header.parent_hash != expected_parent {
-                    return Err(NodeError::Startup(format!(
-                        "new_chain continuity broken at {:?}: expected parent {:?}, got {:?}",
-                        hash, expected_parent, block.header.parent_hash
-                    )));
-                }
-                expected_parent = *hash;
-            }
-        }
 
         for hash in old_chain {
             chain_store.delete_block_transaction_indexes(hash)?;
@@ -198,6 +194,47 @@ impl ReorgEngine {
         );
 
         Ok(result)
+    }
+
+    fn validate_chain_segment<S: KvStore>(
+        chain_store: &ChainStore<S>,
+        ancestor_hash: ShellHash,
+        ancestor_number: u64,
+        chain: &[ShellHash],
+        label: &str,
+    ) -> Result<(), NodeError> {
+        let mut expected_parent = ancestor_hash;
+        for (idx, hash) in chain.iter().enumerate() {
+            let offset = u64::try_from(idx)
+                .ok()
+                .and_then(|idx| idx.checked_add(1))
+                .ok_or_else(|| {
+                    NodeError::Startup(format!("{label} length overflows block height"))
+                })?;
+            let expected_number = ancestor_number.checked_add(offset).ok_or_else(|| {
+                NodeError::Startup(format!("{label} height overflows block number space"))
+            })?;
+
+            let block = chain_store.get_block_by_hash(hash)?.ok_or_else(|| {
+                NodeError::Startup(format!("{label} block not found: {:?}", hash))
+            })?;
+            if block.number() != expected_number {
+                return Err(NodeError::Startup(format!(
+                    "{label} height continuity broken at {:?}: expected #{}, got #{}",
+                    hash,
+                    expected_number,
+                    block.number()
+                )));
+            }
+            if block.header.parent_hash != expected_parent {
+                return Err(NodeError::Startup(format!(
+                    "{label} parent continuity broken at {:?}: expected parent {:?}, got {:?}",
+                    hash, expected_parent, block.header.parent_hash
+                )));
+            }
+            expected_parent = *hash;
+        }
+        Ok(())
     }
 }
 
@@ -384,6 +421,84 @@ mod tests {
 
         assert_eq!(result.applied, 2);
         assert_eq!(result.new_head, new_hash_7);
+    }
+
+    #[test]
+    fn test_reorg_rejects_new_chain_height_gap_before_mutation() {
+        let (store, chain_store, world_state, root) = setup_chain();
+
+        let ancestor = make_block(5, make_hash(0), root);
+        chain_store.put_block(&ancestor).unwrap();
+        let ancestor_hash = ancestor.hash();
+
+        let old6 = make_block(6, ancestor_hash, root);
+        chain_store.put_block(&old6).unwrap();
+        let old_hash = old6.hash();
+        chain_store.set_canonical(6, &old_hash).unwrap();
+        chain_store.set_head(&old_hash).unwrap();
+
+        let bad_new7 = make_block(7, ancestor_hash, root);
+        chain_store.put_block(&bad_new7).unwrap();
+        let bad_hash = bad_new7.hash();
+
+        let err = ReorgEngine::execute(
+            &chain_store,
+            &world_state,
+            &store,
+            ancestor_hash,
+            5,
+            &[old_hash],
+            &[bad_hash],
+            0,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("new_chain height continuity broken"));
+        assert_eq!(
+            chain_store.get_block_by_number(6).unwrap().unwrap().hash(),
+            old_hash
+        );
+        assert_eq!(chain_store.get_head_hash().unwrap().unwrap(), old_hash);
+    }
+
+    #[test]
+    fn test_reorg_rejects_old_chain_parent_gap_before_mutation() {
+        let (store, chain_store, world_state, root) = setup_chain();
+
+        let ancestor = make_block(5, make_hash(0), root);
+        chain_store.put_block(&ancestor).unwrap();
+        let ancestor_hash = ancestor.hash();
+
+        let bad_old6 = make_block(6, make_hash(99), root);
+        chain_store.put_block(&bad_old6).unwrap();
+        let bad_old_hash = bad_old6.hash();
+        chain_store.set_canonical(6, &bad_old_hash).unwrap();
+        chain_store.set_head(&bad_old_hash).unwrap();
+
+        let new6 = make_block(6, ancestor_hash, root);
+        chain_store.put_block(&new6).unwrap();
+        let new_hash = new6.hash();
+
+        let err = ReorgEngine::execute(
+            &chain_store,
+            &world_state,
+            &store,
+            ancestor_hash,
+            5,
+            &[bad_old_hash],
+            &[new_hash],
+            0,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("old_chain parent continuity broken"));
+        assert_eq!(
+            chain_store.get_block_by_number(6).unwrap().unwrap().hash(),
+            bad_old_hash
+        );
+        assert_eq!(chain_store.get_head_hash().unwrap().unwrap(), bad_old_hash);
     }
 
     #[test]
