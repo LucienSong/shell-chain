@@ -28,6 +28,10 @@ const DEFAULT_PRUNE_INTERVAL: u64 = 256;
 /// can operate on the same store without importing `ChainStore`.
 const CANONICAL_PREFIX: &[u8] = b"n/";
 
+fn retention_cutoff(highest_block: u64, retention_count: u64) -> u64 {
+    highest_block.saturating_sub(retention_count.saturating_sub(1))
+}
+
 /// Result of a single prune pass.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PruneResult {
@@ -150,9 +154,7 @@ impl StatePruner {
         let highest_block = self.block_roots.keys().next_back().copied().unwrap_or(0);
 
         // Retention floor: keep exactly `retention_count` most recent blocks.
-        let retention_cutoff = highest_block
-            .saturating_add(1)
-            .saturating_sub(self.retention_count);
+        let retention_cutoff = retention_cutoff(highest_block, self.retention_count);
 
         // Effective cutoff: the stricter of prunable_below and retention_cutoff.
         let cutoff = self.prunable_below.min(retention_cutoff);
@@ -263,12 +265,16 @@ mod tests {
     fn setup_blocks(pruner: &mut StatePruner, store: &MemoryDb, range: std::ops::Range<u64>) {
         for n in range {
             let root = dummy_root(n as u8);
-            pruner.register_block(n, root);
-            // Write canonical mapping so prune() can delete it.
-            let key = canonical_key(n);
-            let hash_bytes = root.as_bytes().to_vec();
-            store.put(&key, &hash_bytes).unwrap();
+            setup_block(pruner, store, n, root);
         }
+    }
+
+    fn setup_block(pruner: &mut StatePruner, store: &MemoryDb, block_number: u64, root: ShellHash) {
+        pruner.register_block(block_number, root);
+        // Write canonical mapping so prune() can delete it.
+        let key = canonical_key(block_number);
+        let hash_bytes = root.as_bytes().to_vec();
+        store.put(&key, &hash_bytes).unwrap();
     }
 
     // ── Retention policy tests ─────────────────────────────────
@@ -473,6 +479,35 @@ mod tests {
         let result = pruner.prune(&*store).unwrap();
         assert_eq!(result.pruned_count, 0);
         assert_eq!(pruner.tracked_block_count(), 50);
+    }
+
+    #[test]
+    fn prune_keeps_exact_retention_near_u64_max() {
+        let store = Arc::new(MemoryDb::new());
+        let mut pruner = StatePruner::new(32);
+        let first_pruned = u64::MAX - 33;
+        let last_pruned = u64::MAX - 32;
+        let first_retained = u64::MAX - 31;
+        let head = u64::MAX;
+
+        setup_block(&mut pruner, &store, first_pruned, dummy_root(1));
+        setup_block(&mut pruner, &store, last_pruned, dummy_root(2));
+        setup_block(&mut pruner, &store, first_retained, dummy_root(3));
+        setup_block(&mut pruner, &store, head, dummy_root(4));
+
+        pruner.mark_prunable(u64::MAX);
+        let result = pruner.prune(&*store).unwrap();
+
+        assert_eq!(result.pruned_count, 2);
+        assert_eq!(result.protected_count, 0);
+        assert!(store.get(&canonical_key(first_pruned)).unwrap().is_none());
+        assert!(store.get(&canonical_key(last_pruned)).unwrap().is_none());
+        assert!(store.get(&canonical_key(first_retained)).unwrap().is_some());
+        assert!(store.get(&canonical_key(head)).unwrap().is_some());
+        assert!(!pruner.is_tracked(first_pruned));
+        assert!(!pruner.is_tracked(last_pruned));
+        assert!(pruner.is_tracked(first_retained));
+        assert!(pruner.is_tracked(head));
     }
 
     #[test]
