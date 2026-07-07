@@ -43,22 +43,27 @@ pub fn calculate_base_fee(
     if parent_gas_used == gas_target {
         parent_base_fee
     } else if parent_gas_used > gas_target {
-        let delta = parent_base_fee
-            .saturating_mul(parent_gas_used.saturating_sub(gas_target))
-            .checked_div(gas_target)
-            .unwrap_or(0)
-            .checked_div(BASE_FEE_CHANGE_DENOMINATOR)
-            .unwrap_or(0);
+        let delta = base_fee_delta(
+            parent_base_fee,
+            parent_gas_used.saturating_sub(gas_target),
+            gas_target,
+        );
         parent_base_fee.saturating_add(delta.max(1))
     } else {
-        let delta = parent_base_fee
-            .saturating_mul(gas_target.saturating_sub(parent_gas_used))
-            .checked_div(gas_target)
-            .unwrap_or(0)
-            .checked_div(BASE_FEE_CHANGE_DENOMINATOR)
-            .unwrap_or(0);
+        let delta = base_fee_delta(
+            parent_base_fee,
+            gas_target.saturating_sub(parent_gas_used),
+            gas_target,
+        );
         (parent_base_fee.saturating_sub(delta)).max(1)
     }
+}
+
+fn base_fee_delta(parent_base_fee: u64, gas_delta: u64, gas_target: u64) -> u64 {
+    let delta = u128::from(parent_base_fee).saturating_mul(u128::from(gas_delta))
+        / u128::from(gas_target)
+        / u128::from(BASE_FEE_CHANGE_DENOMINATOR);
+    delta.min(u128::from(u64::MAX)) as u64
 }
 
 /// EIP-4844: target blob gas per block (3 blobs × 131072 gas each).
@@ -231,6 +236,22 @@ mod tests {
         let new = calculate_base_fee(GAS_LIMIT, GAS_LIMIT, base);
         assert!(new >= base, "fee should not wrap around");
         // saturating_add guarantees no overflow past u64::MAX
+    }
+
+    #[test]
+    fn high_base_fee_decrease_uses_full_precision_delta() {
+        let base = u64::MAX;
+        let new = calculate_base_fee(0, GAS_LIMIT, base);
+
+        assert_eq!(new, base - base / BASE_FEE_CHANGE_DENOMINATOR);
+    }
+
+    #[test]
+    fn high_base_fee_increase_caps_at_u64_max() {
+        let base = u64::MAX;
+        let new = calculate_base_fee(GAS_LIMIT, GAS_LIMIT, base);
+
+        assert_eq!(new, u64::MAX);
     }
 
     // ── effective_gas_price tests ──────────────────────────────
