@@ -20,6 +20,10 @@ use crate::{ChainStore, KvStore, StorageError, WitnessStore};
 /// Tuning: Mainnet should use 512 (≈17 minutes); testnet uses 256 for faster development cycles.
 pub const DEFAULT_WITNESS_RETENTION: u64 = 256;
 
+fn retention_cutoff(current_head: u64, retention_count: u64) -> u64 {
+    current_head.saturating_sub(retention_count.saturating_sub(1))
+}
+
 /// Result of a single witness prune pass.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct WitnessPruneResult {
@@ -73,8 +77,8 @@ impl WitnessPruner {
     /// retention window.
     ///
     /// `current_head` is the block number of the latest finalized block.
-    /// Bundles for blocks `< current_head.saturating_add(1).saturating_sub(retention_count)`
-    /// are deleted, subject to the STARK proving guard.
+    /// Bundles below the overflow-safe retention cutoff are deleted, subject to
+    /// the STARK proving guard.
     ///
     /// `stark_frontier` is the first block number that has NOT yet been
     /// STARK-proved.  Witnesses for blocks at or above this number are always
@@ -95,9 +99,7 @@ impl WitnessPruner {
         }
 
         // Retention-based cutoff: blocks below this are old enough to prune.
-        let retention_cutoff = current_head
-            .saturating_add(1)
-            .saturating_sub(self.retention_count);
+        let retention_cutoff = retention_cutoff(current_head, self.retention_count);
 
         // STARK guard: never prune witnesses for blocks that haven't been proved yet.
         // stark_frontier == 0 means the guard is disabled (prune normally).
@@ -385,24 +387,31 @@ mod tests {
     }
 
     #[test]
-    fn prune_before_saturates_head_plus_one_near_u64_max() {
+    fn prune_before_keeps_exact_retention_near_u64_max() {
         let (_db, cs, ws) = make_store();
-        let number = u64::MAX - 2;
-        let mut block = dummy_block(0);
-        block.header.number = number;
-        block.header.timestamp = 0;
-        let hash = block.hash();
-        cs.put_block(&block).unwrap();
-        cs.set_canonical(number, &hash).unwrap();
-        store_bundle(&ws, &hash);
+        let first_number = u64::MAX - 2;
+        let second_number = u64::MAX - 1;
+        let mut hashes = Vec::new();
+        for number in [first_number, second_number] {
+            let mut block = dummy_block(0);
+            block.header.number = number;
+            block.header.timestamp = 0;
+            let hash = block.hash();
+            cs.put_block(&block).unwrap();
+            cs.set_canonical(number, &hash).unwrap();
+            store_bundle(&ws, &hash);
+            hashes.push(hash);
+        }
 
         let mut pruner = WitnessPruner::new(1);
-        pruner.pruned_below = number;
+        pruner.pruned_below = first_number;
         let result = pruner.prune_before(u64::MAX, 0, &cs, &ws).unwrap();
 
-        assert_eq!(result.pruned_count, 1);
+        assert_eq!(result.pruned_count, 2);
         assert_eq!(result.not_found_count, 0);
-        assert_eq!(pruner.pruned_below(), u64::MAX - 1);
-        assert!(!ws.has_bundle(&hash).unwrap());
+        assert_eq!(pruner.pruned_below(), u64::MAX);
+        for hash in hashes {
+            assert!(!ws.has_bundle(&hash).unwrap());
+        }
     }
 }

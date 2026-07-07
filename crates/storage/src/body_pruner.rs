@@ -30,6 +30,10 @@ use crate::{ChainStore, KvStore, StorageError};
 /// Default number of recent blocks whose bodies are always retained.
 pub const DEFAULT_BODY_RETENTION: u64 = 512;
 
+fn retention_cutoff(current_head: u64, retention_count: u64) -> u64 {
+    current_head.saturating_sub(retention_count.saturating_sub(1))
+}
+
 /// Result of a single body prune pass.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct BodyPruneResult {
@@ -51,7 +55,7 @@ pub struct BodyPruneResult {
 /// and cheap.
 #[derive(Debug)]
 pub struct BodyPruner {
-    /// Blocks `< current_head.saturating_add(1) - retention_count` are eligible for expiry.
+    /// Blocks below the overflow-safe retention cutoff are eligible for expiry.
     /// Zero means archive mode (never prune).
     retention_count: u64,
     /// The highest block number whose body has already been pruned + 1.
@@ -78,8 +82,8 @@ impl BodyPruner {
     /// Prune block bodies for blocks that have aged past the retention window.
     ///
     /// Bodies for block numbers in `[pruned_below, expiry_horizon)` are
-    /// deleted, where `expiry_horizon = current_head.saturating_add(1)
-    /// .saturating_sub(retention_count)`.
+    /// deleted, where `expiry_horizon` keeps exactly `retention_count` recent
+    /// blocks without overflowing at the maximum block height.
     ///
     /// Returns a [`BodyPruneResult`] summary.  Missing bodies (already pruned
     /// or never stored) are silently skipped.
@@ -93,9 +97,7 @@ impl BodyPruner {
         }
 
         // Expiry horizon: prune everything strictly before this block number.
-        let expiry_horizon = current_head
-            .saturating_add(1)
-            .saturating_sub(self.retention_count);
+        let expiry_horizon = retention_cutoff(current_head, self.retention_count);
 
         if expiry_horizon <= self.pruned_below {
             // Nothing new to prune.
@@ -301,23 +303,30 @@ mod tests {
     }
 
     #[test]
-    fn prune_before_saturates_head_plus_one_near_u64_max() {
+    fn prune_before_keeps_exact_retention_near_u64_max() {
         let cs = setup_chain(0);
-        let number = u64::MAX - 2;
-        let mut block = empty_block(0);
-        block.header.number = number;
-        block.header.timestamp = 0;
-        let hash = block.hash();
-        cs.put_block(&block).unwrap();
-        cs.set_canonical(number, &hash).unwrap();
+        let first_number = u64::MAX - 2;
+        let second_number = u64::MAX - 1;
+        let mut hashes = Vec::new();
+        for number in [first_number, second_number] {
+            let mut block = empty_block(0);
+            block.header.number = number;
+            block.header.timestamp = 0;
+            let hash = block.hash();
+            cs.put_block(&block).unwrap();
+            cs.set_canonical(number, &hash).unwrap();
+            hashes.push(hash);
+        }
 
         let mut pruner = BodyPruner::new(1);
-        pruner.pruned_below = number;
+        pruner.pruned_below = first_number;
         let result = pruner.prune_before(u64::MAX, &cs).unwrap();
 
-        assert_eq!(result.blocks_checked, 1);
-        assert_eq!(result.bodies_pruned, 1);
-        assert_eq!(pruner.pruned_below(), u64::MAX - 1);
-        assert!(cs.get_block_by_hash(&hash).unwrap().is_none());
+        assert_eq!(result.blocks_checked, 2);
+        assert_eq!(result.bodies_pruned, 2);
+        assert_eq!(pruner.pruned_below(), u64::MAX);
+        for hash in hashes {
+            assert!(cs.get_block_by_hash(&hash).unwrap().is_none());
+        }
     }
 }

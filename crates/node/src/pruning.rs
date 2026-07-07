@@ -284,6 +284,10 @@ impl StateRootTracker {
     }
 }
 
+pub(crate) fn retention_cutoff(current_head: u64, keep_recent: u64) -> u64 {
+    current_head.saturating_sub(keep_recent.saturating_sub(1))
+}
+
 /// Summary of a state-trie prune pass.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct StateTriePruneResult {
@@ -506,6 +510,13 @@ mod tests {
         assert_eq!(evicted.block_number, 1);
         assert_eq!(tracker.len(), 1);
         assert_eq!(tracker.latest().unwrap().block_number, 2);
+    }
+
+    #[test]
+    fn retention_cutoff_keeps_exact_window_at_max_height() {
+        assert_eq!(retention_cutoff(u64::MAX, 1), u64::MAX);
+        assert_eq!(retention_cutoff(u64::MAX, 2), u64::MAX - 1);
+        assert_eq!(retention_cutoff(u64::MAX, 32), u64::MAX - 31);
     }
 
     #[test]

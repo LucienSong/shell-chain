@@ -50,7 +50,9 @@ pub(crate) use crate::config::NodeConfig;
 pub(crate) use crate::error::NodeError;
 pub(crate) use crate::metrics::Metrics;
 pub(crate) use crate::prover_service::{ProverConfig, ProverService, ProverServiceHandle};
-pub(crate) use crate::pruning::{prune_state_trie, StateRootTracker, StorageProfile};
+pub(crate) use crate::pruning::{
+    prune_state_trie, retention_cutoff, StateRootTracker, StorageProfile,
+};
 pub(crate) use chain_state_machine::{BlockImportTransition, ChainStateMachine};
 pub(crate) use challenge_lifecycle::{
     ChallengeLifecycle, ChallengeRecord, ChallengeStatus, CHALLENGE_TIMEOUT_BLOCKS,
@@ -1113,8 +1115,7 @@ impl<S: KvStore + 'static> Node<S> {
                     "state root eligible for pruning"
                 );
                 if matches!(profile, StorageProfile::Light) && keep_recent > 0 {
-                    prune_keep_below =
-                        Some(block_number.saturating_add(1).saturating_sub(keep_recent));
+                    prune_keep_below = Some(retention_cutoff(block_number, keep_recent));
                 }
             }
         }
