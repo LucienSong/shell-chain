@@ -185,7 +185,12 @@ impl TxPool {
                 .unwrap_or(0);
             let bump = self.config.replacement_fee_bump_pct;
             // required = old_fee * (100 + bump) / 100, rounded up
-            let required = replacement_fee_required(old_fee, bump);
+            let Some(required) = replacement_fee_required(old_fee, bump) else {
+                return Err(MempoolError::ReplacementFeeTooLow {
+                    got: priority_fee,
+                    required: u64::MAX,
+                });
+            };
             if priority_fee < required {
                 return Err(MempoolError::ReplacementFeeTooLow {
                     got: priority_fee,
@@ -690,15 +695,17 @@ fn next_expected_nonce(sender_q: Option<&BTreeMap<u64, ShellHash>>, chain_nonce:
     expected
 }
 
-fn replacement_fee_required(old_fee: u64, bump_pct: u64) -> u64 {
-    let numerator = u128::from(old_fee).saturating_mul(u128::from(100u64.saturating_add(bump_pct)));
-    let rounded = numerator.saturating_add(99) / 100;
-    let percentage_required = rounded.min(u128::from(u64::MAX)) as u64;
+fn replacement_fee_required(old_fee: u64, bump_pct: u64) -> Option<u64> {
     if bump_pct == 0 {
-        percentage_required
-    } else {
-        percentage_required.max(old_fee.saturating_add(1))
+        return Some(old_fee);
     }
+
+    let multiplier = u128::from(bump_pct).checked_add(100)?;
+    let numerator = u128::from(old_fee).checked_mul(multiplier)?;
+    let rounded = numerator.checked_add(99)? / 100;
+    let minimum_bump = u128::from(old_fee).checked_add(1)?;
+    let required = rounded.max(minimum_bump);
+    u64::try_from(required).ok()
 }
 
 #[cfg(test)]
@@ -2008,10 +2015,68 @@ mod tests {
 
     #[test]
     fn rbf_fee_bump_rounds_up_for_small_fees() {
-        assert_eq!(replacement_fee_required(0, 10), 1);
-        assert_eq!(replacement_fee_required(1, 10), 2);
-        assert_eq!(replacement_fee_required(10, 10), 11);
-        assert_eq!(replacement_fee_required(101, 10), 112);
+        assert_eq!(replacement_fee_required(0, 10), Some(1));
+        assert_eq!(replacement_fee_required(1, 10), Some(2));
+        assert_eq!(replacement_fee_required(10, 10), Some(11));
+        assert_eq!(replacement_fee_required(101, 10), Some(112));
+    }
+
+    #[test]
+    fn rbf_fee_bump_rejects_unrepresentable_required_fee() {
+        assert_eq!(replacement_fee_required(u64::MAX, 10), None);
+        assert_eq!(replacement_fee_required(u64::MAX, 0), Some(u64::MAX));
+    }
+
+    #[test]
+    fn rbf_rejects_max_fee_when_positive_bump_is_impossible() {
+        let pool = TxPool::new(make_config());
+        let verifier = DilithiumVerifier;
+        let (mut ws, cs) = setup_validation_ctx();
+
+        let signer = DilithiumSigner::generate();
+        let pubkey = signer.public_key().to_vec();
+        let from = test_address(&pubkey);
+        let recipient = test_address(b"recipient-placeholder-key-data-for-address");
+        let first_nonce = u64::default();
+
+        let make_max_fee_tx = |value: U256| {
+            let tx = Transaction {
+                chain_id: 42,
+                nonce: first_nonce,
+                to: Some(recipient),
+                value,
+                data: Bytes::default(),
+                gas_limit: 21_000,
+                max_fee_per_gas: u64::MAX,
+                max_priority_fee_per_gas: u64::MAX,
+                access_list: None,
+                tx_type: 2,
+                max_fee_per_blob_gas: None,
+                blob_versioned_hashes: None,
+            };
+            let sig = signer.sign(tx.hash().as_bytes()).unwrap();
+            SignedTransaction::with_pubkey(from, tx, sig, pubkey.clone())
+        };
+
+        let tx_old = make_max_fee_tx(U256::ZERO);
+        let old_hash = tx_old.hash();
+        insert_with_balance(&pool, tx_old, &verifier, &mut ws, &cs, U256::MAX).unwrap();
+
+        let tx_new = make_max_fee_tx(U256::from(1u64));
+        let new_hash = tx_new.hash();
+        let err =
+            insert_with_balance(&pool, tx_new, &verifier, &mut ws, &cs, U256::MAX).unwrap_err();
+
+        assert!(matches!(
+            err,
+            MempoolError::ReplacementFeeTooLow {
+                got: u64::MAX,
+                required: u64::MAX
+            }
+        ));
+        assert_eq!(pool.len(), 1);
+        assert!(pool.contains(&old_hash));
+        assert!(!pool.contains(&new_hash));
     }
 
     #[test]
