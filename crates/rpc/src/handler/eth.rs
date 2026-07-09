@@ -1,5 +1,7 @@
 use super::*;
 
+const MAX_FEE_HISTORY_REWARD_PERCENTILES: usize = 100;
+
 fn capped_filter_poll_to(from: u64, latest: u64) -> u64 {
     latest.min(from.saturating_add(MAX_BLOCK_RANGE.saturating_sub(1)))
 }
@@ -569,6 +571,11 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
             ));
         }
         if let Some(percentiles) = reward_percentiles.as_deref() {
+            if percentiles.len() > MAX_FEE_HISTORY_REWARD_PERCENTILES {
+                return Err(invalid_params_err(format!(
+                    "feeHistory reward percentiles must contain at most {MAX_FEE_HISTORY_REWARD_PERCENTILES} entries"
+                )));
+            }
             validate_reward_percentiles(percentiles)?;
         }
 

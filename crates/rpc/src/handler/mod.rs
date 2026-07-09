@@ -2566,6 +2566,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fee_history_rejects_too_many_reward_percentiles() {
+        let handler = setup();
+        let percentiles = (0..101).map(|value| value as f64).collect();
+
+        let err =
+            EthApiServer::fee_history(&handler, "0x1".into(), "latest".into(), Some(percentiles))
+                .await
+                .unwrap_err();
+
+        assert_eq!(err.code(), jsonrpsee::types::error::INVALID_PARAMS_CODE);
+        assert!(err.message().contains("at most 100 entries"));
+    }
+
+    #[tokio::test]
     async fn get_nonexistent_tx_returns_none() {
         let handler = setup();
         let result = EthApiServer::get_transaction_by_hash(&handler, ShellHash::default())
