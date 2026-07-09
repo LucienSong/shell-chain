@@ -820,6 +820,11 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
                 for log in receipt.logs {
                     if filter.matches_log(&log) {
                         let data = hex_bytes(log.data.as_ref());
+                        if results.len() >= MAX_LOG_RESULTS {
+                            return Err(limit_exceeded(format!(
+                                "query returned more than {MAX_LOG_RESULTS} logs; narrow the filter"
+                            )));
+                        }
                         results.push(RpcLogWithMeta {
                             address: log.address,
                             topics: log.topics,
@@ -932,6 +937,11 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
                     let tx_hash = receipt.tx_hash;
                     for log in receipt.logs {
                         if filter.matches_log(&log) {
+                            if results.len() >= MAX_LOG_RESULTS {
+                                return Err(limit_exceeded(format!(
+                                    "filter poll returned more than {MAX_LOG_RESULTS} logs; narrow the filter"
+                                )));
+                            }
                             let data = hex_bytes(log.data.as_ref());
                             results.push(RpcLogWithMeta {
                                 address: log.address,
