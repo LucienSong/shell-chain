@@ -28,7 +28,7 @@ pub(crate) use crate::error::{
     dev_mode_required, feature_not_enabled, invalid_params, limit_exceeded, method_not_found,
     not_found, server_error,
 };
-pub(crate) use crate::filter::{RawLogFilter, MAX_BLOCK_RANGE};
+pub(crate) use crate::filter::{RawLogFilter, MAX_BLOCK_RANGE, MAX_LOG_RESULTS};
 pub(crate) use crate::filter_registry::{FilterKind, FilterRegistry};
 pub(crate) use crate::subscriptions::{BlockEvent, SubscriptionTracker, SyncStatus};
 pub(crate) use crate::types::*;
@@ -3952,6 +3952,22 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.message().contains("cap the range"));
+    }
+
+    #[tokio::test]
+    async fn get_logs_rejects_too_many_matching_logs() {
+        let handler = setup();
+        let logs = (0..MAX_LOG_RESULTS + 1)
+            .map(|_| shell_core::Log::new(Address::from([0xAA; 20]), vec![], Bytes::new()).unwrap())
+            .collect();
+        store_block_with_logs(&handler, 0, vec![logs]);
+
+        let raw: crate::filter::RawLogFilter =
+            serde_json::from_str(r#"{"fromBlock":"0x0","toBlock":"0x0"}"#).unwrap();
+
+        let err = EthApiServer::get_logs(&handler, raw).await.unwrap_err();
+
+        assert!(err.message().contains("more than 10000 logs"));
     }
 
     #[tokio::test]

@@ -6,6 +6,8 @@ use shell_primitives::{Address, ShellHash};
 
 /// Maximum number of blocks that can be queried in a single `eth_getLogs` call.
 pub const MAX_BLOCK_RANGE: u64 = 10_000;
+/// Maximum matching logs returned by a single log query or filter poll.
+pub const MAX_LOG_RESULTS: usize = 10_000;
 /// Maximum addresses accepted in a single log filter.
 pub const MAX_LOG_FILTER_ADDRESSES: usize = 128;
 /// Maximum topic alternatives accepted per topic position.
