@@ -499,7 +499,14 @@ impl<S: KvStore + 'static> Node<S> {
                         block.number()
                     ))
                 })?;
-                validation_nonces.insert(tx.from, expected_nonce.saturating_add(1));
+                let next_nonce = expected_nonce.checked_add(1).ok_or_else(|| {
+                    NodeError::Startup(format!(
+                        "block {} tx validation exhausted nonce space for {}",
+                        block.number(),
+                        tx.from
+                    ))
+                })?;
+                validation_nonces.insert(tx.from, next_nonce);
 
                 if let shell_core::PubkeyMode::Embedded(pk) = &tx.pubkey_mode {
                     validation_pubkeys

@@ -431,12 +431,14 @@ impl TxPool {
             result.push(entry.tx.clone());
 
             if let Some(sender_queue) = inner.by_sender.get(&sender) {
-                let next_nonce = nonce.saturating_add(1);
-                if let Some((queued_nonce, next_hash)) = sender_queue.range(next_nonce..).next() {
-                    if *queued_nonce == next_nonce {
-                        if let Some(next_entry) = inner.by_hash.get(next_hash) {
-                            if next_entry.priority_key != priority_key {
-                                ready.insert(next_entry.priority_key, (sender, *next_hash));
+                if let Some(next_nonce) = nonce.checked_add(1) {
+                    if let Some((queued_nonce, next_hash)) = sender_queue.range(next_nonce..).next()
+                    {
+                        if *queued_nonce == next_nonce {
+                            if let Some(next_entry) = inner.by_hash.get(next_hash) {
+                                if next_entry.priority_key != priority_key {
+                                    ready.insert(next_entry.priority_key, (sender, *next_hash));
+                                }
                             }
                         }
                     }
