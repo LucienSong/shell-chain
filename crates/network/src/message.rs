@@ -1,6 +1,7 @@
 //! Network message types for block and transaction propagation.
 
-use serde::{Deserialize, Serialize};
+use serde::de::{self, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer as _, Serialize};
 use shell_consensus::{
     Attestation, ChallengeResponse, EquivocationProof, ProofChallenge, ViewChangeMessage,
 };
@@ -19,6 +20,8 @@ pub const MAX_MESSAGE_SIZE: usize = 50 * 1024 * 1024;
 pub const MAX_TX_GOSSIP_SIZE: usize = 1024 * 1024;
 pub const MAX_CONSENSUS_MESSAGE_SIZE: usize = 2 * 1024 * 1024;
 pub const MAX_CONTROL_MESSAGE_SIZE: usize = 64 * 1024;
+/// Maximum number of blocks accepted in a single sync response.
+pub const MAX_RESPONSE_BLOCKS: usize = 128;
 
 /// Unique identifier for a network peer.
 #[derive(Debug, Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]
@@ -257,10 +260,130 @@ pub fn deserialize_checked(data: &[u8], limit: usize) -> Result<NetworkMessage, 
     if let Some(limit) = serialized_message_size_limit(data) {
         validate_message_size(data, limit)?;
     }
+    validate_response_block_count(data)?;
     let msg: NetworkMessage =
         serde_json::from_slice(data).map_err(|e| NetworkError::Serialization(e.to_string()))?;
     validate_message_size(data, msg.max_serialized_size())?;
     Ok(msg)
+}
+
+fn validate_response_block_count(data: &[u8]) -> Result<(), NetworkError> {
+    if !matches!(
+        serialized_message_variant(data),
+        Some("BlockResponse" | "BodyResponse")
+    ) {
+        return Ok(());
+    }
+
+    serde_json::Deserializer::from_slice(data)
+        .deserialize_map(ResponseVisitor)
+        .map_err(|error| {
+            NetworkError::Serialization(format!("invalid response structure: {error}"))
+        })
+}
+
+struct ResponseVisitor;
+
+impl<'de> Visitor<'de> for ResponseVisitor {
+    type Value = ();
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("an externally tagged network response")
+    }
+
+    fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+    where
+        M: MapAccess<'de>,
+    {
+        let Some(variant) = map.next_key::<String>()? else {
+            return Ok(());
+        };
+        map.next_value_seed(ResponsePayloadSeed {
+            is_block_response: variant == "BlockResponse" || variant == "BodyResponse",
+        })
+    }
+}
+
+struct ResponsePayloadSeed {
+    is_block_response: bool,
+}
+
+impl<'de> DeserializeSeed<'de> for ResponsePayloadSeed {
+    type Value = ();
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        if self.is_block_response {
+            deserializer.deserialize_map(ResponsePayloadVisitor)
+        } else {
+            deserializer.deserialize_any(IgnoredAny).map(|_| ())
+        }
+    }
+}
+
+struct ResponsePayloadVisitor;
+
+impl<'de> Visitor<'de> for ResponsePayloadVisitor {
+    type Value = ();
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a response payload")
+    }
+
+    fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+    where
+        M: MapAccess<'de>,
+    {
+        while let Some(key) = map.next_key::<String>()? {
+            if key == "blocks" {
+                map.next_value_seed(BlockArraySeed)?;
+            } else {
+                let _: IgnoredAny = map.next_value()?;
+            }
+        }
+        Ok(())
+    }
+}
+
+struct BlockArraySeed;
+
+impl<'de> DeserializeSeed<'de> for BlockArraySeed {
+    type Value = ();
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_seq(BlockArrayVisitor)
+    }
+}
+
+struct BlockArrayVisitor;
+
+impl<'de> Visitor<'de> for BlockArrayVisitor {
+    type Value = ();
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a bounded block array")
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let mut count = 0;
+        while sequence.next_element::<IgnoredAny>()?.is_some() {
+            count += 1;
+            if count > MAX_RESPONSE_BLOCKS {
+                return Err(de::Error::custom(format!(
+                    "response contains more than {MAX_RESPONSE_BLOCKS} blocks"
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 fn serialized_message_size_limit(data: &[u8]) -> Option<usize> {
@@ -626,6 +749,24 @@ mod tests {
         let json = serde_json::to_vec(&msg).unwrap();
         let decoded = deserialize_checked(&json, MAX_MESSAGE_SIZE).unwrap();
         assert!(matches!(decoded, NetworkMessage::Ping));
+    }
+
+    #[test]
+    fn deserialize_checked_rejects_oversized_block_response_before_decode() {
+        let msg = NetworkMessage::BlockResponse {
+            blocks: (0..=MAX_RESPONSE_BLOCKS)
+                .map(|n| test_block(n as u64))
+                .collect(),
+            commit_certificates: vec![],
+            nonce: 0,
+        };
+        let json = serde_json::to_vec(&msg).unwrap();
+
+        let err = deserialize_checked(&json, MAX_MESSAGE_SIZE).unwrap_err();
+
+        assert!(
+            matches!(err, NetworkError::Serialization(message) if message.contains("more than 128 blocks"))
+        );
     }
 
     #[test]
