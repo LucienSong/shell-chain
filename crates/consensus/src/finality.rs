@@ -169,6 +169,20 @@ impl FinalityState {
             return false;
         }
 
+        if self
+            .attestation_store
+            .get(&attestation.block_hash)
+            .and_then(|attestations| attestations.first())
+            .is_some_and(|existing| {
+                existing.chain_id != attestation.chain_id
+                    || existing.parent_hash != attestation.parent_hash
+                    || existing.block_number != attestation.block_number
+                    || existing.round != attestation.round
+            })
+        {
+            return false;
+        }
+
         // Reject attestations for unknown blocks when at capacity.
         if !self
             .pending_attestations
@@ -211,6 +225,14 @@ impl FinalityState {
         block_number: u64,
         total_weight: u64,
     ) -> bool {
+        if self
+            .attestation_store
+            .get(block_hash)
+            .and_then(|attestations| attestations.first())
+            .is_none_or(|attestation| attestation.block_number != block_number)
+        {
+            return false;
+        }
         let attested_weight = self.attested_weight(block_hash);
 
         if Self::has_weighted_quorum(attested_weight, total_weight)
@@ -501,6 +523,29 @@ mod tests {
         assert!(state.record_attestation(att1));
         assert!(!state.record_attestation(att2)); // duplicate validator
         assert_eq!(state.attestation_count(&hash), 1);
+    }
+
+    #[test]
+    fn inconsistent_attestation_targets_do_not_combine_weight() {
+        let mut state = FinalityState::new();
+        let hash = make_hash(1);
+        let first = Attestation::new(1337, make_hash(9), hash, 10, make_addr(1), 2, vec![]);
+        let inconsistent = Attestation::new(1337, make_hash(8), hash, 100, make_addr(2), 3, vec![]);
+
+        assert!(state.record_attestation_weighted(first, 2));
+        assert!(!state.record_attestation_weighted(inconsistent, 1));
+        assert_eq!(state.attested_weight(&hash), 2);
+        assert_eq!(state.attestation_count(&hash), 1);
+    }
+
+    #[test]
+    fn finality_requires_the_recorded_block_number() {
+        let mut state = FinalityState::new();
+        let hash = make_hash(1);
+        state.record_attestation_weighted(make_att(hash, 10, make_addr(1), vec![]), 3);
+
+        assert!(!state.check_finality_weighted(&hash, 100, 3));
+        assert_eq!(state.last_finalized_number(), 0);
     }
 
     #[test]
