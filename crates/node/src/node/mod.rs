@@ -558,8 +558,8 @@ impl<'a, S: KvStore + 'static> MemPoolBoundary<'a, S> {
         &self,
         target_peer: Option<&shell_network::PeerId>,
         limit: usize,
-    ) -> Vec<SignedTransaction> {
-        let txs = self.tx_pool.pending_for_block(limit);
+    ) -> Vec<Arc<SignedTransaction>> {
+        let txs = self.tx_pool.pending_for_block_shared(limit);
         if txs.is_empty() || target_peer.is_some() {
             return txs;
         }
@@ -568,7 +568,8 @@ impl<'a, S: KvStore + 'static> MemPoolBoundary<'a, S> {
         let cooldown = std::time::Duration::from_secs(TX_REBROADCAST_COOLDOWN_SECS);
         let mut seen = self.tx_rebroadcast_seen.lock();
         seen.retain(|_, last_seen| now.duration_since(*last_seen) < cooldown);
-        txs.into_iter()
+        let selected = txs
+            .into_iter()
             .filter(|tx| {
                 let hash = tx.hash();
                 if seen
@@ -581,7 +582,9 @@ impl<'a, S: KvStore + 'static> MemPoolBoundary<'a, S> {
                     true
                 }
             })
-            .collect()
+            .collect();
+        drop(seen);
+        selected
     }
 
     fn remove_committed_hashes(&self, tx_hashes: &[ShellHash]) -> usize {
@@ -1059,7 +1062,7 @@ impl<S: KvStore + 'static> Node<S> {
             "rebroadcasting pending transactions"
         );
         for tx in txs {
-            let msg = NetworkMessage::NewTransaction(Box::new(tx));
+            let msg = NetworkMessage::NewTransaction(Box::new(tx.as_ref().clone()));
             let result = if let Some(peer) = target_peer {
                 network.send_to_peer(peer, msg).await
             } else {
@@ -1765,6 +1768,36 @@ mod tests {
             .map(|tx| tx.hash())
             .collect();
         assert_eq!(ordered_hashes, vec![nonce0_hash, nonce1_hash]);
+    }
+
+    #[test]
+    fn periodic_rebroadcast_filters_shared_pool_transactions_before_cloning() {
+        let (node, _proposer_signer) = setup_node();
+        let tx_signer = DilithiumSigner::generate();
+        let sender = Address::from_public_key(tx_signer.public_key(), tx_signer.sig_type().as_u8());
+        let receiver = Address::from([0x56; 32]);
+        fund_account(&node, &sender, U256::from(100_000_000_000_000u64));
+        let tx = Transaction {
+            chain_id: 1337,
+            nonce: 0,
+            to: Some(receiver),
+            value: U256::ZERO,
+            data: shell_primitives::Bytes::new(),
+            gas_limit: 21_000,
+            max_fee_per_gas: shell_core::INITIAL_BASE_FEE + 1,
+            max_priority_fee_per_gas: 1,
+            access_list: None,
+            tx_type: 2,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
+        };
+        submit_signed_tx(&node, &tx_signer, sender, tx);
+
+        let stored = node.tx_pool.pending_for_block_shared(1);
+        let first = node.mem_pool().pending_for_rebroadcast(None, 1);
+        assert_eq!(first.len(), 1);
+        assert!(Arc::ptr_eq(&stored[0], &first[0]));
+        assert!(node.mem_pool().pending_for_rebroadcast(None, 1).is_empty());
     }
 
     #[test]
