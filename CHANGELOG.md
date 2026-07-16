@@ -6,6 +6,8 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Size the world-state account cache from decoded entry memory and honor a
+  zero-MiB budget with the minimum LRU capacity instead of the default cache.
 - Bound proof-amendment gossip envelopes to the signed payload hash and source
   range end before applying witness-replacement retention behavior.
 - Retain expired grace-window witness deletions for retry when storage returns
