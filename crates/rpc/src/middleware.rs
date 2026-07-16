@@ -331,7 +331,8 @@ where
             let authorized = req
                 .headers()
                 .get(http::header::AUTHORIZATION)
-                .is_some_and(|value| value.as_bytes() == expected.as_bytes());
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value == expected.as_ref());
 
             if !authorized {
                 let mut resp = Response::new(ResBody::default());
@@ -585,6 +586,22 @@ mod tests {
             .header(http::header::AUTHORIZATION, "Bearer wrong")
             .body(())
             .unwrap();
+        let resp = svc.ready().await.unwrap().call(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn api_key_rejects_non_ascii_header_values() {
+        let layer = ApiKeyLayer::new(Some("é".into()));
+        let mut svc = layer.layer(OkService);
+        let req = Request::builder()
+            .header(
+                http::header::AUTHORIZATION,
+                http::HeaderValue::from_bytes("Bearer é".as_bytes()).unwrap(),
+            )
+            .body(())
+            .unwrap();
+
         let resp = svc.ready().await.unwrap().call(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
