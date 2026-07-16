@@ -130,6 +130,16 @@ fn canonical_mapping_retention(body_retention: u64, witness_retention: u64) -> u
         .saturating_add(1)
 }
 
+fn canonical_mapping_prune_boundary(
+    finalized_number: u64,
+    body_pruned_below: u64,
+    witness_pruned_below: u64,
+) -> u64 {
+    finalized_number
+        .min(body_pruned_below)
+        .min(witness_pruned_below)
+}
+
 fn state_trie_prune_boundary(finalized_number: u64, keep_recent: u64) -> Option<u64> {
     if finalized_number == 0 || keep_recent == 0 {
         return None;
@@ -1262,10 +1272,19 @@ impl<S: KvStore + 'static> Node<S> {
 
         // F-303: Drive StatePruner — register block and run periodic pruning.
         {
+            // Canonical mappings are required to resume body and witness pruning.
+            // A delayed STARK settlement can hold the witness cursor behind the
+            // configured retention window, so never let mapping cleanup overtake
+            // either dependent pruner.
+            let canonical_prune_boundary = canonical_mapping_prune_boundary(
+                finalized_number,
+                self.body_pruner.read().pruned_below(),
+                self.witness_pruner.read().pruned_below(),
+            );
             let mut pruner = self.state_pruner.write();
             pruner.register_block(block_number, state_root);
             if finalized_number > 0 && pruner.should_prune(block_number) {
-                pruner.mark_prunable(finalized_number);
+                pruner.mark_prunable(canonical_prune_boundary);
                 match pruner.prune(self.store.as_ref()) {
                     Ok(result) => {
                         if result.pruned_count > 0 {
@@ -5648,6 +5667,26 @@ mod tests {
     fn canonical_mapping_retention_preserves_archive_indexes() {
         assert_eq!(canonical_mapping_retention(0, 256), u64::MAX);
         assert_eq!(canonical_mapping_retention(512, 0), u64::MAX);
+    }
+
+    #[test]
+    fn canonical_mapping_pruning_waits_for_dependent_pruners() {
+        assert_eq!(canonical_mapping_prune_boundary(80, 80, 0), 0);
+        assert_eq!(canonical_mapping_prune_boundary(80, 40, 60), 40);
+        assert_eq!(canonical_mapping_prune_boundary(80, 90, 100), 80);
+
+        let store = Arc::new(MemoryDb::new());
+        let chain_store = ChainStore::new(Arc::clone(&store));
+        let mut pruner = StatePruner::new(32);
+        for number in 0..100 {
+            let root = ShellHash::from([number as u8; 32]);
+            pruner.register_block(number, root);
+            chain_store.set_canonical(number, &root).unwrap();
+        }
+
+        pruner.mark_prunable(canonical_mapping_prune_boundary(80, 80, 0));
+        assert_eq!(pruner.prune(store.as_ref()).unwrap().pruned_count, 0);
+        assert!(chain_store.get_block_hash_by_number(0).unwrap().is_some());
     }
 
     #[test]

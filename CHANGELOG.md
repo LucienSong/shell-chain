@@ -6,6 +6,8 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Keep canonical block mappings until both body and witness pruning have
+  processed them, so delayed STARK settlements cannot strand retained data.
 - Bound proof-amendment gossip envelopes to the signed payload hash and source
   range end before applying witness-replacement retention behavior.
 - Retain expired grace-window witness deletions for retry when storage returns
