@@ -6183,6 +6183,7 @@ dependencies = [
  "shell-rpc",
  "shell-stark-prover",
  "shell-storage",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
