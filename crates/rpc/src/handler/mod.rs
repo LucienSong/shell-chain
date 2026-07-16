@@ -1266,13 +1266,42 @@ mod tests {
     use shell_core::{Block, BlockHeader, SystemTransaction, Transaction, TransactionReceipt};
     use shell_crypto::{DilithiumSigner, Signer};
     use shell_primitives::Bytes;
-    use shell_storage::{MemoryDb, ProofAmendmentStore, WitnessStore};
+    use shell_storage::{MemoryDb, ProofAmendmentStore, StorageError, WitnessStore, WriteBatch};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     #[derive(Default)]
     struct MockDevControl {
         mined: AtomicU64,
         increased: AtomicU64,
+    }
+
+    #[derive(Default)]
+    struct FailingGetStore(MemoryDb);
+
+    impl KvStore for FailingGetStore {
+        fn get(&self, _key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+            Err(StorageError::Database("injected get failure".into()))
+        }
+
+        fn put(&self, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
+            self.0.put(key, value)
+        }
+
+        fn delete(&self, key: &[u8]) -> Result<(), StorageError> {
+            self.0.delete(key)
+        }
+
+        fn flush(&self) -> Result<(), StorageError> {
+            self.0.flush()
+        }
+
+        fn write_batch(&self, batch: WriteBatch) -> Result<(), StorageError> {
+            self.0.write_batch(batch)
+        }
+
+        fn scan_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
+            self.0.scan_prefix(prefix)
+        }
     }
 
     impl DevRpcControl for MockDevControl {
@@ -1298,8 +1327,7 @@ mod tests {
         }
     }
 
-    fn setup() -> RpcHandler<MemoryDb> {
-        let db = Arc::new(MemoryDb::new());
+    fn setup_with_store<S: KvStore + 'static>(db: Arc<S>) -> RpcHandler<S> {
         let chain_store = Arc::new(ChainStore::new(db.clone()));
         let world_state = Arc::new(parking_lot::RwLock::new(WorldState::new(db)));
         let tx_pool = Arc::new(TxPool::new(shell_mempool::MempoolConfig {
@@ -1319,6 +1347,10 @@ mod tests {
             finalized_number,
             finality,
         )
+    }
+
+    fn setup() -> RpcHandler<MemoryDb> {
+        setup_with_store(Arc::new(MemoryDb::new()))
     }
 
     fn test_address(seed: &[u8]) -> Address {
@@ -1891,6 +1923,36 @@ mod tests {
                 .contains("legacy address transaction pagination offset"),
             "unexpected error: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn address_transaction_endpoints_propagate_head_lookup_failures() {
+        let handler = setup_with_store(Arc::new(FailingGetStore::default()));
+        let address = test_address(b"head-lookup-failure");
+
+        let v2_err = ShellApiServer::get_transactions_by_address_v2(
+            &handler,
+            address,
+            Some(RpcAddressTransactionsV2Options::default()),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(v2_err.code(), -32603);
+
+        let legacy_err =
+            ShellApiServer::get_transactions_by_address(&handler, address, None, None, None, None)
+                .await
+                .unwrap_err();
+        assert_eq!(legacy_err.code(), -32603);
+    }
+
+    #[tokio::test]
+    async fn admin_node_info_propagates_head_lookup_failures() {
+        let handler = setup_with_store(Arc::new(FailingGetStore::default()));
+
+        let err = AdminApiServer::node_info(&handler).await.unwrap_err();
+
+        assert_eq!(err.code(), -32603);
     }
 
     #[tokio::test]

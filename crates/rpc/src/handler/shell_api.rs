@@ -98,14 +98,15 @@ impl<S: KvStore + 'static> RpcHandler<S> {
         address: Address,
         options: RpcAddressTransactionsV2Options,
     ) -> Result<RpcAddressTransactionsV2Page, ErrorObjectOwned> {
-        let to_block = options.to_block.unwrap_or_else(|| {
-            self.chain_store
+        let to_block = match options.to_block {
+            Some(to_block) => to_block,
+            None => self
+                .chain_store
                 .get_head_block()
-                .ok()
-                .flatten()
+                .map_err(internal_err)?
                 .map(|b| b.number())
-                .unwrap_or(0)
-        });
+                .unwrap_or(0),
+        };
         let from_block = options.from_block.unwrap_or(0);
         let limit = options.limit.unwrap_or(20).clamp(1, 100);
         let descending = matches!(options.direction, RpcListDirection::Desc);
@@ -1109,14 +1110,15 @@ impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
         limit: Option<u64>,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         let from = from_block.unwrap_or(0);
-        let to = to_block.unwrap_or_else(|| {
-            self.chain_store
+        let to = match to_block {
+            Some(to_block) => to_block,
+            None => self
+                .chain_store
                 .get_head_block()
-                .ok()
-                .flatten()
+                .map_err(internal_err)?
                 .map(|b| b.number())
-                .unwrap_or(0)
-        });
+                .unwrap_or(0),
+        };
         let page = page.unwrap_or(0);
         let limit = limit.unwrap_or(20).clamp(1, 100);
         let offset = page
