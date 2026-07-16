@@ -6,6 +6,8 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Resolve custom-validator account and storage reads against the full 32-byte Shell address instead of the lossy 20-byte EVM alias.
+
 - Bound proof-amendment gossip envelopes to the signed payload hash and source
   range end before applying witness-replacement retention behavior.
 - Retain expired grace-window witness deletions for retry when storage returns
