@@ -1386,6 +1386,7 @@ mod tests {
     #[derive(Debug, Default)]
     struct FailingBatchDb {
         inner: MemoryDb,
+        fail_next_get: AtomicBool,
         fail_next_batch: AtomicBool,
         fail_head_batch: AtomicBool,
         fail_next_delete: AtomicBool,
@@ -1395,6 +1396,7 @@ mod tests {
         fn new() -> Self {
             Self {
                 inner: MemoryDb::new(),
+                fail_next_get: AtomicBool::new(false),
                 fail_next_batch: AtomicBool::new(false),
                 fail_head_batch: AtomicBool::new(false),
                 fail_next_delete: AtomicBool::new(false),
@@ -1403,6 +1405,10 @@ mod tests {
 
         fn fail_next_batch(&self) {
             self.fail_next_batch.store(true, Ordering::SeqCst);
+        }
+
+        fn fail_next_get(&self) {
+            self.fail_next_get.store(true, Ordering::SeqCst);
         }
 
         fn fail_head_batch(&self) {
@@ -1416,6 +1422,9 @@ mod tests {
 
     impl KvStore for FailingBatchDb {
         fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+            if self.fail_next_get.swap(false, Ordering::SeqCst) {
+                return Err(StorageError::Database("injected get failure".into()));
+            }
             self.inner.get(key)
         }
 
@@ -7206,6 +7215,29 @@ mod tests {
 
         assert!(!node.pending_grace_deletes.lock().contains_key(&block_hash));
         assert!(!node.chain_store.has_witness_bundle(&block_hash).unwrap());
+    }
+
+    #[test]
+    fn wpoa_view_change_propagates_head_lookup_failure() {
+        let (node, signer, db) = setup_failing_batch_node();
+        let authority = node.config.proposer_address.unwrap();
+        node.register_authority_pubkey(authority, signer.public_key().to_vec());
+
+        let highest_qc_hash = *node.finality.read().last_finalized_hash();
+        let signing_message = ViewChangeMessage::signing_message(1337, 1, 0, &highest_qc_hash);
+        let signature = signer.sign(&signing_message).unwrap();
+        let msg = ViewChangeMessage::new(1337, 1, 0, highest_qc_hash, authority, signature.data);
+
+        db.fail_next_get();
+        let err = node
+            .handle_wpoa_view_change(msg, &MultiVerifier)
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            NodeError::Storage(StorageError::Database(message))
+                if message.contains("injected get failure")
+        ));
     }
 
     // ─── W.7: wPoA end-to-end test suite ──────────────────────────────────────
