@@ -26,6 +26,7 @@ use shell_storage::{ChainStore, KvStore, MemoryDb, WorldState};
 use tracing::{error, info, warn};
 
 use crate::password::{resolve_password, PasswordArgs};
+use crate::secure_file::{read_sensitive_file, write_sensitive_file_new};
 
 /// Aggregated CLI arguments for the `run` subcommand.
 pub struct RunArgs {
@@ -132,7 +133,7 @@ fn validate_role_authority(
 
 fn load_or_create_dev_signer(path: &Path) -> Result<DilithiumSigner, Box<dyn std::error::Error>> {
     if path.exists() {
-        let json = std::fs::read_to_string(path)?;
+        let json = read_sensitive_file(path)?;
         let stored: DevAuthorityKeyFile = serde_json::from_str(&json)?;
         let public_key = hex::decode(stored.public_key.trim_start_matches("0x"))?;
         let secret_key = hex::decode(stored.secret_key.trim_start_matches("0x"))?;
@@ -147,17 +148,7 @@ fn load_or_create_dev_signer(path: &Path) -> Result<DilithiumSigner, Box<dyn std
         secret_key: format!("0x{}", hex::encode(signer.secret_key_bytes().as_slice())),
     };
     let json = serde_json::to_string_pretty(&stored)?;
-    {
-        use std::io::Write;
-        #[cfg(unix)]
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut opts = std::fs::OpenOptions::new();
-        opts.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        opts.mode(0o600);
-        let mut file = opts.open(path)?;
-        file.write_all(json.as_bytes())?;
-    }
+    write_sensitive_file_new(path, json)?;
     info!("Persisted dev authority key to {}", path.display());
     Ok(signer)
 }
@@ -338,7 +329,7 @@ async fn run_with_store<S: KvStore + 'static>(
                 }
             }
             info!("Loading keystore from {}", path.display());
-            let json = std::fs::read_to_string(&path)?;
+            let json = read_sensitive_file(&path)?;
             let encrypted: EncryptedKey = serde_json::from_str(&json)?;
             let unlocked_address = Address::parse(&encrypted.address)
                 .map_err(|e| format!("invalid keystore address '{}': {e}", encrypted.address))?;

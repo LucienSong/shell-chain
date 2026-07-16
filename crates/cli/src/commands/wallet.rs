@@ -7,7 +7,7 @@ use shell_keystore::EncryptedKey;
 
 use super::{account, key, tx};
 use crate::password::PasswordArgs;
-use crate::secure_file::write_sensitive_file_new;
+use crate::secure_file::{read_sensitive_file, write_sensitive_file_new};
 
 #[derive(Subcommand)]
 pub enum WalletCommand {
@@ -107,7 +107,7 @@ pub fn execute(
 }
 
 fn cmd_export(keystore: PathBuf, output: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
-    let raw = std::fs::read_to_string(&keystore)?;
+    let raw = read_sensitive_file(&keystore)?;
     let encrypted: EncryptedKey = serde_json::from_str(&raw)?;
     let normalized = serde_json::to_string_pretty(&encrypted)?;
     write_sensitive_file_new(&output, normalized)?;
@@ -121,10 +121,9 @@ mod tests {
 
     #[test]
     fn export_keystore_json() {
-        let dir = std::env::temp_dir().join(format!("shell-wallet-export-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let src = dir.join("src.json");
-        let dst = dir.join("dst.json");
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.json");
+        let dst = dir.path().join("dst.json");
 
         std::fs::write(
             &src,
@@ -145,9 +144,37 @@ mod tests {
         let result = cmd_export(src.clone(), dst.clone());
         assert!(result.is_ok());
         assert!(dst.exists());
+    }
 
-        let _ = std::fs::remove_file(src);
-        let _ = std::fs::remove_file(dst);
-        let _ = std::fs::remove_dir(dir);
+    #[cfg(unix)]
+    #[test]
+    fn export_rejects_symbolic_link_keystore() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.json");
+        let linked = dir.path().join("linked.json");
+        let dst = dir.path().join("dst.json");
+        std::fs::write(
+            &src,
+            r#"{
+  "version": 1,
+  "address": "0x0000000000000000000000000000000000000000000000000000000000000001",
+  "key_type": "dilithium3",
+  "public_key": "deadbeef",
+  "ciphertext": "00",
+  "cipher": "xchacha20-poly1305",
+  "kdf": "argon2id",
+  "kdf_params": {"m_cost": 65536, "t_cost": 3, "p_cost": 1, "salt": "00"},
+  "cipher_params": {"nonce": "00"}
+}"#,
+        )
+        .unwrap();
+        symlink(src, &linked).unwrap();
+
+        let error = cmd_export(linked, dst.clone()).unwrap_err();
+
+        assert!(error.to_string().contains("regular file"));
+        assert!(!dst.exists());
     }
 }
