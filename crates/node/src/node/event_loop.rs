@@ -6,6 +6,14 @@ fn block_response_import_allowed(block_count: usize, commit_certificate_count: u
     block_count <= MAX_BLOCK_SYNC_RESPONSE_BLOCKS && commit_certificate_count <= block_count
 }
 
+fn block_response_matches_request(
+    sync_requested: bool,
+    expected_nonce: Option<u64>,
+    nonce: u64,
+) -> bool {
+    sync_requested && expected_nonce == Some(nonce)
+}
+
 fn body_response_import_allowed(block_count: usize) -> bool {
     block_count > 0 && block_count <= crate::historical_sync::BODY_BACKFILL_BATCH_SIZE as usize
 }
@@ -1071,6 +1079,18 @@ impl<S: KvStore + 'static> Node<S> {
                                     let _ = network.send_to_peer(&peer, resp).await;
                                 }
                                 NetworkMessage::BlockResponse { blocks, commit_certificates, nonce } => {
+                                    if !block_response_matches_request(
+                                        sync_requested,
+                                        sync_request_nonce,
+                                        nonce,
+                                    ) {
+                                        warn!(
+                                            %peer,
+                                            nonce,
+                                            "dropping unsolicited or stale BlockResponse"
+                                        );
+                                        continue;
+                                    }
                                     if !block_response_import_allowed(
                                         blocks.len(),
                                         commit_certificates.len(),
@@ -2567,5 +2587,13 @@ mod cadence_tests {
             0
         ));
         assert!(!block_response_import_allowed(1, 2));
+    }
+
+    #[test]
+    fn block_response_requires_the_active_request_nonce() {
+        assert!(block_response_matches_request(true, Some(7), 7));
+        assert!(!block_response_matches_request(false, Some(7), 7));
+        assert!(!block_response_matches_request(true, None, 7));
+        assert!(!block_response_matches_request(true, Some(8), 7));
     }
 }
