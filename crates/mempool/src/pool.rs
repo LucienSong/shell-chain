@@ -184,25 +184,30 @@ impl TxPool {
 
         // Same-nonce handling: RBF replacement (F-021)
         if let Some(existing_hash) = existing_hash {
-            // Check fee bump threshold
-            let old_fee = inner
+            // Require both EIP-1559 fee dimensions to meet the bump threshold.
+            let (old_priority_fee, old_max_fee) = inner
                 .by_hash
                 .get(&existing_hash)
-                .map(|e| e.tx.tx.max_priority_fee_per_gas)
-                .unwrap_or(0);
+                .map(|e| (e.tx.tx.max_priority_fee_per_gas, e.tx.tx.max_fee_per_gas))
+                .unwrap_or((0, 0));
             let bump = self.config.replacement_fee_bump_pct;
-            // required = old_fee * (100 + bump) / 100, rounded up
-            let Some(required) = replacement_fee_required(old_fee, bump) else {
-                return Err(MempoolError::ReplacementFeeTooLow {
-                    got: priority_fee,
-                    required: u64::MAX,
-                });
-            };
-            if priority_fee < required {
-                return Err(MempoolError::ReplacementFeeTooLow {
-                    got: priority_fee,
-                    required,
-                });
+            for (old_fee, new_fee) in [
+                (old_priority_fee, priority_fee),
+                (old_max_fee, tx.tx.max_fee_per_gas),
+            ] {
+                // required = old_fee * (100 + bump) / 100, rounded up
+                let Some(required) = replacement_fee_required(old_fee, bump) else {
+                    return Err(MempoolError::ReplacementFeeTooLow {
+                        got: new_fee,
+                        required: u64::MAX,
+                    });
+                };
+                if new_fee < required {
+                    return Err(MempoolError::ReplacementFeeTooLow {
+                        got: new_fee,
+                        required,
+                    });
+                }
             }
             evict_hash = Some(existing_hash);
         } else if nonce > expected_next_nonce {
@@ -2657,6 +2662,74 @@ mod tests {
     }
 
     #[test]
+    fn rbf_rejects_replacement_that_lowers_max_fee_cap() {
+        let pool = TxPool::new(make_config());
+        let verifier = DilithiumVerifier;
+        let (mut ws, cs) = setup_validation_ctx();
+
+        let signer = DilithiumSigner::generate();
+        let pubkey = signer.public_key().to_vec();
+        let nonce = u64::default();
+        let old_tx = make_signed_value_tx_with_fees(&signer, &pubkey, nonce, 200, 100, U256::ZERO);
+        let old_hash = old_tx.hash();
+        insert_rich(&pool, old_tx, &verifier, &mut ws, &cs).unwrap();
+
+        let replacement =
+            make_signed_value_tx_with_fees(&signer, &pubkey, nonce, 150, 110, U256::from(1u64));
+        let replacement_hash = replacement.hash();
+        let err = insert_rich(&pool, replacement, &verifier, &mut ws, &cs).unwrap_err();
+
+        assert!(matches!(
+            err,
+            MempoolError::ReplacementFeeTooLow {
+                got: 150,
+                required: 220
+            }
+        ));
+        assert_eq!(pool.len(), 1);
+        assert!(pool.contains(&old_hash));
+        assert!(!pool.contains(&replacement_hash));
+    }
+
+    #[test]
+    fn rbf_rejects_unrepresentable_max_fee_cap_bump() {
+        let pool = TxPool::new(make_config());
+        let verifier = DilithiumVerifier;
+        let (mut ws, cs) = setup_validation_ctx();
+
+        let signer = DilithiumSigner::generate();
+        let pubkey = signer.public_key().to_vec();
+        let nonce = u64::default();
+        let old_tx =
+            make_signed_value_tx_with_fees(&signer, &pubkey, nonce, u64::MAX, 100, U256::ZERO);
+        let old_hash = old_tx.hash();
+        insert_with_balance(&pool, old_tx, &verifier, &mut ws, &cs, U256::MAX).unwrap();
+
+        let replacement = make_signed_value_tx_with_fees(
+            &signer,
+            &pubkey,
+            nonce,
+            u64::MAX,
+            110,
+            U256::from(1u64),
+        );
+        let replacement_hash = replacement.hash();
+        let err = insert_with_balance(&pool, replacement, &verifier, &mut ws, &cs, U256::MAX)
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            MempoolError::ReplacementFeeTooLow {
+                got: u64::MAX,
+                required: u64::MAX
+            }
+        ));
+        assert_eq!(pool.len(), 1);
+        assert!(pool.contains(&old_hash));
+        assert!(!pool.contains(&replacement_hash));
+    }
+
+    #[test]
     fn rbf_zero_fee_replacement_requires_positive_bump() {
         let pool = TxPool::new(make_config());
         let verifier = DilithiumVerifier;
@@ -2774,16 +2847,16 @@ mod tests {
         let signer = DilithiumSigner::generate();
         let pubkey = signer.public_key().to_vec();
 
-        let tx_old = make_signed_tx_with_signer(&signer, &pubkey, 0, 100);
+        let tx_old = make_signed_value_tx_with_fees(&signer, &pubkey, 0, 100, 100, U256::ZERO);
         insert_rich(&pool, tx_old, &verifier, &mut ws, &cs).unwrap();
 
         // 115 < 120% of 100 → reject
-        let tx_low = make_signed_tx_with_signer(&signer, &pubkey, 0, 115);
+        let tx_low = make_signed_value_tx_with_fees(&signer, &pubkey, 0, 115, 115, U256::ZERO);
         let err = insert_rich(&pool, tx_low, &verifier, &mut ws, &cs).unwrap_err();
         assert!(matches!(err, MempoolError::ReplacementFeeTooLow { .. }));
 
         // 120 >= 120% of 100 → accept
-        let tx_ok = make_signed_tx_with_signer(&signer, &pubkey, 0, 120);
+        let tx_ok = make_signed_value_tx_with_fees(&signer, &pubkey, 0, 120, 120, U256::ZERO);
         insert_rich(&pool, tx_ok, &verifier, &mut ws, &cs).unwrap();
         assert_eq!(pool.len(), 1);
     }
