@@ -2,6 +2,9 @@
 
 use std::path::{Path, PathBuf};
 
+const MAX_DATABASE_TREE_DEPTH: usize = 128;
+const MAX_DATABASE_TREE_ENTRIES: u64 = 1_000_000;
+
 /// Remove the chain data directory.
 ///
 /// Without `--force`, prints what would be removed and exits.
@@ -61,6 +64,18 @@ pub fn removedb(datadir: PathBuf, force: bool) -> Result<(), Box<dyn std::error:
 
 /// Recursively compute the total size of a directory.
 fn dir_size(path: &Path) -> std::io::Result<u64> {
+    let mut entries_seen = 0;
+    dir_size_inner(path, 0, &mut entries_seen)
+}
+
+fn dir_size_inner(path: &Path, depth: usize, entries_seen: &mut u64) -> std::io::Result<u64> {
+    if depth > MAX_DATABASE_TREE_DEPTH {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("database directory nesting exceeds {MAX_DATABASE_TREE_DEPTH} levels"),
+        ));
+    }
+
     let root_type = std::fs::symlink_metadata(path)?.file_type();
     if root_type.is_symlink() {
         return Ok(0);
@@ -75,15 +90,36 @@ fn dir_size(path: &Path) -> std::io::Result<u64> {
     let mut total = 0u64;
     for entry in std::fs::read_dir(path)? {
         let entry = entry?;
+        *entries_seen = entries_seen.checked_add(1).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "database entry count overflowed",
+            )
+        })?;
+        if *entries_seen > MAX_DATABASE_TREE_ENTRIES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("database tree exceeds {MAX_DATABASE_TREE_ENTRIES} entries"),
+            ));
+        }
+
         let file_type = entry.file_type()?;
         if file_type.is_symlink() {
             continue;
         }
-        if file_type.is_dir() {
-            total += dir_size(&entry.path())?;
+        let entry_size = if file_type.is_dir() {
+            dir_size_inner(&entry.path(), depth + 1, entries_seen)?
         } else if file_type.is_file() {
-            total += entry.metadata()?.len();
-        }
+            entry.metadata()?.len()
+        } else {
+            0
+        };
+        total = total.checked_add(entry_size).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "database size exceeds supported range",
+            )
+        })?;
     }
     Ok(total)
 }
@@ -114,6 +150,24 @@ mod tests {
         symlink(&outside, db.join("external")).unwrap();
 
         assert_eq!(dir_size(&db).unwrap(), 4);
+    }
+
+    #[test]
+    fn directory_size_rejects_excessive_nesting() {
+        let root = tempfile::tempdir().unwrap();
+        let db = root.path().join("db");
+        std::fs::create_dir(&db).unwrap();
+
+        let mut nested = db.clone();
+        for _ in 0..=128 {
+            nested = nested.join("d");
+            std::fs::create_dir(&nested).unwrap();
+        }
+
+        let error = dir_size(&db).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("nesting"));
     }
 
     #[cfg(unix)]
