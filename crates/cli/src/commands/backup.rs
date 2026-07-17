@@ -18,8 +18,11 @@
 //! Both subcommands print structured status to stderr and return a machine-readable
 //! JSON summary to stdout so they can be composed in shell scripts.
 
+use std::io::Read;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+const MAX_CURRENT_FILE_BYTES: u64 = 1_024;
 
 /// Create a RocksDB checkpoint (offline backup) of the data directory.
 ///
@@ -128,6 +131,7 @@ pub fn restore_backup(
         .tempdir_in(&datadir)?;
     let staged_db = staging.path().join("db");
     copy_dir_all(&source_root, &staged_db)?;
+    validate_checkpoint(&staged_db)?;
 
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -211,6 +215,64 @@ fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result
             ));
         }
     }
+    Ok(())
+}
+
+fn validate_checkpoint(checkpoint: &std::path::Path) -> std::io::Result<()> {
+    let current_path = checkpoint.join("CURRENT");
+    let current_meta = std::fs::symlink_metadata(&current_path).map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!("backup checkpoint CURRENT file is unavailable: {error}"),
+        )
+    })?;
+    if current_meta.file_type().is_symlink() || !current_meta.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "backup checkpoint CURRENT entry must be a regular file",
+        ));
+    }
+
+    let mut current = Vec::new();
+    std::fs::File::open(&current_path)?
+        .take(MAX_CURRENT_FILE_BYTES + 1)
+        .read_to_end(&mut current)?;
+    if current.len() as u64 > MAX_CURRENT_FILE_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "backup checkpoint CURRENT file is too large",
+        ));
+    }
+
+    let manifest = std::str::from_utf8(&current)
+        .ok()
+        .and_then(|value| value.strip_suffix('\n'))
+        .filter(|value| {
+            value.strip_prefix("MANIFEST-").is_some_and(|suffix| {
+                !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit())
+            })
+        })
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "backup checkpoint CURRENT file is malformed",
+            )
+        })?;
+
+    let manifest_path = checkpoint.join(manifest);
+    let manifest_meta = std::fs::symlink_metadata(&manifest_path).map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!("backup checkpoint manifest is unavailable: {error}"),
+        )
+    })?;
+    if manifest_meta.file_type().is_symlink() || !manifest_meta.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "backup checkpoint manifest must be a regular file",
+        ));
+    }
+
     Ok(())
 }
 
@@ -323,6 +385,65 @@ mod tests {
     }
 
     #[test]
+    fn restore_rejects_non_checkpoint_directory_without_moving_live_database() {
+        let root = tempfile::tempdir().unwrap();
+        let datadir = root.path().join("chain");
+        let db_path = datadir.join("db");
+        std::fs::create_dir_all(&db_path).unwrap();
+        std::fs::write(db_path.join("CURRENT"), b"live database").unwrap();
+
+        let backup = root.path().join("backup");
+        std::fs::create_dir_all(&backup).unwrap();
+        std::fs::write(backup.join("README"), b"not a RocksDB checkpoint").unwrap();
+
+        let error = restore_backup(datadir.clone(), backup).unwrap_err();
+
+        assert!(error.to_string().contains("CURRENT"));
+        assert_eq!(
+            std::fs::read(db_path.join("CURRENT")).unwrap(),
+            b"live database"
+        );
+        assert_eq!(
+            std::fs::read_dir(datadir)
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().starts_with("db.bak."))
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn restore_rejects_malformed_current_without_moving_live_database() {
+        let root = tempfile::tempdir().unwrap();
+        let datadir = root.path().join("chain");
+        let db_path = datadir.join("db");
+        std::fs::create_dir_all(&db_path).unwrap();
+        std::fs::write(db_path.join("CURRENT"), b"live database").unwrap();
+
+        let backup = root.path().join("backup");
+        std::fs::create_dir_all(&backup).unwrap();
+        std::fs::write(backup.join("CURRENT"), b"../outside\n").unwrap();
+        std::fs::write(root.path().join("outside"), b"not a manifest").unwrap();
+
+        let error = restore_backup(datadir.clone(), backup).unwrap_err();
+
+        assert!(error.to_string().contains("CURRENT file is malformed"));
+        assert_eq!(
+            std::fs::read(db_path.join("CURRENT")).unwrap(),
+            b"live database"
+        );
+        assert_eq!(
+            std::fs::read_dir(datadir)
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().starts_with("db.bak."))
+                .count(),
+            0
+        );
+    }
+
+    #[test]
     fn restore_stages_backup_before_replacing_live_database() {
         let root = tempfile::tempdir().unwrap();
         let datadir = root.path().join("chain");
@@ -332,14 +453,15 @@ mod tests {
 
         let backup = root.path().join("backup");
         std::fs::create_dir_all(backup.join("nested")).unwrap();
-        std::fs::write(backup.join("CURRENT"), b"new database").unwrap();
+        std::fs::write(backup.join("CURRENT"), b"MANIFEST-000001\n").unwrap();
+        std::fs::write(backup.join("MANIFEST-000001"), b"manifest").unwrap();
         std::fs::write(backup.join("nested").join("MANIFEST"), b"manifest").unwrap();
 
         restore_backup(datadir.clone(), backup).unwrap();
 
         assert_eq!(
             std::fs::read(db_path.join("CURRENT")).unwrap(),
-            b"new database"
+            b"MANIFEST-000001\n"
         );
         assert_eq!(
             std::fs::read(db_path.join("nested").join("MANIFEST")).unwrap(),
