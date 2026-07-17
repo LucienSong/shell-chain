@@ -184,18 +184,15 @@ fn prune_rate_limit_buckets(buckets: &mut HashMap<RateLimitBucketKey, RateLimite
     let now = Instant::now();
     buckets
         .retain(|_, state| now.saturating_duration_since(state.last_seen) < RATE_LIMIT_BUCKET_TTL);
-    if buckets.len() >= MAX_RATE_LIMIT_BUCKETS {
-        let mut keys_by_age: Vec<(RateLimitBucketKey, Instant)> = buckets
+    while buckets.len() >= MAX_RATE_LIMIT_BUCKETS {
+        let oldest_key = buckets
             .iter()
-            .map(|(key, state)| (*key, state.last_seen))
-            .collect();
-        keys_by_age.sort_by_key(|(_, last_seen)| *last_seen);
-        for (key, _) in keys_by_age
-            .into_iter()
-            .take(buckets.len().saturating_sub(MAX_RATE_LIMIT_BUCKETS - 1))
-        {
-            buckets.remove(&key);
-        }
+            .min_by_key(|(_, state)| state.last_seen)
+            .map(|(key, _)| *key);
+        let Some(oldest_key) = oldest_key else {
+            break;
+        };
+        buckets.remove(&oldest_key);
     }
 }
 
@@ -523,6 +520,33 @@ mod tests {
 
         assert!(buckets.contains_key(&RateLimitBucketKey::PublicUnknown));
         assert!(buckets.len() < MAX_RATE_LIMIT_BUCKETS);
+    }
+
+    #[test]
+    fn rate_limit_capacity_pruning_removes_oldest_bucket() {
+        let now = Instant::now();
+        let mut buckets = HashMap::new();
+        for i in 0..MAX_RATE_LIMIT_BUCKETS {
+            let last_seen = now
+                .checked_sub(Duration::from_secs((MAX_RATE_LIMIT_BUCKETS - i) as u64))
+                .unwrap_or(now);
+            buckets.insert(
+                RateLimitBucketKey::PublicPeer(std::net::Ipv4Addr::from(i as u32).into()),
+                RateLimiterState {
+                    max_per_sec: 1,
+                    window_start: last_seen,
+                    last_seen,
+                    count: 0,
+                },
+            );
+        }
+
+        prune_rate_limit_buckets(&mut buckets);
+
+        assert_eq!(buckets.len(), MAX_RATE_LIMIT_BUCKETS - 1);
+        assert!(!buckets.contains_key(&RateLimitBucketKey::PublicPeer(
+            std::net::Ipv4Addr::from(0).into()
+        )));
     }
 
     #[tokio::test]
