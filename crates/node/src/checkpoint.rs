@@ -10,6 +10,9 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+
 use shell_storage::{ChainStore, KvStore, SnapshotReader};
 use tracing::info;
 
@@ -33,11 +36,12 @@ impl DownloadedSnapshot {
                 "checkpoint_snapshot-{}-{timestamp}-{file_id}.jsonl",
                 std::process::id()
             ));
-            match std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)
-            {
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            options.mode(0o600);
+
+            match options.open(&path) {
                 Ok(file) => return Ok((Self { path }, file)),
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(error) => {
@@ -439,6 +443,30 @@ mod tests {
         assert!(second.path.exists());
         drop(first);
         drop(second);
+        std::fs::remove_dir(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn downloaded_snapshot_files_are_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "shell-checkpoint-permissions-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let (snapshot, _file) = DownloadedSnapshot::create(&dir).unwrap();
+        let mode = std::fs::metadata(&snapshot.path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+
+        assert_eq!(mode, 0o600);
+        drop(snapshot);
         std::fs::remove_dir(&dir).unwrap();
     }
 }
