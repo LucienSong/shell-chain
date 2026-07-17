@@ -1267,7 +1267,7 @@ mod tests {
     use shell_crypto::{DilithiumSigner, Signer};
     use shell_primitives::Bytes;
     use shell_storage::{MemoryDb, ProofAmendmentStore, StorageError, WitnessStore, WriteBatch};
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     #[derive(Default)]
     struct MockDevControl {
@@ -1301,6 +1301,43 @@ mod tests {
 
         fn scan_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
             self.0.scan_prefix(prefix)
+        }
+    }
+
+    #[derive(Default)]
+    struct FailingCanonicalReadStore {
+        inner: MemoryDb,
+        fail_canonical_reads: AtomicBool,
+    }
+
+    impl KvStore for FailingCanonicalReadStore {
+        fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+            if self.fail_canonical_reads.load(Ordering::Relaxed) && key.starts_with(b"n/") {
+                return Err(StorageError::Database(
+                    "injected canonical block read failure".into(),
+                ));
+            }
+            self.inner.get(key)
+        }
+
+        fn put(&self, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
+            self.inner.put(key, value)
+        }
+
+        fn delete(&self, key: &[u8]) -> Result<(), StorageError> {
+            self.inner.delete(key)
+        }
+
+        fn flush(&self) -> Result<(), StorageError> {
+            self.inner.flush()
+        }
+
+        fn write_batch(&self, batch: WriteBatch) -> Result<(), StorageError> {
+            self.inner.write_batch(batch)
+        }
+
+        fn scan_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
+            self.inner.scan_prefix(prefix)
         }
     }
 
@@ -4813,6 +4850,31 @@ mod tests {
         assert_eq!(result["avgBlockTime"], 3.0);
         assert_eq!(result["gasUsedTotal"], "0x5208"); // 21000
         assert!(result["latestBaseFee"].is_string());
+    }
+
+    #[tokio::test]
+    async fn get_chain_stats_propagates_average_block_time_read_failures() {
+        let store = Arc::new(FailingCanonicalReadStore::default());
+        let handler = setup_with_store(store.clone());
+
+        let genesis = make_genesis_block();
+        let genesis_hash = genesis.hash();
+        handler.chain_store.put_block(&genesis).unwrap();
+        handler.chain_store.set_canonical(0, &genesis_hash).unwrap();
+
+        let mut block = genesis;
+        block.header.number = 1;
+        block.header.parent_hash = genesis_hash;
+        block.header.timestamp += 3;
+        let block_hash = block.hash();
+        handler.chain_store.put_block(&block).unwrap();
+        handler.chain_store.set_canonical(1, &block_hash).unwrap();
+        handler.chain_store.set_head(&block_hash).unwrap();
+
+        store.fail_canonical_reads.store(true, Ordering::Relaxed);
+        let err = ShellApiServer::get_chain_stats(&handler).await.unwrap_err();
+
+        assert_eq!(err.code(), -32603);
     }
 
     #[tokio::test]

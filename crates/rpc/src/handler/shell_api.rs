@@ -911,10 +911,15 @@ impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
         if block_height > 0 {
             let window = std::cmp::min(block_height, 10);
             if window >= 1 {
-                if let (Ok(Some(recent)), Ok(Some(older))) = (
-                    self.chain_store.get_block_by_number(block_height),
-                    self.chain_store.get_block_by_number(block_height - window),
-                ) {
+                let recent = self
+                    .chain_store
+                    .get_block_by_number(block_height)
+                    .map_err(internal_err)?;
+                let older = self
+                    .chain_store
+                    .get_block_by_number(block_height - window)
+                    .map_err(internal_err)?;
+                if let (Some(recent), Some(older)) = (recent, older) {
                     let dt = recent
                         .header
                         .timestamp
