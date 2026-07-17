@@ -18,6 +18,10 @@ fn body_response_import_allowed(block_count: usize) -> bool {
     block_count > 0 && block_count <= crate::historical_sync::BODY_BACKFILL_BATCH_SIZE as usize
 }
 
+fn body_response_matches_request(expected_nonce: Option<u64>, nonce: u64) -> bool {
+    expected_nonce == Some(nonce)
+}
+
 fn bounded_request_numbers(
     start_number: u64,
     count: u64,
@@ -329,6 +333,7 @@ impl<S: KvStore + 'static> Node<S> {
         // Track whether we are catching up so we don't spam requests.
         let mut sync_requested = false;
         let mut sync_request_nonce: Option<u64> = None;
+        let mut body_request_nonce: Option<u64> = None;
         let startup_peers = network.peer_count().await;
         let allow_isolated_production = self.config.network_type == shell_genesis::NetworkType::Dev
             || self.consensus.read().poa_config().authorities.len() == 1;
@@ -420,16 +425,22 @@ impl<S: KvStore + 'static> Node<S> {
                 let head = self.head_number();
                 if oldest > 0 {
                     // There are gaps — request bodies starting from the beginning.
-                    let _ = network
+                    let nonce = Self::wall_clock_millis();
+                    if network
                         .broadcast(NetworkMessage::BodyRequest {
                             start_number: 0,
                             count: crate::historical_sync::BODY_BACKFILL_BATCH_SIZE,
+                            nonce,
                         })
-                        .await;
-                    info!(
-                        oldest_available = oldest,
-                        head, "L4: kicked historical body back-fill startup scan"
-                    );
+                        .await
+                        .is_ok()
+                    {
+                        body_request_nonce = Some(nonce);
+                        info!(
+                            oldest_available = oldest,
+                            head, "L4: kicked historical body back-fill startup scan"
+                        );
+                    }
                 }
             }
         }
@@ -1554,7 +1565,7 @@ impl<S: KvStore + 'static> Node<S> {
                                     self.peer_caps.record(peer.clone(), profile, oldest_body_block);
                                 }
                                 // L4: Peer requests block bodies for historical back-fill.
-                                NetworkMessage::BodyRequest { start_number, count } => {
+                                NetworkMessage::BodyRequest { start_number, count, nonce } => {
                                     debug!(%peer, start_number, count, "L4: received BodyRequest");
                                     let mut blocks = Vec::new();
                                     for n in bounded_request_numbers(
@@ -1578,7 +1589,7 @@ impl<S: KvStore + 'static> Node<S> {
                                         let _ = network
                                             .send_to_peer(
                                                 &peer,
-                                                NetworkMessage::BodyResponse { blocks },
+                                                NetworkMessage::BodyResponse { blocks, nonce },
                                             )
                                             // Note: send_to_peer falls back to broadcast if the
                                             // transport does not support unicast addressing.
@@ -1586,7 +1597,15 @@ impl<S: KvStore + 'static> Node<S> {
                                     }
                                 }
                                 // L4: Receive block bodies from a peer as historical back-fill.
-                                NetworkMessage::BodyResponse { blocks } => {
+                                NetworkMessage::BodyResponse { blocks, nonce } => {
+                                    if !body_response_matches_request(body_request_nonce, nonce) {
+                                        warn!(
+                                            %peer,
+                                            nonce,
+                                            "L4: dropping unsolicited or stale BodyResponse"
+                                        );
+                                        continue;
+                                    }
                                     if !body_response_import_allowed(blocks.len()) {
                                         warn!(
                                             %peer,
@@ -1596,6 +1615,7 @@ impl<S: KvStore + 'static> Node<S> {
                                         );
                                         continue;
                                     }
+                                    body_request_nonce = None;
                                     debug!(%peer, count = blocks.len(), "L4: received BodyResponse");
                                     let head_number = self.chain_store
                                         .get_head_block()
@@ -1655,15 +1675,22 @@ impl<S: KvStore + 'static> Node<S> {
                                     if let Some(next) = next_start {
                                         if next <= head_number {
                                             // More blocks needed — request next batch.
-                                            let _ = network
+                                            let next_nonce = Self::wall_clock_millis()
+                                                .max(nonce.saturating_add(1));
+                                            if network
                                                 .send_to_peer(
                                                     &peer,
                                                     NetworkMessage::BodyRequest {
                                                         start_number: next,
                                                         count: crate::historical_sync::BODY_BACKFILL_BATCH_SIZE,
+                                                        nonce: next_nonce,
                                                     },
                                                 )
-                                                .await;
+                                                .await
+                                                .is_ok()
+                                            {
+                                                body_request_nonce = Some(next_nonce);
+                                            }
                                         } else {
                                             info!("L4: historical body back-fill complete");
                                         }
@@ -2538,6 +2565,13 @@ mod cadence_tests {
         assert!(!body_response_import_allowed(
             crate::historical_sync::BODY_BACKFILL_BATCH_SIZE as usize + 1
         ));
+    }
+
+    #[test]
+    fn body_response_requires_the_active_request_nonce() {
+        assert!(body_response_matches_request(Some(7), 7));
+        assert!(!body_response_matches_request(None, 7));
+        assert!(!body_response_matches_request(Some(8), 7));
     }
 
     #[test]
