@@ -6,6 +6,9 @@
 
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use shell_storage::{ChainStore, KvStore, SnapshotReader};
 use tracing::info;
@@ -17,10 +20,37 @@ struct DownloadedSnapshot {
 }
 
 impl DownloadedSnapshot {
-    fn new(datadir: &Path) -> Self {
-        Self {
-            path: datadir.join(format!("checkpoint_snapshot-{}.jsonl", std::process::id())),
+    fn create(datadir: &Path) -> Result<(Self, std::fs::File), NodeError> {
+        static NEXT_FILE_ID: AtomicU64 = AtomicU64::new(0);
+
+        for _ in 0..16 {
+            let timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let file_id = NEXT_FILE_ID.fetch_add(1, Ordering::Relaxed);
+            let path = datadir.join(format!(
+                "checkpoint_snapshot-{}-{timestamp}-{file_id}.jsonl",
+                std::process::id()
+            ));
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(file) => return Ok((Self { path }, file)),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => {
+                    return Err(NodeError::Startup(format!(
+                        "create checkpoint snapshot file: {error}"
+                    )))
+                }
+            }
         }
+
+        Err(NodeError::Startup(
+            "could not allocate a unique checkpoint snapshot file".into(),
+        ))
     }
 }
 
@@ -42,11 +72,11 @@ pub async fn checkpoint_sync<S: KvStore>(
     datadir: &Path,
     expected_chain_id: u64,
 ) -> Result<u64, NodeError> {
-    let snapshot = DownloadedSnapshot::new(datadir);
+    let (snapshot, output_file) = DownloadedSnapshot::create(datadir)?;
 
     // Download the snapshot file using curl.
-    info!("Downloading checkpoint from {url}...");
-    download_snapshot(url, &snapshot.path).await?;
+    info!("Downloading checkpoint snapshot...");
+    download_snapshot(url, output_file).await?;
 
     // Validate the snapshot format before importing.
     info!("Validating checkpoint snapshot...");
@@ -127,12 +157,11 @@ pub fn should_checkpoint_sync<S: KvStore>(chain_store: &ChainStore<S>) -> Result
     })
 }
 
-/// Download a file from `url` to `dest` using `curl`.
-async fn download_snapshot(url: &str, dest: &PathBuf) -> Result<(), NodeError> {
-    let dest_str = dest
-        .to_str()
-        .ok_or_else(|| NodeError::Startup("snapshot path contains invalid UTF-8".into()))?;
-
+/// Download a file from `url` into an already-open exclusive file using `curl`.
+async fn download_snapshot(url: &str, output_file: std::fs::File) -> Result<(), NodeError> {
+    let downloaded_file = output_file
+        .try_clone()
+        .map_err(|e| NodeError::Startup(format!("inspect checkpoint snapshot file: {e}")))?;
     let output = tokio::process::Command::new("curl")
         .args([
             "--fail",
@@ -143,27 +172,28 @@ async fn download_snapshot(url: &str, dest: &PathBuf) -> Result<(), NodeError> {
             "1073741824", // 1 GB max
             "--max-time",
             "600", // 10 minute timeout
-            "--output",
-            dest_str,
+            "--",
             url,
         ])
+        .stdout(Stdio::from(output_file))
         .output()
         .await
         .map_err(|e| NodeError::Startup(format!("failed to run curl: {e}")))?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = String::from_utf8_lossy(&output.stderr).replace(url, "<checkpoint-url>");
         return Err(NodeError::Startup(format!(
             "curl failed (exit {}): {stderr}",
             output.status
         )));
     }
 
-    // Verify the file was created and is non-empty.
-    let file_meta = std::fs::metadata(dest)
-        .map_err(|e| NodeError::Startup(format!("snapshot file not found after download: {e}")))?;
-    if file_meta.len() == 0 {
-        let _ = std::fs::remove_file(dest);
+    if downloaded_file
+        .metadata()
+        .map_err(|e| NodeError::Startup(format!("inspect downloaded snapshot file: {e}")))?
+        .len()
+        == 0
+    {
         return Err(NodeError::Startup(
             "downloaded snapshot file is empty".into(),
         ));
@@ -383,12 +413,32 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let path = {
-            let snapshot = DownloadedSnapshot::new(&dir);
-            std::fs::write(&snapshot.path, b"partial snapshot").unwrap();
+            let (snapshot, mut file) = DownloadedSnapshot::create(&dir).unwrap();
+            std::io::Write::write_all(&mut file, b"partial snapshot").unwrap();
             snapshot.path.clone()
         };
 
         assert!(!path.exists());
+        std::fs::remove_dir(&dir).unwrap();
+    }
+
+    #[test]
+    fn downloaded_snapshot_files_are_unique_and_exclusive() {
+        let dir = std::env::temp_dir().join(format!(
+            "shell-checkpoint-unique-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let (first, _first_file) = DownloadedSnapshot::create(&dir).unwrap();
+        let (second, _second_file) = DownloadedSnapshot::create(&dir).unwrap();
+
+        assert_ne!(first.path, second.path);
+        assert!(first.path.exists());
+        assert!(second.path.exists());
+        drop(first);
+        drop(second);
         std::fs::remove_dir(&dir).unwrap();
     }
 }
