@@ -1956,6 +1956,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fee_endpoints_propagate_storage_failures() {
+        let handler = setup_with_store(Arc::new(FailingGetStore::default()));
+
+        let gas_price_err = EthApiServer::gas_price(&handler).await.unwrap_err();
+        assert_eq!(gas_price_err.code(), -32603);
+
+        let latest_history_err =
+            EthApiServer::fee_history(&handler, "0x1".into(), "latest".into(), None)
+                .await
+                .unwrap_err();
+        assert_eq!(latest_history_err.code(), -32603);
+
+        let explicit_history_err =
+            EthApiServer::fee_history(&handler, "0x1".into(), "0x0".into(), None)
+                .await
+                .unwrap_err();
+        assert_eq!(explicit_history_err.code(), -32603);
+    }
+
+    #[tokio::test]
     async fn address_transaction_pages_clamp_zero_limit_to_one() {
         let handler = setup();
         let address = test_address(b"zero-page-limit");
