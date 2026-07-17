@@ -1270,40 +1270,6 @@ impl<S: KvStore + 'static> Node<S> {
             }
         }
 
-        // F-303: Drive StatePruner — register block and run periodic pruning.
-        {
-            // Canonical mappings are required to resume body and witness pruning.
-            // A delayed STARK settlement can hold the witness cursor behind the
-            // configured retention window, so never let mapping cleanup overtake
-            // either dependent pruner.
-            let canonical_prune_boundary = canonical_mapping_prune_boundary(
-                finalized_number,
-                self.body_pruner.read().pruned_below(),
-                self.witness_pruner.read().pruned_below(),
-            );
-            let mut pruner = self.state_pruner.write();
-            pruner.register_block(block_number, state_root);
-            if finalized_number > 0 && pruner.should_prune(block_number) {
-                pruner.mark_prunable(canonical_prune_boundary);
-                match pruner.prune(self.store.as_ref()) {
-                    Ok(result) => {
-                        if result.pruned_count > 0 {
-                            tracing::info!(
-                                pruned = result.pruned_count,
-                                protected = result.protected_count,
-                                block = block_number,
-                                finalized = finalized_number,
-                                "state pruner: removed old canonical mappings"
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "state pruner: prune failed");
-                    }
-                }
-            }
-        }
-
         // D1: Drive WitnessPruner — prune old witness bundles after finality.
         {
             let mut wpruner = self.witness_pruner.write();
@@ -1350,6 +1316,41 @@ impl<S: KvStore + 'static> Node<S> {
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "body pruner: prune failed");
+                    }
+                }
+            }
+        }
+
+        // F-303: Drive StatePruner after dependent pruning so a successful body
+        // or witness pass can advance canonical mapping cleanup in this cycle.
+        {
+            // Canonical mappings are required to resume body and witness pruning.
+            // A delayed STARK settlement can hold the witness cursor behind the
+            // configured retention window, so never let mapping cleanup overtake
+            // either dependent pruner.
+            let canonical_prune_boundary = canonical_mapping_prune_boundary(
+                finalized_number,
+                self.body_pruner.read().pruned_below(),
+                self.witness_pruner.read().pruned_below(),
+            );
+            let mut pruner = self.state_pruner.write();
+            pruner.register_block(block_number, state_root);
+            if finalized_number > 0 && pruner.should_prune(block_number) {
+                pruner.mark_prunable(canonical_prune_boundary);
+                match pruner.prune(self.store.as_ref()) {
+                    Ok(result) => {
+                        if result.pruned_count > 0 {
+                            tracing::info!(
+                                pruned = result.pruned_count,
+                                protected = result.protected_count,
+                                block = block_number,
+                                finalized = finalized_number,
+                                "state pruner: removed old canonical mappings"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "state pruner: prune failed");
                     }
                 }
             }
@@ -5805,6 +5806,47 @@ mod tests {
 
         assert_eq!(node.body_pruner.read().pruned_below(), 2);
         assert_eq!(node.witness_pruner.read().pruned_below(), 2);
+    }
+
+    #[test]
+    fn canonical_mapping_pruning_uses_current_dependency_cursors() {
+        let (node, signer) = setup_node_with_retention(2, 2);
+        *node.state_pruner.write() = StatePruner::new(32);
+        node.state_pruner.write().set_prune_interval(1);
+        store_genesis(&node);
+
+        for _ in 0..40 {
+            node.produce_block(&signer, 0).unwrap();
+        }
+
+        let finalized = node.chain_store.get_block_by_number(35).unwrap().unwrap();
+        node.chain_store.set_finalized_number(35).unwrap();
+        node.finality
+            .write()
+            .set_finalized_direct(35, finalized.hash());
+        for number in 0..34 {
+            let hash = node
+                .chain_store
+                .get_block_hash_by_number(number)
+                .unwrap()
+                .unwrap();
+            node.settled_stark_sources.lock().insert((1, hash));
+        }
+
+        assert!(node
+            .chain_store
+            .get_block_hash_by_number(1)
+            .unwrap()
+            .is_some());
+        node.produce_block(&signer, 0).unwrap();
+
+        assert_eq!(node.body_pruner.read().pruned_below(), 34);
+        assert_eq!(node.witness_pruner.read().pruned_below(), 34);
+        assert!(node
+            .chain_store
+            .get_block_hash_by_number(1)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
