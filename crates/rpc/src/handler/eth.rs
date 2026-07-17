@@ -927,14 +927,15 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
             let actual_to = capped_filter_poll_to(query_from, query_to);
 
             for block_num in query_from..=actual_to {
-                let block = match self
+                let block = self
                     .chain_store
                     .get_block_by_number(block_num)
                     .map_err(internal_err)?
-                {
-                    Some(b) => b,
-                    None => continue,
-                };
+                    .ok_or_else(|| {
+                        internal_err(format!(
+                            "canonical block {block_num} missing during log filter poll"
+                        ))
+                    })?;
 
                 if !filter.matches_bloom(block.header.logs_bloom.as_ref()) {
                     continue;
@@ -991,13 +992,16 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
             let mut hashes = Vec::new();
             let actual_to = capped_filter_poll_to(from, latest);
             for block_num in from..=actual_to {
-                if let Some(block) = self
+                let block = self
                     .chain_store
                     .get_block_by_number(block_num)
                     .map_err(internal_err)?
-                {
-                    hashes.push(block.hash());
-                }
+                    .ok_or_else(|| {
+                        internal_err(format!(
+                            "canonical block {block_num} missing during block filter poll"
+                        ))
+                    })?;
+                hashes.push(block.hash());
             }
 
             self.filter_registry.update_last_poll(&id, actual_to);
