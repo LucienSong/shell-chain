@@ -1455,6 +1455,7 @@ impl<S: KvStore> ChainStore<S> {
         // snapshot entries. This prevents a semantic import failure from
         // leaving partially restored keys in the destination store.
         let mut head_hash = None;
+        let mut snapshot_chain_config = None;
         while let Some(entry) = snap_reader.next_entry()? {
             if entry.key == prefix::HEAD_BLOCK {
                 if entry.value.len() != 32 {
@@ -1468,6 +1469,23 @@ impl<S: KvStore> ChainStore<S> {
                     ));
                 }
                 head_hash = Some(ShellHash::from_slice(&entry.value));
+            } else if entry.key == prefix::CHAIN_CONFIG {
+                if snapshot_chain_config.is_some() {
+                    return Err(StorageError::State(
+                        "snapshot contains multiple chain configurations".into(),
+                    ));
+                }
+                let config: ChainConfig = serde_json::from_slice(&entry.value).map_err(|e| {
+                    StorageError::Serialization(format!("decode snapshot chain configuration: {e}"))
+                })?;
+                if config.chain_id != expected_chain_id
+                    || &config.genesis_hash != expected_genesis_hash
+                {
+                    return Err(StorageError::State(
+                        "snapshot chain configuration does not match the trusted chain".into(),
+                    ));
+                }
+                snapshot_chain_config = Some(config);
             }
         }
 
@@ -2886,6 +2904,87 @@ mod tests {
         // Import with wrong chain_id
         let result = cs.import_snapshot(std::io::Cursor::new(&buf), 9999, &ShellHash::default());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_import_snapshot_rejects_mismatched_stored_chain_config_before_writes() {
+        let trusted_genesis = ShellHash::from([0x11; 32]);
+        let mismatched_configs = [
+            ChainConfig {
+                chain_id: 9999,
+                genesis_hash: trusted_genesis,
+            },
+            ChainConfig {
+                chain_id: 1337,
+                genesis_hash: ShellHash::from([0x22; 32]),
+            },
+        ];
+
+        for mismatched_config in mismatched_configs {
+            let store = Arc::new(MemoryDb::new());
+            let cs = ChainStore::new(Arc::clone(&store));
+            let meta = crate::SnapshotMetadata::new(
+                1337,
+                0,
+                ShellHash::ZERO,
+                ShellHash::ZERO,
+                trusted_genesis,
+            );
+            let mut buf = Vec::new();
+            {
+                let mut writer =
+                    crate::SnapshotWriter::new(std::io::Cursor::new(&mut buf), meta).unwrap();
+                writer.write_entry(b"untrusted-key", b"value").unwrap();
+                writer
+                    .write_entry(
+                        prefix::CHAIN_CONFIG,
+                        &serde_json::to_vec(&mismatched_config).unwrap(),
+                    )
+                    .unwrap();
+                writer.finalize().unwrap();
+            }
+
+            let error = cs
+                .import_snapshot(std::io::Cursor::new(buf), 1337, &trusted_genesis)
+                .unwrap_err();
+
+            assert!(error
+                .to_string()
+                .contains("does not match the trusted chain"));
+            assert!(store.get(b"untrusted-key").unwrap().is_none());
+            assert!(store.get(prefix::CHAIN_CONFIG).unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn test_import_snapshot_rejects_duplicate_chain_configs() {
+        let store = Arc::new(MemoryDb::new());
+        let cs = ChainStore::new(store);
+        let config = ChainConfig {
+            chain_id: 1337,
+            genesis_hash: ShellHash::ZERO,
+        };
+        let encoded = serde_json::to_vec(&config).unwrap();
+        let meta = crate::SnapshotMetadata::new(
+            1337,
+            0,
+            ShellHash::ZERO,
+            ShellHash::ZERO,
+            ShellHash::ZERO,
+        );
+        let mut buf = Vec::new();
+        {
+            let mut writer =
+                crate::SnapshotWriter::new(std::io::Cursor::new(&mut buf), meta).unwrap();
+            writer.write_entry(prefix::CHAIN_CONFIG, &encoded).unwrap();
+            writer.write_entry(prefix::CHAIN_CONFIG, &encoded).unwrap();
+            writer.finalize().unwrap();
+        }
+
+        let error = cs
+            .import_snapshot(std::io::Cursor::new(buf), 1337, &ShellHash::ZERO)
+            .unwrap_err();
+        assert!(error.to_string().contains("multiple chain configurations"));
     }
 
     #[test]
