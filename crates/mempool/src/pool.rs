@@ -184,17 +184,26 @@ impl TxPool {
 
         // Same-nonce handling: RBF replacement (F-021)
         if let Some(existing_hash) = existing_hash {
-            // Require both EIP-1559 fee dimensions to meet the bump threshold.
-            let (old_priority_fee, old_max_fee) = inner
+            // Require each applicable fee dimension to meet the bump threshold.
+            let (old_priority_fee, old_max_fee, old_blob_fee) = inner
                 .by_hash
                 .get(&existing_hash)
-                .map(|e| (e.tx.tx.max_priority_fee_per_gas, e.tx.tx.max_fee_per_gas))
-                .unwrap_or((0, 0));
+                .map(|e| {
+                    (
+                        e.tx.tx.max_priority_fee_per_gas,
+                        e.tx.tx.max_fee_per_gas,
+                        e.tx.tx.max_fee_per_blob_gas,
+                    )
+                })
+                .unwrap_or((0, 0, None));
             let bump = self.config.replacement_fee_bump_pct;
-            for (old_fee, new_fee) in [
+            let fee_pairs = [
                 (old_priority_fee, priority_fee),
                 (old_max_fee, tx.tx.max_fee_per_gas),
-            ] {
+            ]
+            .into_iter()
+            .chain(old_blob_fee.zip(tx.tx.max_fee_per_blob_gas));
+            for (old_fee, new_fee) in fee_pairs {
                 // required = old_fee * (100 + bump) / 100, rounded up
                 let Some(required) = replacement_fee_required(old_fee, bump) else {
                     return Err(MempoolError::ReplacementFeeTooLow {
@@ -1013,7 +1022,17 @@ mod tests {
     fn make_blob_tx(max_fee_per_blob_gas: u64) -> SignedTransaction {
         let signer = DilithiumSigner::generate();
         let pubkey = signer.public_key().to_vec();
-        let from = test_address(&pubkey);
+        make_blob_tx_with_signer(&signer, &pubkey, 100, 1, max_fee_per_blob_gas)
+    }
+
+    fn make_blob_tx_with_signer(
+        signer: &DilithiumSigner,
+        pubkey: &[u8],
+        max_fee_per_gas: u64,
+        max_priority_fee_per_gas: u64,
+        max_fee_per_blob_gas: u64,
+    ) -> SignedTransaction {
+        let from = test_address(pubkey);
         let tx = Transaction {
             chain_id: 42,
             nonce: u64::default(),
@@ -1021,15 +1040,15 @@ mod tests {
             value: U256::ZERO,
             data: Bytes::default(),
             gas_limit: 21_000,
-            max_fee_per_gas: 100,
-            max_priority_fee_per_gas: 1,
+            max_fee_per_gas,
+            max_priority_fee_per_gas,
             access_list: None,
             tx_type: 3,
             max_fee_per_blob_gas: Some(max_fee_per_blob_gas),
             blob_versioned_hashes: Some(vec![ShellHash::ZERO]),
         };
         let sig = signer.sign(tx.hash().as_bytes()).unwrap();
-        SignedTransaction::with_pubkey(from, tx, sig, pubkey)
+        SignedTransaction::with_pubkey(from, tx, sig, pubkey.to_vec())
     }
 
     /// Convenience: create a signed tx from an existing signer for multi-nonce tests.
@@ -2713,6 +2732,63 @@ mod tests {
             110,
             U256::from(1u64),
         );
+        let replacement_hash = replacement.hash();
+        let err = insert_with_balance(&pool, replacement, &verifier, &mut ws, &cs, U256::MAX)
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            MempoolError::ReplacementFeeTooLow {
+                got: u64::MAX,
+                required: u64::MAX
+            }
+        ));
+        assert_eq!(pool.len(), 1);
+        assert!(pool.contains(&old_hash));
+        assert!(!pool.contains(&replacement_hash));
+    }
+
+    #[test]
+    fn rbf_rejects_blob_replacement_without_blob_fee_bump() {
+        let pool = TxPool::new(make_config());
+        let verifier = DilithiumVerifier;
+        let (mut ws, cs) = setup_validation_ctx();
+
+        let signer = DilithiumSigner::generate();
+        let pubkey = signer.public_key().to_vec();
+        let old_tx = make_blob_tx_with_signer(&signer, &pubkey, 100, 10, 100);
+        let old_hash = old_tx.hash();
+        insert_rich(&pool, old_tx, &verifier, &mut ws, &cs).unwrap();
+
+        let replacement = make_blob_tx_with_signer(&signer, &pubkey, 110, 11, 100);
+        let replacement_hash = replacement.hash();
+        let err = insert_rich(&pool, replacement, &verifier, &mut ws, &cs).unwrap_err();
+
+        assert!(matches!(
+            err,
+            MempoolError::ReplacementFeeTooLow {
+                got: 100,
+                required: 110
+            }
+        ));
+        assert_eq!(pool.len(), 1);
+        assert!(pool.contains(&old_hash));
+        assert!(!pool.contains(&replacement_hash));
+    }
+
+    #[test]
+    fn rbf_rejects_unrepresentable_blob_fee_bump() {
+        let pool = TxPool::new(make_config());
+        let verifier = DilithiumVerifier;
+        let (mut ws, cs) = setup_validation_ctx();
+
+        let signer = DilithiumSigner::generate();
+        let pubkey = signer.public_key().to_vec();
+        let old_tx = make_blob_tx_with_signer(&signer, &pubkey, 100, 10, u64::MAX);
+        let old_hash = old_tx.hash();
+        insert_with_balance(&pool, old_tx, &verifier, &mut ws, &cs, U256::MAX).unwrap();
+
+        let replacement = make_blob_tx_with_signer(&signer, &pubkey, 110, 11, u64::MAX);
         let replacement_hash = replacement.hash();
         let err = insert_with_balance(&pool, replacement, &verifier, &mut ws, &cs, U256::MAX)
             .unwrap_err();
