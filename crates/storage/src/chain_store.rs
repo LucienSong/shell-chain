@@ -1455,6 +1455,8 @@ impl<S: KvStore> ChainStore<S> {
         // snapshot entries. This prevents a semantic import failure from
         // leaving partially restored keys in the destination store.
         let mut head_hash = None;
+        let canonical_head_key = Self::number_key(metadata.block_number);
+        let mut canonical_head_hash = None;
         let mut snapshot_chain_config = None;
         while let Some(entry) = snap_reader.next_entry()? {
             if entry.key == prefix::HEAD_BLOCK {
@@ -1469,6 +1471,18 @@ impl<S: KvStore> ChainStore<S> {
                     ));
                 }
                 head_hash = Some(ShellHash::from_slice(&entry.value));
+            } else if entry.key == canonical_head_key {
+                if entry.value.len() != 32 {
+                    return Err(StorageError::State(
+                        "snapshot canonical head mapping has invalid length".into(),
+                    ));
+                }
+                if canonical_head_hash.is_some() {
+                    return Err(StorageError::State(
+                        "snapshot contains multiple canonical head mappings".into(),
+                    ));
+                }
+                canonical_head_hash = Some(ShellHash::from_slice(&entry.value));
             } else if entry.key == prefix::CHAIN_CONFIG {
                 if snapshot_chain_config.is_some() {
                     return Err(StorageError::State(
@@ -1486,6 +1500,14 @@ impl<S: KvStore> ChainStore<S> {
                     ));
                 }
                 snapshot_chain_config = Some(config);
+            }
+        }
+
+        if let Some(head_hash) = head_hash {
+            if canonical_head_hash != Some(head_hash) {
+                return Err(StorageError::State(
+                    "snapshot canonical head mapping does not match HEAD".into(),
+                ));
             }
         }
 
@@ -3079,6 +3101,12 @@ mod tests {
             writer
                 .write_entry(prefix::HEAD_BLOCK, block_hash.as_bytes())
                 .unwrap();
+            writer
+                .write_entry(
+                    &ChainStore::<MemoryDb>::number_key(block.number()),
+                    block_hash.as_bytes(),
+                )
+                .unwrap();
             writer.finalize().unwrap();
         }
 
@@ -3116,6 +3144,12 @@ mod tests {
                     &encode_rlp(&block.header),
                 )
                 .unwrap();
+            writer
+                .write_entry(
+                    &ChainStore::<FailingBatchStore>::number_key(block.number()),
+                    block_hash.as_bytes(),
+                )
+                .unwrap();
             for index in 0..10_000 {
                 writer
                     .write_entry(format!("snapshot/test/{index:05}").as_bytes(), b"value")
@@ -3130,6 +3164,95 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("injected batch failure"));
         assert_eq!(cs.get_head_hash().unwrap(), Some(old_head));
+    }
+
+    #[test]
+    fn test_import_snapshot_rejects_mismatched_canonical_head_mapping_before_writes() {
+        let store = Arc::new(MemoryDb::new());
+        let cs = ChainStore::new(Arc::clone(&store));
+        let block = empty_block(1);
+        let block_hash = block.hash();
+        let meta = crate::SnapshotMetadata::new(
+            1337,
+            block.number(),
+            block_hash,
+            block.header.state_root,
+            ShellHash::ZERO,
+        );
+        let mut buf = Vec::new();
+        {
+            let mut writer =
+                crate::SnapshotWriter::new(std::io::Cursor::new(&mut buf), meta).unwrap();
+            writer.write_entry(b"untrusted-key", b"value").unwrap();
+            writer
+                .write_entry(prefix::HEAD_BLOCK, block_hash.as_bytes())
+                .unwrap();
+            writer
+                .write_entry(
+                    &ChainStore::<MemoryDb>::header_key(&block_hash),
+                    &encode_rlp(&block.header),
+                )
+                .unwrap();
+            writer
+                .write_entry(
+                    &ChainStore::<MemoryDb>::number_key(block.number()),
+                    ShellHash::from([0x44; 32]).as_bytes(),
+                )
+                .unwrap();
+            writer.finalize().unwrap();
+        }
+
+        let error = cs
+            .import_snapshot(std::io::Cursor::new(buf), 1337, &ShellHash::ZERO)
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("canonical head mapping does not match HEAD"));
+        assert!(store.get(b"untrusted-key").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_import_snapshot_rejects_duplicate_canonical_head_mappings() {
+        let store = Arc::new(MemoryDb::new());
+        let cs = ChainStore::new(store);
+        let block = empty_block(1);
+        let block_hash = block.hash();
+        let meta = crate::SnapshotMetadata::new(
+            1337,
+            block.number(),
+            block_hash,
+            block.header.state_root,
+            ShellHash::ZERO,
+        );
+        let mut buf = Vec::new();
+        {
+            let mut writer =
+                crate::SnapshotWriter::new(std::io::Cursor::new(&mut buf), meta).unwrap();
+            writer
+                .write_entry(prefix::HEAD_BLOCK, block_hash.as_bytes())
+                .unwrap();
+            writer
+                .write_entry(
+                    &ChainStore::<MemoryDb>::number_key(block.number()),
+                    block_hash.as_bytes(),
+                )
+                .unwrap();
+            writer
+                .write_entry(
+                    &ChainStore::<MemoryDb>::number_key(block.number()),
+                    block_hash.as_bytes(),
+                )
+                .unwrap();
+            writer.finalize().unwrap();
+        }
+
+        let error = cs
+            .import_snapshot(std::io::Cursor::new(buf), 1337, &ShellHash::ZERO)
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("multiple canonical head mappings"));
     }
 
     #[test]
