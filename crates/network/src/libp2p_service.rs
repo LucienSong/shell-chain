@@ -547,6 +547,14 @@ struct SwarmLoopConfig {
     peer_security: PeerSecurityConfig,
 }
 
+struct PeerCountResetGuard(Arc<AtomicUsize>);
+
+impl Drop for PeerCountResetGuard {
+    fn drop(&mut self) {
+        self.0.store(0, Ordering::Relaxed);
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PeerSecurityConfig {
     max_peers: usize,
@@ -571,6 +579,7 @@ async fn swarm_loop(
     event_tx: mpsc::Sender<NetworkEvent>,
     loop_config: SwarmLoopConfig,
 ) {
+    let _peer_count_reset = PeerCountResetGuard(Arc::clone(&loop_config.peer_count));
     // F-305: Initialize peer tracking and ban list.
     let mut peer_tracker = crate::security::PeerTracker::new(loop_config.peer_security.max_peers);
     let mut peer_ban_list = crate::security::PeerBanList::new(
@@ -1487,6 +1496,17 @@ mod tests {
         assert!(track_connection_closed(&mut tracker, &rejected).is_none());
         update_peer_count(&tracker, &peer_count);
         assert_eq!(peer_count.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn peer_count_resets_when_swarm_loop_stops() {
+        let peer_count = Arc::new(AtomicUsize::new(3));
+
+        {
+            let _guard = PeerCountResetGuard(Arc::clone(&peer_count));
+        }
+
+        assert_eq!(peer_count.load(Ordering::Relaxed), 0);
     }
 
     #[test]
