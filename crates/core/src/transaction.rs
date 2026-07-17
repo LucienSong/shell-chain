@@ -3606,13 +3606,21 @@ mod tests {
         let mut changed = auth.clone();
         changed.value_cap += U256::from(1u64);
         variants.push(changed);
-        let mut changed = auth;
+        let mut changed = auth.clone();
         changed.expiry_block += 1;
         variants.push(changed);
 
         for variant in variants {
             assert_ne!(expected, signing_hash(variant));
         }
+
+        let mut changed = auth.clone();
+        changed.root_signature = Bytes::from(vec![0x03; 96]);
+        assert_eq!(expected, signing_hash(changed));
+
+        let mut changed = auth;
+        changed.session_signature = Bytes::from(vec![0x04; 96]);
+        assert_eq!(expected, signing_hash(changed));
     }
 
     #[test]
