@@ -6,7 +6,8 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
-- Resolve custom-validator account and storage reads against the full 32-byte Shell address instead of the lossy 20-byte EVM alias.
+- Resolve custom-validator and contract-paymaster state reads against full
+  32-byte Shell addresses instead of lossy 20-byte EVM aliases.
 
 - Bound proof-amendment gossip envelopes to the signed payload hash and source
   range end before applying witness-replacement retention behavior.
