@@ -4,7 +4,7 @@
 //! (no blocks beyond genesis), the node downloads a snapshot file from
 //! the given URL, validates it, and imports it via `ChainStore::import_snapshot`.
 
-use std::io::BufReader;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -20,10 +20,11 @@ use crate::error::NodeError;
 
 struct DownloadedSnapshot {
     path: PathBuf,
+    file: Option<std::fs::File>,
 }
 
 impl DownloadedSnapshot {
-    fn create(datadir: &Path) -> Result<(Self, std::fs::File), NodeError> {
+    fn create(datadir: &Path) -> Result<Self, NodeError> {
         static NEXT_FILE_ID: AtomicU64 = AtomicU64::new(0);
 
         for _ in 0..16 {
@@ -37,12 +38,17 @@ impl DownloadedSnapshot {
                 std::process::id()
             ));
             let mut options = std::fs::OpenOptions::new();
-            options.write(true).create_new(true);
+            options.read(true).write(true).create_new(true);
             #[cfg(unix)]
             options.mode(0o600);
 
             match options.open(&path) {
-                Ok(file) => return Ok((Self { path }, file)),
+                Ok(file) => {
+                    return Ok(Self {
+                        path,
+                        file: Some(file),
+                    })
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(error) => {
                     return Err(NodeError::Startup(format!(
@@ -56,10 +62,27 @@ impl DownloadedSnapshot {
             "could not allocate a unique checkpoint snapshot file".into(),
         ))
     }
+
+    fn file(&self) -> Result<&std::fs::File, NodeError> {
+        self.file
+            .as_ref()
+            .ok_or_else(|| NodeError::Startup("checkpoint snapshot file is closed".into()))
+    }
+
+    fn reader(&self) -> Result<std::fs::File, NodeError> {
+        let mut file = self
+            .file()?
+            .try_clone()
+            .map_err(|e| NodeError::Startup(format!("clone checkpoint snapshot file: {e}")))?;
+        file.seek(SeekFrom::Start(0))
+            .map_err(|e| NodeError::Startup(format!("rewind checkpoint snapshot file: {e}")))?;
+        Ok(file)
+    }
 }
 
 impl Drop for DownloadedSnapshot {
     fn drop(&mut self) {
+        drop(self.file.take());
         let _ = std::fs::remove_file(&self.path);
     }
 }
@@ -76,15 +99,15 @@ pub async fn checkpoint_sync<S: KvStore>(
     datadir: &Path,
     expected_chain_id: u64,
 ) -> Result<u64, NodeError> {
-    let (snapshot, output_file) = DownloadedSnapshot::create(datadir)?;
+    let snapshot = DownloadedSnapshot::create(datadir)?;
 
     // Download the snapshot file using curl.
     info!("Downloading checkpoint snapshot...");
-    download_snapshot(url, output_file).await?;
+    download_snapshot(url, snapshot.file()?).await?;
 
     // Validate the snapshot format before importing.
     info!("Validating checkpoint snapshot...");
-    let metadata = validate_snapshot(&snapshot.path)?;
+    let metadata = validate_snapshot(snapshot.reader()?)?;
     info!(
         "Checkpoint snapshot: block #{}, chain_id={}, entries={}",
         metadata.block_number, metadata.chain_id, metadata.entry_count
@@ -119,11 +142,8 @@ pub async fn checkpoint_sync<S: KvStore>(
 
     // Import the snapshot into the chain store.
     info!("Importing checkpoint snapshot...");
-    let file = std::fs::File::open(&snapshot.path)
-        .map_err(|e| NodeError::Startup(format!("open snapshot: {e}")))?;
-    let reader = BufReader::new(file);
     let imported = chain_store
-        .import_snapshot(reader, config.chain_id, &config.genesis_hash)
+        .import_snapshot(snapshot.reader()?, config.chain_id, &config.genesis_hash)
         .map_err(NodeError::Storage)?;
 
     // Verify the imported HEAD block's state_root matches the snapshot metadata.
@@ -162,10 +182,13 @@ pub fn should_checkpoint_sync<S: KvStore>(chain_store: &ChainStore<S>) -> Result
 }
 
 /// Download a file from `url` into an already-open exclusive file using `curl`.
-async fn download_snapshot(url: &str, output_file: std::fs::File) -> Result<(), NodeError> {
+async fn download_snapshot(url: &str, output_file: &std::fs::File) -> Result<(), NodeError> {
     let downloaded_file = output_file
         .try_clone()
         .map_err(|e| NodeError::Startup(format!("inspect checkpoint snapshot file: {e}")))?;
+    let curl_output = output_file
+        .try_clone()
+        .map_err(|e| NodeError::Startup(format!("clone checkpoint snapshot output: {e}")))?;
     let output = tokio::process::Command::new("curl")
         .args([
             "--fail",
@@ -179,7 +202,7 @@ async fn download_snapshot(url: &str, output_file: std::fs::File) -> Result<(), 
             "--",
             url,
         ])
-        .stdout(Stdio::from(output_file))
+        .stdout(Stdio::from(curl_output))
         .output()
         .await
         .map_err(|e| NodeError::Startup(format!("failed to run curl: {e}")))?;
@@ -208,10 +231,9 @@ async fn download_snapshot(url: &str, output_file: std::fs::File) -> Result<(), 
 
 /// Validate that a file is a valid snapshot (parseable JSON-lines with META footer).
 /// Returns the snapshot metadata on success.
-fn validate_snapshot(path: &Path) -> Result<shell_storage::SnapshotMetadata, NodeError> {
-    let file = std::fs::File::open(path)
-        .map_err(|e| NodeError::Startup(format!("open snapshot for validation: {e}")))?;
-    let reader = BufReader::new(file);
+fn validate_snapshot<R: Read + Seek>(
+    reader: R,
+) -> Result<shell_storage::SnapshotMetadata, NodeError> {
     let snap_reader = SnapshotReader::new(reader)
         .map_err(|e| NodeError::Startup(format!("invalid snapshot: {e}")))?;
     Ok(snap_reader.metadata().clone())
@@ -239,11 +261,7 @@ mod tests {
     #[test]
     fn test_validate_snapshot_valid() {
         let data = make_test_snapshot();
-        let dir = std::env::current_dir().unwrap();
-        let path = dir.join("test_validate_snapshot.jsonl");
-        std::fs::write(&path, &data).unwrap();
-        let result = validate_snapshot(&path);
-        let _ = std::fs::remove_file(&path);
+        let result = validate_snapshot(Cursor::new(data));
         assert!(result.is_ok());
         let meta = result.unwrap();
         assert_eq!(meta.block_number, 42);
@@ -253,11 +271,7 @@ mod tests {
 
     #[test]
     fn test_validate_snapshot_invalid() {
-        let dir = std::env::current_dir().unwrap();
-        let path = dir.join("test_validate_snapshot_bad.jsonl");
-        std::fs::write(&path, b"not a valid snapshot").unwrap();
-        let result = validate_snapshot(&path);
-        let _ = std::fs::remove_file(&path);
+        let result = validate_snapshot(Cursor::new(b"not a valid snapshot"));
         assert!(result.is_err());
     }
 
@@ -417,7 +431,8 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let path = {
-            let (snapshot, mut file) = DownloadedSnapshot::create(&dir).unwrap();
+            let snapshot = DownloadedSnapshot::create(&dir).unwrap();
+            let mut file = snapshot.file().unwrap().try_clone().unwrap();
             std::io::Write::write_all(&mut file, b"partial snapshot").unwrap();
             snapshot.path.clone()
         };
@@ -435,14 +450,39 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
 
-        let (first, _first_file) = DownloadedSnapshot::create(&dir).unwrap();
-        let (second, _second_file) = DownloadedSnapshot::create(&dir).unwrap();
+        let first = DownloadedSnapshot::create(&dir).unwrap();
+        let second = DownloadedSnapshot::create(&dir).unwrap();
 
         assert_ne!(first.path, second.path);
         assert!(first.path.exists());
         assert!(second.path.exists());
         drop(first);
         drop(second);
+        std::fs::remove_dir(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_validation_uses_reserved_file_after_path_replacement() {
+        use std::io::Write;
+
+        let dir = std::env::temp_dir().join(format!(
+            "shell-checkpoint-replacement-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let snapshot = DownloadedSnapshot::create(&dir).unwrap();
+        let mut file = snapshot.file().unwrap().try_clone().unwrap();
+        file.write_all(&make_test_snapshot()).unwrap();
+        file.flush().unwrap();
+        std::fs::remove_file(&snapshot.path).unwrap();
+        std::fs::write(&snapshot.path, b"replacement file").unwrap();
+
+        let metadata = validate_snapshot(snapshot.reader().unwrap()).unwrap();
+        assert_eq!(metadata.block_number, 42);
+        drop(snapshot);
         std::fs::remove_dir(&dir).unwrap();
     }
 
@@ -458,7 +498,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
 
-        let (snapshot, _file) = DownloadedSnapshot::create(&dir).unwrap();
+        let snapshot = DownloadedSnapshot::create(&dir).unwrap();
         let mode = std::fs::metadata(&snapshot.path)
             .unwrap()
             .permissions()
