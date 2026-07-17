@@ -7,6 +7,9 @@ use std::path::{Path, PathBuf};
 /// Without `--force`, prints what would be removed and exits.
 /// With `--force`, deletes the database directory.
 pub fn removedb(datadir: PathBuf, force: bool) -> Result<(), Box<dyn std::error::Error>> {
+    if datadir.as_os_str().is_empty() {
+        return Err("Data directory path must not be empty".into());
+    }
     let db_path = datadir.join("db");
 
     let datadir_meta = match std::fs::symlink_metadata(&datadir) {
@@ -88,6 +91,13 @@ fn dir_size(path: &Path) -> std::io::Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn removedb_rejects_empty_data_directory() {
+        let error = removedb(PathBuf::new(), false).unwrap_err();
+
+        assert!(error.to_string().contains("must not be empty"));
+    }
 
     #[cfg(unix)]
     #[test]
