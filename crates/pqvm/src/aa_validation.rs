@@ -680,6 +680,7 @@ fn call_paymaster_validate<S: KvStore + 'static>(
         world_state,
         chain_store,
         wrapper_address,
+        *paymaster,
         paymaster_validation_wrapper_code(paymaster),
     );
 
@@ -878,6 +879,7 @@ fn encode_validate_paymaster_op_calldata(
 struct ValidationStateDb<'a, S: KvStore + 'static> {
     inner: ShellStateRefDb<'a, S>,
     validation_target: Address,
+    state_target: Address,
     validation_code_hash: ShellHash,
     inline_code: Option<Bytecode>,
 }
@@ -892,6 +894,7 @@ impl<'a, S: KvStore + 'static> ValidationStateDb<'a, S> {
         Self {
             inner: ShellStateRefDb::new(world_state, chain_store),
             validation_target,
+            state_target: validation_target,
             validation_code_hash,
             inline_code: None,
         }
@@ -901,12 +904,14 @@ impl<'a, S: KvStore + 'static> ValidationStateDb<'a, S> {
         world_state: &'a WorldState<S>,
         chain_store: &'a ChainStore<S>,
         validation_target: Address,
+        state_target: Address,
         code: Vec<u8>,
     ) -> Self {
         let validation_code_hash = keccak256(&code);
         Self {
             inner: ShellStateRefDb::new(world_state, chain_store),
             validation_target,
+            state_target,
             validation_code_hash,
             inline_code: Some(
                 Bytecode::new_raw_checked(code.into())
@@ -928,6 +933,12 @@ impl<S: KvStore + 'static> Database for ValidationStateDb<'_, S> {
             self.inner
                 .world_state()
                 .get_account(&self.validation_target)
+                .map_err(StateDbError::Storage)?
+                .map(|account| ShellStateDb::<S>::to_account_info(&account))
+        } else if address == self.state_target.to_alloy() {
+            self.inner
+                .world_state()
+                .get_account(&self.state_target)
                 .map_err(StateDbError::Storage)?
                 .map(|account| ShellStateDb::<S>::to_account_info(&account))
         } else {
@@ -962,12 +973,12 @@ impl<S: KvStore + 'static> Database for ValidationStateDb<'_, S> {
         address: alloy_primitives::Address,
         index: alloy_primitives::U256,
     ) -> Result<alloy_primitives::U256, Self::Error> {
-        if address == self.validation_target.to_alloy() {
+        if address == self.state_target.to_alloy() {
             let key = ShellHash::from(alloy_primitives::B256::from(index));
             let value = self
                 .inner
                 .world_state()
-                .get_storage(&self.validation_target, &key)
+                .get_storage(&self.state_target, &key)
                 .map_err(StateDbError::Storage)?;
             return Ok(alloy_primitives::U256::from_be_bytes(*value.as_bytes()));
         }
@@ -1208,6 +1219,28 @@ mod tests {
         let (mut ws, cs) = setup_stores();
         let paymaster = Address::from([0x77; 20]);
         install_paymaster(&mut ws, &cs, paymaster, validator_returns_true());
+        let signed = sign_tx(&signer, base_tx(1337, nonce_from_signer(&signer)), true);
+
+        assert!(call_paymaster_validate(&signed, &paymaster, &[1], &ws, &cs).is_ok());
+    }
+
+    #[test]
+    fn paymaster_validation_reads_full_shell_address_storage() {
+        let signer = DilithiumSigner::generate();
+        let paymaster_signer = DilithiumSigner::generate();
+        let (mut ws, cs) = setup_stores();
+        let paymaster = signer_address(&paymaster_signer);
+        assert_ne!(paymaster, Address::from(paymaster.to_alloy()));
+        install_paymaster(
+            &mut ws,
+            &cs,
+            paymaster,
+            validator_accepts_when_slot_zero_is_one(),
+        );
+        let mut stored = [0u8; 32];
+        stored[31] = 1;
+        ws.set_storage(&paymaster, &ShellHash::ZERO, &ShellHash::from(stored))
+            .unwrap();
         let signed = sign_tx(&signer, base_tx(1337, nonce_from_signer(&signer)), true);
 
         assert!(call_paymaster_validate(&signed, &paymaster, &[1], &ws, &cs).is_ok());
