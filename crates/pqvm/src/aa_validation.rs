@@ -1088,6 +1088,15 @@ mod tests {
         ]
     }
 
+    fn validator_accepts_when_own_balance_is_one() -> Vec<u8> {
+        vec![
+            0x30, 0x31, // balance(address())
+            0x60, 0x01, 0x14, // eq(value, 1)
+            0x5f, 0x52, // mstore(0, accepted)
+            0x60, 0x20, 0x5f, 0xf3, // return(0, 32)
+        ]
+    }
+
     fn read_abi_u64(word: &[u8]) -> u64 {
         u64::from_be_bytes(word[24..32].try_into().unwrap())
     }
@@ -1241,6 +1250,25 @@ mod tests {
         stored[31] = 1;
         ws.set_storage(&paymaster, &ShellHash::ZERO, &ShellHash::from(stored))
             .unwrap();
+        let signed = sign_tx(&signer, base_tx(1337, nonce_from_signer(&signer)), true);
+
+        assert!(call_paymaster_validate(&signed, &paymaster, &[1], &ws, &cs).is_ok());
+    }
+
+    #[test]
+    fn paymaster_validation_reads_full_shell_address_balance() {
+        let signer = DilithiumSigner::generate();
+        let paymaster_signer = DilithiumSigner::generate();
+        let (mut ws, cs) = setup_stores();
+        let paymaster = signer_address(&paymaster_signer);
+        assert_ne!(paymaster, Address::from(paymaster.to_alloy()));
+        install_paymaster(
+            &mut ws,
+            &cs,
+            paymaster,
+            validator_accepts_when_own_balance_is_one(),
+        );
+        ws.set_balance(&paymaster, U256::from(1u64)).unwrap();
         let signed = sign_tx(&signer, base_tx(1337, nonce_from_signer(&signer)), true);
 
         assert!(call_paymaster_validate(&signed, &paymaster, &[1], &ws, &cs).is_ok());
@@ -1472,6 +1500,38 @@ mod tests {
         stored[31] = 1;
         ws.set_storage(&from, &ShellHash::ZERO, &ShellHash::from(stored))
             .unwrap();
+
+        let signed = SignedTransaction::new(
+            from,
+            base_tx(1337, 0),
+            PQSignature::new(SignatureType::MlDsa65, vec![0xaa; 64]),
+        );
+
+        validate_aa_tx(&signed, &ws, &cs, &DilithiumVerifier).unwrap();
+    }
+
+    #[test]
+    fn custom_validation_reads_full_shell_address_balance() {
+        let signer = DilithiumSigner::generate();
+        let (mut ws, cs) = setup_stores();
+        let from = signer_address(&signer);
+        assert_ne!(from, Address::from(from.to_alloy()));
+
+        let code = validator_accepts_when_own_balance_is_one();
+        let code_hash = keccak256(&code);
+        cs.put_code(&code_hash, &code).unwrap();
+        ws.set_account(
+            &from,
+            &Account {
+                pq_pubkey_hash: ShellHash::ZERO,
+                nonce: 0,
+                balance: U256::from(1u64),
+                validation_code_hash: Some(code_hash),
+                code_hash: None,
+                storage_root: ShellHash::ZERO,
+            },
+        )
+        .unwrap();
 
         let signed = SignedTransaction::new(
             from,
