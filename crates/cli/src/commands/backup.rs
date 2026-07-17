@@ -109,6 +109,15 @@ pub fn restore_backup(
     }
 
     std::fs::create_dir_all(&datadir)?;
+    let source_root = checkpoint_src.canonicalize()?;
+    let data_root = datadir.canonicalize()?;
+    if data_root.starts_with(&source_root) {
+        return Err(format!(
+            "Backup path must not contain data directory: {}",
+            checkpoint_src.display()
+        )
+        .into());
+    }
     let db_path = datadir.join("db");
 
     // Fully stage and validate the backup before moving the live database.
@@ -118,7 +127,7 @@ pub fn restore_backup(
         .prefix(".db.restore-")
         .tempdir_in(&datadir)?;
     let staged_db = staging.path().join("db");
-    copy_dir_all(&checkpoint_src, &staged_db)?;
+    copy_dir_all(&source_root, &staged_db)?;
 
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -288,6 +297,25 @@ mod tests {
         let error = restore_backup(datadir, backup).unwrap_err();
 
         assert!(error.to_string().contains("symbolic link"));
+        assert_eq!(
+            std::fs::read(db_path.join("CURRENT")).unwrap(),
+            b"live database"
+        );
+    }
+
+    #[test]
+    fn restore_rejects_source_containing_data_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let datadir = root.path().join("chain");
+        let db_path = datadir.join("db");
+        std::fs::create_dir_all(&db_path).unwrap();
+        std::fs::write(db_path.join("CURRENT"), b"live database").unwrap();
+
+        let error = restore_backup(datadir.clone(), root.path().to_path_buf()).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("must not contain data directory"));
         assert_eq!(
             std::fs::read(db_path.join("CURRENT")).unwrap(),
             b"live database"
