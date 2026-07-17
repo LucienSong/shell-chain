@@ -2988,6 +2988,39 @@ mod tests {
     }
 
     #[test]
+    fn test_import_snapshot_rejects_malformed_chain_config_before_writes() {
+        let store = Arc::new(MemoryDb::new());
+        let cs = ChainStore::new(Arc::clone(&store));
+        let meta = crate::SnapshotMetadata::new(
+            1337,
+            0,
+            ShellHash::ZERO,
+            ShellHash::ZERO,
+            ShellHash::ZERO,
+        );
+        let mut buf = Vec::new();
+        {
+            let mut writer =
+                crate::SnapshotWriter::new(std::io::Cursor::new(&mut buf), meta).unwrap();
+            writer.write_entry(b"untrusted-key", b"value").unwrap();
+            writer
+                .write_entry(prefix::CHAIN_CONFIG, br#"{"chain_id":"not-a-number"}"#)
+                .unwrap();
+            writer.finalize().unwrap();
+        }
+
+        let error = cs
+            .import_snapshot(std::io::Cursor::new(buf), 1337, &ShellHash::ZERO)
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("decode snapshot chain configuration"));
+        assert!(store.get(b"untrusted-key").unwrap().is_none());
+        assert!(store.get(prefix::CHAIN_CONFIG).unwrap().is_none());
+    }
+
+    #[test]
     fn test_import_snapshot_restores_data() {
         let store = Arc::new(MemoryDb::new());
         let cs = ChainStore::new(store.clone());
