@@ -842,6 +842,23 @@ mod tests {
     }
 
     #[test]
+    fn body_sync_nonces_default_for_legacy_messages() {
+        let request: NetworkMessage =
+            serde_json::from_str(r#"{"BodyRequest":{"start_number":1,"count":1}}"#).unwrap();
+        assert!(matches!(
+            request,
+            NetworkMessage::BodyRequest { nonce: 0, .. }
+        ));
+
+        let response: NetworkMessage =
+            serde_json::from_str(r#"{"BodyResponse":{"blocks":[]}}"#).unwrap();
+        assert!(matches!(
+            response,
+            NetworkMessage::BodyResponse { nonce: 0, .. }
+        ));
+    }
+
+    #[test]
     fn deserialize_checked_rejects_excess_commit_certificates() {
         let msg = NetworkMessage::BlockResponse {
             blocks: vec![],
