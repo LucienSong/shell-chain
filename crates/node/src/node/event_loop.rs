@@ -340,14 +340,15 @@ impl<S: KvStore + 'static> Node<S> {
             startup_sync_grace,
         );
         if startup_peers > 0 {
-            self.request_missing_blocks(
-                &network,
-                None,
-                &mut sync_requested,
-                &mut sync_request_nonce,
-                "initial-sync",
-            )
-            .await;
+            let _ = self
+                .request_missing_blocks(
+                    &network,
+                    None,
+                    &mut sync_requested,
+                    &mut sync_request_nonce,
+                    "initial-sync",
+                )
+                .await;
         }
 
         let rebuilt_stark_settlements = self.rebuild_settled_stark_sources_from_chain()?;
@@ -971,20 +972,22 @@ impl<S: KvStore + 'static> Node<S> {
                                             // Only request missing blocks on genuine gap,
                                             // NOT on invalid signatures or other errors (F-037).
                                             if !sync_requested {
-                                                self.request_missing_blocks(
+                                                if self.request_missing_blocks(
                                                     &network,
                                                     Some(&peer),
                                                     &mut sync_requested,
                                                     &mut sync_request_nonce,
                                                     "gap-detected",
                                                 )
-                                                .await;
-                                                production_readiness.note_sync_requested(
-                                                    self.head_number(),
-                                                    std::time::Instant::now(),
-                                                    catch_up_timeout,
-                                                    "gap-detected",
-                                                );
+                                                .await
+                                                {
+                                                    production_readiness.note_sync_requested(
+                                                        self.head_number(),
+                                                        std::time::Instant::now(),
+                                                        catch_up_timeout,
+                                                        "gap-detected",
+                                                    );
+                                                }
                                             } else {
                                                 debug!(
                                                     head = self.head_number(),
@@ -1715,20 +1718,22 @@ impl<S: KvStore + 'static> Node<S> {
                                 sync_retry_timer.reset_after(Duration::from_secs(
                                     SYNC_RETRY_BASE_INTERVAL_SECS,
                                 ));
-                                self.request_missing_blocks(
+                                if self.request_missing_blocks(
                                     &network,
                                     Some(&peer),
                                     &mut sync_requested,
                                     &mut sync_request_nonce,
                                     "peer-connected",
                                 )
-                                .await;
-                                production_readiness.note_head_probe(
-                                    self.head_number(),
-                                    std::time::Instant::now(),
-                                    startup_sync_grace,
-                                    "peer-connected",
-                                );
+                                .await
+                                {
+                                    production_readiness.note_head_probe(
+                                        self.head_number(),
+                                        std::time::Instant::now(),
+                                        startup_sync_grace,
+                                        "peer-connected",
+                                    );
+                                }
                             } else {
                                 debug!(
                                     head = self.head_number(),
@@ -1768,20 +1773,22 @@ impl<S: KvStore + 'static> Node<S> {
                                 sync_retry_timer.reset_after(Duration::from_secs(
                                     SYNC_RETRY_BASE_INTERVAL_SECS,
                                 ));
-                                self.request_missing_blocks(
+                                if self.request_missing_blocks(
                                     &network,
                                     None,
                                     &mut sync_requested,
                                     &mut sync_request_nonce,
                                     "routing-update",
                                 )
-                                .await;
-                                production_readiness.note_head_probe(
-                                    self.head_number(),
-                                    std::time::Instant::now(),
-                                    startup_sync_grace,
-                                    "routing-update",
-                                );
+                                .await
+                                {
+                                    production_readiness.note_head_probe(
+                                        self.head_number(),
+                                        std::time::Instant::now(),
+                                        startup_sync_grace,
+                                        "routing-update",
+                                    );
+                                }
                             }
                         }
                         None => {
@@ -1887,7 +1894,7 @@ impl<S: KvStore + 'static> Node<S> {
                             ));
                             continue;
                         }
-                        self.request_missing_blocks(
+                        let request_sent = self.request_missing_blocks(
                             &network,
                             None,
                             &mut sync_requested,
@@ -1895,9 +1902,16 @@ impl<S: KvStore + 'static> Node<S> {
                             "sync-retry",
                         )
                         .await;
-                        sync_retry_attempts_without_progress =
-                            sync_retry_attempts_without_progress.saturating_add(1);
-                        if sync_retry_attempts_without_progress >= SYNC_RETRY_BACKOFF_THRESHOLD {
+                        if request_sent {
+                            sync_retry_attempts_without_progress =
+                                sync_retry_attempts_without_progress.saturating_add(1);
+                        } else {
+                            sync_retry_attempts_without_progress = 0;
+                        }
+                        if !request_sent
+                            || sync_retry_attempts_without_progress
+                                >= SYNC_RETRY_BACKOFF_THRESHOLD
+                        {
                             production_readiness.refresh(
                                 peers,
                                 sync_requested,
@@ -1914,20 +1928,22 @@ impl<S: KvStore + 'static> Node<S> {
                         // otherwise stay stale until a reconnect/routing event. Periodically
                         // ask peers for head+1 as a cheap head probe; an empty response clears
                         // the sync request without moving readiness out of Ready.
-                        self.request_missing_blocks(
+                        if self.request_missing_blocks(
                             &network,
                             None,
                             &mut sync_requested,
                             &mut sync_request_nonce,
                             "periodic-head-probe",
                         )
-                        .await;
-                        production_readiness.note_head_probe(
-                            self.head_number(),
-                            std::time::Instant::now(),
-                            startup_sync_grace,
-                            "periodic-head-probe",
-                        );
+                        .await
+                        {
+                            production_readiness.note_head_probe(
+                                self.head_number(),
+                                std::time::Instant::now(),
+                                startup_sync_grace,
+                                "periodic-head-probe",
+                            );
+                        }
                         sync_retry_attempts_without_progress = 0;
                         sync_retry_timer.reset_after(Duration::from_secs(
                             SYNC_RETRY_BASE_INTERVAL_SECS,
