@@ -6,6 +6,8 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Keep pending-balance reservation checks linear when pool-capacity eviction
+  removes a sender's nonce descendants.
 - Remap local build paths out of precompiled release binaries, omit
   nondeterministic macOS linker UUIDs, and refresh embedded revision metadata
   after branch advances.
