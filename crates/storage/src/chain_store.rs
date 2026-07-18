@@ -1883,6 +1883,23 @@ impl<S: KvStore> ProofAmendmentStore<S> {
         self.store.put(&Self::key(block_hash), bytes)
     }
 
+    /// Atomically store all artifacts for one proof range.
+    ///
+    /// A range may contain compact pointers for earlier source blocks and the
+    /// full proof at its final block. Publishing only part of that set would
+    /// leave pointers missing or dangling, so callers should use this method
+    /// when persisting a complete generated range.
+    pub fn put_amendments_atomic(
+        &self,
+        artifacts: impl IntoIterator<Item = (ShellHash, Vec<u8>)>,
+    ) -> Result<(), StorageError> {
+        let mut batch = WriteBatch::new();
+        for (block_hash, bytes) in artifacts {
+            batch.put(Self::key(&block_hash), bytes);
+        }
+        self.store.write_batch(batch)
+    }
+
     /// Retrieve the raw bytes of the `ProofAmendment` for a block, if present.
     pub fn get_amendment(&self, block_hash: &ShellHash) -> Result<Option<Vec<u8>>, StorageError> {
         self.store.get(&Self::key(block_hash))
@@ -2314,6 +2331,52 @@ mod tests {
         store.put(b"h/a", b"ignored").unwrap();
 
         assert_eq!(cs.approximate_prefix_bytes(b"b/").unwrap(), 12);
+    }
+
+    #[test]
+    fn proof_amendment_range_is_written_in_one_batch() {
+        let store = Arc::new(FailingBatchStore::new());
+        let amendments = ProofAmendmentStore::new(Arc::clone(&store));
+        let first = ShellHash::from([1u8; 32]);
+        let last = ShellHash::from([2u8; 32]);
+
+        amendments
+            .put_amendments_atomic(vec![
+                (first, b"pointer".to_vec()),
+                (last, b"proof".to_vec()),
+            ])
+            .unwrap();
+
+        assert_eq!(store.batch_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(store.put_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            amendments.get_amendment(&first).unwrap(),
+            Some(b"pointer".to_vec())
+        );
+        assert_eq!(
+            amendments.get_amendment(&last).unwrap(),
+            Some(b"proof".to_vec())
+        );
+    }
+
+    #[test]
+    fn proof_amendment_range_failure_leaves_no_partial_artifacts() {
+        let store = Arc::new(FailingBatchStore::new());
+        let amendments = ProofAmendmentStore::new(Arc::clone(&store));
+        let first = ShellHash::from([3u8; 32]);
+        let last = ShellHash::from([4u8; 32]);
+        store.fail_next_batch();
+
+        let err = amendments
+            .put_amendments_atomic(vec![
+                (first, b"pointer".to_vec()),
+                (last, b"proof".to_vec()),
+            ])
+            .unwrap_err();
+
+        assert!(err.to_string().contains("injected batch failure"));
+        assert_eq!(amendments.get_amendment(&first).unwrap(), None);
+        assert_eq!(amendments.get_amendment(&last).unwrap(), None);
     }
 
     fn empty_block(number: u64) -> Block {
