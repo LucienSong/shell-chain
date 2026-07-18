@@ -7,7 +7,8 @@ All notable changes to this project will be documented in this file.
 ### Fixed
 
 - Keep the reported libp2p peer count aligned with admitted unique peers so connections rejected by peer limits cannot transiently inflate RPC and sync readiness metrics.
-
+- Keep canonical block mappings until both body and witness pruning have
+  processed them, so delayed STARK settlements cannot strand retained data.
 - Release the consensus read lock before RPC validator stake lookups and reuse
   one world-state read guard for the full validator snapshot.
 - Bound proof-amendment gossip envelopes to the signed payload hash and source
