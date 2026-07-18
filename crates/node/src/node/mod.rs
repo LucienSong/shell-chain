@@ -6870,20 +6870,19 @@ mod tests {
         }
 
         let canonical = node.produce_block(&proposer_signer, 100).unwrap();
-        for (label, clear_signature) in [("empty", true), ("corrupt", false)] {
+        for (label, mutation) in [("empty", 0), ("corrupt", 1), ("sender", 2)] {
             let mut side_fork = canonical.clone();
             side_fork.header.extra_data = Bytes::copy_from_slice(label.as_bytes());
             side_fork.header.witness_root = None;
-            let signature = &mut side_fork
+            let transaction = side_fork
                 .transactions
                 .first_mut()
-                .expect("block should include a transaction")
-                .signature
-                .data;
-            if clear_signature {
-                signature.clear();
-            } else {
-                signature[0] ^= 1;
+                .expect("block should include a transaction");
+            match mutation {
+                0 => transaction.signature.data.clear(),
+                1 => transaction.signature.data[0] ^= 1,
+                2 => transaction.from = Address::from([0x44; 20]),
+                _ => unreachable!(),
             }
             side_fork.proposer_seal = Some(
                 proposer_signer
@@ -6897,7 +6896,8 @@ mod tests {
             let message = error.to_string();
             assert!(
                 message.contains("empty signature")
-                    || message.contains("batch sig verification failed"),
+                    || message.contains("batch sig verification failed")
+                    || message.contains("does not match resolved pubkey address"),
                 "unexpected rejection for {label} signature: {message}"
             );
             assert!(node

@@ -176,6 +176,16 @@ impl<S: KvStore + 'static> Node<S> {
                     }
                 }
             };
+            let derived = Address::from_public_key(&pubkey, tx.signature.sig_type.as_u8());
+            if derived != tx.from {
+                return Err(NodeError::Startup(format!(
+                    "block {} tx {} sender {} does not match resolved pubkey address {}",
+                    block.number(),
+                    tx.hash(),
+                    tx.from,
+                    derived
+                )));
+            }
             resolved_pubkeys.push(pubkey);
         }
 
@@ -195,7 +205,7 @@ impl<S: KvStore + 'static> Node<S> {
             .map_err(|error| {
                 NodeError::Startup(format!(
                     "block {} batch sig verification failed: {error}",
-                    block.number()
+                    block.number(),
                 ))
             })
     }
