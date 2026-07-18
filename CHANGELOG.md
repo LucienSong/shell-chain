@@ -8,6 +8,8 @@ All notable changes to this project will be documented in this file.
 
 - Keep the reported libp2p peer count aligned with admitted unique peers so connections rejected by peer limits cannot transiently inflate RPC and sync readiness metrics.
 
+- Release the consensus read lock before RPC validator stake lookups and reuse
+  one world-state read guard for the full validator snapshot.
 - Bound proof-amendment gossip envelopes to the signed payload hash and source
   range end before applying witness-replacement retention behavior.
 - Retain expired grace-window witness deletions for retry when storage returns
