@@ -595,6 +595,17 @@ struct NetworkInterface<'a, N: NetworkService + ?Sized> {
     inner: &'a mut N,
 }
 
+fn record_sync_request_result(
+    sent: bool,
+    nonce: u64,
+    sync_requested: &mut bool,
+    sync_request_nonce: &mut Option<u64>,
+) -> bool {
+    *sync_requested = sent;
+    *sync_request_nonce = sent.then_some(nonce);
+    sent
+}
+
 impl<'a, N: NetworkService + ?Sized> NetworkInterface<'a, N> {
     fn new(inner: &'a mut N) -> Self {
         Self { inner }
@@ -1000,7 +1011,7 @@ impl<S: KvStore + 'static> Node<S> {
         sync_requested: &mut bool,
         sync_request_nonce: &mut Option<u64>,
         reason: &'static str,
-    ) {
+    ) -> bool {
         let head_number = self.head_number();
         info!(
             head = head_number,
@@ -1020,7 +1031,7 @@ impl<S: KvStore + 'static> Node<S> {
             );
             *sync_requested = false;
             *sync_request_nonce = None;
-            return;
+            return false;
         };
         let req = NetworkMessage::BlockRequest {
             start_number,
@@ -1032,11 +1043,13 @@ impl<S: KvStore + 'static> Node<S> {
         } else {
             network.broadcast(req).await
         };
-        if let Err(e) = send_result {
-            tracing::warn!(reason, error = %e, "failed to request missing blocks");
+        match send_result {
+            Ok(()) => record_sync_request_result(true, nonce, sync_requested, sync_request_nonce),
+            Err(e) => {
+                tracing::warn!(reason, error = %e, "failed to request missing blocks");
+                record_sync_request_result(false, nonce, sync_requested, sync_request_nonce)
+            }
         }
-        *sync_requested = true;
-        *sync_request_nonce = Some(nonce);
     }
 
     async fn rebroadcast_pending_transactions<N: NetworkService + ?Sized>(
@@ -1782,6 +1795,30 @@ mod tests {
         assert_eq!(Node::<MemoryDb>::sync_retry_delay_secs(2), 5);
         assert_eq!(Node::<MemoryDb>::sync_retry_delay_secs(3), 30);
         assert_eq!(Node::<MemoryDb>::sync_retry_delay_secs(10), 30);
+    }
+
+    #[test]
+    fn failed_sync_request_does_not_leave_an_in_flight_nonce() {
+        let mut sync_requested = true;
+        let mut sync_request_nonce = Some(7);
+
+        assert!(!record_sync_request_result(
+            false,
+            8,
+            &mut sync_requested,
+            &mut sync_request_nonce,
+        ));
+        assert!(!sync_requested);
+        assert_eq!(sync_request_nonce, None);
+
+        assert!(record_sync_request_result(
+            true,
+            9,
+            &mut sync_requested,
+            &mut sync_request_nonce,
+        ));
+        assert!(sync_requested);
+        assert_eq!(sync_request_nonce, Some(9));
     }
 
     #[test]
