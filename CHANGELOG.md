@@ -8,7 +8,8 @@ All notable changes to this project will be documented in this file.
 
 - Resolve custom-validator and contract-paymaster state reads against full
   32-byte Shell addresses instead of lossy 20-byte EVM aliases.
-
+- Keep canonical block mappings until both body and witness pruning have
+  processed them, so delayed STARK settlements cannot strand retained data.
 - Release the consensus read lock before RPC validator stake lookups and reuse
   one world-state read guard for the full validator snapshot.
 - Bound proof-amendment gossip envelopes to the signed payload hash and source
