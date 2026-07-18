@@ -1350,6 +1350,15 @@ impl<S: KvStore + 'static> Node<S> {
                 self.witness_pruner.read().pruned_below(),
             );
             let mut pruner = self.state_pruner.write();
+            if pruner.genesis_root().is_none() {
+                match self.chain_store.get_block_by_number(0) {
+                    Ok(Some(genesis)) => pruner.set_genesis_root(genesis.header.state_root),
+                    Ok(None) => {}
+                    Err(e) => {
+                        tracing::warn!(error = %e, "state pruner: failed to load genesis root")
+                    }
+                }
+            }
             pruner.register_block(block_number, state_root);
             if finalized_number > 0 && pruner.should_prune(block_number) {
                 pruner.mark_prunable(canonical_prune_boundary);
@@ -5800,15 +5809,24 @@ mod tests {
     }
 
     #[test]
-    fn state_pruner_does_not_pin_every_committed_root() {
+    fn state_pruner_only_pins_genesis_root() {
         let (node, signer) = setup_node_with_pruning(128);
         store_genesis(&node);
+        let genesis_root = node
+            .chain_store
+            .get_block_by_number(0)
+            .unwrap()
+            .unwrap()
+            .header
+            .state_root;
 
         for _ in 0..5 {
             node.produce_block(&signer, 0).unwrap();
         }
 
-        assert_eq!(node.state_pruner.read().active_root_count(), 0);
+        let pruner = node.state_pruner.read();
+        assert_eq!(pruner.active_root_count(), 1);
+        assert_eq!(pruner.genesis_root(), Some(&genesis_root));
     }
 
     #[test]
@@ -5921,6 +5939,11 @@ mod tests {
 
         assert_eq!(node.body_pruner.read().pruned_below(), 34);
         assert_eq!(node.witness_pruner.read().pruned_below(), 34);
+        assert!(node
+            .chain_store
+            .get_block_hash_by_number(0)
+            .unwrap()
+            .is_some());
         assert!(node
             .chain_store
             .get_block_hash_by_number(1)
