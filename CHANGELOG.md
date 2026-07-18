@@ -8,6 +8,8 @@ All notable changes to this project will be documented in this file.
 
 - Size the world-state account cache from decoded entry memory and honor a
   zero-MiB budget with the minimum LRU capacity instead of the default cache.
+- Keep canonical block mappings until both body and witness pruning have
+  processed them, so delayed STARK settlements cannot strand retained data.
 - Release the consensus read lock before RPC validator stake lookups and reuse
   one world-state read guard for the full validator snapshot.
 - Bound proof-amendment gossip envelopes to the signed payload hash and source
