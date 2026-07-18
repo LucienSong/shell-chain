@@ -257,7 +257,7 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
         hash: ShellHash,
     ) -> Result<Option<RpcTransaction>, ErrorObjectOwned> {
         // Check mempool first
-        if let Some(pending_tx) = self.tx_pool.get(&hash) {
+        if let Some(pending_tx) = self.tx_pool.get_shared(&hash) {
             return Ok(Some(tx_to_rpc(&pending_tx, None, None, None, None)));
         }
 

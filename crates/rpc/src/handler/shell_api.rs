@@ -1525,7 +1525,7 @@ impl<S: KvStore + 'static> ShellApiServer for RpcHandler<S> {
             })
         };
 
-        if let Some(pending) = self.tx_pool.get(&tx_hash) {
+        if let Some(pending) = self.tx_pool.get_shared(&tx_hash) {
             return Ok(describe(&pending, "mempool"));
         }
 

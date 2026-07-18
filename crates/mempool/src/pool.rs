@@ -421,8 +421,17 @@ impl TxPool {
 
     /// Get a transaction by hash.
     pub fn get(&self, hash: &ShellHash) -> Option<SignedTransaction> {
+        self.get_shared(hash).map(|tx| tx.as_ref().clone())
+    }
+
+    /// Get a shared transaction by hash without cloning its payload.
+    ///
+    /// The pool lock is released after cloning the internal [`Arc`], allowing
+    /// callers such as RPC handlers to inspect large signed transactions
+    /// without holding the read lock or copying signature and calldata bytes.
+    pub fn get_shared(&self, hash: &ShellHash) -> Option<Arc<SignedTransaction>> {
         let inner = self.inner.read();
-        inner.by_hash.get(hash).map(|e| e.tx.as_ref().clone())
+        inner.by_hash.get(hash).map(|entry| Arc::clone(&entry.tx))
     }
 
     /// Check if a transaction is in the pool.
@@ -1285,6 +1294,11 @@ mod tests {
         assert_eq!(pool.len(), 1);
         assert!(pool.contains(&hash));
         assert!(pool.get(&hash).is_some());
+
+        let first = pool.get_shared(&hash).expect("shared transaction");
+        let second = pool.get_shared(&hash).expect("shared transaction");
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(first.hash(), hash);
     }
 
     #[test]
