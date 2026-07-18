@@ -19,6 +19,57 @@ fi
 if ! grep -Fq 'cargo audit --file deps/libp2p-yamux/Cargo.lock' "$SCRIPT_DIR/release.sh"; then
     fail "release audit does not cover the patched libp2p-yamux lockfile"
 fi
+if ! grep -Fq 'check-release-ci.sh' "$SCRIPT_DIR/release.sh"; then
+    fail "release preflight does not verify hosted CI for HEAD"
+fi
+
+CHECK_SHA=1111111111111111111111111111111111111111
+FAKE_GH="$TMP_DIR/fake-gh"
+cat > "$FAKE_GH" <<'EOF'
+#!/usr/bin/env bash
+cat "$CHECK_RUNS_FIXTURE"
+EOF
+chmod +x "$FAKE_GH"
+
+write_check_runs() {
+    local test_status=$1
+    local test_conclusion=$2
+    local test_sha=${3:-$CHECK_SHA}
+    cat > "$TMP_DIR/check-runs.json" <<EOF
+{
+  "check_runs": [
+    {"name":"Check & Lint","head_sha":"$CHECK_SHA","status":"completed","conclusion":"success"},
+    {"name":"Test","head_sha":"$test_sha","status":"$test_status","conclusion":$test_conclusion},
+    {"name":"Supply Chain Security","head_sha":"$CHECK_SHA","status":"completed","conclusion":"success"}
+  ]
+}
+EOF
+}
+
+assert_ci_fails_with() {
+    local expected=$1
+    local output
+    if output=$(GH_BIN="$FAKE_GH" CHECK_RUNS_FIXTURE="$TMP_DIR/check-runs.json" \
+        "$SCRIPT_DIR/check-release-ci.sh" "$CHECK_SHA" 2>&1); then
+        fail "release CI check unexpectedly passed"
+    fi
+    if ! grep -Fq "$expected" <<<"$output"; then
+        fail "expected '$expected' in CI check output: $output"
+    fi
+}
+
+write_check_runs completed '"success"'
+GH_BIN="$FAKE_GH" CHECK_RUNS_FIXTURE="$TMP_DIR/check-runs.json" \
+    "$SCRIPT_DIR/check-release-ci.sh" "$CHECK_SHA" >/dev/null
+
+write_check_runs in_progress null
+assert_ci_fails_with "required check 'Test' has not succeeded"
+
+write_check_runs completed '"success"' 2222222222222222222222222222222222222222
+assert_ci_fails_with "required check 'Test' is associated with another commit"
+
+printf '{"check_runs":[]}' > "$TMP_DIR/check-runs.json"
+assert_ci_fails_with "required check 'Check & Lint' is missing"
 
 make_fixture() {
     local changelog=$1
@@ -26,7 +77,8 @@ make_fixture() {
 
     rm -rf "$fixture"
     mkdir -p "$fixture/scripts"
-    cp "$SCRIPT_DIR/release.sh" "$SCRIPT_DIR/check-release-metadata.sh" \
+    cp "$SCRIPT_DIR/release.sh" "$SCRIPT_DIR/check-release-ci.sh" \
+        "$SCRIPT_DIR/check-release-metadata.sh" \
         "$SCRIPT_DIR/supply-chain-tool-versions.sh" "$fixture/scripts/"
     printf '[workspace.package]\nversion = "0.27.1"\n' > "$fixture/Cargo.toml"
     mkdir -p "$fixture/fuzz"
@@ -112,7 +164,8 @@ assert_fails_with "$fixture" '0.27.1' "cargo fmt check failed"
 fixture=$(make_fixture $'## [Unreleased]\n\n## [0.27.1] - test release')
 git -C "$fixture" switch -q --orphan release/v0.27.1
 mkdir -p "$fixture/scripts"
-cp "$SCRIPT_DIR/release.sh" "$SCRIPT_DIR/check-release-metadata.sh" \
+cp "$SCRIPT_DIR/release.sh" "$SCRIPT_DIR/check-release-ci.sh" \
+    "$SCRIPT_DIR/check-release-metadata.sh" \
     "$SCRIPT_DIR/supply-chain-tool-versions.sh" "$fixture/scripts/"
 printf '[workspace.package]\nversion = "0.27.1"\n' > "$fixture/Cargo.toml"
 mkdir -p "$fixture/fuzz"

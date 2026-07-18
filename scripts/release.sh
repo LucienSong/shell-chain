@@ -119,6 +119,14 @@ else
     fail "cargo fmt check failed — run 'cargo fmt --all' then commit"
 fi
 
+# Require the hosted CI checks for the exact commit that will be tagged.
+RELEASE_COMMIT=$(git rev-parse HEAD)
+if "$SCRIPT_DIR/check-release-ci.sh" "$RELEASE_COMMIT"; then
+    ok "Hosted CI passed on HEAD: ${RELEASE_COMMIT}"
+else
+    fail "Hosted CI is missing, pending, or failing on HEAD"
+fi
+
 # ── Fuzz target syntax check ──────────────────────────────────
 
 echo ""
