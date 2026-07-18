@@ -5751,6 +5751,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn block_filter_preserves_cursor_across_canonical_gaps() {
+        let handler = setup();
+        let genesis = make_genesis_block();
+        let genesis_hash = genesis.hash();
+        handler.chain_store.put_block(&genesis).unwrap();
+        handler.chain_store.set_canonical(0, &genesis_hash).unwrap();
+        handler.chain_store.set_head(&genesis_hash).unwrap();
+        let filter_id = EthApiServer::new_block_filter(&handler).await.unwrap();
+
+        let block1 = Block {
+            header: BlockHeader {
+                parent_hash: genesis_hash,
+                number: 1,
+                ..make_genesis_block().header
+            },
+            transactions: vec![],
+            system_transactions: vec![],
+            proposer_seal: None,
+        };
+        let hash1 = block1.hash();
+        let block2 = Block {
+            header: BlockHeader {
+                parent_hash: hash1,
+                number: 2,
+                ..make_genesis_block().header
+            },
+            transactions: vec![],
+            system_transactions: vec![],
+            proposer_seal: None,
+        };
+        let hash2 = block2.hash();
+        handler.chain_store.put_block(&block2).unwrap();
+        handler.chain_store.set_canonical(2, &hash2).unwrap();
+        handler.chain_store.set_head(&hash2).unwrap();
+
+        let error = EthApiServer::get_filter_changes(&handler, filter_id.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), -32603);
+        assert_eq!(
+            handler
+                .filter_registry
+                .get_filter_info(&filter_id)
+                .unwrap()
+                .1,
+            0
+        );
+
+        handler.chain_store.put_block(&block1).unwrap();
+        handler.chain_store.set_canonical(1, &hash1).unwrap();
+        let changes = EthApiServer::get_filter_changes(&handler, filter_id)
+            .await
+            .unwrap();
+        assert_eq!(changes, serde_json::json!([hash1, hash2]));
+    }
+
+    #[tokio::test]
     async fn block_filter_changes_are_range_capped() {
         let handler = setup();
 
@@ -5883,6 +5940,42 @@ mod tests {
         let arr = changes.as_array().unwrap();
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["blockNumber"], "0x1");
+    }
+
+    #[tokio::test]
+    async fn log_filter_preserves_cursor_across_canonical_gaps() {
+        let handler = setup();
+        store_block_with_logs(&handler, 0, vec![vec![]]);
+        let address = Address::from([0xAB; 20]);
+        let raw: RawLogFilter =
+            serde_json::from_str(&format!(r#"{{"fromBlock":"0x0","address":"{}"}}"#, address))
+                .unwrap();
+        let filter_id = EthApiServer::new_filter(&handler, raw).await.unwrap();
+
+        let log = shell_core::Log::new(address, vec![], Bytes::new()).unwrap();
+        let hash2 = store_block_with_logs(&handler, 2, vec![vec![log]]);
+
+        let error = EthApiServer::get_filter_changes(&handler, filter_id.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), -32603);
+        assert_eq!(
+            handler
+                .filter_registry
+                .get_filter_info(&filter_id)
+                .unwrap()
+                .1,
+            0
+        );
+
+        store_block_with_logs(&handler, 1, vec![vec![]]);
+        handler.chain_store.set_head(&hash2).unwrap();
+        let changes = EthApiServer::get_filter_changes(&handler, filter_id)
+            .await
+            .unwrap();
+        let logs = changes.as_array().unwrap();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0]["blockNumber"], "0x2");
     }
 
     #[tokio::test]
