@@ -201,7 +201,6 @@ fn copy_dir_from_handle(
     use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags};
     use std::ffi::OsStr;
     use std::os::unix::ffi::OsStrExt;
-    use std::os::unix::fs::PermissionsExt;
 
     std::fs::create_dir_all(dst)?;
     let mut entries = Dir::read_from(&source).map_err(std::io::Error::from)?;
@@ -247,14 +246,13 @@ fn copy_dir_from_handle(
                 }
 
                 let mut input = std::fs::File::from(child);
+                let permissions = input.metadata()?.permissions();
                 let mut output = std::fs::OpenOptions::new()
                     .write(true)
                     .create_new(true)
                     .open(dest)?;
                 std::io::copy(&mut input, &mut output)?;
-                output.set_permissions(std::fs::Permissions::from_mode(u32::from(
-                    opened.st_mode & 0o777,
-                )))?;
+                output.set_permissions(permissions)?;
             }
             FileType::Symlink => {
                 return Err(std::io::Error::new(
