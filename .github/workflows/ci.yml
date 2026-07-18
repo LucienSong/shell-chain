@@ -32,7 +32,7 @@ jobs:
         run: scripts/default-pq-validator-artifacts.sh --check
       - name: Check workspace crates are private
         run: cargo metadata --no-deps --format-version 1 | jq -e 'all(.packages[]; .publish == [])'
-      - run: cargo clippy --workspace -- -D warnings
+      - run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Check fuzz targets
         run: cargo check --locked --manifest-path fuzz/Cargo.toml --all-targets
       - name: Check transaction generator
