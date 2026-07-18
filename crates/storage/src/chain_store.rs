@@ -1455,6 +1455,9 @@ impl<S: KvStore> ChainStore<S> {
         // snapshot entries. This prevents a semantic import failure from
         // leaving partially restored keys in the destination store.
         let mut head_hash = None;
+        let canonical_head_key = Self::number_key(metadata.block_number);
+        let mut canonical_head_hash = None;
+        let mut snapshot_chain_config = None;
         while let Some(entry) = snap_reader.next_entry()? {
             if entry.key == prefix::HEAD_BLOCK {
                 if entry.value.len() != 32 {
@@ -1468,6 +1471,43 @@ impl<S: KvStore> ChainStore<S> {
                     ));
                 }
                 head_hash = Some(ShellHash::from_slice(&entry.value));
+            } else if entry.key == canonical_head_key {
+                if entry.value.len() != 32 {
+                    return Err(StorageError::State(
+                        "snapshot canonical head mapping has invalid length".into(),
+                    ));
+                }
+                if canonical_head_hash.is_some() {
+                    return Err(StorageError::State(
+                        "snapshot contains multiple canonical head mappings".into(),
+                    ));
+                }
+                canonical_head_hash = Some(ShellHash::from_slice(&entry.value));
+            } else if entry.key == prefix::CHAIN_CONFIG {
+                if snapshot_chain_config.is_some() {
+                    return Err(StorageError::State(
+                        "snapshot contains multiple chain configurations".into(),
+                    ));
+                }
+                let config: ChainConfig = serde_json::from_slice(&entry.value).map_err(|e| {
+                    StorageError::Serialization(format!("decode snapshot chain configuration: {e}"))
+                })?;
+                if config.chain_id != expected_chain_id
+                    || &config.genesis_hash != expected_genesis_hash
+                {
+                    return Err(StorageError::State(
+                        "snapshot chain configuration does not match the trusted chain".into(),
+                    ));
+                }
+                snapshot_chain_config = Some(config);
+            }
+        }
+
+        if let Some(head_hash) = head_hash {
+            if canonical_head_hash != Some(head_hash) {
+                return Err(StorageError::State(
+                    "snapshot canonical head mapping does not match HEAD".into(),
+                ));
             }
         }
 
@@ -2952,6 +2992,120 @@ mod tests {
     }
 
     #[test]
+    fn test_import_snapshot_rejects_mismatched_stored_chain_config_before_writes() {
+        let trusted_genesis = ShellHash::from([0x11; 32]);
+        let mismatched_configs = [
+            ChainConfig {
+                chain_id: 9999,
+                genesis_hash: trusted_genesis,
+            },
+            ChainConfig {
+                chain_id: 1337,
+                genesis_hash: ShellHash::from([0x22; 32]),
+            },
+        ];
+
+        for mismatched_config in mismatched_configs {
+            let store = Arc::new(MemoryDb::new());
+            let cs = ChainStore::new(Arc::clone(&store));
+            let meta = crate::SnapshotMetadata::new(
+                1337,
+                0,
+                ShellHash::ZERO,
+                ShellHash::ZERO,
+                trusted_genesis,
+            );
+            let mut buf = Vec::new();
+            {
+                let mut writer =
+                    crate::SnapshotWriter::new(std::io::Cursor::new(&mut buf), meta).unwrap();
+                writer.write_entry(b"untrusted-key", b"value").unwrap();
+                writer
+                    .write_entry(
+                        prefix::CHAIN_CONFIG,
+                        &serde_json::to_vec(&mismatched_config).unwrap(),
+                    )
+                    .unwrap();
+                writer.finalize().unwrap();
+            }
+
+            let error = cs
+                .import_snapshot(std::io::Cursor::new(buf), 1337, &trusted_genesis)
+                .unwrap_err();
+
+            assert!(error
+                .to_string()
+                .contains("does not match the trusted chain"));
+            assert!(store.get(b"untrusted-key").unwrap().is_none());
+            assert!(store.get(prefix::CHAIN_CONFIG).unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn test_import_snapshot_rejects_duplicate_chain_configs() {
+        let store = Arc::new(MemoryDb::new());
+        let cs = ChainStore::new(store);
+        let config = ChainConfig {
+            chain_id: 1337,
+            genesis_hash: ShellHash::ZERO,
+        };
+        let encoded = serde_json::to_vec(&config).unwrap();
+        let meta = crate::SnapshotMetadata::new(
+            1337,
+            0,
+            ShellHash::ZERO,
+            ShellHash::ZERO,
+            ShellHash::ZERO,
+        );
+        let mut buf = Vec::new();
+        {
+            let mut writer =
+                crate::SnapshotWriter::new(std::io::Cursor::new(&mut buf), meta).unwrap();
+            writer.write_entry(prefix::CHAIN_CONFIG, &encoded).unwrap();
+            writer.write_entry(prefix::CHAIN_CONFIG, &encoded).unwrap();
+            writer.finalize().unwrap();
+        }
+
+        let error = cs
+            .import_snapshot(std::io::Cursor::new(buf), 1337, &ShellHash::ZERO)
+            .unwrap_err();
+        assert!(error.to_string().contains("multiple chain configurations"));
+    }
+
+    #[test]
+    fn test_import_snapshot_rejects_malformed_chain_config_before_writes() {
+        let store = Arc::new(MemoryDb::new());
+        let cs = ChainStore::new(Arc::clone(&store));
+        let meta = crate::SnapshotMetadata::new(
+            1337,
+            0,
+            ShellHash::ZERO,
+            ShellHash::ZERO,
+            ShellHash::ZERO,
+        );
+        let mut buf = Vec::new();
+        {
+            let mut writer =
+                crate::SnapshotWriter::new(std::io::Cursor::new(&mut buf), meta).unwrap();
+            writer.write_entry(b"untrusted-key", b"value").unwrap();
+            writer
+                .write_entry(prefix::CHAIN_CONFIG, br#"{"chain_id":"not-a-number"}"#)
+                .unwrap();
+            writer.finalize().unwrap();
+        }
+
+        let error = cs
+            .import_snapshot(std::io::Cursor::new(buf), 1337, &ShellHash::ZERO)
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("decode snapshot chain configuration"));
+        assert!(store.get(b"untrusted-key").unwrap().is_none());
+        assert!(store.get(prefix::CHAIN_CONFIG).unwrap().is_none());
+    }
+
+    #[test]
     fn test_import_snapshot_restores_data() {
         let store = Arc::new(MemoryDb::new());
         let cs = ChainStore::new(store.clone());
@@ -3010,6 +3164,12 @@ mod tests {
             writer
                 .write_entry(prefix::HEAD_BLOCK, block_hash.as_bytes())
                 .unwrap();
+            writer
+                .write_entry(
+                    &ChainStore::<MemoryDb>::number_key(block.number()),
+                    block_hash.as_bytes(),
+                )
+                .unwrap();
             writer.finalize().unwrap();
         }
 
@@ -3047,6 +3207,12 @@ mod tests {
                     &encode_rlp(&block.header),
                 )
                 .unwrap();
+            writer
+                .write_entry(
+                    &ChainStore::<FailingBatchStore>::number_key(block.number()),
+                    block_hash.as_bytes(),
+                )
+                .unwrap();
             for index in 0..10_000 {
                 writer
                     .write_entry(format!("snapshot/test/{index:05}").as_bytes(), b"value")
@@ -3061,6 +3227,95 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("injected batch failure"));
         assert_eq!(cs.get_head_hash().unwrap(), Some(old_head));
+    }
+
+    #[test]
+    fn test_import_snapshot_rejects_mismatched_canonical_head_mapping_before_writes() {
+        let store = Arc::new(MemoryDb::new());
+        let cs = ChainStore::new(Arc::clone(&store));
+        let block = empty_block(1);
+        let block_hash = block.hash();
+        let meta = crate::SnapshotMetadata::new(
+            1337,
+            block.number(),
+            block_hash,
+            block.header.state_root,
+            ShellHash::ZERO,
+        );
+        let mut buf = Vec::new();
+        {
+            let mut writer =
+                crate::SnapshotWriter::new(std::io::Cursor::new(&mut buf), meta).unwrap();
+            writer.write_entry(b"untrusted-key", b"value").unwrap();
+            writer
+                .write_entry(prefix::HEAD_BLOCK, block_hash.as_bytes())
+                .unwrap();
+            writer
+                .write_entry(
+                    &ChainStore::<MemoryDb>::header_key(&block_hash),
+                    &encode_rlp(&block.header),
+                )
+                .unwrap();
+            writer
+                .write_entry(
+                    &ChainStore::<MemoryDb>::number_key(block.number()),
+                    ShellHash::from([0x44; 32]).as_bytes(),
+                )
+                .unwrap();
+            writer.finalize().unwrap();
+        }
+
+        let error = cs
+            .import_snapshot(std::io::Cursor::new(buf), 1337, &ShellHash::ZERO)
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("canonical head mapping does not match HEAD"));
+        assert!(store.get(b"untrusted-key").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_import_snapshot_rejects_duplicate_canonical_head_mappings() {
+        let store = Arc::new(MemoryDb::new());
+        let cs = ChainStore::new(store);
+        let block = empty_block(1);
+        let block_hash = block.hash();
+        let meta = crate::SnapshotMetadata::new(
+            1337,
+            block.number(),
+            block_hash,
+            block.header.state_root,
+            ShellHash::ZERO,
+        );
+        let mut buf = Vec::new();
+        {
+            let mut writer =
+                crate::SnapshotWriter::new(std::io::Cursor::new(&mut buf), meta).unwrap();
+            writer
+                .write_entry(prefix::HEAD_BLOCK, block_hash.as_bytes())
+                .unwrap();
+            writer
+                .write_entry(
+                    &ChainStore::<MemoryDb>::number_key(block.number()),
+                    block_hash.as_bytes(),
+                )
+                .unwrap();
+            writer
+                .write_entry(
+                    &ChainStore::<MemoryDb>::number_key(block.number()),
+                    block_hash.as_bytes(),
+                )
+                .unwrap();
+            writer.finalize().unwrap();
+        }
+
+        let error = cs
+            .import_snapshot(std::io::Cursor::new(buf), 1337, &ShellHash::ZERO)
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("multiple canonical head mappings"));
     }
 
     #[test]
