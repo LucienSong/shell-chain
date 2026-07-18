@@ -530,10 +530,13 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
 
     async fn gas_price(&self) -> Result<String, ErrorObjectOwned> {
         // Return the base fee from the latest block, or INITIAL_BASE_FEE if no blocks exist.
-        let base_fee = match self.chain_store.get_head_block() {
-            Ok(Some(head)) if head.header.base_fee_per_gas > 0 => head.header.base_fee_per_gas,
-            _ => shell_core::INITIAL_BASE_FEE,
-        };
+        let base_fee = self
+            .chain_store
+            .get_head_block()
+            .map_err(internal_err)?
+            .map(|head| head.header.base_fee_per_gas)
+            .filter(|fee| *fee > 0)
+            .unwrap_or(shell_core::INITIAL_BASE_FEE);
         Ok(hex_u64(base_fee))
     }
 
@@ -552,10 +555,11 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
             Some(n) => n,
             None => {
                 // "latest" — get head block number
-                match self.chain_store.get_head_block() {
-                    Ok(Some(head)) => head.header.number,
-                    _ => 0,
-                }
+                self.chain_store
+                    .get_head_block()
+                    .map_err(internal_err)?
+                    .map(|head| head.header.number)
+                    .unwrap_or(0)
             }
         };
 
@@ -600,10 +604,11 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
                     };
                     gas_used_ratio.push(ratio);
                 }
-                _ => {
+                Ok(None) => {
                     base_fee_per_gas.push(hex_u64(0));
                     gas_used_ratio.push(0.0);
                 }
+                Err(error) => return Err(internal_err(error)),
             }
             if let (Some(reward), Some(percentiles)) = (&mut reward, reward_percentiles.as_ref()) {
                 reward.push(vec![hex_u64(0); percentiles.len()]);
@@ -611,7 +616,11 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
         }
 
         // Append next block's predicted base fee (one more entry than gas_used_ratio).
-        if let Ok(Some(head)) = self.chain_store.get_block_by_number(latest) {
+        if let Some(head) = self
+            .chain_store
+            .get_block_by_number(latest)
+            .map_err(internal_err)?
+        {
             let next = shell_core::fee::calculate_base_fee(
                 head.header.gas_used,
                 head.header.gas_limit,
