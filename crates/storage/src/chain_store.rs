@@ -110,7 +110,7 @@ fn encode_rlp_list<T: Encodable>(items: &[T]) -> Vec<u8> {
 /// - `0x02` → RLP (current)
 /// - `0x01` → JSON with explicit version prefix
 /// - anything else → legacy JSON (no prefix, backward compatibility)
-fn decode_versioned<T: Decodable + serde::de::DeserializeOwned>(
+pub(crate) fn decode_versioned<T: Decodable + serde::de::DeserializeOwned>(
     data: &[u8],
 ) -> Result<T, StorageError> {
     if data.is_empty() {
