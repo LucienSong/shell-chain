@@ -4,6 +4,8 @@
 /fuzz/artifacts/
 /fuzz/corpus/
 /fuzz/target/
+__pycache__/
+*.py[cod]
 
 # IDE
 .vscode/
