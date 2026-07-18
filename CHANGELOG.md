@@ -6,6 +6,8 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Resolve custom-validator and contract-paymaster state reads against full
+  32-byte Shell addresses instead of lossy 20-byte EVM aliases.
 - Keep the reported libp2p peer count aligned with admitted unique peers so connections rejected by peer limits cannot transiently inflate RPC and sync readiness metrics.
 - Keep canonical block mappings until both body and witness pruning have
   processed them, so delayed STARK settlements cannot strand retained data.
