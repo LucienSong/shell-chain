@@ -40,3 +40,6 @@ toml.workspace = true
 ureq.workspace = true
 alloy-rlp.workspace = true
 tempfile = "3"
+
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true

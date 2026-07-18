@@ -5967,6 +5967,7 @@ dependencies = [
  "clap",
  "hex",
  "rpassword",
+ "rustix",
  "serde",
  "serde_json",
  "shell-consensus",

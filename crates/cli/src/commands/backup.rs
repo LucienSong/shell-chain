@@ -179,6 +179,104 @@ pub fn restore_backup(
 // ---------------------------------------------------------------------------
 
 /// Recursively copy a directory tree (used for restore).
+#[cfg(unix)]
+fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    use rustix::fs::{Mode, OFlags};
+
+    let source = rustix::fs::open(
+        src,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(std::io::Error::from)?;
+    copy_dir_from_handle(source, src, dst)
+}
+
+#[cfg(unix)]
+fn copy_dir_from_handle(
+    source: std::os::fd::OwnedFd,
+    source_path: &std::path::Path,
+    dst: &std::path::Path,
+) -> std::io::Result<()> {
+    use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags};
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::create_dir_all(dst)?;
+    let mut entries = Dir::read_from(&source).map_err(std::io::Error::from)?;
+    while let Some(entry) = entries.read() {
+        let entry = entry.map_err(std::io::Error::from)?;
+        let name = entry.file_name();
+        if name.to_bytes() == b"." || name.to_bytes() == b".." {
+            continue;
+        }
+
+        let entry_path = source_path.join(OsStr::from_bytes(name.to_bytes()));
+        let dest = dst.join(OsStr::from_bytes(name.to_bytes()));
+        let metadata = rustix::fs::statat(&source, name, AtFlags::SYMLINK_NOFOLLOW)
+            .map_err(std::io::Error::from)?;
+        match FileType::from_raw_mode(metadata.st_mode) {
+            FileType::Directory => {
+                let child = rustix::fs::openat(
+                    &source,
+                    name,
+                    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                    Mode::empty(),
+                )
+                .map_err(std::io::Error::from)?;
+                copy_dir_from_handle(child, &entry_path, &dest)?;
+            }
+            FileType::RegularFile => {
+                let child = rustix::fs::openat(
+                    &source,
+                    name,
+                    OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                    Mode::empty(),
+                )
+                .map_err(std::io::Error::from)?;
+                let opened = rustix::fs::fstat(&child).map_err(std::io::Error::from)?;
+                if FileType::from_raw_mode(opened.st_mode) != FileType::RegularFile {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "backup entry changed while opening: {}",
+                            entry_path.display()
+                        ),
+                    ));
+                }
+
+                let mut input = std::fs::File::from(child);
+                let mut output = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(dest)?;
+                std::io::copy(&mut input, &mut output)?;
+                output.set_permissions(std::fs::Permissions::from_mode(u32::from(
+                    opened.st_mode & 0o777,
+                )))?;
+            }
+            FileType::Symlink => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("backup contains a symbolic link: {}", entry_path.display()),
+                ));
+            }
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "backup contains an unsupported entry: {}",
+                        entry_path.display()
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
 fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
     let source_meta = std::fs::symlink_metadata(src)?;
     if source_meta.file_type().is_symlink() || !source_meta.is_dir() {
@@ -363,6 +461,26 @@ mod tests {
             std::fs::read(db_path.join("CURRENT")).unwrap(),
             b"live database"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn backup_copy_rejects_nested_directory_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("backup");
+        let outside = root.path().join("outside");
+        let destination = root.path().join("staged");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("MANIFEST-1"), b"outside data").unwrap();
+        symlink(&outside, source.join("nested")).unwrap();
+
+        let error = copy_dir_all(&source, &destination).unwrap_err();
+
+        assert!(error.to_string().contains("symbolic link"));
+        assert!(!destination.join("nested/MANIFEST-1").exists());
     }
 
     #[test]

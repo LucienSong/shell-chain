@@ -6,6 +6,8 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Anchor Unix backup restore traversal to no-follow directory and file handles
+  so concurrent source-path replacement cannot redirect staged restore reads.
 - Remap local build paths out of precompiled release binaries, omit
   nondeterministic macOS linker UUIDs, and refresh embedded revision metadata
   after branch advances.
