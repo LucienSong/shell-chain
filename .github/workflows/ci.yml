@@ -26,6 +26,10 @@ jobs:
       - run: cargo fmt --all -- --check
       - name: Test release preflight checks
         run: scripts/test-release-preflight.sh
+      - name: Test release binary build wrapper
+        run: scripts/test-build-release-binary.sh
+      - name: Test CLI revision watch paths
+        run: scripts/test-cli-git-hash-watch.sh
       - name: Check Dockerfile base image pins
         run: scripts/check-dockerfile-base-pins.sh
       - name: Check DefaultPQValidator artifacts

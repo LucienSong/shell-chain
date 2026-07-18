@@ -6,6 +6,9 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Remap local build paths out of precompiled release binaries, omit
+  nondeterministic macOS linker UUIDs, and refresh embedded revision metadata
+  after branch advances.
 - Keep the published security support line, version badge, container example,
   and fuzz manifest aligned with the workspace release version.
 - Size the world-state account cache from decoded entry memory and honor a
