@@ -26,6 +26,8 @@ jobs:
       - run: cargo fmt --all -- --check
       - name: Test release preflight checks
         run: scripts/test-release-preflight.sh
+      - name: Check Dockerfile base image pins
+        run: scripts/check-dockerfile-base-pins.sh
       - name: Check DefaultPQValidator artifacts
         run: scripts/default-pq-validator-artifacts.sh --check
       - name: Check workspace crates are private
