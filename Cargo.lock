@@ -5966,6 +5966,7 @@ dependencies = [
  "alloy-rlp",
  "clap",
  "hex",
+ "libc",
  "rpassword",
  "serde",
  "serde_json",

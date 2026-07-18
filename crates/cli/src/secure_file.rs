@@ -1,4 +1,4 @@
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::{self, Read, Write};
 use std::path::Path;
 
@@ -26,7 +26,12 @@ pub(crate) fn read_sensitive_file(path: &Path) -> io::Result<String> {
         ));
     }
 
-    let file = File::open(path)?;
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW);
+
+    let file = options.open(path)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -86,6 +91,7 @@ pub(crate) fn write_sensitive_file_new(path: &Path, contents: impl AsRef<[u8]>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::File;
 
     #[test]
     fn write_sensitive_file_refuses_existing_path() {
