@@ -6,6 +6,8 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Keep the published security support line, version badge, container example,
+  and fuzz manifest aligned with the workspace release version.
 - Size the world-state account cache from decoded entry memory and honor a
   zero-MiB budget with the minimum LRU capacity instead of the default cache.
 - Resolve custom-validator and contract-paymaster state reads against full
