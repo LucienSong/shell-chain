@@ -141,6 +141,65 @@ impl<S: KvStore + 'static> Node<S> {
         Ok(())
     }
 
+    fn verify_side_fork_transaction_signatures(&self, block: &Block) -> Result<(), NodeError> {
+        let mut block_pubkeys: HashMap<Address, Vec<u8>> = HashMap::new();
+        let mut resolved_pubkeys = Vec::with_capacity(block.transactions.len());
+
+        for tx in &block.transactions {
+            if tx.signature.data.is_empty() {
+                return Err(NodeError::Startup(format!(
+                    "block {} tx {} has empty signature",
+                    block.number(),
+                    tx.hash()
+                )));
+            }
+
+            let pubkey = match &tx.pubkey_mode {
+                shell_core::PubkeyMode::Embedded(pubkey) => {
+                    block_pubkeys
+                        .entry(tx.from)
+                        .or_insert_with(|| pubkey.clone());
+                    pubkey.clone()
+                }
+                shell_core::PubkeyMode::Reference => {
+                    if let Some(pubkey) = block_pubkeys.get(&tx.from) {
+                        pubkey.clone()
+                    } else {
+                        self.chain_store.get_pubkey(&tx.from)?.ok_or_else(|| {
+                            NodeError::Startup(format!(
+                                "block {} tx {} uses Reference pubkey mode but sender {} has no registered or earlier embedded pubkey",
+                                block.number(),
+                                tx.hash(),
+                                tx.from
+                            ))
+                        })?
+                    }
+                }
+            };
+            resolved_pubkeys.push(pubkey);
+        }
+
+        let tx_hashes: Vec<ShellHash> = block.transactions.iter().map(|tx| tx.hash()).collect();
+        let verify_items: Vec<VerifyItem> = block
+            .transactions
+            .iter()
+            .enumerate()
+            .map(|(index, tx)| VerifyItem {
+                pubkey: &resolved_pubkeys[index],
+                message: tx_hashes[index].as_bytes(),
+                signature: &tx.signature,
+            })
+            .collect();
+        MultiVerifier
+            .verify_batch_all(&verify_items)
+            .map_err(|error| {
+                NodeError::Startup(format!(
+                    "block {} batch sig verification failed: {error}",
+                    block.number()
+                ))
+            })
+    }
+
     fn verify_import_economics(&self, block: &Block, parent: &Block) -> Result<(), NodeError> {
         let expected_base_fee = calculate_base_fee(
             parent.header.gas_used,
@@ -238,6 +297,7 @@ impl<S: KvStore + 'static> Node<S> {
             self.verify_import_consensus(&block, &parent)?;
             self.verify_import_economics(&block, &parent)?;
             self.verify_incoming_witness_root(&block)?;
+            self.verify_side_fork_transaction_signatures(&block)?;
             if let Ok(Some(existing)) = block_store.block_by_number(incoming) {
                 self.queue_signed_equivocation_if_valid(&existing, &block);
             }
@@ -274,6 +334,7 @@ impl<S: KvStore + 'static> Node<S> {
             self.verify_import_consensus(&block, &parent)?;
             self.verify_import_economics(&block, &parent)?;
             self.verify_incoming_witness_root(&block)?;
+            self.verify_side_fork_transaction_signatures(&block)?;
             let remote_hash = incoming_hash;
             block_store.put_side_fork_block(&block)?;
             consensus.register_fork_choice_block(remote_hash, block.header.parent_hash, incoming);

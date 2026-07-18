@@ -6,6 +6,8 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Reject side-fork blocks with empty, invalid, or unresolved transaction
+  signatures before storing them or admitting them to fork choice.
 - Remap local build paths out of precompiled release binaries, omit
   nondeterministic macOS linker UUIDs, and refresh embedded revision metadata
   after branch advances.

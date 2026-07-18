@@ -6847,6 +6847,69 @@ mod tests {
     }
 
     #[test]
+    fn import_side_fork_with_invalid_transaction_signatures_is_rejected() {
+        let (node, proposer_signer) = setup_node();
+        store_genesis(&node);
+        let proposer = node.config.proposer_address.unwrap();
+        node.register_authority_pubkey(proposer, proposer_signer.public_key().to_vec());
+
+        let tx_signer = DilithiumSigner::generate();
+        let sender = Address::from_public_key(tx_signer.public_key(), tx_signer.sig_type().as_u8());
+        fund_account(&node, &sender, U256::from(100_000_000_000_000u64));
+        let tx = make_embedded_tx(&tx_signer, sender, tx_signer.public_key().to_vec(), 0, 1);
+        {
+            let mut world_state = node.world_state.write();
+            node.tx_pool
+                .insert(
+                    tx,
+                    &mut world_state,
+                    node.chain_store.as_ref(),
+                    &MultiVerifier,
+                )
+                .unwrap();
+        }
+
+        let canonical = node.produce_block(&proposer_signer, 100).unwrap();
+        for (label, clear_signature) in [("empty", true), ("corrupt", false)] {
+            let mut side_fork = canonical.clone();
+            side_fork.header.extra_data = Bytes::copy_from_slice(label.as_bytes());
+            side_fork.header.witness_root = None;
+            let signature = &mut side_fork
+                .transactions
+                .first_mut()
+                .expect("block should include a transaction")
+                .signature
+                .data;
+            if clear_signature {
+                signature.clear();
+            } else {
+                signature[0] ^= 1;
+            }
+            side_fork.proposer_seal = Some(
+                proposer_signer
+                    .sign(side_fork.header.hash().as_bytes())
+                    .expect("sign side fork"),
+            );
+            let side_fork_hash = side_fork.hash();
+
+            let error = node.import_block(side_fork, &MultiVerifier).unwrap_err();
+
+            let message = error.to_string();
+            assert!(
+                message.contains("empty signature")
+                    || message.contains("batch sig verification failed"),
+                "unexpected rejection for {label} signature: {message}"
+            );
+            assert!(node
+                .chain_store
+                .get_block_by_hash(&side_fork_hash)
+                .unwrap()
+                .is_none());
+            assert!(!node.fork_choice.read().contains(&side_fork_hash));
+        }
+    }
+
+    #[test]
     fn import_block_witness_root_matches_bundle_succeeds() {
         let (node, signer) = setup_node();
         store_genesis(&node);
