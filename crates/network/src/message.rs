@@ -277,6 +277,17 @@ pub fn deserialize_checked(data: &[u8], limit: usize) -> Result<NetworkMessage, 
     Ok(msg)
 }
 
+/// Validate and serialize an outbound message using the same semantic and
+/// size limits enforced by inbound decoding.
+pub fn serialize_checked(msg: &NetworkMessage, limit: usize) -> Result<Vec<u8>, NetworkError> {
+    msg.validate_semantics()?;
+    let data =
+        serde_json::to_vec(msg).map_err(|error| NetworkError::Serialization(error.to_string()))?;
+    validate_message_size(&data, limit)?;
+    validate_message_size(&data, msg.max_serialized_size())?;
+    Ok(data)
+}
+
 impl NetworkMessage {
     fn validate_semantics(&self) -> Result<(), NetworkError> {
         match self {
@@ -838,6 +849,29 @@ mod tests {
             assert!(
                 matches!(err, NetworkError::Serialization(message) if message.contains("request count must be between"))
             );
+        }
+    }
+
+    #[test]
+    fn serialize_checked_rejects_out_of_range_sync_request_counts() {
+        for msg in [
+            NetworkMessage::BlockRequest {
+                start_number: 1,
+                count: 0,
+                nonce: 1,
+            },
+            NetworkMessage::BodyRequest {
+                start_number: 1,
+                count: MAX_RESPONSE_BLOCKS as u64 + 1,
+                nonce: 1,
+            },
+        ] {
+            let error = serialize_checked(&msg, MAX_MESSAGE_SIZE).unwrap_err();
+            assert!(matches!(
+                error,
+                NetworkError::Serialization(message)
+                    if message.contains("request count must be between")
+            ));
         }
     }
 

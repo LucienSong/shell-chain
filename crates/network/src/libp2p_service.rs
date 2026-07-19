@@ -1178,10 +1178,7 @@ impl NetworkService for Libp2pNetwork {
     async fn broadcast(&self, msg: NetworkMessage) -> Result<(), NetworkError> {
         let topic = topic_kind_for_message(&msg);
 
-        let data =
-            serde_json::to_vec(&msg).map_err(|e| NetworkError::Serialization(e.to_string()))?;
-        crate::message::validate_message_size(&data, self.max_msg_size)?;
-        crate::message::validate_message_size(&data, msg.max_serialized_size())?;
+        let data = crate::message::serialize_checked(&msg, self.max_msg_size)?;
 
         self.cmd_tx
             .send(SwarmCommand::Publish { topic, data })
@@ -1392,6 +1389,37 @@ mod tests {
             other => panic!("unexpected error: {other:?}"),
         }
 
+        network.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn libp2p_broadcast_rejects_invalid_sync_request() {
+        let config = NetworkConfig {
+            listen_addr: "127.0.0.1:0".parse().unwrap(),
+            enable_mdns: false,
+            enable_kademlia: false,
+            enable_peer_scoring: false,
+            enable_relay: false,
+            enable_dcutr: false,
+            enable_autonat: false,
+            ..Default::default()
+        };
+        let network = Libp2pNetwork::new(&config).await.unwrap();
+
+        let error = network
+            .broadcast(NetworkMessage::BodyRequest {
+                start_number: 1,
+                count: 0,
+                nonce: 1,
+            })
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            NetworkError::Serialization(message)
+                if message.contains("request count must be between")
+        ));
         network.shutdown().await.unwrap();
     }
 
