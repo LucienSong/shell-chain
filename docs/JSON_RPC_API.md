@@ -137,6 +137,8 @@ must be `null`, a `0x`-prefixed 32-byte hash, or an array of `0x`-prefixed
 32-byte hashes. The `topics` array can contain at most four positional entries.
 Within `topics`, `null` is a wildcard for that position; an empty alternatives
 array (`[]`) matches no logs at that position.
+Only `address` and `topics` are supported for live log subscriptions; other
+filter fields are rejected as invalid parameters rather than ignored.
 
 **Example — newPendingTransactions:**
 
