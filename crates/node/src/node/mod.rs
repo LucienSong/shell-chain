@@ -84,6 +84,21 @@ impl Drop for AlgorithmRegistryRollback {
     }
 }
 
+fn apply_pending_activations<S: KvStore + 'static>(
+    block_number: u64,
+    world_state: &mut WorldState<S>,
+    registry: &mut AlgorithmRegistry,
+    phase: &str,
+) -> Result<(), NodeError> {
+    process_pending_activations(block_number, world_state, registry)
+        .map(|_| ())
+        .map_err(|e| {
+            NodeError::Startup(format!(
+                "algorithm activation at block {block_number} failed during {phase}: {e}"
+            ))
+        })
+}
+
 pub(crate) use shell_stark_prover::{
     proof::SigBatchProof,
     prover::{compute_batch_root, verify_sig_batch, SigBatchEntry},
@@ -1423,6 +1438,7 @@ mod tests {
     struct FailingBatchDb {
         inner: MemoryDb,
         fail_next_get: AtomicBool,
+        fail_next_put: AtomicBool,
         fail_next_batch: AtomicBool,
         fail_head_batch: AtomicBool,
         fail_next_delete: AtomicBool,
@@ -1433,6 +1449,7 @@ mod tests {
             Self {
                 inner: MemoryDb::new(),
                 fail_next_get: AtomicBool::new(false),
+                fail_next_put: AtomicBool::new(false),
                 fail_next_batch: AtomicBool::new(false),
                 fail_head_batch: AtomicBool::new(false),
                 fail_next_delete: AtomicBool::new(false),
@@ -1445,6 +1462,10 @@ mod tests {
 
         fn fail_next_get(&self) {
             self.fail_next_get.store(true, Ordering::SeqCst);
+        }
+
+        fn fail_next_put(&self) {
+            self.fail_next_put.store(true, Ordering::SeqCst);
         }
 
         fn fail_head_batch(&self) {
@@ -1465,6 +1486,9 @@ mod tests {
         }
 
         fn put(&self, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
+            if self.fail_next_put.swap(false, Ordering::SeqCst) {
+                return Err(StorageError::Database("injected put failure".into()));
+            }
             self.inner.put(key, value)
         }
 
@@ -1613,6 +1637,25 @@ mod tests {
             consensus,
         );
         (node, signer, db)
+    }
+
+    fn configure_pending_activation<S: KvStore + 'static>(node: &Node<S>, height: u64) {
+        let algo = shell_crypto::SignatureType::SphincsSha2256f;
+        AlgorithmRegistry::global_mut().propose_activation_with_spec(algo, height, [0xA5; 32]);
+
+        let mut key_material = b"algorithm_activation_height:".to_vec();
+        key_material.push(algo.as_u8());
+        let key = shell_primitives::keccak256(&key_material);
+        let mut value = [0u8; 32];
+        value[24..].copy_from_slice(&height.to_be_bytes());
+        node.world_state
+            .write()
+            .set_storage(
+                &shell_pqvm::registry_address(),
+                &key,
+                &ShellHash::from(value),
+            )
+            .unwrap();
     }
 
     fn store_genesis<S: KvStore + 'static>(node: &Node<S>) {
@@ -5226,6 +5269,34 @@ mod tests {
         assert!(
             AlgorithmRegistry::global().is_allowed(shell_crypto::SignatureType::SphincsSha2256f),
             "rejected imports must restore process-global algorithm status"
+        );
+    }
+
+    #[test]
+    fn activation_transition_propagates_persistence_failure() {
+        const TEST_NAME: &str = "node::tests::activation_transition_propagates_persistence_failure";
+        const ISOLATED_MARKER: &str = "SHELL_TEST_ISOLATED_ACTIVATION_PRODUCTION_FAILURE";
+        if run_isolated(TEST_NAME, ISOLATED_MARKER) {
+            return;
+        }
+
+        *AlgorithmRegistry::global_mut() = AlgorithmRegistry::default();
+        let (node, _signer, db) = setup_failing_batch_node();
+        configure_pending_activation(&node, 1);
+        store_consistent_genesis(&node);
+        db.fail_next_put();
+
+        let mut world_state = node.world_state.write();
+        let mut registry = AlgorithmRegistry::global_mut();
+        let err = apply_pending_activations(1, &mut world_state, &mut registry, "production")
+            .expect_err("activation persistence failure must propagate");
+
+        let message = err.to_string();
+        assert!(message.contains("injected put failure"));
+        assert!(message.contains("algorithm activation at block 1"));
+        assert!(
+            !registry.is_allowed(shell_crypto::SignatureType::SphincsSha2256f),
+            "failed activation persistence must leave the process registry pending"
         );
     }
 

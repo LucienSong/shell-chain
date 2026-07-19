@@ -424,12 +424,7 @@ impl<S: KvStore + 'static> Node<S> {
         {
             let mut ws = self.world_state.write();
             let mut registry = AlgorithmRegistry::global_mut();
-            if let Err(e) = process_pending_activations(header.number, &mut *ws, &mut registry) {
-                warn!(
-                    block = header.number,
-                    "process_pending_activations failed during production: {e}"
-                );
-            }
+            apply_pending_activations(header.number, &mut *ws, &mut registry, "production")?;
         }
 
         // Compute state root from the updated world state (includes any activations above).
