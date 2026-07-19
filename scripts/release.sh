@@ -193,15 +193,7 @@ fi
 echo ""
 echo "── Tagging ──"
 
-CHANGELOG_EXCERPT=$(awk -v heading="## [${VERSION}]" '
-    index($0, heading) == 1 {
-        suffix = substr($0, length(heading) + 1, 1)
-        if (suffix == "" || suffix ~ /[[:space:]]/) found = 1
-        next
-    }
-    found && /^## \[/ { exit }
-    found { print }
-' CHANGELOG.md | head -30)
+CHANGELOG_EXCERPT=$("$SCRIPT_DIR/changelog-excerpt.sh" CHANGELOG.md "$VERSION" 30)
 
 git tag -a "$TAG" -m "Release ${TAG}
 

@@ -29,6 +29,23 @@ if ! grep -Fq 'git push "$RELEASE_REMOTE" "$TAG"' "$SCRIPT_DIR/release.sh"; then
     fail "release tag push does not use the validated remote"
 fi
 
+LONG_CHANGELOG="$TMP_DIR/long-changelog.md"
+{
+    printf '## [Unreleased]\n\n## [0.27.1] - test release\n'
+    for line in $(seq 1 35); do
+        printf 'release line %s\n' "$line"
+    done
+    printf '## [0.27.0] - prior release\nprior line\n'
+} > "$LONG_CHANGELOG"
+CHANGELOG_EXCERPT=$("$SCRIPT_DIR/changelog-excerpt.sh" "$LONG_CHANGELOG" 0.27.1)
+if [ "$(printf '%s\n' "$CHANGELOG_EXCERPT" | wc -l | tr -d ' ')" -ne 30 ]; then
+    fail "long changelog excerpt was not limited to 30 lines"
+fi
+if ! grep -Fq 'release line 30' <<<"$CHANGELOG_EXCERPT" \
+    || grep -Fq 'release line 31' <<<"$CHANGELOG_EXCERPT"; then
+    fail "long changelog excerpt used the wrong section boundary"
+fi
+
 REMOTE_FIXTURE="$TMP_DIR/remote-fixture"
 git -C "$TMP_DIR" init -q -b main remote-fixture
 git -C "$REMOTE_FIXTURE" remote add canonical https://github.com/ShellDAO/shell-chain.git
@@ -118,7 +135,8 @@ make_fixture() {
 
     rm -rf "$fixture"
     mkdir -p "$fixture/scripts"
-    cp "$SCRIPT_DIR/release.sh" "$SCRIPT_DIR/check-release-ci.sh" \
+    cp "$SCRIPT_DIR/release.sh" "$SCRIPT_DIR/changelog-excerpt.sh" \
+        "$SCRIPT_DIR/check-release-ci.sh" \
         "$SCRIPT_DIR/check-release-remote.sh" \
         "$SCRIPT_DIR/check-release-metadata.sh" \
         "$SCRIPT_DIR/supply-chain-tool-versions.sh" "$fixture/scripts/"
@@ -207,7 +225,8 @@ assert_fails_with "$fixture" '0.27.1' "cargo fmt check failed"
 fixture=$(make_fixture $'## [Unreleased]\n\n## [0.27.1] - test release')
 git -C "$fixture" switch -q --orphan release/v0.27.1
 mkdir -p "$fixture/scripts"
-cp "$SCRIPT_DIR/release.sh" "$SCRIPT_DIR/check-release-ci.sh" \
+cp "$SCRIPT_DIR/release.sh" "$SCRIPT_DIR/changelog-excerpt.sh" \
+    "$SCRIPT_DIR/check-release-ci.sh" \
     "$SCRIPT_DIR/check-release-remote.sh" \
     "$SCRIPT_DIR/check-release-metadata.sh" \
     "$SCRIPT_DIR/supply-chain-tool-versions.sh" "$fixture/scripts/"
