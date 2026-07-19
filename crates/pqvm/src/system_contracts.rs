@@ -1193,8 +1193,8 @@ fn decode_u64_from_hash(hash: &ShellHash) -> u64 {
 /// Called once per block (in both block production and import) after the canonical
 /// world state is committed.  For every algorithm in `PendingActivation` whose
 /// `activation_height` ≤ `current_height` the function:
-/// 1. Updates the in-process registry to `Active`.
-/// 2. Persists `Active` status to `world_state`.
+/// 1. Persists `Active` status to `world_state`.
+/// 2. Updates the in-process registry to `Active`.
 ///
 /// Returns the list of algorithms that were activated.
 pub fn process_pending_activations<S: KvStore + 'static>(
@@ -1220,8 +1220,8 @@ pub fn process_pending_activations<S: KvStore + 'static>(
         let act_height = decode_u64_from_hash(&act_height_hash);
         // activation_height == 0 means no timelock was stored (pre-governance entry); skip.
         if act_height > 0 && act_height <= current_height {
-            registry.activate(algo);
             store_algorithm_status(world_state, algo, AlgorithmStatus::Active)?;
+            registry.activate(algo);
             activated.push(algo);
         }
     }
@@ -2288,8 +2288,59 @@ pub fn account_manager_code_hash() -> shell_primitives::ShellHash {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shell_storage::{ChainStore, MemoryDb};
-    use std::sync::Arc;
+    use shell_storage::{ChainStore, MemoryDb, StorageError, WriteBatch};
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+
+    #[derive(Debug, Default)]
+    struct FailingWriteStore {
+        inner: MemoryDb,
+        fail_writes: AtomicBool,
+    }
+
+    impl FailingWriteStore {
+        fn fail_writes(&self) {
+            self.fail_writes.store(true, Ordering::SeqCst);
+        }
+
+        fn check_write(&self) -> Result<(), StorageError> {
+            if self.fail_writes.load(Ordering::SeqCst) {
+                return Err(StorageError::Database("injected write failure".into()));
+            }
+            Ok(())
+        }
+    }
+
+    impl KvStore for FailingWriteStore {
+        fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+            self.inner.get(key)
+        }
+
+        fn put(&self, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
+            self.check_write()?;
+            self.inner.put(key, value)
+        }
+
+        fn delete(&self, key: &[u8]) -> Result<(), StorageError> {
+            self.check_write()?;
+            self.inner.delete(key)
+        }
+
+        fn flush(&self) -> Result<(), StorageError> {
+            self.inner.flush()
+        }
+
+        fn write_batch(&self, batch: WriteBatch) -> Result<(), StorageError> {
+            self.check_write()?;
+            self.inner.write_batch(batch)
+        }
+
+        fn scan_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
+            self.inner.scan_prefix(prefix)
+        }
+    }
 
     fn setup_with_validators(validators: &[Address]) -> WorldState<MemoryDb> {
         let store = Arc::new(MemoryDb::new());
@@ -2819,6 +2870,31 @@ mod tests {
             .unwrap(),
             encode_algorithm_status(AlgorithmStatus::Active)
         );
+    }
+
+    #[test]
+    fn process_pending_activations_keeps_registry_pending_when_storage_fails() {
+        let store = Arc::new(FailingWriteStore::default());
+        let mut ws = WorldState::new(Arc::clone(&store));
+        let mut registry = AlgorithmRegistry::default();
+        let algo = SignatureType::MlDsa65;
+        let activation_height = 100;
+
+        registry.propose_activation_with_spec(algo, activation_height, [0xCD; 32]);
+        store_algorithm_status(&mut ws, algo, AlgorithmStatus::PendingActivation).unwrap();
+        ws.set_storage(
+            &registry_address(),
+            &algorithm_activation_height_key(algo),
+            &encode_u64_as_hash(activation_height),
+        )
+        .unwrap();
+        store.fail_writes();
+
+        let err = process_pending_activations(activation_height, &mut ws, &mut registry)
+            .expect_err("status persistence must fail");
+
+        assert!(err.to_string().contains("injected write failure"));
+        assert!(!registry.is_allowed(algo));
     }
 
     #[test]
