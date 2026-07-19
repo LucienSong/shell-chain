@@ -1418,7 +1418,7 @@ mod tests {
     use shell_rpc::DevRpcControl;
     use shell_storage::{MemoryDb, StorageError, WriteBatch, WriteBatchOp};
     use std::process::Command;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     fn run_isolated(test_name: &str, marker: &str) -> bool {
         if std::env::var_os(marker).is_some() {
@@ -1439,6 +1439,8 @@ mod tests {
         inner: MemoryDb,
         fail_next_get: AtomicBool,
         fail_next_put: AtomicBool,
+        put_count: AtomicUsize,
+        fail_on_put: AtomicUsize,
         fail_next_batch: AtomicBool,
         fail_head_batch: AtomicBool,
         fail_next_delete: AtomicBool,
@@ -1450,6 +1452,8 @@ mod tests {
                 inner: MemoryDb::new(),
                 fail_next_get: AtomicBool::new(false),
                 fail_next_put: AtomicBool::new(false),
+                put_count: AtomicUsize::new(0),
+                fail_on_put: AtomicUsize::new(usize::MAX),
                 fail_next_batch: AtomicBool::new(false),
                 fail_head_batch: AtomicBool::new(false),
                 fail_next_delete: AtomicBool::new(false),
@@ -1466,6 +1470,11 @@ mod tests {
 
         fn fail_next_put(&self) {
             self.fail_next_put.store(true, Ordering::SeqCst);
+        }
+
+        fn fail_on_put(&self, put_number: usize) {
+            self.put_count.store(0, Ordering::SeqCst);
+            self.fail_on_put.store(put_number, Ordering::SeqCst);
         }
 
         fn fail_head_batch(&self) {
@@ -1486,7 +1495,10 @@ mod tests {
         }
 
         fn put(&self, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
-            if self.fail_next_put.swap(false, Ordering::SeqCst) {
+            let put_number = self.put_count.fetch_add(1, Ordering::SeqCst) + 1;
+            if self.fail_next_put.swap(false, Ordering::SeqCst)
+                || put_number == self.fail_on_put.load(Ordering::SeqCst)
+            {
                 return Err(StorageError::Database("injected put failure".into()));
             }
             self.inner.put(key, value)
@@ -1639,8 +1651,11 @@ mod tests {
         (node, signer, db)
     }
 
-    fn configure_pending_activation<S: KvStore + 'static>(node: &Node<S>, height: u64) {
-        let algo = shell_crypto::SignatureType::SphincsSha2256f;
+    fn configure_pending_activation<S: KvStore + 'static>(
+        node: &Node<S>,
+        height: u64,
+        algo: shell_crypto::SignatureType,
+    ) {
         AlgorithmRegistry::global_mut().propose_activation_with_spec(algo, height, [0xA5; 32]);
 
         let mut key_material = b"algorithm_activation_height:".to_vec();
@@ -5282,7 +5297,7 @@ mod tests {
 
         *AlgorithmRegistry::global_mut() = AlgorithmRegistry::default();
         let (node, _signer, db) = setup_failing_batch_node();
-        configure_pending_activation(&node, 1);
+        configure_pending_activation(&node, 1, shell_crypto::SignatureType::SphincsSha2256f);
         store_consistent_genesis(&node);
         db.fail_next_put();
 
@@ -5298,6 +5313,39 @@ mod tests {
             !registry.is_allowed(shell_crypto::SignatureType::SphincsSha2256f),
             "failed activation persistence must leave the process registry pending"
         );
+    }
+
+    #[test]
+    fn block_production_rolls_back_state_when_activation_persistence_fails() {
+        const TEST_NAME: &str =
+            "node::tests::block_production_rolls_back_state_when_activation_persistence_fails";
+        const ISOLATED_MARKER: &str = "SHELL_TEST_ISOLATED_ACTIVATION_PRODUCTION_ROLLBACK";
+        if run_isolated(TEST_NAME, ISOLATED_MARKER) {
+            return;
+        }
+
+        *AlgorithmRegistry::global_mut() = AlgorithmRegistry::default();
+        let (node, signer, db) = setup_failing_batch_node();
+        for algo in [
+            shell_crypto::SignatureType::MlDsa65,
+            shell_crypto::SignatureType::SphincsSha2256f,
+        ] {
+            configure_pending_activation(&node, 1, algo);
+        }
+        store_consistent_genesis(&node);
+        let canonical_root = node.world_state.write().state_root().unwrap();
+        let canonical_head = node.chain_store.get_head_hash().unwrap();
+        db.fail_on_put(2);
+
+        let err = node.produce_block(&signer, 100).unwrap_err();
+
+        assert!(err.to_string().contains("injected put failure"));
+        assert_eq!(
+            node.world_state.write().state_root().unwrap(),
+            canonical_root,
+            "failed production must restore the canonical world state"
+        );
+        assert_eq!(node.chain_store.get_head_hash().unwrap(), canonical_head);
     }
 
     #[test]

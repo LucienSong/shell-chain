@@ -421,10 +421,21 @@ impl<S: KvStore + 'static> Node<S> {
 
         // Apply algorithm activations whose timelock has elapsed (WP §6.5).
         // Must run BEFORE state_root so activations are committed to the Merkle root.
-        {
+        let activation_result = {
             let mut ws = self.world_state.write();
             let mut registry = AlgorithmRegistry::global_mut();
-            apply_pending_activations(header.number, &mut *ws, &mut registry, "production")?;
+            apply_pending_activations(header.number, &mut *ws, &mut registry, "production")
+        };
+        if let Err(err) = activation_result {
+            prover.restore_pending_stark_settlements(drained_stark_settlements);
+            if let Err(rollback_err) = block_store.rollback_world_state(&current_root) {
+                warn!(
+                    error = %rollback_err,
+                    target_root = %current_root,
+                    "produce_block: failed to roll back world state after activation error"
+                );
+            }
+            return Err(err);
         }
 
         // Compute state root from the updated world state (includes any activations above).

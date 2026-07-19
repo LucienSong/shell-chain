@@ -1220,10 +1220,18 @@ pub fn process_pending_activations<S: KvStore + 'static>(
         let act_height = decode_u64_from_hash(&act_height_hash);
         // activation_height == 0 means no timelock was stored (pre-governance entry); skip.
         if act_height > 0 && act_height <= current_height {
-            store_algorithm_status(world_state, algo, AlgorithmStatus::Active)?;
-            registry.activate(algo);
             activated.push(algo);
         }
+    }
+
+    // Persist every due transition before changing the process registry. If a
+    // write fails, callers can discard the staged world state without exposing
+    // a partially activated in-process registry.
+    for &algo in &activated {
+        store_algorithm_status(world_state, algo, AlgorithmStatus::Active)?;
+    }
+    for &algo in &activated {
+        registry.activate(algo);
     }
     Ok(activated)
 }
@@ -2290,14 +2298,27 @@ mod tests {
     use super::*;
     use shell_storage::{ChainStore, MemoryDb, StorageError, WriteBatch};
     use std::sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
     };
 
-    #[derive(Debug, Default)]
+    #[derive(Debug)]
     struct FailingWriteStore {
         inner: MemoryDb,
         fail_writes: AtomicBool,
+        write_count: AtomicUsize,
+        fail_on_write: AtomicUsize,
+    }
+
+    impl Default for FailingWriteStore {
+        fn default() -> Self {
+            Self {
+                inner: MemoryDb::new(),
+                fail_writes: AtomicBool::new(false),
+                write_count: AtomicUsize::new(0),
+                fail_on_write: AtomicUsize::new(usize::MAX),
+            }
+        }
     }
 
     impl FailingWriteStore {
@@ -2305,8 +2326,16 @@ mod tests {
             self.fail_writes.store(true, Ordering::SeqCst);
         }
 
+        fn fail_on_write(&self, write_number: usize) {
+            self.write_count.store(0, Ordering::SeqCst);
+            self.fail_on_write.store(write_number, Ordering::SeqCst);
+        }
+
         fn check_write(&self) -> Result<(), StorageError> {
-            if self.fail_writes.load(Ordering::SeqCst) {
+            let write_number = self.write_count.fetch_add(1, Ordering::SeqCst) + 1;
+            if self.fail_writes.load(Ordering::SeqCst)
+                || write_number == self.fail_on_write.load(Ordering::SeqCst)
+            {
                 return Err(StorageError::Database("injected write failure".into()));
             }
             Ok(())
@@ -2895,6 +2924,37 @@ mod tests {
 
         assert!(err.to_string().contains("injected write failure"));
         assert!(!registry.is_allowed(algo));
+    }
+
+    #[test]
+    fn process_pending_activations_enables_none_when_a_later_write_fails() {
+        let store = Arc::new(FailingWriteStore::default());
+        let mut ws = WorldState::new(Arc::clone(&store));
+        let mut registry = AlgorithmRegistry::default();
+        let activation_height = 100;
+        let algorithms = [SignatureType::MlDsa65, SignatureType::SphincsSha2256f];
+
+        for algo in algorithms {
+            registry.propose_activation_with_spec(algo, activation_height, [0xCD; 32]);
+            store_algorithm_status(&mut ws, algo, AlgorithmStatus::PendingActivation).unwrap();
+            ws.set_storage(
+                &registry_address(),
+                &algorithm_activation_height_key(algo),
+                &encode_u64_as_hash(activation_height),
+            )
+            .unwrap();
+        }
+        store.fail_on_write(2);
+
+        process_pending_activations(activation_height, &mut ws, &mut registry)
+            .expect_err("second status write must fail");
+
+        for algo in algorithms {
+            assert!(
+                !registry.is_allowed(algo),
+                "no process activation may be visible until every status write succeeds"
+            );
+        }
     }
 
     #[test]
