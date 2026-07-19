@@ -181,15 +181,20 @@ pub fn restore_backup(
 /// Recursively copy a directory tree (used for restore).
 #[cfg(unix)]
 fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    let source = open_backup_directory(src)?;
+    copy_dir_from_handle(source, src, dst)
+}
+
+#[cfg(unix)]
+fn open_backup_directory(src: &std::path::Path) -> std::io::Result<std::os::fd::OwnedFd> {
     use rustix::fs::{Mode, OFlags};
 
-    let source = rustix::fs::open(
+    rustix::fs::open(
         src,
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::empty(),
     )
-    .map_err(std::io::Error::from)?;
-    copy_dir_from_handle(source, src, dst)
+    .map_err(std::io::Error::from)
 }
 
 #[cfg(unix)]
@@ -479,6 +484,30 @@ mod tests {
 
         assert!(error.to_string().contains("symbolic link"));
         assert!(!destination.join("nested/MANIFEST-1").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn backup_copy_stays_anchored_after_source_path_replacement() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("backup");
+        let moved_source = root.path().join("moved-backup");
+        let destination = root.path().join("staged");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("ORIGINAL"), b"original data").unwrap();
+        let source_handle = open_backup_directory(&source).unwrap();
+
+        std::fs::rename(&source, &moved_source).unwrap();
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("REPLACEMENT"), b"replacement data").unwrap();
+
+        copy_dir_from_handle(source_handle, &source, &destination).unwrap();
+
+        assert_eq!(
+            std::fs::read(destination.join("ORIGINAL")).unwrap(),
+            b"original data"
+        );
+        assert!(!destination.join("REPLACEMENT").exists());
     }
 
     #[test]
