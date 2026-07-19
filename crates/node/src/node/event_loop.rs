@@ -47,6 +47,21 @@ fn proof_amendment_envelope_matches(
     envelope_hash == payload_hash && envelope_block == payload_block
 }
 
+fn decode_challenge_response_amendment(
+    response_hash: ShellHash,
+    payload: &[u8],
+) -> Result<ProofAmendment, String> {
+    let amendment = ProofAmendment::from_json(payload)
+        .map_err(|error| format!("invalid proof amendment payload: {error}"))?;
+    if amendment.block_hash != response_hash {
+        return Err(format!(
+            "challenge response hash {response_hash} does not match amendment target {}",
+            amendment.block_hash
+        ));
+    }
+    Ok(amendment)
+}
+
 struct NodeTaskLifecycle {
     tasks: tokio::task::JoinSet<()>,
     prover_service: Option<ProverServiceHandle>,
@@ -1540,24 +1555,30 @@ impl<S: KvStore + 'static> Node<S> {
                                 // Re-verify and store if valid.
                                 NetworkMessage::ProofChallengeResponse(resp) => {
                                     debug!(%peer, "I2: received ChallengeResponse for block {}", resp.block_hash);
-                                    // Attempt to verify the provided proof bytes.
-                                    match shell_stark_prover::proof::SigBatchProof::from_json(&resp.proof_bytes) {
-                                        Ok(sig_proof) => {
-                                            if shell_stark_prover::prover::verify_sig_batch(&sig_proof).is_ok() {
-                                                if let Err(e) = self.amendment_store.put_amendment(&resp.block_hash, &resp.proof_bytes) {
-                                                    warn!("I2: failed to store verified challenge response: {e}");
-                                                } else {
-                                                    self.resolve_open_challenge(&resp.block_hash);
-                                                    info!(block = %resp.block_hash, "I2: challenge response verified and stored");
-                                                }
-                                            } else {
-                                                warn!(%peer, "I2: challenge response proof verification failed");
-                                            }
+                                    let amendment = match decode_challenge_response_amendment(
+                                        resp.block_hash,
+                                        &resp.proof_bytes,
+                                    ) {
+                                        Ok(amendment) => amendment,
+                                        Err(error) => {
+                                            warn!(%peer, %error, "I2: challenge response malformed");
+                                            continue;
                                         }
-                                        Err(e) => {
-                                            warn!(%peer, "I2: challenge response malformed: {e}");
-                                        }
+                                    };
+                                    if let Err(error) = self.validate_stark_amendment_ordering(&amendment) {
+                                        warn!(%peer, %error, "I2: challenge response ordering validation failed");
+                                        continue;
                                     }
+                                    if let Err(error) = self.validate_stark_proof_source_binding(&amendment) {
+                                        warn!(%peer, %error, "I2: challenge response proof verification failed");
+                                        continue;
+                                    }
+                                    if let Err(error) = self.store_stark_artifacts(&amendment, None) {
+                                        warn!(%peer, %error, "I2: failed to store verified challenge response");
+                                        continue;
+                                    }
+                                    self.resolve_open_challenge(&resp.block_hash);
+                                    info!(block = %resp.block_hash, "I2: challenge response verified and stored");
                                 }
                                 // L4: Peer announces its storage capability.
                                 NetworkMessage::StorageCapability { profile, oldest_body_block } => {
@@ -2619,6 +2640,54 @@ mod cadence_tests {
         assert!(proof_amendment_envelope_matches(hash, 7, hash, 7));
         assert!(!proof_amendment_envelope_matches(hash, 7, other_hash, 7));
         assert!(!proof_amendment_envelope_matches(hash, 6, hash, 7));
+    }
+
+    fn challenge_response_payload(block_hash: ShellHash) -> Vec<u8> {
+        ProofAmendment {
+            version: shell_stark_prover::amendment::PROOF_AMENDMENT_VERSION,
+            block_hash,
+            block_number: 7,
+            start_block: None,
+            proof: shell_stark_prover::proof::SigBatchProof::commitment_only([0; 32], 0),
+            prover: Address::ZERO,
+            prover_signature: Bytes::new(),
+            layer: 1,
+            source_hashes: Vec::new(),
+            original_size: Some(100),
+            compressed_size: Some(10),
+            settlement_tx_hash: None,
+        }
+        .to_json()
+        .unwrap()
+    }
+
+    #[test]
+    fn challenge_response_decodes_stored_amendment_payload() {
+        let block_hash = ShellHash::from([0x33; 32]);
+        let payload = challenge_response_payload(block_hash);
+
+        let amendment = decode_challenge_response_amendment(block_hash, &payload).unwrap();
+
+        assert_eq!(amendment.block_hash, block_hash);
+        assert_eq!(amendment.block_number, 7);
+    }
+
+    #[test]
+    fn challenge_response_rejects_mismatched_amendment_target() {
+        let response_hash = ShellHash::from([0x44; 32]);
+        let payload = challenge_response_payload(ShellHash::from([0x55; 32]));
+
+        assert!(decode_challenge_response_amendment(response_hash, &payload).is_err());
+    }
+
+    #[test]
+    fn challenge_response_rejects_bare_sig_batch_proof() {
+        let block_hash = ShellHash::from([0x66; 32]);
+        let payload = shell_stark_prover::proof::SigBatchProof::commitment_only([0; 32], 0)
+            .to_json()
+            .unwrap();
+
+        assert!(decode_challenge_response_amendment(block_hash, &payload).is_err());
     }
 
     #[test]
