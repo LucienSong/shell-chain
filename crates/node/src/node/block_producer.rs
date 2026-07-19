@@ -405,17 +405,9 @@ impl<S: KvStore + 'static> Node<S> {
 
         // Compute block-level logs bloom by OR-ing all receipt blooms.
         {
-            let receipt_blooms: Vec<shell_pqvm::bloom::Bloom> = receipts
-                .iter()
-                .map(|r| {
-                    let mut bloom = [0u8; shell_pqvm::bloom::BLOOM_SIZE];
-                    let bytes = r.logs_bloom.as_ref();
-                    let len = bytes.len().min(shell_pqvm::bloom::BLOOM_SIZE);
-                    bloom[..len].copy_from_slice(&bytes[..len]);
-                    bloom
-                })
-                .collect();
-            let block_bloom = shell_pqvm::bloom::bloom_union(&receipt_blooms);
+            let block_bloom = shell_pqvm::bloom::bloom_union_bytes(
+                receipts.iter().map(|receipt| receipt.logs_bloom.as_ref()),
+            );
             header.logs_bloom = Bytes::from(block_bloom.to_vec());
         }
 
