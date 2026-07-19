@@ -1350,17 +1350,26 @@ impl<S: KvStore + 'static> Node<S> {
                 self.witness_pruner.read().pruned_below(),
             );
             let mut pruner = self.state_pruner.write();
-            if pruner.genesis_root().is_none() {
+            let genesis_registered = if pruner.genesis_root().is_some() {
+                true
+            } else {
                 match self.chain_store.get_block_by_number(0) {
-                    Ok(Some(genesis)) => pruner.set_genesis_root(genesis.header.state_root),
-                    Ok(None) => {}
+                    Ok(Some(genesis)) => {
+                        pruner.set_genesis_root(genesis.header.state_root);
+                        true
+                    }
+                    Ok(None) => {
+                        tracing::warn!("state pruner: genesis block is unavailable");
+                        false
+                    }
                     Err(e) => {
-                        tracing::warn!(error = %e, "state pruner: failed to load genesis root")
+                        tracing::warn!(error = %e, "state pruner: failed to load genesis root");
+                        false
                     }
                 }
-            }
+            };
             pruner.register_block(block_number, state_root);
-            if finalized_number > 0 && pruner.should_prune(block_number) {
+            if genesis_registered && finalized_number > 0 && pruner.should_prune(block_number) {
                 pruner.mark_prunable(canonical_prune_boundary);
                 match pruner.prune(self.store.as_ref()) {
                     Ok(result) => {
@@ -5949,6 +5958,50 @@ mod tests {
             .get_block_hash_by_number(1)
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn canonical_mapping_pruning_stops_when_genesis_is_unavailable() {
+        let (node, signer) = setup_node_with_retention(2, 2);
+        store_genesis(&node);
+
+        for _ in 0..40 {
+            node.produce_block(&signer, 0).unwrap();
+        }
+
+        let finalized = node.chain_store.get_block_by_number(35).unwrap().unwrap();
+        node.chain_store.set_finalized_number(35).unwrap();
+        node.finality
+            .write()
+            .set_finalized_direct(35, finalized.hash());
+        for number in 0..34 {
+            let hash = node
+                .chain_store
+                .get_block_hash_by_number(number)
+                .unwrap()
+                .unwrap();
+            node.settled_stark_sources.lock().insert((1, hash));
+        }
+
+        node.produce_block(&signer, 0).unwrap();
+        assert_eq!(node.body_pruner.read().pruned_below(), 34);
+        assert_eq!(node.witness_pruner.read().pruned_below(), 34);
+        assert!(node
+            .chain_store
+            .get_block_hash_by_number(1)
+            .unwrap()
+            .is_some());
+
+        *node.state_pruner.write() = StatePruner::new(32);
+        node.state_pruner.write().set_prune_interval(1);
+        node.chain_store.delete_canonical(0).unwrap();
+        node.produce_block(&signer, 0).unwrap();
+
+        assert!(node
+            .chain_store
+            .get_block_hash_by_number(1)
+            .unwrap()
+            .is_some());
     }
 
     #[test]
