@@ -22,6 +22,47 @@ fi
 if ! grep -Fq 'check-release-ci.sh' "$SCRIPT_DIR/release.sh"; then
     fail "release preflight does not verify hosted CI for HEAD"
 fi
+if ! grep -Fq 'check-release-remote.sh' "$SCRIPT_DIR/release.sh"; then
+    fail "release preflight does not verify the tag push remote"
+fi
+if ! grep -Fq 'git push "$RELEASE_REMOTE" "$TAG"' "$SCRIPT_DIR/release.sh"; then
+    fail "release tag push does not use the validated remote"
+fi
+
+REMOTE_FIXTURE="$TMP_DIR/remote-fixture"
+git -C "$TMP_DIR" init -q -b main remote-fixture
+git -C "$REMOTE_FIXTURE" remote add canonical https://github.com/ShellDAO/shell-chain.git
+git -C "$REMOTE_FIXTURE" remote add canonical-ssh git@github.com:ShellDAO/shell-chain.git
+git -C "$REMOTE_FIXTURE" remote add fork https://github.com/example/shell-chain.git
+git -C "$REMOTE_FIXTURE" remote add multi https://github.com/ShellDAO/shell-chain.git
+git -C "$REMOTE_FIXTURE" remote set-url --add --push multi \
+    https://github.com/ShellDAO/shell-chain.git
+git -C "$REMOTE_FIXTURE" remote set-url --add --push multi \
+    https://github.com/example/shell-chain.git
+
+(cd "$REMOTE_FIXTURE" && "$SCRIPT_DIR/check-release-remote.sh" canonical >/dev/null)
+(cd "$REMOTE_FIXTURE" && "$SCRIPT_DIR/check-release-remote.sh" canonical-ssh >/dev/null)
+if REMOTE_OUTPUT=$(cd "$REMOTE_FIXTURE" && \
+    "$SCRIPT_DIR/check-release-remote.sh" fork 2>&1); then
+    fail "release remote check unexpectedly accepted a fork"
+fi
+if ! grep -Fq "does not target ShellDAO/shell-chain" <<<"$REMOTE_OUTPUT"; then
+    fail "fork rejection did not explain the required release target: $REMOTE_OUTPUT"
+fi
+if REMOTE_OUTPUT=$(cd "$REMOTE_FIXTURE" && \
+    "$SCRIPT_DIR/check-release-remote.sh" multi 2>&1); then
+    fail "release remote check unexpectedly accepted multiple push URLs"
+fi
+if ! grep -Fq "must have exactly one push URL (found 2)" <<<"$REMOTE_OUTPUT"; then
+    fail "multiple push URL rejection was not specific: $REMOTE_OUTPUT"
+fi
+if REMOTE_OUTPUT=$(cd "$REMOTE_FIXTURE" && \
+    "$SCRIPT_DIR/check-release-remote.sh" missing 2>&1); then
+    fail "release remote check unexpectedly accepted a missing remote"
+fi
+if ! grep -Fq "has no push URL" <<<"$REMOTE_OUTPUT"; then
+    fail "missing push URL rejection was not specific: $REMOTE_OUTPUT"
+fi
 
 CHECK_SHA=1111111111111111111111111111111111111111
 FAKE_GH="$TMP_DIR/fake-gh"
@@ -78,6 +119,7 @@ make_fixture() {
     rm -rf "$fixture"
     mkdir -p "$fixture/scripts"
     cp "$SCRIPT_DIR/release.sh" "$SCRIPT_DIR/check-release-ci.sh" \
+        "$SCRIPT_DIR/check-release-remote.sh" \
         "$SCRIPT_DIR/check-release-metadata.sh" \
         "$SCRIPT_DIR/supply-chain-tool-versions.sh" "$fixture/scripts/"
     printf '[workspace.package]\nversion = "0.27.1"\n' > "$fixture/Cargo.toml"
@@ -90,6 +132,7 @@ make_fixture() {
     git -C "$fixture" init -q -b main
     git -C "$fixture" config user.name "ShellDAO Release Test"
     git -C "$fixture" config user.email "release-test@shelldao.org"
+    git -C "$fixture" remote add origin https://github.com/ShellDAO/shell-chain.git
     git -C "$fixture" add .
     git -C "$fixture" commit -qm "test fixture"
     printf '%s\n' "$fixture"
@@ -165,6 +208,7 @@ fixture=$(make_fixture $'## [Unreleased]\n\n## [0.27.1] - test release')
 git -C "$fixture" switch -q --orphan release/v0.27.1
 mkdir -p "$fixture/scripts"
 cp "$SCRIPT_DIR/release.sh" "$SCRIPT_DIR/check-release-ci.sh" \
+    "$SCRIPT_DIR/check-release-remote.sh" \
     "$SCRIPT_DIR/check-release-metadata.sh" \
     "$SCRIPT_DIR/supply-chain-tool-versions.sh" "$fixture/scripts/"
 printf '[workspace.package]\nversion = "0.27.1"\n' > "$fixture/Cargo.toml"

@@ -38,6 +38,7 @@ if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
 fi
 
 TAG="v${VERSION}"
+RELEASE_REMOTE="${RELEASE_REMOTE:-origin}"
 
 echo ""
 echo "╔══════════════════════════════════════════════╗"
@@ -108,6 +109,13 @@ if [ "$BRANCH" = "release/v${VERSION}" ]; then
     fi
 fi
 ok "Current branch: ${BRANCH}"
+
+# 6. Release tags must be pushed to the canonical repository, not a fork.
+if "$SCRIPT_DIR/check-release-remote.sh" "$RELEASE_REMOTE"; then
+    ok "Release remote: ${RELEASE_REMOTE}"
+else
+    fail "Release remote must target ShellDAO/shell-chain"
+fi
 
 # ── Format check ─────────────────────────────────────────────
 
@@ -202,10 +210,10 @@ ${CHANGELOG_EXCERPT}"
 ok "Created annotated tag: ${TAG}"
 
 echo ""
-read -r -p "Push tag ${TAG} to origin? [y/N] " CONFIRM
+read -r -p "Push tag ${TAG} to ${RELEASE_REMOTE}? [y/N] " CONFIRM
 if [ "$CONFIRM" = "y" ] || [ "$CONFIRM" = "Y" ]; then
-    git push origin "$TAG"
-    ok "Pushed tag ${TAG} to origin"
+    git push "$RELEASE_REMOTE" "$TAG"
+    ok "Pushed tag ${TAG} to ${RELEASE_REMOTE}"
     echo ""
     echo "Next steps:"
     echo "  1. Create a GitHub Release at https://github.com/ShellDAO/shell-chain/releases/new?tag=${TAG}"
@@ -213,7 +221,7 @@ if [ "$CONFIRM" = "y" ] || [ "$CONFIRM" = "Y" ]; then
     echo "  3. Build each platform with scripts/build-release-binary.sh and attach the binaries"
     echo "  4. Publish Docker image: docker buildx build --platform linux/amd64,linux/arm64 -t ghcr.io/shelldao/shell-chain:${TAG} --push ."
 else
-    warn "Tag created locally but NOT pushed. Run: git push origin ${TAG}"
+    warn "Tag created locally but NOT pushed. Run: git push ${RELEASE_REMOTE} ${TAG}"
 fi
 
 echo ""
