@@ -1,4 +1,4 @@
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::Path;
 
@@ -6,6 +6,14 @@ use std::path::Path;
 use std::os::unix::fs::OpenOptionsExt;
 
 const MAX_SENSITIVE_FILE_SIZE: u64 = 1024 * 1024;
+
+fn open_sensitive_file(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW);
+    options.open(path)
+}
 
 pub(crate) fn read_sensitive_file(path: &Path) -> io::Result<String> {
     let path_meta = std::fs::symlink_metadata(path)?;
@@ -26,12 +34,7 @@ pub(crate) fn read_sensitive_file(path: &Path) -> io::Result<String> {
         ));
     }
 
-    let mut options = OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    options.custom_flags(libc::O_NOFOLLOW);
-
-    let file = options.open(path)?;
+    let file = open_sensitive_file(path)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -91,7 +94,6 @@ pub(crate) fn write_sensitive_file_new(path: &Path, contents: impl AsRef<[u8]>) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs::File;
 
     #[test]
     fn write_sensitive_file_refuses_existing_path() {
@@ -131,6 +133,22 @@ mod tests {
         let error = read_sensitive_file(&linked).unwrap_err();
 
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_sensitive_file_does_not_follow_symbolic_links() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.json");
+        let linked = dir.path().join("linked.json");
+        std::fs::write(&target, b"secret").unwrap();
+        symlink(&target, &linked).unwrap();
+
+        let error = open_sensitive_file(&linked).unwrap_err();
+
+        assert_eq!(error.raw_os_error(), Some(libc::ELOOP));
     }
 
     #[test]
