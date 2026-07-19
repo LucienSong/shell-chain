@@ -299,7 +299,7 @@ pub struct StateTriePruneResult {
 const STATE_TRIE_PRUNED_BELOW_KEY: &[u8] = b"STATE_TRIE_PRUNED_BELOW";
 const MAX_STATE_TRIE_PRUNE_BLOCKS_PER_PASS: u64 = 1_024;
 
-fn state_trie_pruned_below<S: KvStore>(store: &S) -> Result<u64, StorageError> {
+pub(crate) fn state_trie_pruned_below<S: KvStore>(store: &S) -> Result<u64, StorageError> {
     match store.get(STATE_TRIE_PRUNED_BELOW_KEY)? {
         Some(bytes) if bytes.len() == 8 => {
             let encoded: [u8; 8] = bytes.try_into().map_err(|_| {

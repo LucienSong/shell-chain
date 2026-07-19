@@ -52,7 +52,7 @@ pub(crate) use crate::error::NodeError;
 pub(crate) use crate::metrics::Metrics;
 pub(crate) use crate::prover_service::{ProverConfig, ProverService, ProverServiceHandle};
 pub(crate) use crate::pruning::{
-    prune_state_trie, retention_cutoff, StateRootTracker, StorageProfile,
+    prune_state_trie, retention_cutoff, state_trie_pruned_below, StateRootTracker, StorageProfile,
 };
 pub(crate) use chain_state_machine::{BlockImportTransition, ChainStateMachine};
 pub(crate) use challenge_lifecycle::{
@@ -134,10 +134,14 @@ fn canonical_mapping_prune_boundary(
     finalized_number: u64,
     body_pruned_below: u64,
     witness_pruned_below: u64,
+    state_trie_pruned_below: Option<u64>,
 ) -> u64 {
-    finalized_number
+    let dependent_boundary = finalized_number
         .min(body_pruned_below)
-        .min(witness_pruned_below)
+        .min(witness_pruned_below);
+    state_trie_pruned_below.map_or(dependent_boundary, |trie_boundary| {
+        dependent_boundary.min(trie_boundary)
+    })
 }
 
 fn state_trie_prune_boundary(finalized_number: u64, keep_recent: u64) -> Option<u64> {
@@ -1343,11 +1347,27 @@ impl<S: KvStore + 'static> Node<S> {
             // Canonical mappings are required to resume body and witness pruning.
             // A delayed STARK settlement can hold the witness cursor behind the
             // configured retention window, so never let mapping cleanup overtake
-            // either dependent pruner.
+            // any dependent pruner.
+            let state_trie_boundary = if matches!(profile, StorageProfile::Light) && keep_recent > 0
+            {
+                match state_trie_pruned_below(self.store.as_ref()) {
+                    Ok(boundary) => Some(boundary),
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "state pruner: failed to read state-trie pruning cursor"
+                        );
+                        Some(0)
+                    }
+                }
+            } else {
+                None
+            };
             let canonical_prune_boundary = canonical_mapping_prune_boundary(
                 finalized_number,
                 self.body_pruner.read().pruned_below(),
                 self.witness_pruner.read().pruned_below(),
+                state_trie_boundary,
             );
             let mut pruner = self.state_pruner.write();
             pruner.register_block(block_number, state_root);
@@ -5751,9 +5771,14 @@ mod tests {
 
     #[test]
     fn canonical_mapping_pruning_waits_for_dependent_pruners() {
-        assert_eq!(canonical_mapping_prune_boundary(80, 80, 0), 0);
-        assert_eq!(canonical_mapping_prune_boundary(80, 40, 60), 40);
-        assert_eq!(canonical_mapping_prune_boundary(80, 90, 100), 80);
+        assert_eq!(canonical_mapping_prune_boundary(80, 80, 0, None), 0);
+        assert_eq!(canonical_mapping_prune_boundary(80, 40, 60, None), 40);
+        assert_eq!(canonical_mapping_prune_boundary(80, 90, 100, None), 80);
+        assert_eq!(
+            canonical_mapping_prune_boundary(8_000, 8_000, 8_000, Some(1_024)),
+            1_024,
+            "canonical mappings must not overtake the bounded state-trie cursor"
+        );
 
         let store = Arc::new(MemoryDb::new());
         let chain_store = ChainStore::new(Arc::clone(&store));
@@ -5764,7 +5789,7 @@ mod tests {
             chain_store.set_canonical(number, &root).unwrap();
         }
 
-        pruner.mark_prunable(canonical_mapping_prune_boundary(80, 80, 0));
+        pruner.mark_prunable(canonical_mapping_prune_boundary(80, 80, 0, None));
         assert_eq!(pruner.prune(store.as_ref()).unwrap().pruned_count, 0);
         assert!(chain_store.get_block_hash_by_number(0).unwrap().is_some());
     }
@@ -5888,7 +5913,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_mapping_pruning_uses_current_dependency_cursors() {
+    fn canonical_mapping_pruning_waits_for_state_trie_cursor() {
         let (node, signer) = setup_node_with_retention(2, 2);
         *node.state_pruner.write() = StatePruner::new(32);
         node.state_pruner.write().set_prune_interval(1);
@@ -5921,11 +5946,13 @@ mod tests {
 
         assert_eq!(node.body_pruner.read().pruned_below(), 34);
         assert_eq!(node.witness_pruner.read().pruned_below(), 34);
-        assert!(node
-            .chain_store
-            .get_block_hash_by_number(1)
-            .unwrap()
-            .is_none());
+        assert!(
+            node.chain_store
+                .get_block_hash_by_number(1)
+                .unwrap()
+                .is_some(),
+            "state-trie pruning has not advanced, so its canonical mappings remain required"
+        );
     }
 
     #[test]
