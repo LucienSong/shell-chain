@@ -6749,6 +6749,27 @@ mod tests {
     }
 
     #[test]
+    fn import_block_rejects_logs_bloom_mismatch() {
+        let (node, signer) = setup_node();
+        store_genesis(&node);
+        node.register_authority_pubkey(
+            node.config.proposer_address.unwrap(),
+            signer.public_key().to_vec(),
+        );
+        let mut block = make_block_at_1(&node, &signer, None);
+        block.header.logs_bloom = Bytes::from(vec![0x01; shell_pqvm::bloom::BLOOM_SIZE]);
+        block.proposer_seal = Some(
+            signer
+                .sign(block.header.hash().as_bytes())
+                .expect("sign block"),
+        );
+
+        let err = node.import_block(block, &MultiVerifier).unwrap_err();
+
+        assert!(err.to_string().contains("logs_bloom mismatch"));
+    }
+
+    #[test]
     fn import_block_witness_root_mismatch_without_stored_bundle_rejected() {
         let (node, signer) = setup_node();
         store_genesis(&node);
