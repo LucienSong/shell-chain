@@ -136,11 +136,10 @@ impl ReorgEngine {
         let mut tip_ws = WorldState::at_root(Arc::clone(store), &tip_state_root)?;
         tip_ws.validate()?;
 
-        // Step 1: Collect transactions from blocks being rolled back (newest first)
-        let mut reverted_txs = Vec::new();
-        for block in old_blocks.iter().rev() {
-            reverted_txs.extend(block.transactions.clone());
-        }
+        let reverted_tx_count = old_blocks
+            .iter()
+            .map(|block| block.transactions.len())
+            .sum();
 
         let new_head = new_chain.last().copied().unwrap_or(ancestor_hash);
         let new_tip_number = ancestor_number.saturating_add(new_chain.len() as u64);
@@ -159,6 +158,13 @@ impl ReorgEngine {
             &stale_canonical_numbers,
             &new_head,
         )?;
+
+        // The committed old blocks are no longer needed. Move their transactions
+        // into the result instead of cloning every signature and calldata buffer.
+        let mut reverted_txs = Vec::with_capacity(reverted_tx_count);
+        for mut block in old_blocks.into_iter().rev() {
+            reverted_txs.append(&mut block.transactions);
+        }
         *world_state.write() = tip_ws;
 
         info!(state_root = ?tip_state_root, "restored world state to reorg tip");
