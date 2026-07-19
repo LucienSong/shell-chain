@@ -559,9 +559,10 @@ impl<'a, S: KvStore + 'static> MemPoolBoundary<'a, S> {
         &self,
         max_txs: usize,
         base_fee_per_gas: u64,
+        blob_base_fee: u64,
     ) -> Vec<Arc<SignedTransaction>> {
         self.tx_pool
-            .pending_for_block_at_base_fee_shared(max_txs, base_fee_per_gas)
+            .pending_for_block_at_fees_shared(max_txs, base_fee_per_gas, blob_base_fee)
     }
 
     fn pending_for_rebroadcast(

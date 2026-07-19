@@ -525,8 +525,36 @@ impl TxPool {
         limit: usize,
         base_fee_per_gas: u64,
     ) -> Vec<Arc<SignedTransaction>> {
+        self.pending_for_block_at_fees_shared(limit, base_fee_per_gas, 0)
+    }
+
+    /// Collect transactions that can pay both next-block execution and blob fees.
+    ///
+    /// Underpriced sender heads remain queued without consuming the result limit
+    /// or allowing descendants to bypass them.
+    pub fn pending_for_block_at_fees(
+        &self,
+        limit: usize,
+        base_fee_per_gas: u64,
+        blob_base_fee: u64,
+    ) -> Vec<SignedTransaction> {
+        self.pending_for_block_at_fees_shared(limit, base_fee_per_gas, blob_base_fee)
+            .into_iter()
+            .map(|tx| tx.as_ref().clone())
+            .collect()
+    }
+
+    /// Shared-handle variant of [`Self::pending_for_block_at_fees`].
+    pub fn pending_for_block_at_fees_shared(
+        &self,
+        limit: usize,
+        base_fee_per_gas: u64,
+        blob_base_fee: u64,
+    ) -> Vec<Arc<SignedTransaction>> {
         self.pending_for_block_matching_shared(limit, |tx| {
             tx.tx.max_fee_per_gas >= base_fee_per_gas
+                && (tx.tx.tx_type != 3
+                    || tx.tx.max_fee_per_blob_gas.unwrap_or_default() >= blob_base_fee)
         })
     }
 
@@ -1951,6 +1979,30 @@ mod tests {
         insert_rich(&pool, eligible, &verifier, &mut ws, &cs).unwrap();
 
         let candidates = pool.pending_for_block_at_base_fee(1, 150);
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].hash(), eligible_hash);
+    }
+
+    #[test]
+    fn block_candidate_limit_does_not_count_underpriced_blob_heads() {
+        let pool = TxPool::new(make_config());
+        let verifier = DilithiumVerifier;
+        let (mut ws, cs) = setup_validation_ctx();
+
+        let blob_signer = DilithiumSigner::generate();
+        let blob_pubkey = blob_signer.public_key().to_vec();
+        let underpriced_blob = make_blob_tx_with_signer(&blob_signer, &blob_pubkey, 200, 100, 1);
+
+        let eligible_signer = DilithiumSigner::generate();
+        let eligible_pubkey = eligible_signer.public_key().to_vec();
+        let eligible = make_signed_tx_with_signer(&eligible_signer, &eligible_pubkey, 0, 50);
+        let eligible_hash = eligible.hash();
+
+        insert_rich(&pool, underpriced_blob, &verifier, &mut ws, &cs).unwrap();
+        insert_rich(&pool, eligible, &verifier, &mut ws, &cs).unwrap();
+
+        let candidates = pool.pending_for_block_at_fees(1, 0, 2);
 
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].hash(), eligible_hash);
