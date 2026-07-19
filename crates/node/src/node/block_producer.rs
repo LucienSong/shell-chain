@@ -55,7 +55,7 @@ impl<S: KvStore + 'static> Node<S> {
         let excess_blob_gas =
             calc_excess_blob_gas(head.header.excess_blob_gas, head.header.blob_gas_used);
         let blob_base_fee = calc_blob_gas_price(excess_blob_gas);
-        let candidates = mem_pool.pending_for_block(max_txs, base_fee);
+        let candidates = mem_pool.pending_for_block(max_txs, base_fee, blob_base_fee);
 
         // Create an isolated EVM instance at the current state root.
         let (state_db, current_root) = block_store.isolated_state_db()?;
