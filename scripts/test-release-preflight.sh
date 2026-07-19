@@ -93,12 +93,14 @@ write_check_runs() {
     local test_status=$1
     local test_conclusion=$2
     local test_sha=${3:-$CHECK_SHA}
+    local test_app=${4:-github-actions}
+    local test_app_owner=${5:-github}
     cat > "$TMP_DIR/check-runs.json" <<EOF
 {
   "check_runs": [
-    {"name":"Check & Lint","head_sha":"$CHECK_SHA","status":"completed","conclusion":"success"},
-    {"name":"Test","head_sha":"$test_sha","status":"$test_status","conclusion":$test_conclusion},
-    {"name":"Supply Chain Security","head_sha":"$CHECK_SHA","status":"completed","conclusion":"success"}
+    {"name":"Check & Lint","head_sha":"$CHECK_SHA","status":"completed","conclusion":"success","app":{"slug":"github-actions","owner":{"login":"github"}}},
+    {"name":"Test","head_sha":"$test_sha","status":"$test_status","conclusion":$test_conclusion,"app":{"slug":"$test_app","owner":{"login":"$test_app_owner"}}},
+    {"name":"Supply Chain Security","head_sha":"$CHECK_SHA","status":"completed","conclusion":"success","app":{"slug":"github-actions","owner":{"login":"github"}}}
   ]
 }
 EOF
@@ -125,6 +127,9 @@ assert_ci_fails_with "required check 'Test' has not succeeded"
 
 write_check_runs completed '"success"' 2222222222222222222222222222222222222222
 assert_ci_fails_with "required check 'Test' is associated with another commit"
+
+write_check_runs completed '"success"' "$CHECK_SHA" untrusted-checks example
+assert_ci_fails_with "required check 'Test' is from an untrusted app"
 
 printf '{"check_runs":[]}' > "$TMP_DIR/check-runs.json"
 assert_ci_fails_with "required check 'Check & Lint' is missing"

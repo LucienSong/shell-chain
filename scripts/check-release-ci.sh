@@ -53,6 +53,15 @@ for name in required:
     for run in matches:
         if run.get("head_sha") != commit:
             errors.append(f"required check '{name}' is associated with another commit")
+        app = run.get("app")
+        owner = app.get("owner") if isinstance(app, dict) else None
+        if (
+            not isinstance(app, dict)
+            or app.get("slug") != "github-actions"
+            or not isinstance(owner, dict)
+            or owner.get("login") != "github"
+        ):
+            errors.append(f"required check '{name}' is from an untrusted app")
         if run.get("status") != "completed" or run.get("conclusion") != "success":
             errors.append(
                 f"required check '{name}' has not succeeded "
