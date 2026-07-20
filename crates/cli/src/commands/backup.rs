@@ -232,25 +232,7 @@ fn copy_dir_from_handle(
                 copy_dir_from_handle(child, &entry_path, &dest)?;
             }
             FileType::RegularFile => {
-                let child = rustix::fs::openat(
-                    &source,
-                    name,
-                    OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                    Mode::empty(),
-                )
-                .map_err(std::io::Error::from)?;
-                let opened = rustix::fs::fstat(&child).map_err(std::io::Error::from)?;
-                if FileType::from_raw_mode(opened.st_mode) != FileType::RegularFile {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!(
-                            "backup entry changed while opening: {}",
-                            entry_path.display()
-                        ),
-                    ));
-                }
-
-                let mut input = std::fs::File::from(child);
+                let mut input = open_backup_file(&source, name, &entry_path)?;
                 let permissions = input.metadata()?.permissions();
                 let mut output = std::fs::OpenOptions::new()
                     .write(true)
@@ -277,6 +259,36 @@ fn copy_dir_from_handle(
         }
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn open_backup_file(
+    source: &std::os::fd::OwnedFd,
+    name: &std::ffi::CStr,
+    entry_path: &std::path::Path,
+) -> std::io::Result<std::fs::File> {
+    use rustix::fs::{FileType, Mode, OFlags};
+
+    // NONBLOCK prevents a regular-file-to-FIFO swap from hanging before fstat.
+    let child = rustix::fs::openat(
+        source,
+        name,
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(std::io::Error::from)?;
+    let opened = rustix::fs::fstat(&child).map_err(std::io::Error::from)?;
+    if FileType::from_raw_mode(opened.st_mode) != FileType::RegularFile {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "backup entry changed while opening: {}",
+                entry_path.display()
+            ),
+        ));
+    }
+
+    Ok(std::fs::File::from(child))
 }
 
 #[cfg(not(unix))]
@@ -508,6 +520,30 @@ mod tests {
             b"original data"
         );
         assert!(!destination.join("REPLACEMENT").exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn backup_file_open_rejects_fifo_without_waiting_for_writer() {
+        use rustix::fs::Mode;
+        use std::ffi::CString;
+
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("backup");
+        std::fs::create_dir(&source).unwrap();
+        let source_handle = open_backup_directory(&source).unwrap();
+        let name = CString::new("swapped-entry").unwrap();
+        rustix::fs::mkfifoat(&source_handle, name.as_c_str(), Mode::RUSR | Mode::WUSR).unwrap();
+
+        let error = open_backup_file(
+            &source_handle,
+            name.as_c_str(),
+            &source.join("swapped-entry"),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("changed while opening"));
     }
 
     #[test]
