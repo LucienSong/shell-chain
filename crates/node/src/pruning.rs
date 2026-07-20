@@ -707,6 +707,24 @@ mod tests {
     }
 
     #[test]
+    fn state_trie_pruning_rejects_missing_retained_canonical_header() {
+        let (store, roots, addresses) = populate_state_chain();
+        let chain_store = ChainStore::new(Arc::clone(&store));
+        let block_hash = chain_store.get_block_hash_by_number(2).unwrap().unwrap();
+        let header_key = [b"h/".as_slice(), block_hash.as_bytes()].concat();
+        store.delete(&header_key).unwrap();
+
+        let result = prune_state_trie(Arc::clone(&store), 2, StorageProfile::Light);
+
+        assert!(matches!(result, Err(StorageError::InvalidInput(_))));
+        assert_eq!(store.get(STATE_TRIE_PRUNED_BELOW_KEY).unwrap(), None);
+        assert_eq!(
+            root_balance(&store, roots[0], addresses[0]).unwrap(),
+            U256::from(1u64)
+        );
+    }
+
+    #[test]
     fn archive_profile_does_not_delete_trie_nodes() {
         let (store, roots, addresses) = populate_state_chain();
 
