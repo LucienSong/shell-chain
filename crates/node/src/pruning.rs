@@ -332,6 +332,12 @@ fn canonical_state_root<S: KvStore>(
                 "state-trie pruner: canonical header missing for block {block_number}"
             ))
         })?;
+    if header.number != block_number {
+        return Err(StorageError::InvalidInput(format!(
+            "state-trie pruner: canonical block {block_number} header reports block {}",
+            header.number
+        )));
+    }
     Ok(header.state_root)
 }
 
@@ -713,6 +719,23 @@ mod tests {
         let block_hash = chain_store.get_block_hash_by_number(2).unwrap().unwrap();
         let header_key = [b"h/".as_slice(), block_hash.as_bytes()].concat();
         store.delete(&header_key).unwrap();
+
+        let result = prune_state_trie(Arc::clone(&store), 2, StorageProfile::Light);
+
+        assert!(matches!(result, Err(StorageError::InvalidInput(_))));
+        assert_eq!(store.get(STATE_TRIE_PRUNED_BELOW_KEY).unwrap(), None);
+        assert_eq!(
+            root_balance(&store, roots[0], addresses[0]).unwrap(),
+            U256::from(1u64)
+        );
+    }
+
+    #[test]
+    fn state_trie_pruning_rejects_mismatched_canonical_header_height() {
+        let (store, roots, addresses) = populate_state_chain();
+        let chain_store = ChainStore::new(Arc::clone(&store));
+        let block_one_hash = chain_store.get_block_hash_by_number(1).unwrap().unwrap();
+        chain_store.set_canonical(0, &block_one_hash).unwrap();
 
         let result = prune_state_trie(Arc::clone(&store), 2, StorageProfile::Light);
 
