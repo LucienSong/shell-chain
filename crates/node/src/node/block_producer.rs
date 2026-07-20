@@ -356,6 +356,16 @@ impl<S: KvStore + 'static> Node<S> {
                 );
                 continue;
             }
+            if let Err(e) = self.validate_stark_amendment_authentication(&amendment) {
+                settled_stark_proofs.pop();
+                warn!(
+                    block = next_number,
+                    source = %amendment.block_hash,
+                    layer = amendment.layer,
+                    "skipping STARK reward settlement with invalid prover authentication: {e}"
+                );
+                continue;
+            }
             if let Err(e) = self.validate_stark_proof_source_binding(&amendment) {
                 settled_stark_proofs.pop();
                 warn!(

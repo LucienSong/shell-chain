@@ -388,6 +388,7 @@ impl<S: KvStore + 'static> Node<S> {
                 prover_config,
                 prover_address,
             )
+            .with_signer(Arc::clone(&signer))
             .with_amendment_sender(prover_amendment_tx)
             .with_drain_frontier(Arc::clone(&self.stark_drain_frontier))
             .with_l2_mode(self.config.l2_stark_mode);
@@ -1331,6 +1332,14 @@ impl<S: KvStore + 'static> Node<S> {
                                             payload_block = amendment.block_number,
                                             payload_hash = %amendment.block_hash,
                                             "proof amendment envelope does not match signed payload"
+                                        );
+                                        continue;
+                                    }
+                                    if let Err(e) = self.validate_stark_amendment_authentication(&amendment) {
+                                        warn!(
+                                            block = block_number,
+                                            layer = amendment.layer,
+                                            "STARK proof rejected by prover authentication: {e}"
                                         );
                                         continue;
                                     }

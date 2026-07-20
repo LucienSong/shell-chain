@@ -2007,7 +2007,7 @@ mod tests {
             .last()
             .expect("ordered amendment needs at least one source");
         let empty_root = shell_stark_prover::compute_batch_root(&[]);
-        ProofAmendment {
+        let mut amendment = ProofAmendment {
             version: shell_stark_prover::amendment::PROOF_AMENDMENT_VERSION,
             block_hash,
             block_number: end_block,
@@ -2027,7 +2027,12 @@ mod tests {
             original_size: Some(0),
             compressed_size: Some(0),
             settlement_tx_hash: None,
-        }
+        };
+        let signer = DilithiumSigner::generate();
+        amendment
+            .sign_prover_authentication(&signer)
+            .expect("sign dummy amendment");
+        amendment
     }
 
     fn put_dummy_witness<S: KvStore + 'static>(node: &Node<S>, hash: &ShellHash) {

@@ -7,6 +7,7 @@
 //! importers can verify without re-running native signature checks.
 
 use serde::{Deserialize, Serialize};
+use shell_crypto::{verify_signature, PQSignature, SignatureType, Signer, MAX_SIGNATURE_BYTES};
 use shell_primitives::{Address, Bytes, ShellHash};
 
 use crate::proof::SigBatchProof;
@@ -38,10 +39,11 @@ pub struct ProofAmendment {
     pub proof: SigBatchProof,
     /// The prover's address (registered in ProverRegistry).
     pub prover: Address,
-    /// Raw serialized PQ signature over `(block_hash ‖ block_number ‖ proof_commitment)`.
+    /// Versioned authentication envelope containing the prover's signature
+    /// algorithm, public key, and raw post-quantum signature.
     ///
-    /// The exact message is the SHA3-256 of:
-    ///   `b"proof-amendment" ‖ block_hash.as_bytes() ‖ block_number.to_le_bytes() ‖ proof.batch_root_bytes`
+    /// The signature covers all proof, source-range, compression, and reward
+    /// metadata returned by [`ProofAmendment::signing_message`].
     pub prover_signature: Bytes,
     /// STARK compression layer. L1 covers canonical block witnesses; L2+
     /// covers lower-layer artifacts.
@@ -67,6 +69,9 @@ pub struct ProofAmendment {
 /// Current serialization version.
 pub const PROOF_AMENDMENT_VERSION: u8 = 1;
 pub const PROOF_POINTER_VERSION: u8 = 1;
+const PROVER_AUTH_VERSION: u8 = 1;
+const PROVER_AUTH_HEADER_BYTES: usize = 4;
+const MAX_PROVER_PUBLIC_KEY_BYTES: usize = 4_096;
 
 fn default_layer() -> u32 {
     1
@@ -83,16 +88,105 @@ impl ProofAmendment {
         serde_json::from_slice(bytes)
     }
 
-    /// Compute the canonical signing message for this amendment.
+    /// Compute the canonical, domain-separated signing message for this amendment.
     ///
     /// The prover must sign this message with their registered PQ key.
     /// Validators verify the signature before accepting the amendment.
     pub fn signing_message(&self) -> Vec<u8> {
-        let mut msg = b"proof-amendment".to_vec();
+        let mut msg = b"shell-proof-amendment-auth-v1".to_vec();
+        msg.push(self.version);
         msg.extend_from_slice(self.block_hash.as_bytes());
-        msg.extend_from_slice(&self.block_number.to_le_bytes());
+        msg.extend_from_slice(&self.block_number.to_be_bytes());
+        push_optional_u64(&mut msg, self.start_block);
+        msg.push(self.proof.version);
         msg.extend_from_slice(&self.proof.batch_root_bytes);
+        msg.extend_from_slice(&(self.proof.n_sigs as u64).to_be_bytes());
+        msg.extend_from_slice(blake3::hash(&self.proof.proof_bytes).as_bytes());
+        msg.extend_from_slice(self.prover.as_bytes());
+        msg.extend_from_slice(&self.layer.to_be_bytes());
+        msg.extend_from_slice(&(self.source_hashes.len() as u64).to_be_bytes());
+        for source_hash in &self.source_hashes {
+            msg.extend_from_slice(source_hash.as_bytes());
+        }
+        push_optional_u64(&mut msg, self.original_size);
+        push_optional_u64(&mut msg, self.compressed_size);
         msg
+    }
+
+    /// Bind the prover identity and all reward-relevant amendment metadata to a
+    /// self-contained post-quantum signature envelope.
+    pub fn sign_prover_authentication(&mut self, signer: &dyn Signer) -> Result<(), String> {
+        let public_key = signer.public_key();
+        let public_key_len = u16::try_from(public_key.len())
+            .map_err(|_| "prover public key exceeds authentication envelope limit".to_owned())?;
+        if public_key.is_empty() || public_key.len() > MAX_PROVER_PUBLIC_KEY_BYTES {
+            return Err("invalid prover public key length".to_owned());
+        }
+
+        let sig_type = signer.sig_type();
+        self.prover = Address::from_public_key(public_key, sig_type.as_u8());
+        self.compressed_size = None;
+
+        // The final signature length is algorithm-fixed. A provisional envelope
+        // lets the existing size estimate include its full authentication cost.
+        self.prover_signature = encode_prover_authentication(
+            sig_type,
+            public_key,
+            signer
+                .sign(&self.signing_message())
+                .map_err(|e| format!("sign prover authentication: {e}"))?,
+            public_key_len,
+        )?;
+        self.compressed_size = Some(self.size_bytes() as u64);
+        self.prover_signature = encode_prover_authentication(
+            sig_type,
+            public_key,
+            signer
+                .sign(&self.signing_message())
+                .map_err(|e| format!("sign prover authentication: {e}"))?,
+            public_key_len,
+        )?;
+        Ok(())
+    }
+
+    /// Verify the embedded prover key, address binding, and signature.
+    pub fn verify_prover_authentication(&self) -> Result<(), String> {
+        let envelope = self.prover_signature.as_ref();
+        if envelope.len() < PROVER_AUTH_HEADER_BYTES {
+            return Err("missing prover authentication envelope".to_owned());
+        }
+        if envelope[0] != PROVER_AUTH_VERSION {
+            return Err("unsupported prover authentication version".to_owned());
+        }
+        let sig_type = SignatureType::from_u8(envelope[1])
+            .ok_or_else(|| "unsupported prover authentication algorithm".to_owned())?;
+        let public_key_len = u16::from_be_bytes([envelope[2], envelope[3]]) as usize;
+        if public_key_len == 0 || public_key_len > MAX_PROVER_PUBLIC_KEY_BYTES {
+            return Err("invalid prover public key length".to_owned());
+        }
+        let signature_start = PROVER_AUTH_HEADER_BYTES
+            .checked_add(public_key_len)
+            .ok_or_else(|| "invalid prover authentication envelope".to_owned())?;
+        if signature_start >= envelope.len() {
+            return Err("missing prover authentication signature".to_owned());
+        }
+        let public_key = envelope
+            .get(PROVER_AUTH_HEADER_BYTES..signature_start)
+            .ok_or_else(|| "truncated prover public key".to_owned())?;
+        let signature = envelope
+            .get(signature_start..)
+            .ok_or_else(|| "truncated prover authentication signature".to_owned())?;
+        if signature.len() > MAX_SIGNATURE_BYTES {
+            return Err("prover authentication signature exceeds size limit".to_owned());
+        }
+        if Address::from_public_key(public_key, sig_type.as_u8()) != self.prover {
+            return Err("prover address does not match authentication key".to_owned());
+        }
+        match verify_signature(sig_type, public_key, &self.signing_message(), signature) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err("invalid prover authentication signature".to_owned()),
+            Err(e) => Err(format!("verify prover authentication: {e}")),
+        }
     }
 
     /// Estimated wire size in bytes.
@@ -190,6 +284,38 @@ impl ProofAmendment {
             Some(original) => self.is_compression_valid_for(original),
         }
     }
+}
+
+fn push_optional_u64(message: &mut Vec<u8>, value: Option<u64>) {
+    match value {
+        Some(value) => {
+            message.push(1);
+            message.extend_from_slice(&value.to_be_bytes());
+        }
+        None => message.push(0),
+    }
+}
+
+fn encode_prover_authentication(
+    sig_type: SignatureType,
+    public_key: &[u8],
+    signature: PQSignature,
+    public_key_len: u16,
+) -> Result<Bytes, String> {
+    if signature.sig_type != sig_type || signature.data.is_empty() {
+        return Err("signer returned an invalid authentication signature".to_owned());
+    }
+    if signature.data.len() > MAX_SIGNATURE_BYTES {
+        return Err("prover authentication signature exceeds size limit".to_owned());
+    }
+    let mut envelope =
+        Vec::with_capacity(PROVER_AUTH_HEADER_BYTES + public_key.len() + signature.data.len());
+    envelope.push(PROVER_AUTH_VERSION);
+    envelope.push(sig_type.as_u8());
+    envelope.extend_from_slice(&public_key_len.to_be_bytes());
+    envelope.extend_from_slice(public_key);
+    envelope.extend_from_slice(&signature.data);
+    Ok(Bytes::from(envelope))
 }
 
 /// A compact marker stored for source blocks covered by a later range proof.
@@ -290,6 +416,7 @@ pub fn amendment_key(block_hash: &ShellHash) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shell_crypto::DilithiumSigner;
     use shell_primitives::ShellHash;
 
     fn make_amendment() -> ProofAmendment {
@@ -383,7 +510,62 @@ mod tests {
     fn amendment_signing_message_includes_prefix() {
         let a = make_amendment();
         let msg = a.signing_message();
-        assert!(msg.starts_with(b"proof-amendment"));
+        assert!(msg.starts_with(b"shell-proof-amendment-auth-v1"));
+    }
+
+    #[test]
+    fn signed_prover_authentication_roundtrip() {
+        let signer = DilithiumSigner::generate();
+        let mut amendment = make_amendment();
+
+        amendment
+            .sign_prover_authentication(&signer)
+            .expect("sign amendment");
+
+        assert_eq!(
+            amendment.prover,
+            Address::from_public_key(signer.public_key(), signer.sig_type().as_u8())
+        );
+        amendment
+            .verify_prover_authentication()
+            .expect("verify amendment");
+    }
+
+    #[test]
+    fn prover_authentication_rejects_missing_or_malformed_envelopes() {
+        let mut amendment = make_amendment();
+        amendment.prover_signature = Bytes::new();
+        assert!(amendment.verify_prover_authentication().is_err());
+
+        amendment.prover_signature = Bytes::from(vec![PROVER_AUTH_VERSION, 0, 0, 1]);
+        assert!(amendment.verify_prover_authentication().is_err());
+    }
+
+    #[test]
+    fn prover_authentication_rejects_metadata_tampering() {
+        let signer = DilithiumSigner::generate();
+        let mut amendment = make_amendment();
+        amendment
+            .sign_prover_authentication(&signer)
+            .expect("sign amendment");
+
+        let mut wrong_prover = amendment.clone();
+        wrong_prover.prover = Address::from([0x55; 32]);
+        assert!(wrong_prover.verify_prover_authentication().is_err());
+
+        let mut wrong_source = amendment.clone();
+        wrong_source.source_hashes[0] = ShellHash::from([0x44; 32]);
+        assert!(wrong_source.verify_prover_authentication().is_err());
+
+        let mut wrong_original_size = amendment.clone();
+        wrong_original_size.original_size = Some(20_000);
+        assert!(wrong_original_size.verify_prover_authentication().is_err());
+
+        let mut wrong_compressed_size = amendment;
+        wrong_compressed_size.compressed_size = Some(999);
+        assert!(wrong_compressed_size
+            .verify_prover_authentication()
+            .is_err());
     }
 
     #[test]

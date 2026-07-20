@@ -30,7 +30,8 @@ use tokio::sync::{mpsc, watch};
 use tracing::{debug, error, info, warn};
 
 use parking_lot::Mutex;
-use shell_primitives::{Bytes, ShellHash};
+use shell_crypto::Signer;
+use shell_primitives::ShellHash;
 use shell_stark_prover::{
     prove_sig_batch, L1StallDiagnosis, L2ProverTask, ProofAmendment, ProofBacklog, ProofTask,
     DEFAULT_MAX_L1_RANGE_SOURCES, MIN_L1_STARK_TXS, PROOF_AMENDMENT_VERSION,
@@ -124,6 +125,8 @@ pub struct ProverService<S: KvStore + Send + Sync + 'static> {
     config: ProverConfig,
     /// The node's own address, used as `prover` field in [`ProofAmendment`].
     prover_address: shell_primitives::Address,
+    /// The node key that authenticates generated proof amendments.
+    prover_signer: Option<Arc<dyn Signer>>,
     /// L2 STARK mode — controls whether recursive L2 proving is attempted.
     l2_mode: L2StarkMode,
     /// Shared drain frontier: updated after each drain_front so the seeder
@@ -145,9 +148,16 @@ impl<S: KvStore + Send + Sync + 'static> ProverService<S> {
             amendment_tx: None,
             config,
             prover_address,
+            prover_signer: None,
             l2_mode: L2StarkMode::Disabled,
             drain_frontier: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
+    }
+
+    /// Set the signer used to authenticate locally generated amendments.
+    pub fn with_signer(mut self, signer: Arc<dyn Signer>) -> Self {
+        self.prover_signer = Some(signer);
+        self
     }
 
     /// Set the L2 STARK mode for this service.
@@ -405,7 +415,7 @@ impl<S: KvStore + Send + Sync + 'static> ProverService<S> {
                         end_plus_one.checked_sub(source_hashes.len().max(1) as u64)
                     }),
                     proof,
-                    prover_signature: Bytes::new(),
+                    prover_signature: Default::default(),
                     prover: self.prover_address,
                     layer,
                     source_hashes: if source_hashes.is_empty() {
@@ -417,8 +427,25 @@ impl<S: KvStore + Send + Sync + 'static> ProverService<S> {
                     compressed_size: None,
                     settlement_tx_hash: None,
                 };
-                if amendment.compressed_size.is_none() {
-                    amendment.compressed_size = Some(amendment.size_bytes() as u64);
+                let Some(signer) = self.prover_signer.as_deref() else {
+                    error!(
+                        "ProverService: refusing to persist unauthenticated amendment for block #{block_number}"
+                    );
+                    return;
+                };
+                if let Err(e) = amendment.sign_prover_authentication(signer) {
+                    error!(
+                        "ProverService: failed to authenticate amendment for block #{block_number}: {e}"
+                    );
+                    return;
+                }
+                if amendment.prover != self.prover_address {
+                    error!(
+                        configured = %self.prover_address,
+                        signer = %amendment.prover,
+                        "ProverService: configured prover address does not match signer for block #{block_number}"
+                    );
+                    return;
                 }
 
                 // Serialize and persist the amendment artifacts.
@@ -493,6 +520,7 @@ impl<S: KvStore + Send + Sync + 'static> ProverService<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shell_crypto::DilithiumSigner;
     use shell_primitives::Address;
     use shell_stark_prover::{ProofBacklog, ProofTask};
     use shell_storage::{MemoryDb, ProofAmendmentStore};
@@ -502,8 +530,11 @@ mod tests {
         let db = Arc::new(MemoryDb::new());
         let amendment_store = ProofAmendmentStore::new(db);
         let config = ProverConfig::default();
-        let service =
-            ProverService::new(backlog.clone(), amendment_store, config, Address::default());
+        let signer = Arc::new(DilithiumSigner::generate());
+        let prover_address =
+            Address::from_public_key(signer.public_key(), signer.sig_type().as_u8());
+        let service = ProverService::new(backlog.clone(), amendment_store, config, prover_address)
+            .with_signer(signer);
         (service, backlog)
     }
 
@@ -623,10 +654,14 @@ mod tests {
             .get_amendment(&end_hash)
             .expect("amendment read")
             .expect("full amendment stored");
-        assert!(matches!(
-            shell_stark_prover::StoredProofArtifact::from_json(&full_bytes).expect("amendment"),
-            shell_stark_prover::StoredProofArtifact::Amendment(_)
-        ));
+        let shell_stark_prover::StoredProofArtifact::Amendment(amendment) =
+            shell_stark_prover::StoredProofArtifact::from_json(&full_bytes).expect("amendment")
+        else {
+            panic!("expected full amendment")
+        };
+        amendment
+            .verify_prover_authentication()
+            .expect("generated amendment is authenticated");
     }
 
     #[test]
