@@ -35,6 +35,8 @@ use crate::service::NetworkService;
 
 const BOOTNODE_REDIAL_INTERVAL_SECS: u64 = 30;
 const DIRECT_MESSAGE_PROTOCOL: StreamProtocol = StreamProtocol::new("/shell/direct/1");
+const MAX_PENDING_DIRECT_MESSAGES: usize = 256;
+const MAX_PENDING_DIRECT_BYTES: usize = 2 * crate::message::MAX_MESSAGE_SIZE;
 
 /// Topic category for gossipsub routing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -166,8 +168,54 @@ struct PendingDirectMessage {
     data: Arc<[u8]>,
 }
 
+struct PendingDirectMessages {
+    messages: HashMap<request_response::OutboundRequestId, PendingDirectMessage>,
+    bytes: usize,
+    max_messages: usize,
+    max_bytes: usize,
+}
+
+impl PendingDirectMessages {
+    fn new(max_messages: usize, max_bytes: usize) -> Self {
+        Self {
+            messages: HashMap::new(),
+            bytes: 0,
+            max_messages,
+            max_bytes,
+        }
+    }
+
+    fn can_accept(&self, data_len: usize) -> bool {
+        self.messages.len() < self.max_messages
+            && self
+                .bytes
+                .checked_add(data_len)
+                .is_some_and(|bytes| bytes <= self.max_bytes)
+    }
+
+    fn insert(
+        &mut self,
+        request_id: request_response::OutboundRequestId,
+        message: PendingDirectMessage,
+    ) {
+        debug_assert!(self.can_accept(message.data.len()));
+        self.bytes += message.data.len();
+        let replaced = self.messages.insert(request_id, message);
+        debug_assert!(replaced.is_none());
+    }
+
+    fn remove(
+        &mut self,
+        request_id: &request_response::OutboundRequestId,
+    ) -> Option<PendingDirectMessage> {
+        let message = self.messages.remove(request_id)?;
+        self.bytes = self.bytes.saturating_sub(message.data.len());
+        Some(message)
+    }
+}
+
 fn take_direct_message_fallback(
-    pending: &mut HashMap<request_response::OutboundRequestId, PendingDirectMessage>,
+    pending: &mut PendingDirectMessages,
     request_id: request_response::OutboundRequestId,
     error: &request_response::OutboundFailure,
 ) -> Option<PendingDirectMessage> {
@@ -702,7 +750,8 @@ async fn swarm_loop(
     event_tx: mpsc::Sender<NetworkEvent>,
     loop_config: SwarmLoopConfig,
 ) {
-    let mut pending_direct_messages = HashMap::new();
+    let mut pending_direct_messages =
+        PendingDirectMessages::new(MAX_PENDING_DIRECT_MESSAGES, MAX_PENDING_DIRECT_BYTES);
     let _peer_count_reset = PeerCountResetGuard(Arc::clone(&loop_config.peer_count));
     // F-305: Initialize peer tracking and ban list.
     let mut peer_tracker = crate::security::PeerTracker::new(loop_config.peer_security.max_peers);
@@ -796,12 +845,34 @@ async fn swarm_loop(
                             );
                         } else {
                             let data: Arc<[u8]> = data.into();
-                            let request_id = swarm
-                                .behaviour_mut()
-                                .direct_message
-                                .send_request(&peer, Arc::clone(&data));
-                            pending_direct_messages
-                                .insert(request_id, PendingDirectMessage { topic, data });
+                            if pending_direct_messages.can_accept(data.len()) {
+                                let request_id = swarm
+                                    .behaviour_mut()
+                                    .direct_message
+                                    .send_request(&peer, Arc::clone(&data));
+                                pending_direct_messages.insert(
+                                    request_id,
+                                    PendingDirectMessage { topic, data },
+                                );
+                            } else {
+                                let ident = match topic {
+                                    TopicKind::Blocks => loop_config.blocks_topic.clone(),
+                                    TopicKind::Transactions => loop_config.txs_topic.clone(),
+                                    TopicKind::Attestation => loop_config.attestation_topic.clone(),
+                                    TopicKind::Proofs => loop_config.proofs_topic.clone(),
+                                };
+                                warn!(
+                                    %peer,
+                                    "direct message pending limit reached; using gossip fallback"
+                                );
+                                if let Err(error) = swarm
+                                    .behaviour_mut()
+                                    .gossipsub
+                                    .publish(ident, data.to_vec())
+                                {
+                                    debug!(%peer, %error, "direct message overload fallback failed");
+                                }
+                            }
                         }
                     }
                     Some(SwarmCommand::PeerScores { reply }) => {
@@ -897,10 +968,7 @@ fn handle_swarm_event(
     loop_config: &SwarmLoopConfig,
     peer_tracker: &mut crate::security::PeerTracker,
     peer_ban_list: &mut crate::security::PeerBanList,
-    pending_direct_messages: &mut HashMap<
-        request_response::OutboundRequestId,
-        PendingDirectMessage,
-    >,
+    pending_direct_messages: &mut PendingDirectMessages,
 ) {
     match event {
         SwarmEvent::Behaviour(ShellBehaviourEvent::DirectMessage(
@@ -1591,22 +1659,21 @@ mod tests {
         let modern_peer = Libp2pPeerId::random();
         let legacy_id = behaviour.send_request(&legacy_peer, Arc::from(&b"legacy"[..]));
         let modern_id = behaviour.send_request(&modern_peer, Arc::from(&b"modern"[..]));
-        let mut pending = HashMap::from([
-            (
-                legacy_id,
-                PendingDirectMessage {
-                    topic: TopicKind::Blocks,
-                    data: Arc::from(&b"legacy"[..]),
-                },
-            ),
-            (
-                modern_id,
-                PendingDirectMessage {
-                    topic: TopicKind::Transactions,
-                    data: Arc::from(&b"modern"[..]),
-                },
-            ),
-        ]);
+        let mut pending = PendingDirectMessages::new(2, 12);
+        pending.insert(
+            legacy_id,
+            PendingDirectMessage {
+                topic: TopicKind::Blocks,
+                data: Arc::from(&b"legacy"[..]),
+            },
+        );
+        pending.insert(
+            modern_id,
+            PendingDirectMessage {
+                topic: TopicKind::Transactions,
+                data: Arc::from(&b"modern"[..]),
+            },
+        );
 
         let fallback = take_direct_message_fallback(
             &mut pending,
@@ -1617,7 +1684,8 @@ mod tests {
 
         assert_eq!(fallback.topic, TopicKind::Blocks);
         assert_eq!(fallback.data.as_ref(), b"legacy");
-        assert!(pending.contains_key(&modern_id));
+        assert!(pending.messages.contains_key(&modern_id));
+        assert_eq!(pending.bytes, b"modern".len());
 
         assert!(take_direct_message_fallback(
             &mut pending,
@@ -1625,7 +1693,49 @@ mod tests {
             &request_response::OutboundFailure::Timeout,
         )
         .is_none());
-        assert!(pending.is_empty());
+        assert!(pending.messages.is_empty());
+        assert_eq!(pending.bytes, 0);
+    }
+
+    #[test]
+    fn pending_direct_messages_enforce_count_and_byte_limits() {
+        let mut behaviour = request_response::Behaviour::with_codec(
+            DirectMessageCodec {
+                max_message_size: crate::message::MAX_MESSAGE_SIZE,
+            },
+            [(DIRECT_MESSAGE_PROTOCOL, ProtocolSupport::Full)],
+            request_response::Config::default(),
+        );
+        let peer = Libp2pPeerId::random();
+        let first_id = behaviour.send_request(&peer, Arc::from(&b"1234"[..]));
+        let second_id = behaviour.send_request(&peer, Arc::from(&b"5678"[..]));
+        let mut pending = PendingDirectMessages::new(2, 7);
+
+        assert!(pending.can_accept(4));
+        pending.insert(
+            first_id,
+            PendingDirectMessage {
+                topic: TopicKind::Blocks,
+                data: Arc::from(&b"1234"[..]),
+            },
+        );
+        assert!(!pending.can_accept(4), "byte limit must reject the request");
+        assert!(pending.can_accept(3));
+        pending.insert(
+            second_id,
+            PendingDirectMessage {
+                topic: TopicKind::Blocks,
+                data: Arc::from(&b"567"[..]),
+            },
+        );
+        assert!(
+            !pending.can_accept(0),
+            "count limit must reject the request"
+        );
+
+        pending.remove(&first_id).unwrap();
+        assert_eq!(pending.bytes, 3);
+        assert!(pending.can_accept(4));
     }
 
     #[test]
