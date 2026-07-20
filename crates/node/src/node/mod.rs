@@ -1966,6 +1966,23 @@ mod tests {
     }
 
     #[test]
+    fn stark_artifact_batch_failure_leaves_no_partial_range() {
+        let (node, _signer, db) = setup_failing_batch_node();
+        let first = ShellHash::from_slice(&[0x66; 32]);
+        let last = ShellHash::from_slice(&[0x77; 32]);
+        let mut amendment = dummy_proof_amendment(1, 1_000, 400);
+        amendment.block_hash = last;
+        amendment.source_hashes = vec![first, last];
+        db.fail_next_batch();
+
+        let err = node.store_stark_artifacts(&amendment, None).unwrap_err();
+
+        assert!(err.to_string().contains("injected batch failure"));
+        assert_eq!(node.amendment_store.get_amendment(&first).unwrap(), None);
+        assert_eq!(node.amendment_store.get_amendment(&last).unwrap(), None);
+    }
+
+    #[test]
     fn system_extra_roundtrips_stark_settlements() {
         let amendment = dummy_proof_amendment(2, 1_000, 400);
 

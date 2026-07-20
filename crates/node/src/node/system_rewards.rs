@@ -653,12 +653,8 @@ impl<S: KvStore + 'static> Node<S> {
                     amendment.block_number
                 ))
             })?;
-        let mut stored = 0usize;
-        for (source_hash, artifact) in artifacts {
-            self.amendment_store
-                .put_amendment(&source_hash, &artifact)?;
-            stored += 1;
-        }
+        let stored = artifacts.len();
+        self.amendment_store.put_amendments_atomic(artifacts)?;
         Ok(stored)
     }
 
