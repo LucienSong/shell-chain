@@ -966,6 +966,8 @@ mod tests {
 
         // Both txs should be in reverted list since they aren't in the new chain.
         assert_eq!(result.reverted_txs.len(), 2);
+        assert_eq!(result.reverted_txs[0].hash(), tx_b.hash());
+        assert_eq!(result.reverted_txs[1].hash(), tx_a.hash());
     }
 
     #[test]
