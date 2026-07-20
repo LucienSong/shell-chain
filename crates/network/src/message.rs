@@ -298,6 +298,21 @@ impl NetworkMessage {
                     "request count must be between 1 and {MAX_RESPONSE_BLOCKS}"
                 )))
             }
+            Self::BlockResponse { blocks, .. } | Self::BodyResponse { blocks, .. }
+                if blocks.len() > MAX_RESPONSE_BLOCKS =>
+            {
+                Err(NetworkError::Serialization(format!(
+                    "response contains more than {MAX_RESPONSE_BLOCKS} blocks"
+                )))
+            }
+            Self::BlockResponse {
+                commit_certificates,
+                ..
+            } if commit_certificates.len() > MAX_RESPONSE_BLOCKS => {
+                Err(NetworkError::Serialization(format!(
+                    "response contains more than {MAX_RESPONSE_BLOCKS} commit certificates"
+                )))
+            }
             Self::BlockResponse {
                 blocks,
                 commit_certificates,
@@ -871,6 +886,39 @@ mod tests {
                 error,
                 NetworkError::Serialization(message)
                     if message.contains("request count must be between")
+            ));
+        }
+    }
+
+    #[test]
+    fn serialize_checked_rejects_oversized_response_arrays() {
+        for msg in [
+            NetworkMessage::BlockResponse {
+                blocks: (0..=MAX_RESPONSE_BLOCKS)
+                    .map(|n| test_block(n as u64))
+                    .collect(),
+                commit_certificates: vec![],
+                nonce: 1,
+            },
+            NetworkMessage::BodyResponse {
+                blocks: (0..=MAX_RESPONSE_BLOCKS)
+                    .map(|n| test_block(n as u64))
+                    .collect(),
+                nonce: 1,
+            },
+            NetworkMessage::BlockResponse {
+                blocks: vec![],
+                commit_certificates: (0..=MAX_RESPONSE_BLOCKS)
+                    .map(|_| (ShellHash::default(), vec![]))
+                    .collect(),
+                nonce: 1,
+            },
+        ] {
+            let error = serialize_checked(&msg, MAX_MESSAGE_SIZE).unwrap_err();
+            assert!(matches!(
+                error,
+                NetworkError::Serialization(message)
+                    if message.contains("response contains more than 128")
             ));
         }
     }
