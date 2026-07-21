@@ -143,7 +143,7 @@ impl<S: KvStore + 'static> Node<S> {
 
     fn verify_side_fork_transaction_signatures(&self, block: &Block) -> Result<(), NodeError> {
         let mut block_pubkeys: HashMap<Address, Vec<u8>> = HashMap::new();
-        let mut resolved_pubkeys = Vec::with_capacity(block.transactions.len());
+        let mut signing_pubkeys = Vec::with_capacity(block.transactions.len());
 
         for tx in &block.transactions {
             if tx.signature.data.is_empty() {
@@ -176,17 +176,57 @@ impl<S: KvStore + 'static> Node<S> {
                     }
                 }
             };
-            let derived = Address::from_public_key(&pubkey, tx.signature.sig_type.as_u8());
-            if derived != tx.from {
-                return Err(NodeError::Startup(format!(
-                    "block {} tx {} sender {} does not match resolved pubkey address {}",
-                    block.number(),
-                    tx.hash(),
-                    tx.from,
-                    derived
-                )));
-            }
-            resolved_pubkeys.push(pubkey);
+            let signing_pubkey = if let Some(session_auth) = tx
+                .aa_bundle()
+                .and_then(|bundle| bundle.session_auth.as_ref())
+            {
+                if infer_signature_type_from_address(&pubkey, &tx.from).is_none() {
+                    return Err(NodeError::Startup(format!(
+                        "block {} tx {} sender {} does not match resolved root pubkey",
+                        block.number(),
+                        tx.hash(),
+                        tx.from,
+                    )));
+                }
+                if tx.signature.sig_type.as_u8() != session_auth.session_algo
+                    || tx.signature.data.as_slice() != session_auth.session_signature.as_ref()
+                {
+                    return Err(NodeError::Startup(format!(
+                        "block {} tx {} session signature does not match outer signature",
+                        block.number(),
+                        tx.hash(),
+                    )));
+                }
+                let auth_hash = session_auth.auth_hash(tx.tx.chain_id);
+                let root_valid = ALLOWED_ALGORITHMS.iter().copied().any(|algorithm| {
+                    let signature =
+                        PQSignature::new(algorithm, session_auth.root_signature.as_ref().to_vec());
+                    MultiVerifier
+                        .verify(&pubkey, auth_hash.as_bytes(), &signature)
+                        .unwrap_or(false)
+                });
+                if !root_valid {
+                    return Err(NodeError::Startup(format!(
+                        "block {} tx {} session root signature is invalid",
+                        block.number(),
+                        tx.hash(),
+                    )));
+                }
+                session_auth.session_pubkey.as_ref().to_vec()
+            } else {
+                let derived = Address::from_public_key(&pubkey, tx.signature.sig_type.as_u8());
+                if derived != tx.from {
+                    return Err(NodeError::Startup(format!(
+                        "block {} tx {} sender {} does not match resolved pubkey address {}",
+                        block.number(),
+                        tx.hash(),
+                        tx.from,
+                        derived
+                    )));
+                }
+                pubkey.clone()
+            };
+            signing_pubkeys.push(signing_pubkey);
         }
 
         let tx_hashes: Vec<ShellHash> = block.transactions.iter().map(|tx| tx.hash()).collect();
@@ -195,7 +235,7 @@ impl<S: KvStore + 'static> Node<S> {
             .iter()
             .enumerate()
             .map(|(index, tx)| VerifyItem {
-                pubkey: &resolved_pubkeys[index],
+                pubkey: &signing_pubkeys[index],
                 message: tx_hashes[index].as_bytes(),
                 signature: &tx.signature,
             })

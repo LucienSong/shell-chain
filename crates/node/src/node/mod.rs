@@ -31,7 +31,8 @@ pub(crate) use shell_core::{
     WitnessBundle, MAX_BLOB_GAS_PER_BLOCK,
 };
 pub(crate) use shell_crypto::{
-    AlgorithmRegistry, BatchVerifier, MultiVerifier, PreVerified, Signer, Verifier, VerifyItem,
+    infer_signature_type_from_address, AlgorithmRegistry, BatchVerifier, MultiVerifier,
+    PQSignature, PreVerified, Signer, Verifier, VerifyItem, ALLOWED_ALGORITHMS,
 };
 pub(crate) use shell_mempool::TxPool;
 pub(crate) use shell_network::{NetworkMessage, NetworkService};
@@ -1396,7 +1397,9 @@ mod tests {
     use super::*;
     use crate::pruning::PruningConfig;
     use shell_consensus::{PoaConfig, PoaEngine, WPoaConfig, WPoaEngine};
-    use shell_core::Transaction;
+    use shell_core::{
+        AaBundle, InnerCall, PubkeyMode, SessionAuth, Transaction, AA_BUNDLE_TX_TYPE,
+    };
     use shell_crypto::{DilithiumSigner, MlDsaSigner, Signer};
     use shell_mempool::MempoolConfig;
     use shell_primitives::U256;
@@ -6907,6 +6910,115 @@ mod tests {
                 .is_none());
             assert!(!node.fork_choice.read().contains(&side_fork_hash));
         }
+    }
+
+    #[test]
+    fn import_side_fork_accepts_valid_session_key_signature() {
+        let (node, proposer_signer) = setup_node();
+        store_genesis(&node);
+        let proposer = node.config.proposer_address.unwrap();
+        node.register_authority_pubkey(proposer, proposer_signer.public_key().to_vec());
+
+        let root = MlDsaSigner::generate();
+        let session = DilithiumSigner::generate();
+        let sender = Address::from_public_key(root.public_key(), root.sig_type().as_u8());
+        fund_account(&node, &sender, U256::from(100_000_000_000_000u64));
+
+        let recipient = Address::from([0x45; 20]);
+        let transaction = Transaction {
+            chain_id: 1337,
+            nonce: 0,
+            to: Some(recipient),
+            value: U256::ZERO,
+            data: Bytes::new(),
+            gas_limit: 100_000,
+            max_fee_per_gas: 1_000_000_000,
+            max_priority_fee_per_gas: 100_000_000,
+            access_list: None,
+            tx_type: AA_BUNDLE_TX_TYPE,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
+        };
+        let inner_call = InnerCall {
+            to: Some(recipient),
+            value: U256::ZERO,
+            data: Bytes::new(),
+            gas_limit: 50_000,
+        };
+        let mut session_auth = SessionAuth {
+            session_pubkey: Bytes::from(session.public_key().to_vec()),
+            session_algo: session.sig_type().as_u8(),
+            target: Some(recipient),
+            value_cap: U256::ZERO,
+            expiry_block: 10,
+            root_signature: Bytes::new(),
+            session_signature: Bytes::from(vec![1]),
+        };
+        session_auth.root_signature = Bytes::from(
+            root.sign(session_auth.auth_hash(transaction.chain_id).as_bytes())
+                .unwrap()
+                .data,
+        );
+        let placeholder = session.sign(b"placeholder").unwrap();
+        let unsigned = SignedTransaction::with_aa_bundle(
+            sender,
+            transaction.clone(),
+            placeholder,
+            PubkeyMode::Embedded(root.public_key().to_vec()),
+            AaBundle {
+                inner_calls: vec![inner_call.clone()],
+                session_auth: Some(session_auth.clone()),
+                ..AaBundle::default()
+            },
+        )
+        .unwrap();
+        let session_signature = session
+            .sign(unsigned.sender_signing_hash().as_bytes())
+            .unwrap();
+        session_auth.session_signature = Bytes::from(session_signature.data.clone());
+        let signed = SignedTransaction::with_aa_bundle(
+            sender,
+            transaction,
+            session_signature,
+            PubkeyMode::Embedded(root.public_key().to_vec()),
+            AaBundle {
+                inner_calls: vec![inner_call],
+                session_auth: Some(session_auth),
+                ..AaBundle::default()
+            },
+        )
+        .unwrap();
+        {
+            let mut world_state = node.world_state.write();
+            node.tx_pool
+                .insert(
+                    signed,
+                    &mut world_state,
+                    node.chain_store.as_ref(),
+                    &MultiVerifier,
+                )
+                .unwrap();
+        }
+
+        let canonical = node.produce_block(&proposer_signer, 100).unwrap();
+        let mut side_fork = canonical.clone();
+        side_fork.header.extra_data = Bytes::from_static(b"session-side-fork");
+        side_fork.header.witness_root = None;
+        side_fork.proposer_seal = Some(
+            proposer_signer
+                .sign(side_fork.header.hash().as_bytes())
+                .unwrap(),
+        );
+        let side_fork_hash = side_fork.hash();
+
+        node.import_block(side_fork, &MultiVerifier).unwrap();
+
+        assert!(node
+            .chain_store
+            .get_block_by_hash(&side_fork_hash)
+            .unwrap()
+            .is_some());
+        assert!(node.fork_choice.read().contains(&side_fork_hash));
     }
 
     #[test]
