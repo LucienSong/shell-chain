@@ -1350,15 +1350,30 @@ impl<S: KvStore + 'static> Node<S> {
                 self.witness_pruner.read().pruned_below(),
             );
             let mut pruner = self.state_pruner.write();
-            let genesis_registered = if pruner.genesis_root().is_some() {
+            let should_prune = finalized_number > 0 && pruner.should_prune(block_number);
+            let validate_genesis = pruner.genesis_root().is_none() || should_prune;
+            let genesis_registered = if !validate_genesis {
                 true
             } else {
                 match self.chain_store.get_block_hash_by_number(0) {
                     Ok(Some(genesis_hash)) => {
                         match self.chain_store.get_header_by_hash(&genesis_hash) {
                             Ok(Some(genesis)) if genesis.number == 0 => {
-                                pruner.set_genesis_root(genesis.state_root);
-                                true
+                                match pruner.genesis_root() {
+                                    Some(root) if *root != genesis.state_root => {
+                                        tracing::warn!(
+                                            expected_root = %root,
+                                            actual_root = %genesis.state_root,
+                                            "state pruner: genesis state root changed"
+                                        );
+                                        false
+                                    }
+                                    Some(_) => true,
+                                    None => {
+                                        pruner.set_genesis_root(genesis.state_root);
+                                        true
+                                    }
+                                }
                             }
                             Ok(Some(genesis)) => {
                                 tracing::warn!(
@@ -1388,7 +1403,7 @@ impl<S: KvStore + 'static> Node<S> {
                 }
             };
             pruner.register_block(block_number, state_root);
-            if genesis_registered && finalized_number > 0 && pruner.should_prune(block_number) {
+            if genesis_registered && should_prune {
                 pruner.mark_prunable(canonical_prune_boundary);
                 match pruner.prune(self.store.as_ref()) {
                     Ok(result) => {
@@ -6012,6 +6027,44 @@ mod tests {
             .is_some());
 
         *node.state_pruner.write() = StatePruner::new(32);
+        node.state_pruner.write().set_prune_interval(1);
+        node.chain_store.delete_canonical(0).unwrap();
+        node.produce_block(&signer, 0).unwrap();
+
+        assert!(node
+            .chain_store
+            .get_block_hash_by_number(1)
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn canonical_mapping_pruning_revalidates_registered_genesis() {
+        let (node, signer) = setup_node_with_retention(2, 2);
+        store_genesis(&node);
+
+        for _ in 0..40 {
+            node.produce_block(&signer, 0).unwrap();
+        }
+
+        let finalized = node.chain_store.get_block_by_number(35).unwrap().unwrap();
+        node.chain_store.set_finalized_number(35).unwrap();
+        node.finality
+            .write()
+            .set_finalized_direct(35, finalized.hash());
+        for number in 0..34 {
+            let hash = node
+                .chain_store
+                .get_block_hash_by_number(number)
+                .unwrap()
+                .unwrap();
+            node.settled_stark_sources.lock().insert((1, hash));
+        }
+
+        assert!(node.state_pruner.read().genesis_root().is_some());
+        node.produce_block(&signer, 0).unwrap();
+        assert_eq!(node.body_pruner.read().pruned_below(), 34);
+        assert_eq!(node.witness_pruner.read().pruned_below(), 34);
         node.state_pruner.write().set_prune_interval(1);
         node.chain_store.delete_canonical(0).unwrap();
         node.produce_block(&signer, 0).unwrap();
