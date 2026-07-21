@@ -1353,17 +1353,36 @@ impl<S: KvStore + 'static> Node<S> {
             let genesis_registered = if pruner.genesis_root().is_some() {
                 true
             } else {
-                match self.chain_store.get_block_by_number(0) {
-                    Ok(Some(genesis)) => {
-                        pruner.set_genesis_root(genesis.header.state_root);
-                        true
+                match self.chain_store.get_block_hash_by_number(0) {
+                    Ok(Some(genesis_hash)) => {
+                        match self.chain_store.get_header_by_hash(&genesis_hash) {
+                            Ok(Some(genesis)) if genesis.number == 0 => {
+                                pruner.set_genesis_root(genesis.state_root);
+                                true
+                            }
+                            Ok(Some(genesis)) => {
+                                tracing::warn!(
+                                    header_number = genesis.number,
+                                    "state pruner: genesis header reports the wrong block number"
+                                );
+                                false
+                            }
+                            Ok(None) => {
+                                tracing::warn!("state pruner: genesis header is unavailable");
+                                false
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, "state pruner: failed to load genesis header");
+                                false
+                            }
+                        }
                     }
                     Ok(None) => {
-                        tracing::warn!("state pruner: genesis block is unavailable");
+                        tracing::warn!("state pruner: genesis canonical mapping is unavailable");
                         false
                     }
                     Err(e) => {
-                        tracing::warn!(error = %e, "state pruner: failed to load genesis root");
+                        tracing::warn!(error = %e, "state pruner: failed to load genesis mapping");
                         false
                     }
                 }
@@ -6002,6 +6021,51 @@ mod tests {
             .get_block_hash_by_number(1)
             .unwrap()
             .is_some());
+    }
+
+    #[test]
+    fn canonical_mapping_pruning_uses_pruned_genesis_header() {
+        let (node, signer) = setup_node_with_retention(2, 2);
+        store_genesis(&node);
+
+        for _ in 0..40 {
+            node.produce_block(&signer, 0).unwrap();
+        }
+
+        let finalized = node.chain_store.get_block_by_number(35).unwrap().unwrap();
+        node.chain_store.set_finalized_number(35).unwrap();
+        node.finality
+            .write()
+            .set_finalized_direct(35, finalized.hash());
+        for number in 0..34 {
+            let hash = node
+                .chain_store
+                .get_block_hash_by_number(number)
+                .unwrap()
+                .unwrap();
+            node.settled_stark_sources.lock().insert((1, hash));
+        }
+
+        *node.state_pruner.write() = StatePruner::new(32);
+        node.state_pruner.write().set_prune_interval(1);
+        let genesis_hash = node
+            .chain_store
+            .get_block_hash_by_number(0)
+            .unwrap()
+            .unwrap();
+        node.chain_store.delete_body(&genesis_hash).unwrap();
+        node.produce_block(&signer, 0).unwrap();
+
+        assert!(node
+            .chain_store
+            .get_block_hash_by_number(0)
+            .unwrap()
+            .is_some());
+        assert!(node
+            .chain_store
+            .get_block_hash_by_number(1)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
