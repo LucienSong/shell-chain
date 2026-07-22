@@ -1459,6 +1459,7 @@ impl<S: KvStore> ChainStore<S> {
         let canonical_head_key = Self::number_key(metadata.block_number);
         let mut canonical_head_hash = None;
         let mut snapshot_chain_config = None;
+        let mut progress_keys = std::collections::HashSet::new();
         while let Some(entry) = snap_reader.next_entry()? {
             if entry.key == prefix::HEAD_BLOCK {
                 if entry.value.len() != 32 {
@@ -1472,6 +1473,29 @@ impl<S: KvStore> ChainStore<S> {
                     ));
                 }
                 head_hash = Some(ShellHash::from_slice(&entry.value));
+                progress_keys.insert(entry.key);
+            } else if matches!(
+                entry.key.as_slice(),
+                prefix::FINALIZED_NUMBER
+                    | prefix::TOTAL_TX_COUNT
+                    | prefix::TOTAL_GAS_USED
+                    | prefix::TOTALS_HEAD
+            ) {
+                if !progress_keys.insert(entry.key.clone()) {
+                    return Err(StorageError::State(
+                        "snapshot contains duplicate chain progress metadata".into(),
+                    ));
+                }
+                let expected_len = if entry.key == prefix::TOTAL_GAS_USED {
+                    32
+                } else {
+                    8
+                };
+                if entry.value.len() != expected_len {
+                    return Err(StorageError::State(
+                        "snapshot chain progress metadata has invalid length".into(),
+                    ));
+                }
             } else if entry.key == canonical_head_key {
                 if entry.value.len() != 32 {
                     return Err(StorageError::State(
@@ -1576,12 +1600,23 @@ impl<S: KvStore> ChainStore<S> {
             self.store.write_batch(batch)?;
         }
 
-        // Publish chain progress only after every other record is durable. A
-        // failed streaming import must retain a mutually consistent old HEAD,
-        // finalized height, and aggregate counters.
-        if !pending_publication.is_empty() {
-            self.store.write_batch(pending_publication)?;
+        for key in [
+            prefix::HEAD_BLOCK,
+            prefix::FINALIZED_NUMBER,
+            prefix::TOTAL_TX_COUNT,
+            prefix::TOTAL_GAS_USED,
+            prefix::TOTALS_HEAD,
+        ] {
+            if !progress_keys.contains(key) {
+                pending_publication.delete(key.to_vec());
+            }
         }
+
+        // Publish chain progress only after every other record is durable. A
+        // failed streaming import must retain a mutually consistent old view.
+        // Missing snapshot keys delete stale destination progress in the same
+        // batch rather than mixing the imported chain with old counters.
+        self.store.write_batch(pending_publication)?;
 
         Ok(metadata)
     }
@@ -3144,6 +3179,77 @@ mod tests {
         // Verify data was written
         assert_eq!(store.get(b"test-key-1").unwrap(), Some(b"value-1".to_vec()));
         assert_eq!(store.get(b"test-key-2").unwrap(), Some(b"value-2".to_vec()));
+    }
+
+    #[test]
+    fn test_import_snapshot_clears_absent_chain_progress() {
+        let store = Arc::new(MemoryDb::new());
+        let cs = ChainStore::new(Arc::clone(&store));
+        cs.set_head(&ShellHash::from([0xAA; 32])).unwrap();
+        cs.set_finalized_number(9).unwrap();
+        cs.set_total_tx_count(10).unwrap();
+        cs.set_total_gas_used(U256::from(11)).unwrap();
+        cs.set_chain_totals_head(9).unwrap();
+
+        let meta = crate::SnapshotMetadata::new(
+            1337,
+            0,
+            ShellHash::ZERO,
+            ShellHash::ZERO,
+            ShellHash::ZERO,
+        );
+        let mut buf = Vec::new();
+        {
+            let mut writer =
+                crate::SnapshotWriter::new(std::io::Cursor::new(&mut buf), meta).unwrap();
+            writer.write_entry(b"snapshot-key", b"value").unwrap();
+            writer.finalize().unwrap();
+        }
+
+        cs.import_snapshot(std::io::Cursor::new(buf), 1337, &ShellHash::ZERO)
+            .unwrap();
+
+        assert_eq!(cs.get_head_hash().unwrap(), None);
+        assert_eq!(cs.get_finalized_number().unwrap(), None);
+        assert_eq!(cs.get_total_tx_count().unwrap(), 0);
+        assert_eq!(cs.get_total_gas_used().unwrap(), U256::ZERO);
+        assert_eq!(cs.get_chain_totals_head().unwrap(), None);
+        assert_eq!(store.get(b"snapshot-key").unwrap(), Some(b"value".to_vec()));
+    }
+
+    #[test]
+    fn test_import_snapshot_rejects_duplicate_progress_before_writes() {
+        let store = Arc::new(MemoryDb::new());
+        let cs = ChainStore::new(Arc::clone(&store));
+        let meta = crate::SnapshotMetadata::new(
+            1337,
+            0,
+            ShellHash::ZERO,
+            ShellHash::ZERO,
+            ShellHash::ZERO,
+        );
+        let mut buf = Vec::new();
+        {
+            let mut writer =
+                crate::SnapshotWriter::new(std::io::Cursor::new(&mut buf), meta).unwrap();
+            writer.write_entry(b"untrusted-key", b"value").unwrap();
+            writer
+                .write_entry(prefix::FINALIZED_NUMBER, &1u64.to_be_bytes())
+                .unwrap();
+            writer
+                .write_entry(prefix::FINALIZED_NUMBER, &2u64.to_be_bytes())
+                .unwrap();
+            writer.finalize().unwrap();
+        }
+
+        let error = cs
+            .import_snapshot(std::io::Cursor::new(buf), 1337, &ShellHash::ZERO)
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("duplicate chain progress metadata"));
+        assert!(store.get(b"untrusted-key").unwrap().is_none());
     }
 
     #[test]
