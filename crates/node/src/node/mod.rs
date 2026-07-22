@@ -626,12 +626,28 @@ struct NetworkInterface<'a, N: NetworkService + ?Sized> {
 fn record_sync_request_result(
     sent: bool,
     nonce: u64,
+    start_number: u64,
     sync_requested: &mut bool,
     sync_request_nonce: &mut Option<u64>,
+    sync_request_start: &mut Option<u64>,
 ) -> bool {
     *sync_requested = sent;
     *sync_request_nonce = sent.then_some(nonce);
+    *sync_request_start = sent.then_some(start_number);
     sent
+}
+
+fn stable_sync_request_nonce(
+    active_nonce: Option<u64>,
+    active_start: Option<u64>,
+    requested_start: u64,
+    generated: u64,
+) -> u64 {
+    if active_start == Some(requested_start) {
+        active_nonce.unwrap_or(generated)
+    } else {
+        generated
+    }
 }
 
 impl<'a, N: NetworkService + ?Sized> NetworkInterface<'a, N> {
@@ -1038,6 +1054,7 @@ impl<S: KvStore + 'static> Node<S> {
         target_peer: Option<&shell_network::PeerId>,
         sync_requested: &mut bool,
         sync_request_nonce: &mut Option<u64>,
+        sync_request_start: &mut Option<u64>,
         reason: &'static str,
     ) -> bool {
         let head_number = self.head_number();
@@ -1047,10 +1064,6 @@ impl<S: KvStore + 'static> Node<S> {
             peer = target_peer.map(|p| p.0.as_str()).unwrap_or("broadcast"),
             "requesting blocks from peer"
         );
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos() as u64;
         let Some(start_number) = next_block_request_start(head_number) else {
             tracing::warn!(
                 head = head_number,
@@ -1059,8 +1072,22 @@ impl<S: KvStore + 'static> Node<S> {
             );
             *sync_requested = false;
             *sync_request_nonce = None;
+            *sync_request_start = None;
             return false;
         };
+        let generated_nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+        // Retries for the same range keep their nonce so delayed responses remain
+        // useful. Once import progress changes the requested range, rotate the nonce
+        // so an empty response to the older range cannot reopen production early.
+        let nonce = stable_sync_request_nonce(
+            *sync_request_nonce,
+            *sync_request_start,
+            start_number,
+            generated_nonce,
+        );
         let req = NetworkMessage::BlockRequest {
             start_number,
             count: 1, // request 1 block at a time — PQ-signed blocks can be several MB each
@@ -1072,10 +1099,24 @@ impl<S: KvStore + 'static> Node<S> {
             network.broadcast(req).await
         };
         match send_result {
-            Ok(()) => record_sync_request_result(true, nonce, sync_requested, sync_request_nonce),
+            Ok(()) => record_sync_request_result(
+                true,
+                nonce,
+                start_number,
+                sync_requested,
+                sync_request_nonce,
+                sync_request_start,
+            ),
             Err(e) => {
                 tracing::warn!(reason, error = %e, "failed to request missing blocks");
-                record_sync_request_result(false, nonce, sync_requested, sync_request_nonce)
+                record_sync_request_result(
+                    false,
+                    nonce,
+                    start_number,
+                    sync_requested,
+                    sync_request_nonce,
+                    sync_request_start,
+                )
             }
         }
     }
@@ -1912,24 +1953,38 @@ mod tests {
     fn failed_sync_request_does_not_leave_an_in_flight_nonce() {
         let mut sync_requested = true;
         let mut sync_request_nonce = Some(7);
+        let mut sync_request_start = Some(10);
 
         assert!(!record_sync_request_result(
             false,
             8,
+            11,
             &mut sync_requested,
             &mut sync_request_nonce,
+            &mut sync_request_start,
         ));
         assert!(!sync_requested);
         assert_eq!(sync_request_nonce, None);
+        assert_eq!(sync_request_start, None);
 
         assert!(record_sync_request_result(
             true,
             9,
+            12,
             &mut sync_requested,
             &mut sync_request_nonce,
+            &mut sync_request_start,
         ));
         assert!(sync_requested);
         assert_eq!(sync_request_nonce, Some(9));
+        assert_eq!(sync_request_start, Some(12));
+    }
+
+    #[test]
+    fn sync_retry_reuses_nonce_only_for_the_same_range() {
+        assert_eq!(stable_sync_request_nonce(Some(7), Some(10), 10, 8), 7);
+        assert_eq!(stable_sync_request_nonce(Some(7), Some(10), 11, 8), 8);
+        assert_eq!(stable_sync_request_nonce(None, None, 10, 8), 8);
     }
 
     #[test]
