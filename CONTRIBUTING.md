@@ -53,8 +53,13 @@ Format: `<type>(<scope>): <description>`
 1. Create a feature branch from `main`
 2. Implement the feature and ensure all tests pass
 3. Submit a PR and fill out the template
-4. Wait for Code Review
+4. Wait for maintainer review unless the PR author is `LucienSong`
 5. Delete the feature branch after merging
+
+PRs authored by `LucienSong` may merge without independent maintainer
+approval after all required checks pass and there are no requested changes or
+unresolved review threads. PRs from every other author require maintainer
+review before merge.
 
 ## Code Conventions
 

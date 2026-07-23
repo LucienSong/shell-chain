@@ -90,12 +90,18 @@ pub fn bloom_contains(bloom: &Bloom, data: &[u8]) -> bool {
 ///
 /// Used to build the block-level bloom from individual receipt blooms.
 pub fn bloom_union(blooms: &[Bloom]) -> Bloom {
+    bloom_union_bytes(blooms.iter().map(Bloom::as_slice))
+}
+
+/// Combine byte slices with bitwise OR, truncating each input to bloom size.
+///
+/// This supports receipt blooms without first copying each one into a fixed-size
+/// array. Inputs shorter than [`BLOOM_SIZE`] leave the remaining bytes unset.
+pub fn bloom_union_bytes<'a>(blooms: impl IntoIterator<Item = &'a [u8]>) -> Bloom {
     let mut result = [0u8; BLOOM_SIZE];
     for b in blooms {
-        for (i, byte) in b.iter().enumerate() {
-            if let Some(r) = result.get_mut(i) {
-                *r |= byte;
-            }
+        for (r, byte) in result.iter_mut().zip(b) {
+            *r |= byte;
         }
     }
     result
@@ -161,6 +167,22 @@ mod tests {
         let combined = bloom_union(&[b1, b2]);
         assert!(bloom_contains(&combined, addr1.as_bytes()));
         assert!(bloom_contains(&combined, addr2.as_bytes()));
+    }
+
+    #[test]
+    fn bloom_union_bytes_handles_variable_length_inputs() {
+        let oversized = vec![0x80; BLOOM_SIZE + 1];
+        let combined = bloom_union_bytes([&[0x01, 0x02][..], &oversized]);
+
+        assert_eq!(combined[0], 0x81);
+        assert_eq!(combined[1], 0x82);
+        assert!(combined[2..].iter().all(|byte| *byte == 0x80));
+    }
+
+    #[test]
+    fn bloom_union_bytes_of_empty_input_is_zeroed() {
+        let combined = bloom_union_bytes(std::iter::empty());
+        assert_eq!(combined, [0u8; BLOOM_SIZE]);
     }
 
     #[test]

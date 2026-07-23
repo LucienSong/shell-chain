@@ -668,6 +668,11 @@ impl Decodable for SessionAuth {
                 "session_auth: value_cap exceeds 32 bytes",
             ));
         }
+        if value_bytes.is_empty() || (value_bytes.len() > 1 && value_bytes[0] == 0) {
+            return Err(alloy_rlp::Error::Custom(
+                "session_auth: value_cap must use minimal big-endian encoding",
+            ));
+        }
         let value_cap = U256::from_be_slice(value_bytes);
         let expiry_block: u64 = Decodable::decode(buf)?;
         let root_signature_raw = alloy_rlp::Header::decode_bytes(buf, false)?;
@@ -855,6 +860,21 @@ pub struct AaBundle {
 }
 
 impl AaBundle {
+    /// Canonical RLP list passed to contract paymasters as `callData`.
+    pub fn encode_inner_calls(&self) -> Vec<u8> {
+        let payload_len: usize = self.inner_calls.iter().map(Encodable::length).sum();
+        let header = alloy_rlp::Header {
+            list: true,
+            payload_length: payload_len,
+        };
+        let mut encoded = Vec::with_capacity(header.length().saturating_add(payload_len));
+        header.encode(&mut encoded);
+        for call in &self.inner_calls {
+            call.encode(&mut encoded);
+        }
+        encoded
+    }
+
     /// Validate structural constraints (counts, sizes, paymaster pairing).
     /// Does NOT verify any signatures or balances; that happens at mempool
     /// admission and execution time.
@@ -3221,6 +3241,43 @@ mod tests {
             let encoded = alloy_rlp::encode(&auth);
             assert!(SessionAuth::decode(&mut encoded.as_slice()).is_err());
         }
+    }
+
+    #[test]
+    fn session_auth_decode_rejects_noncanonical_value_cap() {
+        let encode_with_value_cap = |value_cap: &[u8]| {
+            let mut payload = Vec::new();
+            [1u8].as_slice().encode(&mut payload);
+            (SignatureType::Dilithium3.as_u8() as u64).encode(&mut payload);
+            <&[u8]>::default().encode(&mut payload);
+            value_cap.encode(&mut payload);
+            1u64.encode(&mut payload);
+            [1u8].as_slice().encode(&mut payload);
+            [1u8].as_slice().encode(&mut payload);
+
+            let mut encoded = Vec::new();
+            alloy_rlp::Header {
+                list: true,
+                payload_length: payload.len(),
+            }
+            .encode(&mut encoded);
+            encoded.extend_from_slice(&payload);
+            encoded
+        };
+
+        for value_cap in [&[][..], &[0, 1][..]] {
+            let encoded = encode_with_value_cap(value_cap);
+            let err = SessionAuth::decode(&mut encoded.as_slice()).unwrap_err();
+            assert!(err.to_string().contains("minimal big-endian encoding"));
+        }
+
+        let encoded_zero = encode_with_value_cap(&[0]);
+        assert_eq!(
+            SessionAuth::decode(&mut encoded_zero.as_slice())
+                .unwrap()
+                .value_cap,
+            U256::ZERO
+        );
     }
 
     #[test]

@@ -147,6 +147,7 @@ mod prefix {
     pub const TX_INDEX: &[u8] = b"t/";
     pub const HEAD_BLOCK: &[u8] = b"HEAD";
     pub const CHAIN_CONFIG: &[u8] = b"CFG";
+    pub const FINALIZED_NUMBER: &[u8] = b"FINALIZED";
     pub const CODE_BY_HASH: &[u8] = b"c/";
     pub const PUBKEY_BY_ADDR: &[u8] = b"pk/";
     /// Address → tx_hash index: key = "a/" + address(32) + block_number(8) + tx_index(4)
@@ -408,11 +409,13 @@ impl<S: KvStore> ChainStore<S> {
     /// transaction/address indexes that are reserved for canonical lookup.
     pub fn put_side_fork_block(&self, block: &Block) -> Result<(), StorageError> {
         let block_hash = block.hash();
-        self.put_block_parts(block, false)?;
-        self.store.put(
-            &Self::side_fork_key(block.number(), &block_hash),
-            block_hash.as_bytes(),
-        )
+        let mut batch = WriteBatch::new();
+        Self::append_block_parts(&mut batch, block, false);
+        batch.put(
+            Self::side_fork_key(block.number(), &block_hash),
+            block_hash.as_bytes().to_vec(),
+        );
+        self.store.write_batch(batch)
     }
 
     /// Return side-fork block hashes recorded at a given block number.
@@ -1458,6 +1461,7 @@ impl<S: KvStore> ChainStore<S> {
         let canonical_head_key = Self::number_key(metadata.block_number);
         let mut canonical_head_hash = None;
         let mut snapshot_chain_config = None;
+        let mut progress_keys = std::collections::HashSet::new();
         while let Some(entry) = snap_reader.next_entry()? {
             if entry.key == prefix::HEAD_BLOCK {
                 if entry.value.len() != 32 {
@@ -1471,6 +1475,29 @@ impl<S: KvStore> ChainStore<S> {
                     ));
                 }
                 head_hash = Some(ShellHash::from_slice(&entry.value));
+                progress_keys.insert(entry.key);
+            } else if matches!(
+                entry.key.as_slice(),
+                prefix::FINALIZED_NUMBER
+                    | prefix::TOTAL_TX_COUNT
+                    | prefix::TOTAL_GAS_USED
+                    | prefix::TOTALS_HEAD
+            ) {
+                if !progress_keys.insert(entry.key.clone()) {
+                    return Err(StorageError::State(
+                        "snapshot contains duplicate chain progress metadata".into(),
+                    ));
+                }
+                let expected_len = if entry.key == prefix::TOTAL_GAS_USED {
+                    32
+                } else {
+                    8
+                };
+                if entry.value.len() != expected_len {
+                    return Err(StorageError::State(
+                        "snapshot chain progress metadata has invalid length".into(),
+                    ));
+                }
             } else if entry.key == canonical_head_key {
                 if entry.value.len() != 32 {
                     return Err(StorageError::State(
@@ -1548,10 +1575,17 @@ impl<S: KvStore> ChainStore<S> {
 
         // Import all entries
         let mut batch = crate::WriteBatch::new();
-        let mut pending_head = None;
+        let mut pending_publication = crate::WriteBatch::new();
         while let Some(entry) = snap_reader.next_entry()? {
-            if entry.key == prefix::HEAD_BLOCK {
-                pending_head = Some(entry.value);
+            if matches!(
+                entry.key.as_slice(),
+                prefix::HEAD_BLOCK
+                    | prefix::FINALIZED_NUMBER
+                    | prefix::TOTAL_TX_COUNT
+                    | prefix::TOTAL_GAS_USED
+                    | prefix::TOTALS_HEAD
+            ) {
+                pending_publication.put(entry.key, entry.value);
                 continue;
             }
             batch.put(entry.key, entry.value);
@@ -1568,25 +1602,36 @@ impl<S: KvStore> ChainStore<S> {
             self.store.write_batch(batch)?;
         }
 
-        // Publish HEAD only after every other record is durable. A failed
-        // streaming import must not make a partial snapshot appear complete.
-        if let Some(head) = pending_head {
-            let mut head_batch = crate::WriteBatch::new();
-            head_batch.put(prefix::HEAD_BLOCK.to_vec(), head);
-            self.store.write_batch(head_batch)?;
+        for key in [
+            prefix::HEAD_BLOCK,
+            prefix::FINALIZED_NUMBER,
+            prefix::TOTAL_TX_COUNT,
+            prefix::TOTAL_GAS_USED,
+            prefix::TOTALS_HEAD,
+        ] {
+            if !progress_keys.contains(key) {
+                pending_publication.delete(key.to_vec());
+            }
         }
+
+        // Publish chain progress only after every other record is durable. A
+        // failed streaming import must retain a mutually consistent old view.
+        // Missing snapshot keys delete stale destination progress in the same
+        // batch rather than mixing the imported chain with old counters.
+        self.store.write_batch(pending_publication)?;
 
         Ok(metadata)
     }
 
     /// Store the finalized block number.
     pub fn set_finalized_number(&self, number: u64) -> Result<(), StorageError> {
-        self.store.put(b"FINALIZED", &number.to_be_bytes())
+        self.store
+            .put(prefix::FINALIZED_NUMBER, &number.to_be_bytes())
     }
 
     /// Get the finalized block number.
     pub fn get_finalized_number(&self) -> Result<Option<u64>, StorageError> {
-        match self.store.get(b"FINALIZED")? {
+        match self.store.get(prefix::FINALIZED_NUMBER)? {
             Some(bytes) if bytes.len() == 8 => {
                 let arr: [u8; 8] = bytes
                     .try_into()
@@ -2506,6 +2551,37 @@ mod tests {
     }
 
     #[test]
+    fn side_fork_block_is_written_in_one_batch() {
+        let store = Arc::new(FailingBatchStore::new());
+        let cs = ChainStore::new(Arc::clone(&store));
+        let block = empty_block(7);
+        let hash = block.hash();
+        store.fail_put_after(1);
+
+        cs.put_side_fork_block(&block).unwrap();
+
+        assert_eq!(store.batch_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(store.put_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(cs.get_side_fork_hashes(7).unwrap(), vec![hash]);
+        assert_eq!(cs.get_block_by_hash(&hash).unwrap().unwrap().hash(), hash);
+    }
+
+    #[test]
+    fn side_fork_block_batch_failure_leaves_no_partial_artifacts() {
+        let store = Arc::new(FailingBatchStore::new());
+        let cs = ChainStore::new(Arc::clone(&store));
+        let block = empty_block(7);
+        let hash = block.hash();
+        store.fail_next_batch();
+
+        let err = cs.put_side_fork_block(&block).unwrap_err();
+
+        assert!(err.to_string().contains("injected batch failure"));
+        assert!(cs.get_side_fork_hashes(7).unwrap().is_empty());
+        assert!(cs.get_block_by_hash(&hash).unwrap().is_none());
+    }
+
+    #[test]
     fn set_canonical_and_get_by_number() {
         let store = Arc::new(MemoryDb::new());
         let cs = ChainStore::new(store);
@@ -3139,6 +3215,77 @@ mod tests {
     }
 
     #[test]
+    fn test_import_snapshot_clears_absent_chain_progress() {
+        let store = Arc::new(MemoryDb::new());
+        let cs = ChainStore::new(Arc::clone(&store));
+        cs.set_head(&ShellHash::from([0xAA; 32])).unwrap();
+        cs.set_finalized_number(9).unwrap();
+        cs.set_total_tx_count(10).unwrap();
+        cs.set_total_gas_used(U256::from(11)).unwrap();
+        cs.set_chain_totals_head(9).unwrap();
+
+        let meta = crate::SnapshotMetadata::new(
+            1337,
+            0,
+            ShellHash::ZERO,
+            ShellHash::ZERO,
+            ShellHash::ZERO,
+        );
+        let mut buf = Vec::new();
+        {
+            let mut writer =
+                crate::SnapshotWriter::new(std::io::Cursor::new(&mut buf), meta).unwrap();
+            writer.write_entry(b"snapshot-key", b"value").unwrap();
+            writer.finalize().unwrap();
+        }
+
+        cs.import_snapshot(std::io::Cursor::new(buf), 1337, &ShellHash::ZERO)
+            .unwrap();
+
+        assert_eq!(cs.get_head_hash().unwrap(), None);
+        assert_eq!(cs.get_finalized_number().unwrap(), None);
+        assert_eq!(cs.get_total_tx_count().unwrap(), 0);
+        assert_eq!(cs.get_total_gas_used().unwrap(), U256::ZERO);
+        assert_eq!(cs.get_chain_totals_head().unwrap(), None);
+        assert_eq!(store.get(b"snapshot-key").unwrap(), Some(b"value".to_vec()));
+    }
+
+    #[test]
+    fn test_import_snapshot_rejects_duplicate_progress_before_writes() {
+        let store = Arc::new(MemoryDb::new());
+        let cs = ChainStore::new(Arc::clone(&store));
+        let meta = crate::SnapshotMetadata::new(
+            1337,
+            0,
+            ShellHash::ZERO,
+            ShellHash::ZERO,
+            ShellHash::ZERO,
+        );
+        let mut buf = Vec::new();
+        {
+            let mut writer =
+                crate::SnapshotWriter::new(std::io::Cursor::new(&mut buf), meta).unwrap();
+            writer.write_entry(b"untrusted-key", b"value").unwrap();
+            writer
+                .write_entry(prefix::FINALIZED_NUMBER, &1u64.to_be_bytes())
+                .unwrap();
+            writer
+                .write_entry(prefix::FINALIZED_NUMBER, &2u64.to_be_bytes())
+                .unwrap();
+            writer.finalize().unwrap();
+        }
+
+        let error = cs
+            .import_snapshot(std::io::Cursor::new(buf), 1337, &ShellHash::ZERO)
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("duplicate chain progress metadata"));
+        assert!(store.get(b"untrusted-key").unwrap().is_none());
+    }
+
+    #[test]
     fn test_import_snapshot_accepts_head_header_before_head_pointer() {
         let store = Arc::new(MemoryDb::new());
         let cs = ChainStore::new(store);
@@ -3184,6 +3331,10 @@ mod tests {
         let cs = ChainStore::new(Arc::clone(&store));
         let old_head = ShellHash::from([0xAA; 32]);
         cs.set_head(&old_head).unwrap();
+        cs.set_finalized_number(0).unwrap();
+        cs.set_total_tx_count(3).unwrap();
+        cs.set_total_gas_used(U256::from(5)).unwrap();
+        cs.set_chain_totals_head(0).unwrap();
 
         let block = empty_block(1);
         let block_hash = block.hash();
@@ -3213,6 +3364,18 @@ mod tests {
                     block_hash.as_bytes(),
                 )
                 .unwrap();
+            writer
+                .write_entry(prefix::FINALIZED_NUMBER, &1u64.to_be_bytes())
+                .unwrap();
+            writer
+                .write_entry(prefix::TOTAL_TX_COUNT, &8u64.to_be_bytes())
+                .unwrap();
+            writer
+                .write_entry(prefix::TOTAL_GAS_USED, &U256::from(13).to_be_bytes::<32>())
+                .unwrap();
+            writer
+                .write_entry(prefix::TOTALS_HEAD, &1u64.to_be_bytes())
+                .unwrap();
             for index in 0..10_000 {
                 writer
                     .write_entry(format!("snapshot/test/{index:05}").as_bytes(), b"value")
@@ -3227,6 +3390,10 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("injected batch failure"));
         assert_eq!(cs.get_head_hash().unwrap(), Some(old_head));
+        assert_eq!(cs.get_finalized_number().unwrap(), Some(0));
+        assert_eq!(cs.get_total_tx_count().unwrap(), 3);
+        assert_eq!(cs.get_total_gas_used().unwrap(), U256::from(5));
+        assert_eq!(cs.get_chain_totals_head().unwrap(), Some(0));
     }
 
     #[test]

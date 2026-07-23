@@ -27,10 +27,11 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now shell-cluster-watchdog.timer
 ```
 
-The watchdog requires sustained production unavailability before taking action,
-never restarts while a reachable node reports active synchronization, and
-restarts only one validator per recovery interval. Order services from lowest
-to highest voting weight in the environment file.
+The watchdog requires every configured validator to report production readiness,
+waits for sustained unavailability before taking action, never restarts while a
+reachable node reports active synchronization, and restarts only an unready
+validator per recovery interval. Order services from lowest to highest voting
+weight in the environment file.
 
 Operational defaults:
 

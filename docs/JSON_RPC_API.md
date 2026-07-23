@@ -137,6 +137,8 @@ must be `null`, a `0x`-prefixed 32-byte hash, or an array of `0x`-prefixed
 32-byte hashes. The `topics` array can contain at most four positional entries.
 Within `topics`, `null` is a wildcard for that position; an empty alternatives
 array (`[]`) matches no logs at that position.
+Only `address` and `topics` are supported for live log subscriptions; other
+filter fields are rejected as invalid parameters rather than ignored.
 
 **Example — newPendingTransactions:**
 
@@ -634,6 +636,8 @@ Returns logs matching a filter.
 |---|------|----------|-------------|
 | 1 | `Object` | Yes | Filter: `{address?, topics?, fromBlock?, toBlock?}`. Addresses use the canonical `0x`-prefixed 64-hex-character Shell address form; `topics` can contain at most four positional entries. Topic entries are `null`, a `0x`-prefixed 32-byte hash, or an array of `0x`-prefixed 32-byte hashes. `null` is a positional wildcard; an empty alternatives array (`[]`) matches no logs at that position. |
 
+Unsupported filter fields are rejected as invalid parameters rather than ignored.
+
 **Returns:** `Array` — Log objects with `address`, `topics`, `data`, `blockNumber`, `blockHash`, `transactionHash`, `transactionIndex`, `logIndex`, `removed`.
 
 Uses bloom filters for fast block-level filtering. The block range is capped at `MAX_BLOCK_RANGE` to prevent DoS.
@@ -654,6 +658,8 @@ Creates a poll-based log filter.
 | # | Type | Required | Description |
 |---|------|----------|-------------|
 | 1 | `Object` | Yes | Filter: `{address?, topics?, fromBlock?, toBlock?}`. Addresses use the canonical `0x`-prefixed 64-hex-character Shell address form; `topics` can contain at most four positional entries. Topic entries are `null`, a `0x`-prefixed 32-byte hash, or an array of `0x`-prefixed 32-byte hashes. `null` is a positional wildcard; an empty alternatives array (`[]`) matches no logs at that position. |
+
+Unsupported filter fields are rejected as invalid parameters rather than ignored.
 
 **Returns:** `String` — Filter ID.
 

@@ -248,6 +248,15 @@ impl LogFilter {
             return Err(invalid_params_err("log filter params must be an object"));
         };
 
+        if let Some(field) = obj
+            .keys()
+            .find(|field| !matches!(field.as_str(), "address" | "topics"))
+        {
+            return Err(invalid_params_err(format!(
+                "unsupported log filter field `{field}`"
+            )));
+        }
+
         // Parse address(es).
         if let Some(addr_val) = obj.get("address") {
             match addr_val {
@@ -1485,6 +1494,19 @@ mod tests {
 
         assert_eq!(err.code(), jsonrpsee::types::error::INVALID_PARAMS_CODE);
         assert!(err.message().contains("address supports at most"));
+    }
+
+    #[test]
+    fn log_filter_rejects_unknown_criteria() {
+        let err = LogFilter::from_value(&serde_json::json!({
+            "blockHash": ShellHash::ZERO.to_string()
+        }))
+        .unwrap_err();
+
+        assert_eq!(err.code(), jsonrpsee::types::error::INVALID_PARAMS_CODE);
+        assert!(err
+            .message()
+            .contains("unsupported log filter field `blockHash`"));
     }
 
     #[test]
