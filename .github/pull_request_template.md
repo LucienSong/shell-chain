@@ -31,6 +31,12 @@ Feature: `<feature-id>`
 - [ ] `cargo clippy --workspace` has no warnings
 - [ ] New code has test coverage
 
+## Review
+
+PRs authored by `LucienSong` may merge without independent maintainer
+approval after all required checks pass and there are no requested changes or
+unresolved review threads. All other PRs require maintainer review.
+
 ## Protocol Invariant Checklist
 
 <!-- Changes touching consensus, mempool, RPC, core, or pqvm require review -->

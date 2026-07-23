@@ -83,7 +83,7 @@ http = "1"
 futures-util = "0.3"
 
 # --- network (libp2p) ---
-libp2p = { version = "0.56", features = ["tcp", "dns", "noise", "yamux", "gossipsub", "mdns", "tokio", "identify", "kad", "macros", "relay", "dcutr", "autonat"] }
+libp2p = { version = "0.56", features = ["tcp", "dns", "noise", "yamux", "gossipsub", "mdns", "tokio", "identify", "kad", "macros", "relay", "dcutr", "autonat", "request-response"] }
 
 # --- storage (rocksdb) ---
 rocksdb = { version = "0.22", default-features = false, features = ["snappy", "zstd"] }
@@ -100,6 +100,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 rpassword = "7"
 rustix = { version = "1", features = ["fs"] }
+libc = "0.2"
 
 # --- metrics ---
 prometheus = "0.14"

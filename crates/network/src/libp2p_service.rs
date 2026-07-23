@@ -6,17 +6,19 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::io;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use libp2p::futures::StreamExt;
+use libp2p::futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, StreamExt};
 use libp2p::gossipsub::{self, IdentTopic, PeerScoreParams, PeerScoreThresholds, TopicScoreParams};
 use libp2p::kad;
+use libp2p::request_response::{self, ProtocolSupport};
 use libp2p::swarm::behaviour::toggle::Toggle;
-use libp2p::swarm::SwarmEvent;
+use libp2p::swarm::{StreamProtocol, SwarmEvent};
 use libp2p::{
     autonat, connection_limits, dcutr, identify, mdns, noise, relay, tcp, yamux, Multiaddr,
     PeerId as Libp2pPeerId, Swarm, SwarmBuilder,
@@ -32,6 +34,9 @@ use crate::message::{NetworkEvent, NetworkMessage, NetworkTopic, PeerId};
 use crate::service::NetworkService;
 
 const BOOTNODE_REDIAL_INTERVAL_SECS: u64 = 30;
+const DIRECT_MESSAGE_PROTOCOL: StreamProtocol = StreamProtocol::new("/shell/direct/1");
+const MAX_PENDING_DIRECT_MESSAGES: usize = 256;
+const MAX_PENDING_DIRECT_BYTES: usize = 2 * crate::message::MAX_MESSAGE_SIZE;
 
 /// Topic category for gossipsub routing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,6 +53,11 @@ enum SwarmCommand {
         topic: TopicKind,
         data: Vec<u8>,
     },
+    SendToPeer {
+        peer: Libp2pPeerId,
+        topic: TopicKind,
+        data: Vec<u8>,
+    },
     /// Request a snapshot of current peer scores.
     PeerScores {
         reply: oneshot::Sender<Vec<(PeerId, f64)>>,
@@ -59,6 +69,7 @@ enum SwarmCommand {
 #[derive(libp2p::swarm::NetworkBehaviour)]
 struct ShellBehaviour {
     gossipsub: gossipsub::Behaviour,
+    direct_message: request_response::Behaviour<DirectMessageCodec>,
     kademlia: Toggle<kad::Behaviour<kad::store::MemoryStore>>,
     mdns: Toggle<mdns::tokio::Behaviour>,
     identify: identify::Behaviour,
@@ -67,6 +78,156 @@ struct ShellBehaviour {
     dcutr: Toggle<dcutr::Behaviour>,
     autonat: Toggle<autonat::Behaviour>,
     connection_limits: connection_limits::Behaviour,
+}
+
+#[derive(Clone)]
+struct DirectMessageCodec {
+    max_message_size: usize,
+}
+
+#[async_trait]
+impl request_response::Codec for DirectMessageCodec {
+    type Protocol = StreamProtocol;
+    type Request = Arc<[u8]>;
+    type Response = ();
+
+    async fn read_request<T>(
+        &mut self,
+        _protocol: &Self::Protocol,
+        io: &mut T,
+    ) -> io::Result<Self::Request>
+    where
+        T: AsyncRead + Unpin + Send,
+    {
+        let limit = u64::try_from(self.max_message_size).unwrap_or(u64::MAX);
+        let mut data = Vec::new();
+        io.take(limit.saturating_add(1))
+            .read_to_end(&mut data)
+            .await?;
+        if data.len() > self.max_message_size {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "direct message exceeds configured size limit",
+            ));
+        }
+        Ok(data.into())
+    }
+
+    async fn read_response<T>(
+        &mut self,
+        _protocol: &Self::Protocol,
+        io: &mut T,
+    ) -> io::Result<Self::Response>
+    where
+        T: AsyncRead + Unpin + Send,
+    {
+        let mut ack = [0u8; 1];
+        io.read_exact(&mut ack).await?;
+        if ack[0] != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid direct message acknowledgement",
+            ));
+        }
+        Ok(())
+    }
+
+    async fn write_request<T>(
+        &mut self,
+        _protocol: &Self::Protocol,
+        io: &mut T,
+        request: Self::Request,
+    ) -> io::Result<()>
+    where
+        T: AsyncWrite + Unpin + Send,
+    {
+        if request.len() > self.max_message_size {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "direct message exceeds configured size limit",
+            ));
+        }
+        io.write_all(&request).await
+    }
+
+    async fn write_response<T>(
+        &mut self,
+        _protocol: &Self::Protocol,
+        io: &mut T,
+        _response: Self::Response,
+    ) -> io::Result<()>
+    where
+        T: AsyncWrite + Unpin + Send,
+    {
+        io.write_all(&[0]).await
+    }
+}
+
+struct PendingDirectMessage {
+    topic: TopicKind,
+    data: Arc<[u8]>,
+}
+
+struct PendingDirectMessages {
+    messages: HashMap<request_response::OutboundRequestId, PendingDirectMessage>,
+    bytes: usize,
+    max_messages: usize,
+    max_bytes: usize,
+}
+
+impl PendingDirectMessages {
+    fn new(max_messages: usize, max_bytes: usize) -> Self {
+        Self {
+            messages: HashMap::new(),
+            bytes: 0,
+            max_messages,
+            max_bytes,
+        }
+    }
+
+    fn can_accept(&self, data_len: usize) -> bool {
+        self.messages.len() < self.max_messages
+            && self
+                .bytes
+                .checked_add(data_len)
+                .is_some_and(|bytes| bytes <= self.max_bytes)
+    }
+
+    fn insert(
+        &mut self,
+        request_id: request_response::OutboundRequestId,
+        message: PendingDirectMessage,
+    ) {
+        debug_assert!(self.can_accept(message.data.len()));
+        self.bytes += message.data.len();
+        let replaced = self.messages.insert(request_id, message);
+        debug_assert!(replaced.is_none());
+    }
+
+    fn remove(
+        &mut self,
+        request_id: &request_response::OutboundRequestId,
+    ) -> Option<PendingDirectMessage> {
+        let message = self.messages.remove(request_id)?;
+        self.bytes = self.bytes.saturating_sub(message.data.len());
+        Some(message)
+    }
+}
+
+fn take_direct_message_fallback(
+    pending: &mut PendingDirectMessages,
+    request_id: request_response::OutboundRequestId,
+    error: &request_response::OutboundFailure,
+) -> Option<PendingDirectMessage> {
+    let message = pending.remove(&request_id);
+    if matches!(
+        error,
+        request_response::OutboundFailure::UnsupportedProtocols
+    ) {
+        message
+    } else {
+        None
+    }
 }
 
 /// Production P2P network service backed by libp2p.
@@ -421,6 +582,15 @@ fn build_swarm_with_identity(
                 "/shell-chain/1.0.0".into(),
                 key.public(),
             ));
+            let direct_message = request_response::Behaviour::with_codec(
+                DirectMessageCodec {
+                    max_message_size: max_msg_size,
+                },
+                [(DIRECT_MESSAGE_PROTOCOL, ProtocolSupport::Full)],
+                request_response::Config::default()
+                    .with_request_timeout(Duration::from_secs(30))
+                    .with_max_concurrent_streams(256),
+            );
 
             let dcutr_behaviour: Option<dcutr::Behaviour> =
                 if enable_dcutr && relay_behaviour.is_some() {
@@ -451,6 +621,7 @@ fn build_swarm_with_identity(
 
             Ok(ShellBehaviour {
                 gossipsub,
+                direct_message,
                 kademlia: kademlia.into(),
                 mdns: mdns.into(),
                 identify,
@@ -579,6 +750,8 @@ async fn swarm_loop(
     event_tx: mpsc::Sender<NetworkEvent>,
     loop_config: SwarmLoopConfig,
 ) {
+    let mut pending_direct_messages =
+        PendingDirectMessages::new(MAX_PENDING_DIRECT_MESSAGES, MAX_PENDING_DIRECT_BYTES);
     let _peer_count_reset = PeerCountResetGuard(Arc::clone(&loop_config.peer_count));
     // F-305: Initialize peer tracking and ban list.
     let mut peer_tracker = crate::security::PeerTracker::new(loop_config.peer_security.max_peers);
@@ -662,6 +835,46 @@ async fn swarm_loop(
                             debug!("Gossipsub publish error: {e}");
                         }
                     }
+                    Some(SwarmCommand::SendToPeer { peer, topic, data }) => {
+                        let data_len = data.len() as u64;
+                        if !loop_config.bandwidth.record_outbound(data_len) {
+                            warn!(
+                                bytes = data_len,
+                                %peer,
+                                "Outbound bandwidth limit exceeded - skipping direct message"
+                            );
+                        } else {
+                            let data: Arc<[u8]> = data.into();
+                            if pending_direct_messages.can_accept(data.len()) {
+                                let request_id = swarm
+                                    .behaviour_mut()
+                                    .direct_message
+                                    .send_request(&peer, Arc::clone(&data));
+                                pending_direct_messages.insert(
+                                    request_id,
+                                    PendingDirectMessage { topic, data },
+                                );
+                            } else {
+                                let ident = match topic {
+                                    TopicKind::Blocks => loop_config.blocks_topic.clone(),
+                                    TopicKind::Transactions => loop_config.txs_topic.clone(),
+                                    TopicKind::Attestation => loop_config.attestation_topic.clone(),
+                                    TopicKind::Proofs => loop_config.proofs_topic.clone(),
+                                };
+                                warn!(
+                                    %peer,
+                                    "direct message pending limit reached; using gossip fallback"
+                                );
+                                if let Err(error) = swarm
+                                    .behaviour_mut()
+                                    .gossipsub
+                                    .publish(ident, data.to_vec())
+                                {
+                                    debug!(%peer, %error, "direct message overload fallback failed");
+                                }
+                            }
+                        }
+                    }
                     Some(SwarmCommand::PeerScores { reply }) => {
                         let scores = collect_peer_scores(&swarm);
                         let _ = reply.send(scores);
@@ -680,6 +893,7 @@ async fn swarm_loop(
                     &loop_config,
                     &mut peer_tracker,
                     &mut peer_ban_list,
+                    &mut pending_direct_messages,
                 );
             }
             _ = kad_bootstrap_interval.tick() => {
@@ -754,8 +968,105 @@ fn handle_swarm_event(
     loop_config: &SwarmLoopConfig,
     peer_tracker: &mut crate::security::PeerTracker,
     peer_ban_list: &mut crate::security::PeerBanList,
+    pending_direct_messages: &mut PendingDirectMessages,
 ) {
     match event {
+        SwarmEvent::Behaviour(ShellBehaviourEvent::DirectMessage(
+            request_response::Event::Message {
+                peer: source,
+                message:
+                    request_response::Message::Request {
+                        request: data,
+                        channel,
+                        ..
+                    },
+                ..
+            },
+        )) => {
+            let _ = swarm
+                .behaviour_mut()
+                .direct_message
+                .send_response(channel, ());
+            let data_len = data.len() as u64;
+            if !loop_config.bandwidth.record_inbound(data_len) {
+                warn!(
+                    bytes = data_len,
+                    peer = %source,
+                    "Inbound bandwidth limit exceeded - dropping direct message"
+                );
+                return;
+            }
+
+            let peer = PeerId(source.to_string());
+            match crate::message::deserialize_checked(&data, loop_config.max_msg_size) {
+                Ok(message) => {
+                    if let Err(error) = try_forward_message_event(event_tx, peer, message) {
+                        debug!(
+                            ?error,
+                            peer = %source,
+                            "node event queue unavailable - dropping direct message"
+                        );
+                    }
+                }
+                Err(error) => {
+                    debug!(peer = %source, %error, "invalid direct message");
+                    if peer_ban_list.record_violation(&peer) {
+                        warn!(peer = %source, "peer banned for repeated violations");
+                        let _ = swarm.disconnect_peer_id(source);
+                    }
+                }
+            }
+        }
+        SwarmEvent::Behaviour(ShellBehaviourEvent::DirectMessage(
+            request_response::Event::Message {
+                message: request_response::Message::Response { request_id, .. },
+                ..
+            },
+        )) => {
+            pending_direct_messages.remove(&request_id);
+        }
+        SwarmEvent::Behaviour(ShellBehaviourEvent::DirectMessage(
+            request_response::Event::OutboundFailure {
+                peer,
+                request_id,
+                error,
+                ..
+            },
+        )) => {
+            if let Some(message) =
+                take_direct_message_fallback(pending_direct_messages, request_id, &error)
+            {
+                let ident = match message.topic {
+                    TopicKind::Blocks => loop_config.blocks_topic.clone(),
+                    TopicKind::Transactions => loop_config.txs_topic.clone(),
+                    TopicKind::Attestation => loop_config.attestation_topic.clone(),
+                    TopicKind::Proofs => loop_config.proofs_topic.clone(),
+                };
+                if let Err(fallback_error) = swarm
+                    .behaviour_mut()
+                    .gossipsub
+                    .publish(ident, message.data.to_vec())
+                {
+                    debug!(
+                        %peer,
+                        %fallback_error,
+                        "direct message compatibility fallback failed"
+                    );
+                } else {
+                    debug!(%peer, "peer lacks direct-message support; used gossip fallback");
+                }
+            } else {
+                debug!(%peer, %error, "direct message delivery failed");
+            }
+        }
+        SwarmEvent::Behaviour(ShellBehaviourEvent::DirectMessage(
+            request_response::Event::InboundFailure { peer, error, .. },
+        )) => {
+            debug!(%peer, %error, "direct message receive failed");
+        }
+        SwarmEvent::Behaviour(ShellBehaviourEvent::DirectMessage(
+            request_response::Event::ResponseSent { .. },
+        )) => {}
         // Gossipsub message received.
         SwarmEvent::Behaviour(ShellBehaviourEvent::Gossipsub(gossipsub::Event::Message {
             propagation_source,
@@ -1191,6 +1502,27 @@ impl NetworkService for Libp2pNetwork {
         Ok(())
     }
 
+    async fn send_to_peer(
+        &self,
+        peer_id: &PeerId,
+        msg: NetworkMessage,
+    ) -> Result<(), NetworkError> {
+        let topic = topic_kind_for_message(&msg);
+        let peer = peer_id
+            .0
+            .parse::<Libp2pPeerId>()
+            .map_err(|error| NetworkError::Transport(format!("invalid peer id: {error}")))?;
+        let data =
+            serde_json::to_vec(&msg).map_err(|e| NetworkError::Serialization(e.to_string()))?;
+        crate::message::validate_message_size(&data, self.max_msg_size)?;
+        crate::message::validate_message_size(&data, msg.max_serialized_size())?;
+
+        self.cmd_tx
+            .send(SwarmCommand::SendToPeer { peer, topic, data })
+            .await
+            .map_err(|_| NetworkError::ChannelClosed)
+    }
+
     async fn next_event(&mut self) -> Option<NetworkEvent> {
         self.event_rx.recv().await
     }
@@ -1227,6 +1559,154 @@ fn extract_peer_id(addr: &Multiaddr) -> Option<Libp2pPeerId> {
 mod tests {
     use super::*;
     use crate::config::NetworkConfig;
+    use libp2p::futures::io::Cursor;
+
+    #[tokio::test]
+    async fn direct_message_codec_enforces_raw_message_limit() {
+        let mut codec = DirectMessageCodec {
+            max_message_size: 4,
+        };
+        let mut exact = Cursor::new(vec![1, 2, 3, 4]);
+        let decoded =
+            request_response::Codec::read_request(&mut codec, &DIRECT_MESSAGE_PROTOCOL, &mut exact)
+                .await
+                .unwrap();
+        assert_eq!(decoded.as_ref(), [1, 2, 3, 4]);
+
+        let mut oversized = Cursor::new(vec![1, 2, 3, 4, 5]);
+        let error = request_response::Codec::read_request(
+            &mut codec,
+            &DIRECT_MESSAGE_PROTOCOL,
+            &mut oversized,
+        )
+        .await
+        .expect_err("oversized direct messages must be rejected before deserialization");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[tokio::test]
+    async fn send_to_peer_queues_a_targeted_direct_message() {
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(1);
+        let (_event_tx, event_rx) = mpsc::channel(1);
+        let network = Libp2pNetwork {
+            cmd_tx,
+            event_rx,
+            peer_count: Arc::new(AtomicUsize::new(0)),
+            bandwidth: Arc::new(BandwidthTracker::new(0, 0)),
+            max_msg_size: crate::message::MAX_MESSAGE_SIZE,
+        };
+        let target = Libp2pPeerId::random();
+
+        network
+            .send_to_peer(&PeerId(target.to_string()), NetworkMessage::Ping)
+            .await
+            .unwrap();
+
+        match cmd_rx.recv().await.unwrap() {
+            SwarmCommand::SendToPeer { peer, topic, data } => {
+                assert_eq!(peer, target);
+                assert_eq!(topic, TopicKind::Blocks);
+                assert!(matches!(
+                    crate::message::deserialize_checked(&data, crate::message::MAX_MESSAGE_SIZE)
+                        .unwrap(),
+                    NetworkMessage::Ping
+                ));
+            }
+            _ => panic!("send_to_peer must not fall back to gossip broadcast"),
+        }
+    }
+
+    #[test]
+    fn unsupported_legacy_peer_falls_back_without_affecting_modern_peer() {
+        let mut behaviour = request_response::Behaviour::with_codec(
+            DirectMessageCodec {
+                max_message_size: crate::message::MAX_MESSAGE_SIZE,
+            },
+            [(DIRECT_MESSAGE_PROTOCOL, ProtocolSupport::Full)],
+            request_response::Config::default(),
+        );
+        let legacy_peer = Libp2pPeerId::random();
+        let modern_peer = Libp2pPeerId::random();
+        let legacy_id = behaviour.send_request(&legacy_peer, Arc::from(&b"legacy"[..]));
+        let modern_id = behaviour.send_request(&modern_peer, Arc::from(&b"modern"[..]));
+        let mut pending = PendingDirectMessages::new(2, 12);
+        pending.insert(
+            legacy_id,
+            PendingDirectMessage {
+                topic: TopicKind::Blocks,
+                data: Arc::from(&b"legacy"[..]),
+            },
+        );
+        pending.insert(
+            modern_id,
+            PendingDirectMessage {
+                topic: TopicKind::Transactions,
+                data: Arc::from(&b"modern"[..]),
+            },
+        );
+
+        let fallback = take_direct_message_fallback(
+            &mut pending,
+            legacy_id,
+            &request_response::OutboundFailure::UnsupportedProtocols,
+        )
+        .expect("an unsupported legacy peer must use the compatibility path");
+
+        assert_eq!(fallback.topic, TopicKind::Blocks);
+        assert_eq!(fallback.data.as_ref(), b"legacy");
+        assert!(pending.messages.contains_key(&modern_id));
+        assert_eq!(pending.bytes, b"modern".len());
+
+        assert!(take_direct_message_fallback(
+            &mut pending,
+            modern_id,
+            &request_response::OutboundFailure::Timeout,
+        )
+        .is_none());
+        assert!(pending.messages.is_empty());
+        assert_eq!(pending.bytes, 0);
+    }
+
+    #[test]
+    fn pending_direct_messages_enforce_count_and_byte_limits() {
+        let mut behaviour = request_response::Behaviour::with_codec(
+            DirectMessageCodec {
+                max_message_size: crate::message::MAX_MESSAGE_SIZE,
+            },
+            [(DIRECT_MESSAGE_PROTOCOL, ProtocolSupport::Full)],
+            request_response::Config::default(),
+        );
+        let peer = Libp2pPeerId::random();
+        let first_id = behaviour.send_request(&peer, Arc::from(&b"1234"[..]));
+        let second_id = behaviour.send_request(&peer, Arc::from(&b"5678"[..]));
+        let mut pending = PendingDirectMessages::new(2, 7);
+
+        assert!(pending.can_accept(4));
+        pending.insert(
+            first_id,
+            PendingDirectMessage {
+                topic: TopicKind::Blocks,
+                data: Arc::from(&b"1234"[..]),
+            },
+        );
+        assert!(!pending.can_accept(4), "byte limit must reject the request");
+        assert!(pending.can_accept(3));
+        pending.insert(
+            second_id,
+            PendingDirectMessage {
+                topic: TopicKind::Blocks,
+                data: Arc::from(&b"567"[..]),
+            },
+        );
+        assert!(
+            !pending.can_accept(0),
+            "count limit must reject the request"
+        );
+
+        pending.remove(&first_id).unwrap();
+        assert_eq!(pending.bytes, 3);
+        assert!(pending.can_accept(4));
+    }
 
     #[test]
     fn config_defaults_enable_kademlia() {

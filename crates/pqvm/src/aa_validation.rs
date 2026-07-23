@@ -8,7 +8,7 @@ use revm::handler::{ExecuteEvm, MainnetContext};
 use revm::primitives::hardfork::SpecId;
 use revm::primitives::TxKind;
 use revm::state::{AccountInfo, Bytecode};
-use shell_core::{InnerCall, SessionAuth, SignedTransaction};
+use shell_core::{AaBundle, InnerCall, SessionAuth, SignedTransaction};
 use shell_crypto::{
     infer_signature_type_from_address, is_algorithm_allowed, PQSignature, SignatureType, Verifier,
     ALLOWED_ALGORITHMS,
@@ -234,6 +234,7 @@ pub fn validate_aa_tx<S: KvStore + 'static, V: Verifier>(
                     // Phase 2: contract paymaster via staticcall sandbox.
                     call_paymaster_validate(
                         signed_tx,
+                        bundle,
                         &paymaster,
                         context,
                         world_state,
@@ -656,9 +657,11 @@ fn validate_session_auth<S: KvStore + 'static, V: Verifier>(
 /// committed, so the borrowed world state remains unchanged even if the
 /// paymaster contract internally writes storage.
 ///
-/// `calldata` here is the outer transaction's `tx.data` (the AaBundle RLP).
+/// `callData` is the canonical RLP list of native AA inner calls. The outer
+/// transaction data is a separate envelope field and is not what execution dispatches.
 fn call_paymaster_validate<S: KvStore + 'static>(
     signed_tx: &SignedTransaction,
+    bundle: &AaBundle,
     paymaster: &Address,
     context: &[u8],
     world_state: &WorldState<S>,
@@ -668,12 +671,9 @@ fn call_paymaster_validate<S: KvStore + 'static>(
         .checked_mul(U256::from(signed_tx.tx.max_fee_per_gas))
         .unwrap_or(U256::MAX);
 
-    let calldata = encode_validate_paymaster_op_calldata(
-        &signed_tx.from,
-        signed_tx.tx.data.as_ref(),
-        max_gas_cost,
-        context,
-    );
+    let call_data = bundle.encode_inner_calls();
+    let calldata =
+        encode_validate_paymaster_op_calldata(&signed_tx.from, &call_data, max_gas_cost, context);
 
     let wrapper_address = paymaster_validation_wrapper_address(paymaster);
     let state_db = ValidationStateDb::with_inline_code(
@@ -993,9 +993,7 @@ impl<S: KvStore + 'static> Database for ValidationStateDb<'_, S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shell_core::{
-        AaBundle, Account, InnerCall, PubkeyMode, SessionAuth, Transaction, AA_BUNDLE_TX_TYPE,
-    };
+    use shell_core::{Account, InnerCall, PubkeyMode, SessionAuth, Transaction, AA_BUNDLE_TX_TYPE};
     use shell_crypto::{
         DilithiumSigner, DilithiumVerifier, MlDsaSigner, MultiVerifier, PQSignature, Signer,
     };
@@ -1182,6 +1180,45 @@ mod tests {
     }
 
     #[test]
+    fn contract_paymaster_call_data_tracks_inner_calls() {
+        let from = Address::from([0x21; 32]);
+        let paymaster = Address::from([0x22; 32]);
+        let mut tx = base_tx(1337, 0);
+        tx.tx_type = AA_BUNDLE_TX_TYPE;
+        tx.data = Bytes::from(vec![0xAA]);
+        tx.gas_limit = 100_000;
+        let make_signed = |inner_data| {
+            let inner_calls = vec![InnerCall {
+                to: Some(Address::from([0x23; 32])),
+                value: U256::ZERO,
+                data: Bytes::from(inner_data),
+                gas_limit: 50_000,
+            }];
+            SignedTransaction::with_aa_bundle(
+                from,
+                tx.clone(),
+                PQSignature::new(SignatureType::MlDsa65, vec![1]),
+                PubkeyMode::Reference,
+                AaBundle {
+                    inner_calls,
+                    paymaster: Some(paymaster),
+                    paymaster_context: Some(Bytes::from(vec![1])),
+                    ..AaBundle::default()
+                },
+            )
+            .unwrap()
+        };
+
+        let first = make_signed(vec![0x01]);
+        let second = make_signed(vec![0x02]);
+        let first_call_data = first.aa_bundle().unwrap().encode_inner_calls();
+        let second_call_data = second.aa_bundle().unwrap().encode_inner_calls();
+
+        assert_ne!(first_call_data, second_call_data);
+        assert_ne!(first_call_data, first.tx.data.as_ref());
+    }
+
+    #[test]
     fn paymaster_abi_bool_requires_canonical_word() {
         let mut accepted = [0u8; 32];
         accepted[31] = 1;
@@ -1222,6 +1259,20 @@ mod tests {
         .unwrap();
     }
 
+    fn test_contract_paymaster_bundle(paymaster: Address) -> AaBundle {
+        AaBundle {
+            inner_calls: vec![InnerCall {
+                to: Some(Address::from([0x78; 20])),
+                value: U256::ZERO,
+                data: Bytes::new(),
+                gas_limit: 21_000,
+            }],
+            paymaster: Some(paymaster),
+            paymaster_context: Some(Bytes::from(vec![1])),
+            ..AaBundle::default()
+        }
+    }
+
     #[test]
     fn paymaster_validation_accepts_read_only_contract() {
         let signer = DilithiumSigner::generate();
@@ -1229,8 +1280,9 @@ mod tests {
         let paymaster = Address::from([0x77; 20]);
         install_paymaster(&mut ws, &cs, paymaster, validator_returns_true());
         let signed = sign_tx(&signer, base_tx(1337, nonce_from_signer(&signer)), true);
+        let bundle = test_contract_paymaster_bundle(paymaster);
 
-        assert!(call_paymaster_validate(&signed, &paymaster, &[1], &ws, &cs).is_ok());
+        assert!(call_paymaster_validate(&signed, &bundle, &paymaster, &[1], &ws, &cs).is_ok());
     }
 
     #[test]
@@ -1251,8 +1303,9 @@ mod tests {
         ws.set_storage(&paymaster, &ShellHash::ZERO, &ShellHash::from(stored))
             .unwrap();
         let signed = sign_tx(&signer, base_tx(1337, nonce_from_signer(&signer)), true);
+        let bundle = test_contract_paymaster_bundle(paymaster);
 
-        assert!(call_paymaster_validate(&signed, &paymaster, &[1], &ws, &cs).is_ok());
+        assert!(call_paymaster_validate(&signed, &bundle, &paymaster, &[1], &ws, &cs).is_ok());
     }
 
     #[test]
@@ -1270,8 +1323,9 @@ mod tests {
         );
         ws.set_balance(&paymaster, U256::from(1u64)).unwrap();
         let signed = sign_tx(&signer, base_tx(1337, nonce_from_signer(&signer)), true);
+        let bundle = test_contract_paymaster_bundle(paymaster);
 
-        assert!(call_paymaster_validate(&signed, &paymaster, &[1], &ws, &cs).is_ok());
+        assert!(call_paymaster_validate(&signed, &bundle, &paymaster, &[1], &ws, &cs).is_ok());
     }
 
     #[test]
@@ -1286,8 +1340,10 @@ mod tests {
             validator_stores_then_returns_true(),
         );
         let signed = sign_tx(&signer, base_tx(1337, nonce_from_signer(&signer)), true);
+        let bundle = test_contract_paymaster_bundle(paymaster);
 
-        let error = call_paymaster_validate(&signed, &paymaster, &[1], &ws, &cs).unwrap_err();
+        let error =
+            call_paymaster_validate(&signed, &bundle, &paymaster, &[1], &ws, &cs).unwrap_err();
 
         assert!(
             matches!(error, AaValidationError::PaymasterValidationFailed(message) if message.starts_with("reverted:"))
