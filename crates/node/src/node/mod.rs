@@ -1521,6 +1521,29 @@ mod tests {
     use std::process::Command;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+    struct AuthorityLockCheckingVerifier {
+        authorities: Arc<RwLock<HashMap<Address, Vec<u8>>>>,
+    }
+
+    impl Verifier for AuthorityLockCheckingVerifier {
+        fn verify(
+            &self,
+            pubkey: &[u8],
+            message: &[u8],
+            signature: &shell_crypto::PQSignature,
+        ) -> Result<bool, shell_crypto::CryptoError> {
+            assert!(
+                self.authorities.try_write().is_some(),
+                "authority registry lock must be released before signature verification"
+            );
+            MultiVerifier.verify(pubkey, message, signature)
+        }
+
+        fn sig_type(&self) -> shell_crypto::SignatureType {
+            shell_crypto::SignatureType::Dilithium3
+        }
+    }
+
     fn run_isolated(test_name: &str, marker: &str) -> bool {
         if std::env::var_os(marker).is_some() {
             return false;
@@ -6972,6 +6995,26 @@ mod tests {
     }
 
     #[test]
+    fn handle_attestation_releases_authority_lock_before_verification() {
+        let (node, signer) = setup_node();
+        store_genesis(&node);
+        let authority = node.config.proposer_address.unwrap();
+        node.register_authority_pubkey(authority, signer.public_key().to_vec());
+
+        let block = node.produce_block(&signer, 100).unwrap();
+        let block_hash = block.hash();
+        node.chain_store.put_block(&block).unwrap();
+        let attestation = node
+            .create_attestation(block_hash, block.header.number, &signer)
+            .unwrap();
+        let verifier = AuthorityLockCheckingVerifier {
+            authorities: Arc::clone(&node.known_authorities),
+        };
+
+        node.handle_attestation(attestation, &verifier).unwrap();
+    }
+
+    #[test]
     fn handle_attestation_rejects_target_metadata_mismatch() {
         let (node, signer) = setup_node();
         store_genesis(&node);
@@ -7764,6 +7807,24 @@ mod tests {
             NodeError::Storage(StorageError::Database(message))
                 if message.contains("injected get failure")
         ));
+    }
+
+    #[test]
+    fn wpoa_view_change_releases_authority_lock_before_verification() {
+        let (node, signer) = setup_node();
+        store_genesis(&node);
+        let authority = node.config.proposer_address.unwrap();
+        node.register_authority_pubkey(authority, signer.public_key().to_vec());
+
+        let highest_qc_hash = *node.finality.read().last_finalized_hash();
+        let signing_message = ViewChangeMessage::signing_message(1337, 1, 0, &highest_qc_hash);
+        let signature = signer.sign(&signing_message).unwrap();
+        let msg = ViewChangeMessage::new(1337, 1, 0, highest_qc_hash, authority, signature.data);
+        let verifier = AuthorityLockCheckingVerifier {
+            authorities: Arc::clone(&node.known_authorities),
+        };
+
+        node.handle_wpoa_view_change(msg, &verifier).unwrap();
     }
 
     // ─── W.7: wPoA end-to-end test suite ──────────────────────────────────────
