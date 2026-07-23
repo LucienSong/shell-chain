@@ -195,6 +195,15 @@ impl<S: KvStore + 'static> Node<S> {
     /// 5. Attempts recursive proof verification via [`get_recursive_prover()`].
     ///    Until the recursive feature is enabled this returns a clear log that
     ///    verification was skipped rather than silently accepting.
+    pub(crate) fn validate_stark_amendment_authentication(
+        &self,
+        amendment: &ProofAmendment,
+    ) -> Result<(), NodeError> {
+        amendment.verify_prover_authentication().map_err(|e| {
+            NodeError::Startup(format!("STARK amendment prover authentication failed: {e}"))
+        })
+    }
+
     pub(crate) fn validate_stark_proof_source_binding(
         &self,
         amendment: &ProofAmendment,

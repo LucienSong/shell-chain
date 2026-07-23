@@ -24,13 +24,17 @@
 //! orphaned task. This does **not** hard-cancel CPU work already running inside
 //! `spawn_blocking`; those proof jobs may run to completion.
 
-use std::sync::Arc;
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, error, info, warn};
 
 use parking_lot::Mutex;
-use shell_primitives::{Bytes, ShellHash};
+use shell_crypto::Signer;
+use shell_primitives::ShellHash;
 use shell_stark_prover::{
     prove_sig_batch, L1StallDiagnosis, L2ProverTask, ProofAmendment, ProofBacklog, ProofTask,
     DEFAULT_MAX_L1_RANGE_SOURCES, MIN_L1_STARK_TXS, PROOF_AMENDMENT_VERSION,
@@ -38,6 +42,36 @@ use shell_stark_prover::{
 use shell_storage::{KvStore, ProofAmendmentStore};
 
 use crate::config::L2StarkMode;
+
+const GAP_CONFIRMATION_WINDOW: Duration = Duration::from_secs(120);
+
+#[derive(Debug, Clone, Copy)]
+struct GapObservation {
+    gap_block: u64,
+    count: u32,
+    first_seen: Instant,
+}
+
+fn observe_gap(
+    previous: Option<GapObservation>,
+    gap_block: u64,
+    now: Instant,
+) -> (GapObservation, bool) {
+    let observation = match previous {
+        Some(previous) if previous.gap_block == gap_block => GapObservation {
+            count: previous.count.saturating_add(1),
+            ..previous
+        },
+        _ => GapObservation {
+            gap_block,
+            count: 1,
+            first_seen: now,
+        },
+    };
+    let confirmed = observation.count >= 2
+        && now.saturating_duration_since(observation.first_seen) >= GAP_CONFIRMATION_WINDOW;
+    (observation, confirmed)
+}
 
 // ── ProverConfig ──────────────────────────────────────────────────────────────
 
@@ -124,6 +158,8 @@ pub struct ProverService<S: KvStore + Send + Sync + 'static> {
     config: ProverConfig,
     /// The node's own address, used as `prover` field in [`ProofAmendment`].
     prover_address: shell_primitives::Address,
+    /// The node key that authenticates generated proof amendments.
+    prover_signer: Option<Arc<dyn Signer>>,
     /// L2 STARK mode — controls whether recursive L2 proving is attempted.
     l2_mode: L2StarkMode,
     /// Shared drain frontier: updated after each drain_front so the seeder
@@ -145,9 +181,16 @@ impl<S: KvStore + Send + Sync + 'static> ProverService<S> {
             amendment_tx: None,
             config,
             prover_address,
+            prover_signer: None,
             l2_mode: L2StarkMode::Disabled,
             drain_frontier: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
+    }
+
+    /// Set the signer used to authenticate locally generated amendments.
+    pub fn with_signer(mut self, signer: Arc<dyn Signer>) -> Self {
+        self.prover_signer = Some(signer);
+        self
     }
 
     /// Set the L2 STARK mode for this service.
@@ -195,13 +238,13 @@ impl<S: KvStore + Send + Sync + 'static> ProverService<S> {
             self.config.max_concurrent_proofs
         );
         let idle_sleep = tokio::time::Duration::from_millis(self.config.idle_poll_ms);
-        let mut last_stall_log = std::time::Instant::now()
+        let mut last_stall_log = Instant::now()
             .checked_sub(std::time::Duration::from_secs(300))
-            .unwrap_or_else(std::time::Instant::now);
-        // Track consecutive stall observations at the same gap block before
-        // draining. We require the same gap_at_block to appear on 2+ consecutive
-        // 60-second stall checks (≥ 120 s) before treating it as permanent.
-        let mut consecutive_gap: Option<(u64, u32)> = None; // (gap_block, count)
+            .unwrap_or_else(Instant::now);
+        // Track repeated observations at the same gap before draining. The first
+        // observation happens immediately, so confirmation must use elapsed time
+        // rather than only counting 60-second checks.
+        let mut gap_observation: Option<GapObservation> = None;
 
         loop {
             // Check shutdown signal.
@@ -238,8 +281,11 @@ impl<S: KvStore + Send + Sync + 'static> ProverService<S> {
                     {
                         let mut backlog = self.backlog.lock();
                         let depth = backlog.len();
+                        if depth == 0 {
+                            gap_observation = None;
+                        }
                         if depth > 0 && last_stall_log.elapsed().as_secs() >= 60 {
-                            last_stall_log = std::time::Instant::now();
+                            last_stall_log = Instant::now();
                             let first_block = backlog.min_block_number_for_layer(1).unwrap_or(0);
                             let last_block = backlog.max_block_number_for_layer(1).unwrap_or(0);
                             let stall_info = backlog
@@ -259,20 +305,13 @@ impl<S: KvStore + Send + Sync + 'static> ProverService<S> {
                                         contiguous_take = take,
                                         "STARK prover stalled: gap in backlog prevents reaching min_entries threshold"
                                     );
-                                    // Guard against transient gaps: require the same
-                                    // gap_at_block to appear on 2 consecutive stall
-                                    // checks (≥ 120 s) before treating it as permanent.
-                                    let count = match consecutive_gap {
-                                        Some((prev_gap, n)) if prev_gap == gap => {
-                                            consecutive_gap = Some((gap, n + 1));
-                                            n + 1
-                                        }
-                                        _ => {
-                                            consecutive_gap = Some((gap, 1));
-                                            1
-                                        }
-                                    };
-                                    if count >= 2 {
+                                    // Guard against transient gaps: the same gap
+                                    // must remain visible for the full confirmation
+                                    // window before any tasks are discarded.
+                                    let (observation, confirmed) =
+                                        observe_gap(gap_observation, gap, Instant::now());
+                                    gap_observation = Some(observation);
+                                    if confirmed {
                                         // The gap block's witness is permanently missing (pruned).
                                         // The pre-gap range can never accumulate enough entries.
                                         // Drain those tasks so the prover can advance past the gap.
@@ -280,12 +319,12 @@ impl<S: KvStore + Send + Sync + 'static> ProverService<S> {
                                             draining = take,
                                             entries_lost = entries,
                                             gap_at_block = gap,
-                                            consecutive_checks = count,
+                                            consecutive_checks = observation.count,
                                             "STARK prover: draining {} stuck tasks before confirmed permanent gap at block {}",
                                             take, gap
                                         );
                                         backlog.drain_front(take);
-                                        consecutive_gap = None;
+                                        gap_observation = None;
                                         // Advance the drain frontier so the seeder
                                         // won't re-insert blocks below this gap on
                                         // the very next seeding pass.
@@ -301,7 +340,7 @@ impl<S: KvStore + Send + Sync + 'static> ProverService<S> {
                                     } else {
                                         info!(
                                             gap_at_block = gap,
-                                            consecutive_checks = count,
+                                            consecutive_checks = observation.count,
                                             "STARK prover: gap observed, waiting for confirmation before drain"
                                         );
                                     }
@@ -310,6 +349,7 @@ impl<S: KvStore + Send + Sync + 'static> ProverService<S> {
                                     entries,
                                     contiguous_take: take,
                                 }) => {
+                                    gap_observation = None;
                                     info!(
                                         depth,
                                         first_block,
@@ -321,6 +361,7 @@ impl<S: KvStore + Send + Sync + 'static> ProverService<S> {
                                     );
                                 }
                                 None => {
+                                    gap_observation = None;
                                     warn!(
                                         depth,
                                         first_block,
@@ -405,7 +446,7 @@ impl<S: KvStore + Send + Sync + 'static> ProverService<S> {
                         end_plus_one.checked_sub(source_hashes.len().max(1) as u64)
                     }),
                     proof,
-                    prover_signature: Bytes::new(),
+                    prover_signature: Default::default(),
                     prover: self.prover_address,
                     layer,
                     source_hashes: if source_hashes.is_empty() {
@@ -417,8 +458,25 @@ impl<S: KvStore + Send + Sync + 'static> ProverService<S> {
                     compressed_size: None,
                     settlement_tx_hash: None,
                 };
-                if amendment.compressed_size.is_none() {
-                    amendment.compressed_size = Some(amendment.size_bytes() as u64);
+                let Some(signer) = self.prover_signer.as_deref() else {
+                    error!(
+                        "ProverService: refusing to persist unauthenticated amendment for block #{block_number}"
+                    );
+                    return;
+                };
+                if let Err(e) = amendment.sign_prover_authentication(signer) {
+                    error!(
+                        "ProverService: failed to authenticate amendment for block #{block_number}: {e}"
+                    );
+                    return;
+                }
+                if amendment.prover != self.prover_address {
+                    error!(
+                        configured = %self.prover_address,
+                        signer = %amendment.prover,
+                        "ProverService: configured prover address does not match signer for block #{block_number}"
+                    );
+                    return;
                 }
 
                 // Serialize and persist the amendment artifacts.
@@ -493,6 +551,7 @@ impl<S: KvStore + Send + Sync + 'static> ProverService<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shell_crypto::DilithiumSigner;
     use shell_primitives::Address;
     use shell_stark_prover::{ProofBacklog, ProofTask};
     use shell_storage::{MemoryDb, ProofAmendmentStore};
@@ -502,8 +561,11 @@ mod tests {
         let db = Arc::new(MemoryDb::new());
         let amendment_store = ProofAmendmentStore::new(db);
         let config = ProverConfig::default();
-        let service =
-            ProverService::new(backlog.clone(), amendment_store, config, Address::default());
+        let signer = Arc::new(DilithiumSigner::generate());
+        let prover_address =
+            Address::from_public_key(signer.public_key(), signer.sig_type().as_u8());
+        let service = ProverService::new(backlog.clone(), amendment_store, config, prover_address)
+            .with_signer(signer);
         (service, backlog)
     }
 
@@ -524,6 +586,38 @@ mod tests {
         };
         assert_eq!(cfg.max_concurrent_proofs, 4);
         assert_eq!(cfg.proving_priority, ProvingPriority::LatestFirst);
+    }
+
+    #[test]
+    fn gap_confirmation_requires_full_elapsed_window() {
+        let start = Instant::now();
+        let (first, first_confirmed) = observe_gap(None, 42, start);
+        assert!(!first_confirmed);
+
+        let (second, second_confirmed) =
+            observe_gap(Some(first), 42, start + Duration::from_secs(60));
+        assert_eq!(second.count, 2);
+        assert!(!second_confirmed);
+
+        let (third, third_confirmed) =
+            observe_gap(Some(second), 42, start + GAP_CONFIRMATION_WINDOW);
+        assert_eq!(third.count, 3);
+        assert!(third_confirmed);
+    }
+
+    #[test]
+    fn gap_confirmation_resets_for_different_gap() {
+        let start = Instant::now();
+        let (first, _) = observe_gap(None, 42, start);
+        let (reset, confirmed) = observe_gap(
+            Some(first),
+            43,
+            start + GAP_CONFIRMATION_WINDOW + Duration::from_secs(1),
+        );
+
+        assert_eq!(reset.gap_block, 43);
+        assert_eq!(reset.count, 1);
+        assert!(!confirmed);
     }
 
     #[tokio::test]
@@ -623,10 +717,14 @@ mod tests {
             .get_amendment(&end_hash)
             .expect("amendment read")
             .expect("full amendment stored");
-        assert!(matches!(
-            shell_stark_prover::StoredProofArtifact::from_json(&full_bytes).expect("amendment"),
-            shell_stark_prover::StoredProofArtifact::Amendment(_)
-        ));
+        let shell_stark_prover::StoredProofArtifact::Amendment(amendment) =
+            shell_stark_prover::StoredProofArtifact::from_json(&full_bytes).expect("amendment")
+        else {
+            panic!("expected full amendment")
+        };
+        amendment
+            .verify_prover_authentication()
+            .expect("generated amendment is authenticated");
     }
 
     #[test]

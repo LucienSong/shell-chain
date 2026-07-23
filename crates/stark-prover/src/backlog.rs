@@ -5,7 +5,7 @@
 //! the prover can drain it, enabling the system to shed non-critical work or
 //! activate additional prover capacity.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use shell_primitives::ShellHash;
 
@@ -157,7 +157,7 @@ pub enum L1StallDiagnosis {
 ///
 /// Two O(1)/O(log n) indexes are maintained alongside the queue:
 /// - `source_index`: `(layer, source_hash)` → O(1) `contains_source` lookup.
-/// - `layer_blocks`: per-layer `BTreeSet<block_number>` → O(log n) `min_block_number_for_layer`.
+/// - `layer_blocks`: per-layer block counts → O(log n) `min_block_number_for_layer`.
 ///
 /// # Thread safety
 ///
@@ -166,10 +166,10 @@ pub enum L1StallDiagnosis {
 #[derive(Debug)]
 pub struct ProofBacklog {
     pending: VecDeque<ProofTask>,
-    /// (layer, source_hash) presence index — enables O(1) `contains_source`.
-    source_index: HashSet<(u32, ShellHash)>,
-    /// Per-layer sorted block numbers — enables O(log n) `min_block_number_for_layer`.
-    layer_blocks: BTreeMap<u32, BTreeSet<u64>>,
+    /// (layer, source_hash) reference counts — enables O(1) `contains_source`.
+    source_index: HashMap<(u32, ShellHash), usize>,
+    /// Per-layer sorted block-number counts — enables O(log n) frontier lookups.
+    layer_blocks: BTreeMap<u32, BTreeMap<u64, usize>>,
     /// Depth at which [`is_above_threshold`] returns `true`.
     ///
     /// [`is_above_threshold`]: ProofBacklog::is_above_threshold
@@ -192,7 +192,7 @@ impl ProofBacklog {
     pub fn with_threshold(watermark_threshold: usize) -> Self {
         Self {
             pending: VecDeque::new(),
-            source_index: HashSet::new(),
+            source_index: HashMap::new(),
             layer_blocks: BTreeMap::new(),
             watermark_threshold,
             total_enqueued: 0,
@@ -216,9 +216,9 @@ impl ProofBacklog {
 
     /// Returns true when a pending task already covers `source_hash` at `layer`.
     ///
-    /// O(1) — backed by an internal HashSet index.
+    /// O(1) — backed by an internal reference-counted hash index.
     pub fn contains_source(&self, layer: u32, source_hash: &ShellHash) -> bool {
-        self.source_index.contains(&(layer, *source_hash))
+        self.source_index.contains_key(&(layer, *source_hash))
     }
 
     /// Pop the next task from the front of the queue (FIFO).
@@ -470,16 +470,22 @@ impl ProofBacklog {
     /// Return the minimum block number among all pending tasks for the given layer,
     /// or `None` if no tasks for that layer are queued.
     ///
-    /// O(log n) — backed by a per-layer `BTreeSet<u64>` index.
+    /// O(log n) — backed by a per-layer sorted block-number index.
     pub fn min_block_number_for_layer(&self, layer: u32) -> Option<u64> {
-        self.layer_blocks.get(&layer)?.first().copied()
+        self.layer_blocks
+            .get(&layer)?
+            .first_key_value()
+            .map(|(number, _)| *number)
     }
 
     /// Returns the highest block number tracked for the given STARK layer, or
     /// `None` if the layer has no pending tasks. Used to detect when newly-seeded
     /// tasks extend the backlog tail (contiguous append) vs. jump the frontier.
     pub fn max_block_number_for_layer(&self, layer: u32) -> Option<u64> {
-        self.layer_blocks.get(&layer)?.last().copied()
+        self.layer_blocks
+            .get(&layer)?
+            .last_key_value()
+            .map(|(number, _)| *number)
     }
 
     /// Drain all pending tasks, returning them in FIFO order.
@@ -509,33 +515,61 @@ impl ProofBacklog {
 
     fn index_add(&mut self, task: &ProofTask) {
         if task.source_hashes.is_empty() {
-            self.source_index
-                .insert((task.layer, ShellHash::from(task.block_hash)));
+            *self
+                .source_index
+                .entry((task.layer, ShellHash::from(task.block_hash)))
+                .or_default() += 1;
         } else {
             for sh in &task.source_hashes {
-                self.source_index.insert((task.layer, *sh));
+                *self.source_index.entry((task.layer, *sh)).or_default() += 1;
             }
         }
-        self.layer_blocks
+        *self
+            .layer_blocks
             .entry(task.layer)
             .or_default()
-            .insert(task.block_number);
+            .entry(task.block_number)
+            .or_default() += 1;
     }
 
     fn index_remove(&mut self, task: &ProofTask) {
         if task.source_hashes.is_empty() {
-            self.source_index
-                .remove(&(task.layer, ShellHash::from(task.block_hash)));
+            Self::decrement_hash_count(
+                &mut self.source_index,
+                &(task.layer, ShellHash::from(task.block_hash)),
+            );
         } else {
             for sh in &task.source_hashes {
-                self.source_index.remove(&(task.layer, *sh));
+                Self::decrement_hash_count(&mut self.source_index, &(task.layer, *sh));
             }
         }
-        if let Some(set) = self.layer_blocks.get_mut(&task.layer) {
-            set.remove(&task.block_number);
-            if set.is_empty() {
+        if let Some(blocks) = self.layer_blocks.get_mut(&task.layer) {
+            Self::decrement_block_count(blocks, task.block_number);
+            if blocks.is_empty() {
                 self.layer_blocks.remove(&task.layer);
             }
+        }
+    }
+
+    fn decrement_hash_count<K: Eq + std::hash::Hash>(counts: &mut HashMap<K, usize>, key: &K) {
+        let should_remove = counts.get_mut(key).is_some_and(|count| {
+            debug_assert!(*count > 0);
+            *count -= 1;
+            *count == 0
+        });
+        if should_remove {
+            counts.remove(key);
+        }
+    }
+
+    fn decrement_block_count(counts: &mut BTreeMap<u64, usize>, block_number: u64) {
+        let should_remove = counts.get_mut(&block_number).is_some_and(|count| {
+            debug_assert!(*count > 0);
+            *count -= 1;
+            *count == 0
+        });
+        if should_remove {
+            counts.remove(&block_number);
         }
     }
 }
@@ -551,7 +585,7 @@ impl Default for ProofBacklog {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::{BTreeMap, BTreeSet, HashSet};
+    use std::collections::{BTreeMap, HashMap};
 
     fn make_task(n: u64) -> ProofTask {
         ProofTask::new([n as u8; 32], n, vec![])
@@ -572,21 +606,26 @@ mod tests {
     }
 
     fn assert_index_consistency(backlog: &ProofBacklog) {
-        let mut expected_sources = HashSet::new();
-        let mut expected_blocks: BTreeMap<u32, BTreeSet<u64>> = BTreeMap::new();
+        let mut expected_sources = HashMap::new();
+        let mut expected_blocks: BTreeMap<u32, BTreeMap<u64, usize>> = BTreeMap::new();
 
         for task in &backlog.pending {
             if task.source_hashes.is_empty() {
-                expected_sources.insert((task.layer, ShellHash::from(task.block_hash)));
+                *expected_sources
+                    .entry((task.layer, ShellHash::from(task.block_hash)))
+                    .or_default() += 1;
             } else {
                 for source_hash in &task.source_hashes {
-                    expected_sources.insert((task.layer, *source_hash));
+                    *expected_sources
+                        .entry((task.layer, *source_hash))
+                        .or_default() += 1;
                 }
             }
-            expected_blocks
+            *expected_blocks
                 .entry(task.layer)
                 .or_default()
-                .insert(task.block_number);
+                .entry(task.block_number)
+                .or_default() += 1;
         }
 
         assert_eq!(backlog.source_index, expected_sources);
@@ -1318,6 +1357,67 @@ mod tests {
         b.pop();
         assert!(!b.contains_source(1, &bh_hash));
     }
+
+    #[test]
+    fn source_index_retains_overlapping_pending_task() {
+        let shared_source = ShellHash::from(make_hash(7, 1));
+        let mut b = ProofBacklog::new();
+        b.push(ProofTask::with_sources(
+            make_hash(8, 10),
+            10,
+            vec![],
+            2,
+            vec![shared_source],
+            None,
+        ));
+        b.push(ProofTask::with_sources(
+            make_hash(8, 11),
+            11,
+            vec![],
+            2,
+            vec![shared_source],
+            None,
+        ));
+
+        b.pop();
+        assert!(b.contains_source(2, &shared_source));
+        assert_index_consistency(&b);
+
+        b.pop();
+        assert!(!b.contains_source(2, &shared_source));
+        assert_index_consistency(&b);
+    }
+
+    #[test]
+    fn block_index_retains_duplicate_pending_height() {
+        let mut b = ProofBacklog::new();
+        b.push(ProofTask::with_sources(
+            make_hash(9, 7),
+            7,
+            vec![],
+            2,
+            vec![ShellHash::from(make_hash(10, 1))],
+            None,
+        ));
+        b.push(ProofTask::with_sources(
+            make_hash(9, 8),
+            7,
+            vec![],
+            2,
+            vec![ShellHash::from(make_hash(10, 2))],
+            None,
+        ));
+
+        b.pop();
+        assert_eq!(b.min_block_number_for_layer(2), Some(7));
+        assert_eq!(b.max_block_number_for_layer(2), Some(7));
+        assert_index_consistency(&b);
+
+        b.pop();
+        assert_eq!(b.min_block_number_for_layer(2), None);
+        assert_index_consistency(&b);
+    }
+
     #[test]
     fn indexes_remain_consistent_after_mixed_operations() {
         let mut b = ProofBacklog::new();

@@ -14,6 +14,13 @@ fn block_response_matches_request(
     sync_requested && expected_nonce == Some(nonce)
 }
 
+fn matching_empty_block_response_exhausts_request(
+    response_matches_sync: bool,
+    response_is_empty: bool,
+) -> bool {
+    response_matches_sync && response_is_empty
+}
+
 fn body_response_import_allowed(block_count: usize) -> bool {
     block_count > 0 && block_count <= crate::historical_sync::BODY_BACKFILL_BATCH_SIZE as usize
 }
@@ -348,6 +355,7 @@ impl<S: KvStore + 'static> Node<S> {
         // Track whether we are catching up so we don't spam requests.
         let mut sync_requested = false;
         let mut sync_request_nonce: Option<u64> = None;
+        let mut sync_request_start: Option<u64> = None;
         let mut body_request_nonce: Option<u64> = None;
         let startup_peers = network.peer_count().await;
         let allow_isolated_production = self.config.network_type == shell_genesis::NetworkType::Dev
@@ -366,6 +374,7 @@ impl<S: KvStore + 'static> Node<S> {
                     None,
                     &mut sync_requested,
                     &mut sync_request_nonce,
+                    &mut sync_request_start,
                     "initial-sync",
                 )
                 .await;
@@ -403,6 +412,7 @@ impl<S: KvStore + 'static> Node<S> {
                 prover_config,
                 prover_address,
             )
+            .with_signer(Arc::clone(&signer))
             .with_amendment_sender(prover_amendment_tx)
             .with_drain_frontier(Arc::clone(&self.stark_drain_frontier))
             .with_l2_mode(self.config.l2_stark_mode);
@@ -461,6 +471,13 @@ impl<S: KvStore + 'static> Node<S> {
         }
 
         loop {
+            self.metrics.syncing.set(i64::from(
+                sync_requested && !production_readiness.can_produce(),
+            ));
+            self.metrics
+                .production_ready
+                .set(i64::from(production_readiness.can_produce()));
+
             tokio::select! {
                 Some(amendment) = prover_amendment_rx.recv() => {
                     if amendment.layer > 1 {
@@ -898,6 +915,7 @@ impl<S: KvStore + 'static> Node<S> {
                                             {
                                                 sync_requested = false;
                                                 sync_request_nonce = None;
+                                                sync_request_start = None;
                                             }
                                             sync_retry_attempts_without_progress = 0;
                                             sync_retry_timer.reset_after(Duration::from_secs(
@@ -1003,6 +1021,7 @@ impl<S: KvStore + 'static> Node<S> {
                                                     Some(&peer),
                                                     &mut sync_requested,
                                                     &mut sync_request_nonce,
+                                                    &mut sync_request_start,
                                                     "gap-detected",
                                                 )
                                                 .await
@@ -1139,6 +1158,7 @@ impl<S: KvStore + 'static> Node<S> {
                                         "received BlockResponse, importing blocks"
                                     );
                                     let response_matches_sync = sync_request_nonce == Some(nonce);
+                                    let response_is_empty = blocks.is_empty();
                                     let verifier = MultiVerifier;
                                     let mut last_ok: Option<u64> = None;
                                     let certs: HashMap<ShellHash, Vec<u8>> =
@@ -1214,6 +1234,7 @@ impl<S: KvStore + 'static> Node<S> {
                                         if peers == 0 {
                                             sync_requested = false;
                                             sync_request_nonce = None;
+                                            sync_request_start = None;
                                             production_readiness.refresh(
                                                 peers,
                                                 sync_requested,
@@ -1231,6 +1252,7 @@ impl<S: KvStore + 'static> Node<S> {
                                         else {
                                             sync_requested = false;
                                             sync_request_nonce = None;
+                                            sync_request_start = None;
                                             production_readiness.refresh(
                                                 peers,
                                                 sync_requested,
@@ -1255,6 +1277,7 @@ impl<S: KvStore + 'static> Node<S> {
                                         let _ = network.send_to_peer(&peer, req).await;
                                         sync_requested = true;
                                         sync_request_nonce = Some(nonce);
+                                        sync_request_start = Some(next_start);
                                         if response_matches_sync {
                                             production_readiness.note_sync_requested(
                                                 self.head_number(),
@@ -1280,24 +1303,15 @@ impl<S: KvStore + 'static> Node<S> {
                                         // response to our current sync request proves this request
                                         // is exhausted; unrelated broadcast responses must not
                                         // clear the gate.
-                                        if response_matches_sync {
+                                        if matching_empty_block_response_exhausts_request(
+                                            response_matches_sync,
+                                            response_is_empty,
+                                        ) {
                                             sync_request_nonce = None;
-                                            if production_readiness.state()
-                                                == ProductionReadinessState::CatchingUp
-                                            {
-                                                sync_requested = true;
-                                                production_readiness.refresh(
-                                                    network.peer_count().await,
-                                                    sync_requested,
-                                                    self.head_number(),
-                                                    std::time::Instant::now(),
-                                                );
-                                                sync_retry_attempts_without_progress = 0;
-                                            } else {
-                                                sync_requested = false;
-                                                production_readiness.note_sync_idle();
-                                                sync_retry_attempts_without_progress = 0;
-                                            }
+                                            sync_request_start = None;
+                                            sync_requested = false;
+                                            production_readiness.note_sync_idle();
+                                            sync_retry_attempts_without_progress = 0;
                                         }
                                         sync_retry_timer.reset_after(Duration::from_secs(
                                             SYNC_RETRY_BASE_INTERVAL_SECS,
@@ -1346,6 +1360,14 @@ impl<S: KvStore + 'static> Node<S> {
                                             payload_block = amendment.block_number,
                                             payload_hash = %amendment.block_hash,
                                             "proof amendment envelope does not match signed payload"
+                                        );
+                                        continue;
+                                    }
+                                    if let Err(e) = self.validate_stark_amendment_authentication(&amendment) {
+                                        warn!(
+                                            block = block_number,
+                                            layer = amendment.layer,
+                                            "STARK proof rejected by prover authentication: {e}"
                                         );
                                         continue;
                                     }
@@ -1771,6 +1793,7 @@ impl<S: KvStore + 'static> Node<S> {
                                     Some(&peer),
                                     &mut sync_requested,
                                     &mut sync_request_nonce,
+                                    &mut sync_request_start,
                                     "peer-connected",
                                 )
                                 .await
@@ -1802,6 +1825,7 @@ impl<S: KvStore + 'static> Node<S> {
                             if network.peer_count().await == 0 {
                                 sync_requested = false;
                                 sync_request_nonce = None;
+                                sync_request_start = None;
                                 sync_retry_attempts_without_progress = 0;
                                 production_readiness.refresh(
                                     0,
@@ -1826,6 +1850,7 @@ impl<S: KvStore + 'static> Node<S> {
                                     None,
                                     &mut sync_requested,
                                     &mut sync_request_nonce,
+                                    &mut sync_request_start,
                                     "routing-update",
                                 )
                                 .await
@@ -1930,6 +1955,7 @@ impl<S: KvStore + 'static> Node<S> {
                             );
                             sync_requested = false;
                             sync_request_nonce = None;
+                            sync_request_start = None;
                             sync_retry_attempts_without_progress = 0;
                             production_readiness.refresh(
                                 peers,
@@ -1947,6 +1973,7 @@ impl<S: KvStore + 'static> Node<S> {
                             None,
                             &mut sync_requested,
                             &mut sync_request_nonce,
+                            &mut sync_request_start,
                             "sync-retry",
                         )
                         .await;
@@ -1976,22 +2003,15 @@ impl<S: KvStore + 'static> Node<S> {
                         // otherwise stay stale until a reconnect/routing event. Periodically
                         // ask peers for head+1 as a cheap head probe; an empty response clears
                         // the sync request without moving readiness out of Ready.
-                        if self.request_missing_blocks(
+                        let _ = self.request_missing_blocks(
                             &network,
                             None,
                             &mut sync_requested,
                             &mut sync_request_nonce,
+                            &mut sync_request_start,
                             "periodic-head-probe",
                         )
-                        .await
-                        {
-                            production_readiness.note_head_probe(
-                                self.head_number(),
-                                std::time::Instant::now(),
-                                startup_sync_grace,
-                                "periodic-head-probe",
-                            );
-                        }
+                        .await;
                         sync_retry_attempts_without_progress = 0;
                         sync_retry_timer.reset_after(Duration::from_secs(
                             SYNC_RETRY_BASE_INTERVAL_SECS,
@@ -2714,5 +2734,12 @@ mod cadence_tests {
         assert!(!block_response_matches_request(false, Some(7), 7));
         assert!(!block_response_matches_request(true, None, 7));
         assert!(!block_response_matches_request(true, Some(8), 7));
+    }
+
+    #[test]
+    fn matching_empty_block_response_exhausts_sync_request() {
+        assert!(matching_empty_block_response_exhausts_request(true, true));
+        assert!(!matching_empty_block_response_exhausts_request(false, true));
+        assert!(!matching_empty_block_response_exhausts_request(true, false));
     }
 }

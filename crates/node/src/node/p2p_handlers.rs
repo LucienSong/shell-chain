@@ -74,14 +74,18 @@ impl<S: KvStore + 'static> Node<S> {
         }
 
         // Verify the attesting validator is a known authority.
-        let known = self.known_authorities.read();
-        let pubkey = known.get(&validator).ok_or_else(|| {
-            NodeError::Startup(format!("unknown attestation validator: {:?}", validator))
-        })?;
+        let pubkey = self
+            .known_authorities
+            .read()
+            .get(&validator)
+            .cloned()
+            .ok_or_else(|| {
+                NodeError::Startup(format!("unknown attestation validator: {:?}", validator))
+            })?;
 
         // Verify the attestation signature using the payload that was signed.
         let msg = attestation.own_signing_message();
-        let sig_type = shell_crypto::infer_signature_type_from_address(pubkey, &validator)
+        let sig_type = shell_crypto::infer_signature_type_from_address(&pubkey, &validator)
             .ok_or_else(|| {
                 NodeError::Startup(format!(
                     "unknown attestation signature algorithm for validator {validator:?}"
@@ -94,7 +98,7 @@ impl<S: KvStore + 'static> Node<S> {
         }
         let sig = shell_crypto::PQSignature::new(sig_type, attestation.signature.clone());
         let valid = verifier
-            .verify(pubkey, &msg, &sig)
+            .verify(&pubkey, &msg, &sig)
             .map_err(|e| NodeError::Startup(format!("invalid attestation signature: {e}")))?;
         if !valid {
             return Err(NodeError::Startup(
@@ -680,16 +684,20 @@ impl<S: KvStore + 'static> Node<S> {
             )));
         }
 
-        let known = self.known_authorities.read();
-        let pubkey = known.get(&msg.validator).ok_or_else(|| {
-            NodeError::Startup(format!(
-                "unknown view-change validator: {:?}",
-                msg.validator
-            ))
-        })?;
+        let pubkey = self
+            .known_authorities
+            .read()
+            .get(&msg.validator)
+            .cloned()
+            .ok_or_else(|| {
+                NodeError::Startup(format!(
+                    "unknown view-change validator: {:?}",
+                    msg.validator
+                ))
+            })?;
 
         let signing_message = msg.own_signing_message();
-        let sig_type = shell_crypto::infer_signature_type_from_address(pubkey, &msg.validator)
+        let sig_type = shell_crypto::infer_signature_type_from_address(&pubkey, &msg.validator)
             .ok_or_else(|| {
                 NodeError::Startup(format!(
                     "unknown view-change signature algorithm for validator {}",
@@ -703,7 +711,7 @@ impl<S: KvStore + 'static> Node<S> {
         }
         let sig = shell_crypto::PQSignature::new(sig_type, msg.signature.clone());
         let valid = verifier
-            .verify(pubkey, &signing_message, &sig)
+            .verify(&pubkey, &signing_message, &sig)
             .map_err(|e| NodeError::Startup(format!("invalid view-change signature: {e}")))?;
         if !valid {
             return Err(NodeError::Startup(

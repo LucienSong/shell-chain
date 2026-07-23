@@ -6,6 +6,15 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Keep pending-balance reservation checks linear when pool-capacity eviction
+  removes a sender's nonce descendants.
+- Reject side-fork blocks with empty, invalid, unresolved, or sender-mismatched
+  transaction signatures before storage or fork-choice admission.
+- Anchor Unix backup restore traversal to no-follow directory handles and
+  nonblocking, no-follow file handles so source replacement cannot redirect or
+  stall reads.
+- Open sensitive CLI input files with no-follow semantics on Unix, closing the
+  final-component symlink race before validating the opened file identity.
 - Remap local build paths out of precompiled release binaries, omit
   nondeterministic macOS linker UUIDs, and refresh embedded revision metadata
   after branch advances.

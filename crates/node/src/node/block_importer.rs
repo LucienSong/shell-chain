@@ -141,6 +141,138 @@ impl<S: KvStore + 'static> Node<S> {
         Ok(())
     }
 
+    fn verify_import_logs_bloom(
+        &self,
+        block: &Block,
+        receipts: &[TransactionReceipt],
+    ) -> Result<(), NodeError> {
+        let mut expected = [0u8; shell_pqvm::bloom::BLOOM_SIZE];
+        for receipt in receipts {
+            for (combined, byte) in expected.iter_mut().zip(receipt.logs_bloom.as_ref().iter()) {
+                *combined |= *byte;
+            }
+        }
+
+        let actual = block.header.logs_bloom.as_ref();
+        let legacy_empty = actual.is_empty() && expected.iter().all(|byte| *byte == 0);
+        if !legacy_empty && actual != expected {
+            return Err(NodeError::Startup(format!(
+                "block {} logs_bloom mismatch",
+                block.number()
+            )));
+        }
+        Ok(())
+    }
+
+    fn verify_side_fork_transaction_signatures(&self, block: &Block) -> Result<(), NodeError> {
+        let mut block_pubkeys: HashMap<Address, Vec<u8>> = HashMap::new();
+        let mut signing_pubkeys = Vec::with_capacity(block.transactions.len());
+
+        for tx in &block.transactions {
+            if tx.signature.data.is_empty() {
+                return Err(NodeError::Startup(format!(
+                    "block {} tx {} has empty signature",
+                    block.number(),
+                    tx.hash()
+                )));
+            }
+
+            let pubkey = match &tx.pubkey_mode {
+                shell_core::PubkeyMode::Embedded(pubkey) => {
+                    block_pubkeys
+                        .entry(tx.from)
+                        .or_insert_with(|| pubkey.clone());
+                    pubkey.clone()
+                }
+                shell_core::PubkeyMode::Reference => {
+                    if let Some(pubkey) = block_pubkeys.get(&tx.from) {
+                        pubkey.clone()
+                    } else {
+                        self.chain_store.get_pubkey(&tx.from)?.ok_or_else(|| {
+                            NodeError::Startup(format!(
+                                "block {} tx {} uses Reference pubkey mode but sender {} has no registered or earlier embedded pubkey",
+                                block.number(),
+                                tx.hash(),
+                                tx.from
+                            ))
+                        })?
+                    }
+                }
+            };
+            let signing_pubkey = if let Some(session_auth) = tx
+                .aa_bundle()
+                .and_then(|bundle| bundle.session_auth.as_ref())
+            {
+                if infer_signature_type_from_address(&pubkey, &tx.from).is_none() {
+                    return Err(NodeError::Startup(format!(
+                        "block {} tx {} sender {} does not match resolved root pubkey",
+                        block.number(),
+                        tx.hash(),
+                        tx.from,
+                    )));
+                }
+                if tx.signature.sig_type.as_u8() != session_auth.session_algo
+                    || tx.signature.data.as_slice() != session_auth.session_signature.as_ref()
+                {
+                    return Err(NodeError::Startup(format!(
+                        "block {} tx {} session signature does not match outer signature",
+                        block.number(),
+                        tx.hash(),
+                    )));
+                }
+                let auth_hash = session_auth.auth_hash(tx.tx.chain_id);
+                let root_valid = ALLOWED_ALGORITHMS.iter().copied().any(|algorithm| {
+                    let signature =
+                        PQSignature::new(algorithm, session_auth.root_signature.as_ref().to_vec());
+                    MultiVerifier
+                        .verify(&pubkey, auth_hash.as_bytes(), &signature)
+                        .unwrap_or(false)
+                });
+                if !root_valid {
+                    return Err(NodeError::Startup(format!(
+                        "block {} tx {} session root signature is invalid",
+                        block.number(),
+                        tx.hash(),
+                    )));
+                }
+                session_auth.session_pubkey.as_ref().to_vec()
+            } else {
+                let derived = Address::from_public_key(&pubkey, tx.signature.sig_type.as_u8());
+                if derived != tx.from {
+                    return Err(NodeError::Startup(format!(
+                        "block {} tx {} sender {} does not match resolved pubkey address {}",
+                        block.number(),
+                        tx.hash(),
+                        tx.from,
+                        derived
+                    )));
+                }
+                pubkey.clone()
+            };
+            signing_pubkeys.push(signing_pubkey);
+        }
+
+        let tx_hashes: Vec<ShellHash> = block.transactions.iter().map(|tx| tx.hash()).collect();
+        let verify_items: Vec<VerifyItem> = block
+            .transactions
+            .iter()
+            .enumerate()
+            .map(|(index, tx)| VerifyItem {
+                pubkey: &signing_pubkeys[index],
+                message: tx_hashes[index].as_bytes(),
+                signature: &tx.signature,
+            })
+            .collect();
+        MultiVerifier
+            .verify_batch_all(&verify_items)
+            .map_err(|error| {
+                NodeError::Startup(format!(
+                    "block {} batch sig verification failed: {error}",
+                    block.number(),
+                ))
+            })
+    }
+
     fn verify_import_economics(&self, block: &Block, parent: &Block) -> Result<(), NodeError> {
         let expected_base_fee = calculate_base_fee(
             parent.header.gas_used,
@@ -238,6 +370,7 @@ impl<S: KvStore + 'static> Node<S> {
             self.verify_import_consensus(&block, &parent)?;
             self.verify_import_economics(&block, &parent)?;
             self.verify_incoming_witness_root(&block)?;
+            self.verify_side_fork_transaction_signatures(&block)?;
             if let Ok(Some(existing)) = block_store.block_by_number(incoming) {
                 self.queue_signed_equivocation_if_valid(&existing, &block);
             }
@@ -274,6 +407,7 @@ impl<S: KvStore + 'static> Node<S> {
             self.verify_import_consensus(&block, &parent)?;
             self.verify_import_economics(&block, &parent)?;
             self.verify_incoming_witness_root(&block)?;
+            self.verify_side_fork_transaction_signatures(&block)?;
             let remote_hash = incoming_hash;
             block_store.put_side_fork_block(&block)?;
             consensus.register_fork_choice_block(remote_hash, block.header.parent_hash, incoming);
@@ -412,6 +546,7 @@ impl<S: KvStore + 'static> Node<S> {
             .collect::<Result<Vec<_>, NodeError>>()?;
         self.validate_stark_settlement_sequence(&stark_settlements)?;
         for amendment in &stark_settlements {
+            self.validate_stark_amendment_authentication(amendment)?;
             self.validate_stark_proof_source_binding(amendment)?;
         }
 
@@ -695,16 +830,12 @@ impl<S: KvStore + 'static> Node<S> {
             // Must run BEFORE state_root so activations are committed to the Merkle root.
             {
                 let mut registry = AlgorithmRegistry::global_mut();
-                if let Err(e) = process_pending_activations(
+                apply_pending_activations(
                     block.number(),
                     evm.state_db_mut().world_state_mut(),
                     &mut registry,
-                ) {
-                    warn!(
-                        block = block.number(),
-                        "process_pending_activations failed during import: {e}"
-                    );
-                }
+                    "import",
+                )?;
             }
             evm.state_db_mut().world_state_mut().state_root()?
         } else {
@@ -727,17 +858,17 @@ impl<S: KvStore + 'static> Node<S> {
                 .map_err(|e| NodeError::Startup(format!("world_state at root: {e}")))?;
             {
                 let mut registry = AlgorithmRegistry::global_mut();
-                if let Err(e) = process_pending_activations(block.number(), &mut ws, &mut registry)
-                {
-                    warn!(
-                        block = block.number(),
-                        "process_pending_activations failed during empty-block import: {e}"
-                    );
-                }
+                apply_pending_activations(
+                    block.number(),
+                    &mut ws,
+                    &mut registry,
+                    "empty-block import",
+                )?;
             }
             ws.state_root()
                 .map_err(|e| NodeError::Startup(format!("state_root for empty block: {e}")))?
         };
+        self.verify_import_logs_bloom(&block, &receipts)?;
         if imported_state_root != block.header.state_root {
             return Err(NodeError::Startup(format!(
                 "block {} state root mismatch: expected {:?}, got {:?}",

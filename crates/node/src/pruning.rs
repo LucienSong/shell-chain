@@ -299,7 +299,7 @@ pub struct StateTriePruneResult {
 const STATE_TRIE_PRUNED_BELOW_KEY: &[u8] = b"STATE_TRIE_PRUNED_BELOW";
 const MAX_STATE_TRIE_PRUNE_BLOCKS_PER_PASS: u64 = 1_024;
 
-fn state_trie_pruned_below<S: KvStore>(store: &S) -> Result<u64, StorageError> {
+pub(crate) fn state_trie_pruned_below<S: KvStore>(store: &S) -> Result<u64, StorageError> {
     match store.get(STATE_TRIE_PRUNED_BELOW_KEY)? {
         Some(bytes) if bytes.len() == 8 => {
             let encoded: [u8; 8] = bytes.try_into().map_err(|_| {
@@ -312,6 +312,33 @@ fn state_trie_pruned_below<S: KvStore>(store: &S) -> Result<u64, StorageError> {
         )),
         None => Ok(0),
     }
+}
+
+fn canonical_state_root<S: KvStore>(
+    chain_store: &ChainStore<S>,
+    block_number: u64,
+) -> Result<ShellHash, StorageError> {
+    let block_hash = chain_store
+        .get_block_hash_by_number(block_number)?
+        .ok_or_else(|| {
+            StorageError::InvalidInput(format!(
+                "state-trie pruner: canonical hash missing for block {block_number}"
+            ))
+        })?;
+    let header = chain_store
+        .get_header_by_hash(&block_hash)?
+        .ok_or_else(|| {
+            StorageError::InvalidInput(format!(
+                "state-trie pruner: canonical header missing for block {block_number}"
+            ))
+        })?;
+    if header.number != block_number {
+        return Err(StorageError::InvalidInput(format!(
+            "state-trie pruner: canonical block {block_number} header reports block {}",
+            header.number
+        )));
+    }
+    Ok(header.state_root)
 }
 
 /// Delete hashed trie nodes for canonical state snapshots older than
@@ -338,13 +365,7 @@ pub fn prune_state_trie<S: KvStore + 'static>(
     // per call which would become O(N²) over the chain's lifetime.
     let window_start = keep_below_block.min(head.number());
     for block_number in window_start..=head.number() {
-        let Some(block_hash) = chain_store.get_block_hash_by_number(block_number)? else {
-            continue;
-        };
-        let Some(header) = chain_store.get_header_by_hash(&block_hash)? else {
-            continue;
-        };
-        retained_roots.insert(header.state_root);
+        retained_roots.insert(canonical_state_root(&chain_store, block_number)?);
     }
 
     let pruned_below = state_trie_pruned_below(store.as_ref())?.min(keep_below_block);
@@ -355,13 +376,7 @@ pub fn prune_state_trie<S: KvStore + 'static>(
     // Collect only the next bounded range. The durable cursor makes steady-state
     // passes O(newly-finalized blocks) and bounds first-run catch-up work.
     for block_number in pruned_below..pass_end {
-        let Some(block_hash) = chain_store.get_block_hash_by_number(block_number)? else {
-            continue;
-        };
-        let Some(header) = chain_store.get_header_by_hash(&block_hash)? else {
-            continue;
-        };
-        old_roots.push(header.state_root);
+        old_roots.push(canonical_state_root(&chain_store, block_number)?);
     }
 
     let mut protected_nodes = HashSet::new();
@@ -659,6 +674,73 @@ mod tests {
         let result = prune_state_trie(Arc::clone(&store), 2, StorageProfile::Light);
 
         assert!(matches!(result, Err(StorageError::Codec(_))));
+        assert_eq!(
+            root_balance(&store, roots[0], addresses[0]).unwrap(),
+            U256::from(1u64)
+        );
+    }
+
+    #[test]
+    fn state_trie_pruning_rejects_missing_old_canonical_mapping() {
+        let (store, roots, addresses) = populate_state_chain();
+        let chain_store = ChainStore::new(Arc::clone(&store));
+        chain_store.delete_canonical(0).unwrap();
+
+        let result = prune_state_trie(Arc::clone(&store), 2, StorageProfile::Light);
+
+        assert!(matches!(result, Err(StorageError::InvalidInput(_))));
+        assert_eq!(store.get(STATE_TRIE_PRUNED_BELOW_KEY).unwrap(), None);
+        assert_eq!(
+            root_balance(&store, roots[0], addresses[0]).unwrap(),
+            U256::from(1u64)
+        );
+    }
+
+    #[test]
+    fn state_trie_pruning_rejects_missing_retained_canonical_mapping() {
+        let (store, roots, addresses) = populate_state_chain();
+        let chain_store = ChainStore::new(Arc::clone(&store));
+        chain_store.delete_canonical(2).unwrap();
+
+        let result = prune_state_trie(Arc::clone(&store), 2, StorageProfile::Light);
+
+        assert!(matches!(result, Err(StorageError::InvalidInput(_))));
+        assert_eq!(store.get(STATE_TRIE_PRUNED_BELOW_KEY).unwrap(), None);
+        assert_eq!(
+            root_balance(&store, roots[0], addresses[0]).unwrap(),
+            U256::from(1u64)
+        );
+    }
+
+    #[test]
+    fn state_trie_pruning_rejects_missing_retained_canonical_header() {
+        let (store, roots, addresses) = populate_state_chain();
+        let chain_store = ChainStore::new(Arc::clone(&store));
+        let block_hash = chain_store.get_block_hash_by_number(2).unwrap().unwrap();
+        let header_key = [b"h/".as_slice(), block_hash.as_bytes()].concat();
+        store.delete(&header_key).unwrap();
+
+        let result = prune_state_trie(Arc::clone(&store), 2, StorageProfile::Light);
+
+        assert!(matches!(result, Err(StorageError::InvalidInput(_))));
+        assert_eq!(store.get(STATE_TRIE_PRUNED_BELOW_KEY).unwrap(), None);
+        assert_eq!(
+            root_balance(&store, roots[0], addresses[0]).unwrap(),
+            U256::from(1u64)
+        );
+    }
+
+    #[test]
+    fn state_trie_pruning_rejects_mismatched_canonical_header_height() {
+        let (store, roots, addresses) = populate_state_chain();
+        let chain_store = ChainStore::new(Arc::clone(&store));
+        let block_one_hash = chain_store.get_block_hash_by_number(1).unwrap().unwrap();
+        chain_store.set_canonical(0, &block_one_hash).unwrap();
+
+        let result = prune_state_trie(Arc::clone(&store), 2, StorageProfile::Light);
+
+        assert!(matches!(result, Err(StorageError::InvalidInput(_))));
+        assert_eq!(store.get(STATE_TRIE_PRUNED_BELOW_KEY).unwrap(), None);
         assert_eq!(
             root_balance(&store, roots[0], addresses[0]).unwrap(),
             U256::from(1u64)

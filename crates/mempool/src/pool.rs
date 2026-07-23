@@ -1,6 +1,6 @@
 //! Core transaction pool implementation.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use parking_lot::RwLock;
@@ -258,11 +258,13 @@ impl TxPool {
             }
         }
 
-        let evicted_hashes = match evict_hash {
+        let evicted_hashes: HashSet<ShellHash> = match evict_hash {
             Some(hash) if evict_descendants => Self::entry_and_descendant_hashes(&inner, &hash),
             Some(hash) => vec![hash],
             None => Vec::new(),
-        };
+        }
+        .into_iter()
+        .collect();
         let evicted_bytes = evicted_hashes
             .iter()
             .filter_map(|hash| inner.by_hash.get(hash))
@@ -525,8 +527,34 @@ impl TxPool {
         limit: usize,
         base_fee_per_gas: u64,
     ) -> Vec<Arc<SignedTransaction>> {
+        self.pending_for_block_at_fees_shared(limit, base_fee_per_gas, 0)
+    }
+
+    /// Collect transactions that can pay the next block's execution and blob
+    /// base fees while preserving per-sender nonce contiguity.
+    pub fn pending_for_block_at_fees(
+        &self,
+        limit: usize,
+        base_fee_per_gas: u64,
+        blob_base_fee: u64,
+    ) -> Vec<SignedTransaction> {
+        self.pending_for_block_at_fees_shared(limit, base_fee_per_gas, blob_base_fee)
+            .into_iter()
+            .map(|tx| tx.as_ref().clone())
+            .collect()
+    }
+
+    /// Shared-handle variant of [`Self::pending_for_block_at_fees`].
+    pub fn pending_for_block_at_fees_shared(
+        &self,
+        limit: usize,
+        base_fee_per_gas: u64,
+        blob_base_fee: u64,
+    ) -> Vec<Arc<SignedTransaction>> {
         self.pending_for_block_matching_shared(limit, |tx| {
             tx.tx.max_fee_per_gas >= base_fee_per_gas
+                && (tx.tx.tx_type != 3
+                    || tx.tx.max_fee_per_blob_gas.unwrap_or_default() >= blob_base_fee)
         })
     }
 
@@ -792,7 +820,7 @@ impl TxPool {
         inner: &PoolInner,
         tx: &SignedTransaction,
         world_state: &WorldState<S>,
-        excluded_hashes: &[ShellHash],
+        excluded_hashes: &HashSet<ShellHash>,
     ) -> Result<(), MempoolError> {
         for account in Self::reservation_accounts(tx) {
             let incoming = Self::reserved_cost_for(tx, &account);
@@ -1954,6 +1982,38 @@ mod tests {
 
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].hash(), eligible_hash);
+    }
+
+    #[test]
+    fn block_candidate_limit_does_not_count_underpriced_blob_sender_heads() {
+        let pool = TxPool::new(make_config());
+        let verifier = DilithiumVerifier;
+        let (mut ws, cs) = setup_validation_ctx();
+        set_head_with_blob_gas(&cs, 30_000_000, 1, 0, 0);
+
+        let blob_signer = DilithiumSigner::generate();
+        let blob_pubkey = blob_signer.public_key().to_vec();
+        let underpriced_blob = make_blob_tx_with_signer(&blob_signer, &blob_pubkey, 100, 90, 1);
+
+        let eligible_signer = DilithiumSigner::generate();
+        let eligible_pubkey = eligible_signer.public_key().to_vec();
+        let eligible = make_signed_value_tx_with_fees(
+            &eligible_signer,
+            &eligible_pubkey,
+            0,
+            200,
+            10,
+            U256::ZERO,
+        );
+        let eligible_hash = eligible.hash();
+
+        insert_rich(&pool, underpriced_blob, &verifier, &mut ws, &cs).unwrap();
+        insert_rich(&pool, eligible, &verifier, &mut ws, &cs).unwrap();
+
+        let includable = pool.pending_for_block_at_fees(1, 1, 2);
+
+        assert_eq!(includable.len(), 1);
+        assert_eq!(includable[0].hash(), eligible_hash);
     }
 
     #[test]
