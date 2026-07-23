@@ -24,7 +24,10 @@
 //! orphaned task. This does **not** hard-cancel CPU work already running inside
 //! `spawn_blocking`; those proof jobs may run to completion.
 
-use std::sync::Arc;
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, error, info, warn};
@@ -38,6 +41,36 @@ use shell_stark_prover::{
 use shell_storage::{KvStore, ProofAmendmentStore};
 
 use crate::config::L2StarkMode;
+
+const GAP_CONFIRMATION_WINDOW: Duration = Duration::from_secs(120);
+
+#[derive(Debug, Clone, Copy)]
+struct GapObservation {
+    gap_block: u64,
+    count: u32,
+    first_seen: Instant,
+}
+
+fn observe_gap(
+    previous: Option<GapObservation>,
+    gap_block: u64,
+    now: Instant,
+) -> (GapObservation, bool) {
+    let observation = match previous {
+        Some(previous) if previous.gap_block == gap_block => GapObservation {
+            count: previous.count.saturating_add(1),
+            ..previous
+        },
+        _ => GapObservation {
+            gap_block,
+            count: 1,
+            first_seen: now,
+        },
+    };
+    let confirmed = observation.count >= 2
+        && now.saturating_duration_since(observation.first_seen) >= GAP_CONFIRMATION_WINDOW;
+    (observation, confirmed)
+}
 
 // ── ProverConfig ──────────────────────────────────────────────────────────────
 
@@ -195,13 +228,13 @@ impl<S: KvStore + Send + Sync + 'static> ProverService<S> {
             self.config.max_concurrent_proofs
         );
         let idle_sleep = tokio::time::Duration::from_millis(self.config.idle_poll_ms);
-        let mut last_stall_log = std::time::Instant::now()
+        let mut last_stall_log = Instant::now()
             .checked_sub(std::time::Duration::from_secs(300))
-            .unwrap_or_else(std::time::Instant::now);
-        // Track consecutive stall observations at the same gap block before
-        // draining. We require the same gap_at_block to appear on 2+ consecutive
-        // 60-second stall checks (≥ 120 s) before treating it as permanent.
-        let mut consecutive_gap: Option<(u64, u32)> = None; // (gap_block, count)
+            .unwrap_or_else(Instant::now);
+        // Track repeated observations at the same gap before draining. The first
+        // observation happens immediately, so confirmation must use elapsed time
+        // rather than only counting 60-second checks.
+        let mut gap_observation: Option<GapObservation> = None;
 
         loop {
             // Check shutdown signal.
@@ -238,8 +271,11 @@ impl<S: KvStore + Send + Sync + 'static> ProverService<S> {
                     {
                         let mut backlog = self.backlog.lock();
                         let depth = backlog.len();
+                        if depth == 0 {
+                            gap_observation = None;
+                        }
                         if depth > 0 && last_stall_log.elapsed().as_secs() >= 60 {
-                            last_stall_log = std::time::Instant::now();
+                            last_stall_log = Instant::now();
                             let first_block = backlog.min_block_number_for_layer(1).unwrap_or(0);
                             let last_block = backlog.max_block_number_for_layer(1).unwrap_or(0);
                             let stall_info = backlog
@@ -259,20 +295,13 @@ impl<S: KvStore + Send + Sync + 'static> ProverService<S> {
                                         contiguous_take = take,
                                         "STARK prover stalled: gap in backlog prevents reaching min_entries threshold"
                                     );
-                                    // Guard against transient gaps: require the same
-                                    // gap_at_block to appear on 2 consecutive stall
-                                    // checks (≥ 120 s) before treating it as permanent.
-                                    let count = match consecutive_gap {
-                                        Some((prev_gap, n)) if prev_gap == gap => {
-                                            consecutive_gap = Some((gap, n + 1));
-                                            n + 1
-                                        }
-                                        _ => {
-                                            consecutive_gap = Some((gap, 1));
-                                            1
-                                        }
-                                    };
-                                    if count >= 2 {
+                                    // Guard against transient gaps: the same gap
+                                    // must remain visible for the full confirmation
+                                    // window before any tasks are discarded.
+                                    let (observation, confirmed) =
+                                        observe_gap(gap_observation, gap, Instant::now());
+                                    gap_observation = Some(observation);
+                                    if confirmed {
                                         // The gap block's witness is permanently missing (pruned).
                                         // The pre-gap range can never accumulate enough entries.
                                         // Drain those tasks so the prover can advance past the gap.
@@ -280,12 +309,12 @@ impl<S: KvStore + Send + Sync + 'static> ProverService<S> {
                                             draining = take,
                                             entries_lost = entries,
                                             gap_at_block = gap,
-                                            consecutive_checks = count,
+                                            consecutive_checks = observation.count,
                                             "STARK prover: draining {} stuck tasks before confirmed permanent gap at block {}",
                                             take, gap
                                         );
                                         backlog.drain_front(take);
-                                        consecutive_gap = None;
+                                        gap_observation = None;
                                         // Advance the drain frontier so the seeder
                                         // won't re-insert blocks below this gap on
                                         // the very next seeding pass.
@@ -301,7 +330,7 @@ impl<S: KvStore + Send + Sync + 'static> ProverService<S> {
                                     } else {
                                         info!(
                                             gap_at_block = gap,
-                                            consecutive_checks = count,
+                                            consecutive_checks = observation.count,
                                             "STARK prover: gap observed, waiting for confirmation before drain"
                                         );
                                     }
@@ -310,6 +339,7 @@ impl<S: KvStore + Send + Sync + 'static> ProverService<S> {
                                     entries,
                                     contiguous_take: take,
                                 }) => {
+                                    gap_observation = None;
                                     info!(
                                         depth,
                                         first_block,
@@ -321,6 +351,7 @@ impl<S: KvStore + Send + Sync + 'static> ProverService<S> {
                                     );
                                 }
                                 None => {
+                                    gap_observation = None;
                                     warn!(
                                         depth,
                                         first_block,
@@ -524,6 +555,38 @@ mod tests {
         };
         assert_eq!(cfg.max_concurrent_proofs, 4);
         assert_eq!(cfg.proving_priority, ProvingPriority::LatestFirst);
+    }
+
+    #[test]
+    fn gap_confirmation_requires_full_elapsed_window() {
+        let start = Instant::now();
+        let (first, first_confirmed) = observe_gap(None, 42, start);
+        assert!(!first_confirmed);
+
+        let (second, second_confirmed) =
+            observe_gap(Some(first), 42, start + Duration::from_secs(60));
+        assert_eq!(second.count, 2);
+        assert!(!second_confirmed);
+
+        let (third, third_confirmed) =
+            observe_gap(Some(second), 42, start + GAP_CONFIRMATION_WINDOW);
+        assert_eq!(third.count, 3);
+        assert!(third_confirmed);
+    }
+
+    #[test]
+    fn gap_confirmation_resets_for_different_gap() {
+        let start = Instant::now();
+        let (first, _) = observe_gap(None, 42, start);
+        let (reset, confirmed) = observe_gap(
+            Some(first),
+            43,
+            start + GAP_CONFIRMATION_WINDOW + Duration::from_secs(1),
+        );
+
+        assert_eq!(reset.gap_block, 43);
+        assert_eq!(reset.count, 1);
+        assert!(!confirmed);
     }
 
     #[tokio::test]
