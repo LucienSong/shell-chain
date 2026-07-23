@@ -85,6 +85,21 @@ impl Drop for AlgorithmRegistryRollback {
     }
 }
 
+fn apply_pending_activations<S: KvStore + 'static>(
+    block_number: u64,
+    world_state: &mut WorldState<S>,
+    registry: &mut AlgorithmRegistry,
+    phase: &str,
+) -> Result<(), NodeError> {
+    process_pending_activations(block_number, world_state, registry)
+        .map(|_| ())
+        .map_err(|e| {
+            NodeError::Startup(format!(
+                "algorithm activation at block {block_number} failed during {phase}: {e}"
+            ))
+        })
+}
+
 pub(crate) use shell_stark_prover::{
     proof::SigBatchProof,
     prover::{compute_batch_root, verify_sig_batch, SigBatchEntry},
@@ -560,9 +575,10 @@ impl<'a, S: KvStore + 'static> MemPoolBoundary<'a, S> {
         &self,
         max_txs: usize,
         base_fee_per_gas: u64,
+        blob_base_fee: u64,
     ) -> Vec<Arc<SignedTransaction>> {
         self.tx_pool
-            .pending_for_block_at_base_fee_shared(max_txs, base_fee_per_gas)
+            .pending_for_block_at_fees_shared(max_txs, base_fee_per_gas, blob_base_fee)
     }
 
     fn pending_for_rebroadcast(
@@ -689,6 +705,11 @@ impl<S: KvStore + 'static> Node<S> {
         let witness_store = Arc::new(WitnessStore::new(store.clone()));
         let witness_pruner = WitnessPruner::new(config.pruning.witness_retention);
         let body_pruner = BodyPruner::new(config.pruning.body_retention);
+        let peer_capability_limit = if config.network.max_peers == 0 {
+            crate::historical_sync::MAX_PEER_CAPABILITY_RECORDS
+        } else {
+            config.network.max_peers
+        };
         let stark_aggregation = config.enable_stark_aggregation;
         let metrics = Arc::new(Metrics::new().expect("failed to register Prometheus metrics"));
         let amendment_store = ProofAmendmentStore::new(store.clone());
@@ -764,7 +785,9 @@ impl<S: KvStore + 'static> Node<S> {
                 snapshots: BTreeMap::new(),
             }),
             shutdown_tx,
-            peer_caps: crate::historical_sync::PeerCapabilityTracker::new(),
+            peer_caps: crate::historical_sync::PeerCapabilityTracker::with_max_records(
+                peer_capability_limit,
+            ),
             pending_grace_deletes: parking_lot::Mutex::new(HashMap::new()),
             proof_window_manager: parking_lot::Mutex::new(ProofWindowManager::new(
                 WindowConfig::default(),
@@ -1392,8 +1415,60 @@ impl<S: KvStore + 'static> Node<S> {
                 self.witness_pruner.read().pruned_below(),
             );
             let mut pruner = self.state_pruner.write();
+            let should_prune = finalized_number > 0 && pruner.should_prune(block_number);
+            let validate_genesis = pruner.genesis_root().is_none() || should_prune;
+            let genesis_registered = if !validate_genesis {
+                true
+            } else {
+                match self.chain_store.get_block_hash_by_number(0) {
+                    Ok(Some(genesis_hash)) => {
+                        match self.chain_store.get_header_by_hash(&genesis_hash) {
+                            Ok(Some(genesis)) if genesis.number == 0 => {
+                                match pruner.genesis_root() {
+                                    Some(root) if *root != genesis.state_root => {
+                                        tracing::warn!(
+                                            expected_root = %root,
+                                            actual_root = %genesis.state_root,
+                                            "state pruner: genesis state root changed"
+                                        );
+                                        false
+                                    }
+                                    Some(_) => true,
+                                    None => {
+                                        pruner.set_genesis_root(genesis.state_root);
+                                        true
+                                    }
+                                }
+                            }
+                            Ok(Some(genesis)) => {
+                                tracing::warn!(
+                                    header_number = genesis.number,
+                                    "state pruner: genesis header reports the wrong block number"
+                                );
+                                false
+                            }
+                            Ok(None) => {
+                                tracing::warn!("state pruner: genesis header is unavailable");
+                                false
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, "state pruner: failed to load genesis header");
+                                false
+                            }
+                        }
+                    }
+                    Ok(None) => {
+                        tracing::warn!("state pruner: genesis canonical mapping is unavailable");
+                        false
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "state pruner: failed to load genesis mapping");
+                        false
+                    }
+                }
+            };
             pruner.register_block(block_number, state_root);
-            if finalized_number > 0 && pruner.should_prune(block_number) {
+            if genesis_registered && should_prune {
                 pruner.mark_prunable(canonical_prune_boundary);
                 match pruner.prune(self.store.as_ref()) {
                     Ok(result) => {
@@ -1447,7 +1522,30 @@ mod tests {
     use shell_rpc::DevRpcControl;
     use shell_storage::{MemoryDb, StorageError, WriteBatch, WriteBatchOp};
     use std::process::Command;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    struct AuthorityLockCheckingVerifier {
+        authorities: Arc<RwLock<HashMap<Address, Vec<u8>>>>,
+    }
+
+    impl Verifier for AuthorityLockCheckingVerifier {
+        fn verify(
+            &self,
+            pubkey: &[u8],
+            message: &[u8],
+            signature: &shell_crypto::PQSignature,
+        ) -> Result<bool, shell_crypto::CryptoError> {
+            assert!(
+                self.authorities.try_write().is_some(),
+                "authority registry lock must be released before signature verification"
+            );
+            MultiVerifier.verify(pubkey, message, signature)
+        }
+
+        fn sig_type(&self) -> shell_crypto::SignatureType {
+            shell_crypto::SignatureType::Dilithium3
+        }
+    }
 
     fn run_isolated(test_name: &str, marker: &str) -> bool {
         if std::env::var_os(marker).is_some() {
@@ -1467,6 +1565,9 @@ mod tests {
     struct FailingBatchDb {
         inner: MemoryDb,
         fail_next_get: AtomicBool,
+        fail_next_put: AtomicBool,
+        put_count: AtomicUsize,
+        fail_on_put: AtomicUsize,
         fail_next_batch: AtomicBool,
         fail_head_batch: AtomicBool,
         fail_next_delete: AtomicBool,
@@ -1477,6 +1578,9 @@ mod tests {
             Self {
                 inner: MemoryDb::new(),
                 fail_next_get: AtomicBool::new(false),
+                fail_next_put: AtomicBool::new(false),
+                put_count: AtomicUsize::new(0),
+                fail_on_put: AtomicUsize::new(usize::MAX),
                 fail_next_batch: AtomicBool::new(false),
                 fail_head_batch: AtomicBool::new(false),
                 fail_next_delete: AtomicBool::new(false),
@@ -1489,6 +1593,15 @@ mod tests {
 
         fn fail_next_get(&self) {
             self.fail_next_get.store(true, Ordering::SeqCst);
+        }
+
+        fn fail_next_put(&self) {
+            self.fail_next_put.store(true, Ordering::SeqCst);
+        }
+
+        fn fail_on_put(&self, put_number: usize) {
+            self.put_count.store(0, Ordering::SeqCst);
+            self.fail_on_put.store(put_number, Ordering::SeqCst);
         }
 
         fn fail_head_batch(&self) {
@@ -1509,6 +1622,12 @@ mod tests {
         }
 
         fn put(&self, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
+            let put_number = self.put_count.fetch_add(1, Ordering::SeqCst) + 1;
+            if self.fail_next_put.swap(false, Ordering::SeqCst)
+                || put_number == self.fail_on_put.load(Ordering::SeqCst)
+            {
+                return Err(StorageError::Database("injected put failure".into()));
+            }
             self.inner.put(key, value)
         }
 
@@ -1657,6 +1776,28 @@ mod tests {
             consensus,
         );
         (node, signer, db)
+    }
+
+    fn configure_pending_activation<S: KvStore + 'static>(
+        node: &Node<S>,
+        height: u64,
+        algo: shell_crypto::SignatureType,
+    ) {
+        AlgorithmRegistry::global_mut().propose_activation_with_spec(algo, height, [0xA5; 32]);
+
+        let mut key_material = b"algorithm_activation_height:".to_vec();
+        key_material.push(algo.as_u8());
+        let key = shell_primitives::keccak256(&key_material);
+        let mut value = [0u8; 32];
+        value[24..].copy_from_slice(&height.to_be_bytes());
+        node.world_state
+            .write()
+            .set_storage(
+                &shell_pqvm::registry_address(),
+                &key,
+                &ShellHash::from(value),
+            )
+            .unwrap();
     }
 
     fn store_genesis<S: KvStore + 'static>(node: &Node<S>) {
@@ -5288,6 +5429,67 @@ mod tests {
     }
 
     #[test]
+    fn activation_transition_propagates_persistence_failure() {
+        const TEST_NAME: &str = "node::tests::activation_transition_propagates_persistence_failure";
+        const ISOLATED_MARKER: &str = "SHELL_TEST_ISOLATED_ACTIVATION_PRODUCTION_FAILURE";
+        if run_isolated(TEST_NAME, ISOLATED_MARKER) {
+            return;
+        }
+
+        *AlgorithmRegistry::global_mut() = AlgorithmRegistry::default();
+        let (node, _signer, db) = setup_failing_batch_node();
+        configure_pending_activation(&node, 1, shell_crypto::SignatureType::SphincsSha2256f);
+        store_consistent_genesis(&node);
+        db.fail_next_put();
+
+        let mut world_state = node.world_state.write();
+        let mut registry = AlgorithmRegistry::global_mut();
+        let err = apply_pending_activations(1, &mut world_state, &mut registry, "production")
+            .expect_err("activation persistence failure must propagate");
+
+        let message = err.to_string();
+        assert!(message.contains("injected put failure"));
+        assert!(message.contains("algorithm activation at block 1"));
+        assert!(
+            !registry.is_allowed(shell_crypto::SignatureType::SphincsSha2256f),
+            "failed activation persistence must leave the process registry pending"
+        );
+    }
+
+    #[test]
+    fn block_production_rolls_back_state_when_activation_persistence_fails() {
+        const TEST_NAME: &str =
+            "node::tests::block_production_rolls_back_state_when_activation_persistence_fails";
+        const ISOLATED_MARKER: &str = "SHELL_TEST_ISOLATED_ACTIVATION_PRODUCTION_ROLLBACK";
+        if run_isolated(TEST_NAME, ISOLATED_MARKER) {
+            return;
+        }
+
+        *AlgorithmRegistry::global_mut() = AlgorithmRegistry::default();
+        let (node, signer, db) = setup_failing_batch_node();
+        for algo in [
+            shell_crypto::SignatureType::MlDsa65,
+            shell_crypto::SignatureType::SphincsSha2256f,
+        ] {
+            configure_pending_activation(&node, 1, algo);
+        }
+        store_consistent_genesis(&node);
+        let canonical_root = node.world_state.write().state_root().unwrap();
+        let canonical_head = node.chain_store.get_head_hash().unwrap();
+        db.fail_on_put(2);
+
+        let err = node.produce_block(&signer, 100).unwrap_err();
+
+        assert!(err.to_string().contains("injected put failure"));
+        assert_eq!(
+            node.world_state.write().state_root().unwrap(),
+            canonical_root,
+            "failed production must restore the canonical world state"
+        );
+        assert_eq!(node.chain_store.get_head_hash().unwrap(), canonical_head);
+    }
+
+    #[test]
     fn import_block_with_invalid_seal_rejected() {
         let (node, signer) = setup_node();
         store_genesis(&node);
@@ -5858,15 +6060,24 @@ mod tests {
     }
 
     #[test]
-    fn state_pruner_does_not_pin_every_committed_root() {
+    fn state_pruner_only_pins_genesis_root() {
         let (node, signer) = setup_node_with_pruning(128);
         store_genesis(&node);
+        let genesis_root = node
+            .chain_store
+            .get_block_by_number(0)
+            .unwrap()
+            .unwrap()
+            .header
+            .state_root;
 
         for _ in 0..5 {
             node.produce_block(&signer, 0).unwrap();
         }
 
-        assert_eq!(node.state_pruner.read().active_root_count(), 0);
+        let pruner = node.state_pruner.read();
+        assert_eq!(pruner.active_root_count(), 1);
+        assert_eq!(pruner.genesis_root(), Some(&genesis_root));
     }
 
     #[test]
@@ -5979,6 +6190,138 @@ mod tests {
 
         assert_eq!(node.body_pruner.read().pruned_below(), 34);
         assert_eq!(node.witness_pruner.read().pruned_below(), 34);
+        assert!(node
+            .chain_store
+            .get_block_hash_by_number(0)
+            .unwrap()
+            .is_some());
+        assert!(node
+            .chain_store
+            .get_block_hash_by_number(1)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn canonical_mapping_pruning_stops_when_genesis_is_unavailable() {
+        let (node, signer) = setup_node_with_retention(2, 2);
+        store_genesis(&node);
+
+        for _ in 0..40 {
+            node.produce_block(&signer, 0).unwrap();
+        }
+
+        let finalized = node.chain_store.get_block_by_number(35).unwrap().unwrap();
+        node.chain_store.set_finalized_number(35).unwrap();
+        node.finality
+            .write()
+            .set_finalized_direct(35, finalized.hash());
+        for number in 0..34 {
+            let hash = node
+                .chain_store
+                .get_block_hash_by_number(number)
+                .unwrap()
+                .unwrap();
+            node.settled_stark_sources.lock().insert((1, hash));
+        }
+
+        node.produce_block(&signer, 0).unwrap();
+        assert_eq!(node.body_pruner.read().pruned_below(), 34);
+        assert_eq!(node.witness_pruner.read().pruned_below(), 34);
+        assert!(node
+            .chain_store
+            .get_block_hash_by_number(1)
+            .unwrap()
+            .is_some());
+
+        *node.state_pruner.write() = StatePruner::new(32);
+        node.state_pruner.write().set_prune_interval(1);
+        node.chain_store.delete_canonical(0).unwrap();
+        node.produce_block(&signer, 0).unwrap();
+
+        assert!(node
+            .chain_store
+            .get_block_hash_by_number(1)
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn canonical_mapping_pruning_revalidates_registered_genesis() {
+        let (node, signer) = setup_node_with_retention(2, 2);
+        store_genesis(&node);
+
+        for _ in 0..40 {
+            node.produce_block(&signer, 0).unwrap();
+        }
+
+        let finalized = node.chain_store.get_block_by_number(35).unwrap().unwrap();
+        node.chain_store.set_finalized_number(35).unwrap();
+        node.finality
+            .write()
+            .set_finalized_direct(35, finalized.hash());
+        for number in 0..34 {
+            let hash = node
+                .chain_store
+                .get_block_hash_by_number(number)
+                .unwrap()
+                .unwrap();
+            node.settled_stark_sources.lock().insert((1, hash));
+        }
+
+        assert!(node.state_pruner.read().genesis_root().is_some());
+        node.produce_block(&signer, 0).unwrap();
+        assert_eq!(node.body_pruner.read().pruned_below(), 34);
+        assert_eq!(node.witness_pruner.read().pruned_below(), 34);
+        node.state_pruner.write().set_prune_interval(1);
+        node.chain_store.delete_canonical(0).unwrap();
+        node.produce_block(&signer, 0).unwrap();
+
+        assert!(node
+            .chain_store
+            .get_block_hash_by_number(1)
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn canonical_mapping_pruning_uses_pruned_genesis_header() {
+        let (node, signer) = setup_node_with_retention(2, 2);
+        store_genesis(&node);
+
+        for _ in 0..40 {
+            node.produce_block(&signer, 0).unwrap();
+        }
+
+        let finalized = node.chain_store.get_block_by_number(35).unwrap().unwrap();
+        node.chain_store.set_finalized_number(35).unwrap();
+        node.finality
+            .write()
+            .set_finalized_direct(35, finalized.hash());
+        for number in 0..34 {
+            let hash = node
+                .chain_store
+                .get_block_hash_by_number(number)
+                .unwrap()
+                .unwrap();
+            node.settled_stark_sources.lock().insert((1, hash));
+        }
+
+        *node.state_pruner.write() = StatePruner::new(32);
+        node.state_pruner.write().set_prune_interval(1);
+        let genesis_hash = node
+            .chain_store
+            .get_block_hash_by_number(0)
+            .unwrap()
+            .unwrap();
+        node.chain_store.delete_body(&genesis_hash).unwrap();
+        node.produce_block(&signer, 0).unwrap();
+
+        assert!(node
+            .chain_store
+            .get_block_hash_by_number(0)
+            .unwrap()
+            .is_some());
         assert!(node
             .chain_store
             .get_block_hash_by_number(1)
@@ -6652,6 +6995,26 @@ mod tests {
         let fork_choice = node.fork_choice.read();
         assert_eq!(fork_choice.block_count(), 1);
         assert_eq!(fork_choice.parent(&block_hash), Some(&ShellHash::ZERO));
+    }
+
+    #[test]
+    fn handle_attestation_releases_authority_lock_before_verification() {
+        let (node, signer) = setup_node();
+        store_genesis(&node);
+        let authority = node.config.proposer_address.unwrap();
+        node.register_authority_pubkey(authority, signer.public_key().to_vec());
+
+        let block = node.produce_block(&signer, 100).unwrap();
+        let block_hash = block.hash();
+        node.chain_store.put_block(&block).unwrap();
+        let attestation = node
+            .create_attestation(block_hash, block.header.number, &signer)
+            .unwrap();
+        let verifier = AuthorityLockCheckingVerifier {
+            authorities: Arc::clone(&node.known_authorities),
+        };
+
+        node.handle_attestation(attestation, &verifier).unwrap();
     }
 
     #[test]
@@ -7619,6 +7982,24 @@ mod tests {
             NodeError::Storage(StorageError::Database(message))
                 if message.contains("injected get failure")
         ));
+    }
+
+    #[test]
+    fn wpoa_view_change_releases_authority_lock_before_verification() {
+        let (node, signer) = setup_node();
+        store_genesis(&node);
+        let authority = node.config.proposer_address.unwrap();
+        node.register_authority_pubkey(authority, signer.public_key().to_vec());
+
+        let highest_qc_hash = *node.finality.read().last_finalized_hash();
+        let signing_message = ViewChangeMessage::signing_message(1337, 1, 0, &highest_qc_hash);
+        let signature = signer.sign(&signing_message).unwrap();
+        let msg = ViewChangeMessage::new(1337, 1, 0, highest_qc_hash, authority, signature.data);
+        let verifier = AuthorityLockCheckingVerifier {
+            authorities: Arc::clone(&node.known_authorities),
+        };
+
+        node.handle_wpoa_view_change(msg, &verifier).unwrap();
     }
 
     // ─── W.7: wPoA end-to-end test suite ──────────────────────────────────────
