@@ -546,6 +546,7 @@ impl<S: KvStore + 'static> Node<S> {
             .collect::<Result<Vec<_>, NodeError>>()?;
         self.validate_stark_settlement_sequence(&stark_settlements)?;
         for amendment in &stark_settlements {
+            self.validate_stark_amendment_authentication(amendment)?;
             self.validate_stark_proof_source_binding(amendment)?;
         }
 
