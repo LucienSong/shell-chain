@@ -38,6 +38,7 @@ if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
 fi
 
 TAG="v${VERSION}"
+RELEASE_REMOTE="${RELEASE_REMOTE:-origin}"
 
 echo ""
 echo "╔══════════════════════════════════════════════╗"
@@ -109,6 +110,13 @@ if [ "$BRANCH" = "release/v${VERSION}" ]; then
 fi
 ok "Current branch: ${BRANCH}"
 
+# 6. Release tags must be pushed to the canonical repository, not a fork.
+if "$SCRIPT_DIR/check-release-remote.sh" "$RELEASE_REMOTE"; then
+    ok "Release remote: ${RELEASE_REMOTE}"
+else
+    fail "Release remote must target ShellDAO/shell-chain"
+fi
+
 # ── Format check ─────────────────────────────────────────────
 
 echo ""
@@ -117,6 +125,14 @@ if cargo fmt --all --check; then
     ok "cargo fmt --all --check passed"
 else
     fail "cargo fmt check failed — run 'cargo fmt --all' then commit"
+fi
+
+# Require the hosted CI checks for the exact commit that will be tagged.
+RELEASE_COMMIT=$(git rev-parse HEAD)
+if "$SCRIPT_DIR/check-release-ci.sh" "$RELEASE_COMMIT"; then
+    ok "Hosted CI passed on HEAD: ${RELEASE_COMMIT}"
+else
+    fail "Hosted CI is missing, pending, or failing on HEAD"
 fi
 
 # ── Fuzz target syntax check ──────────────────────────────────
@@ -177,15 +193,7 @@ fi
 echo ""
 echo "── Tagging ──"
 
-CHANGELOG_EXCERPT=$(awk -v heading="## [${VERSION}]" '
-    index($0, heading) == 1 {
-        suffix = substr($0, length(heading) + 1, 1)
-        if (suffix == "" || suffix ~ /[[:space:]]/) found = 1
-        next
-    }
-    found && /^## \[/ { exit }
-    found { print }
-' CHANGELOG.md | head -30)
+CHANGELOG_EXCERPT=$("$SCRIPT_DIR/changelog-excerpt.sh" CHANGELOG.md "$VERSION" 30)
 
 git tag -a "$TAG" -m "Release ${TAG}
 
@@ -194,10 +202,10 @@ ${CHANGELOG_EXCERPT}"
 ok "Created annotated tag: ${TAG}"
 
 echo ""
-read -r -p "Push tag ${TAG} to origin? [y/N] " CONFIRM
+read -r -p "Push tag ${TAG} to ${RELEASE_REMOTE}? [y/N] " CONFIRM
 if [ "$CONFIRM" = "y" ] || [ "$CONFIRM" = "Y" ]; then
-    git push origin "$TAG"
-    ok "Pushed tag ${TAG} to origin"
+    git push "$RELEASE_REMOTE" "$TAG"
+    ok "Pushed tag ${TAG} to ${RELEASE_REMOTE}"
     echo ""
     echo "Next steps:"
     echo "  1. Create a GitHub Release at https://github.com/ShellDAO/shell-chain/releases/new?tag=${TAG}"
@@ -205,7 +213,7 @@ if [ "$CONFIRM" = "y" ] || [ "$CONFIRM" = "Y" ]; then
     echo "  3. Build each platform with scripts/build-release-binary.sh and attach the binaries"
     echo "  4. Publish Docker image: docker buildx build --platform linux/amd64,linux/arm64 -t ghcr.io/shelldao/shell-chain:${TAG} --push ."
 else
-    warn "Tag created locally but NOT pushed. Run: git push origin ${TAG}"
+    warn "Tag created locally but NOT pushed. Run: git push ${RELEASE_REMOTE} ${TAG}"
 fi
 
 echo ""

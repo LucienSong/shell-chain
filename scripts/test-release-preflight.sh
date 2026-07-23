@@ -19,6 +19,120 @@ fi
 if ! grep -Fq 'cargo audit --file deps/libp2p-yamux/Cargo.lock' "$SCRIPT_DIR/release.sh"; then
     fail "release audit does not cover the patched libp2p-yamux lockfile"
 fi
+if ! grep -Fq 'check-release-ci.sh' "$SCRIPT_DIR/release.sh"; then
+    fail "release preflight does not verify hosted CI for HEAD"
+fi
+if ! grep -Fq 'check-release-remote.sh' "$SCRIPT_DIR/release.sh"; then
+    fail "release preflight does not verify the tag push remote"
+fi
+if ! grep -Fq 'git push "$RELEASE_REMOTE" "$TAG"' "$SCRIPT_DIR/release.sh"; then
+    fail "release tag push does not use the validated remote"
+fi
+
+LONG_CHANGELOG="$TMP_DIR/long-changelog.md"
+{
+    printf '## [Unreleased]\n\n## [0.27.1] - test release\n'
+    for line in $(seq 1 35); do
+        printf 'release line %s\n' "$line"
+    done
+    printf '## [0.27.0] - prior release\nprior line\n'
+} > "$LONG_CHANGELOG"
+CHANGELOG_EXCERPT=$("$SCRIPT_DIR/changelog-excerpt.sh" "$LONG_CHANGELOG" 0.27.1)
+if [ "$(printf '%s\n' "$CHANGELOG_EXCERPT" | wc -l | tr -d ' ')" -ne 30 ]; then
+    fail "long changelog excerpt was not limited to 30 lines"
+fi
+if ! grep -Fq 'release line 30' <<<"$CHANGELOG_EXCERPT" \
+    || grep -Fq 'release line 31' <<<"$CHANGELOG_EXCERPT"; then
+    fail "long changelog excerpt used the wrong section boundary"
+fi
+
+REMOTE_FIXTURE="$TMP_DIR/remote-fixture"
+git -C "$TMP_DIR" init -q -b main remote-fixture
+git -C "$REMOTE_FIXTURE" remote add canonical https://github.com/ShellDAO/shell-chain.git
+git -C "$REMOTE_FIXTURE" remote add canonical-ssh git@github.com:ShellDAO/shell-chain.git
+git -C "$REMOTE_FIXTURE" remote add fork https://github.com/example/shell-chain.git
+git -C "$REMOTE_FIXTURE" remote add multi https://github.com/ShellDAO/shell-chain.git
+git -C "$REMOTE_FIXTURE" remote set-url --add --push multi \
+    https://github.com/ShellDAO/shell-chain.git
+git -C "$REMOTE_FIXTURE" remote set-url --add --push multi \
+    https://github.com/example/shell-chain.git
+
+(cd "$REMOTE_FIXTURE" && "$SCRIPT_DIR/check-release-remote.sh" canonical >/dev/null)
+(cd "$REMOTE_FIXTURE" && "$SCRIPT_DIR/check-release-remote.sh" canonical-ssh >/dev/null)
+if REMOTE_OUTPUT=$(cd "$REMOTE_FIXTURE" && \
+    "$SCRIPT_DIR/check-release-remote.sh" fork 2>&1); then
+    fail "release remote check unexpectedly accepted a fork"
+fi
+if ! grep -Fq "does not target ShellDAO/shell-chain" <<<"$REMOTE_OUTPUT"; then
+    fail "fork rejection did not explain the required release target: $REMOTE_OUTPUT"
+fi
+if REMOTE_OUTPUT=$(cd "$REMOTE_FIXTURE" && \
+    "$SCRIPT_DIR/check-release-remote.sh" multi 2>&1); then
+    fail "release remote check unexpectedly accepted multiple push URLs"
+fi
+if ! grep -Fq "must have exactly one push URL (found 2)" <<<"$REMOTE_OUTPUT"; then
+    fail "multiple push URL rejection was not specific: $REMOTE_OUTPUT"
+fi
+if REMOTE_OUTPUT=$(cd "$REMOTE_FIXTURE" && \
+    "$SCRIPT_DIR/check-release-remote.sh" missing 2>&1); then
+    fail "release remote check unexpectedly accepted a missing remote"
+fi
+if ! grep -Fq "has no push URL" <<<"$REMOTE_OUTPUT"; then
+    fail "missing push URL rejection was not specific: $REMOTE_OUTPUT"
+fi
+
+CHECK_SHA=1111111111111111111111111111111111111111
+FAKE_GH="$TMP_DIR/fake-gh"
+cat > "$FAKE_GH" <<'EOF'
+#!/usr/bin/env bash
+cat "$CHECK_RUNS_FIXTURE"
+EOF
+chmod +x "$FAKE_GH"
+
+write_check_runs() {
+    local test_status=$1
+    local test_conclusion=$2
+    local test_sha=${3:-$CHECK_SHA}
+    local test_app=${4:-github-actions}
+    local test_app_owner=${5:-github}
+    cat > "$TMP_DIR/check-runs.json" <<EOF
+{
+  "check_runs": [
+    {"name":"Check & Lint","head_sha":"$CHECK_SHA","status":"completed","conclusion":"success","app":{"slug":"github-actions","owner":{"login":"github"}}},
+    {"name":"Test","head_sha":"$test_sha","status":"$test_status","conclusion":$test_conclusion,"app":{"slug":"$test_app","owner":{"login":"$test_app_owner"}}},
+    {"name":"Supply Chain Security","head_sha":"$CHECK_SHA","status":"completed","conclusion":"success","app":{"slug":"github-actions","owner":{"login":"github"}}}
+  ]
+}
+EOF
+}
+
+assert_ci_fails_with() {
+    local expected=$1
+    local output
+    if output=$(GH_BIN="$FAKE_GH" CHECK_RUNS_FIXTURE="$TMP_DIR/check-runs.json" \
+        "$SCRIPT_DIR/check-release-ci.sh" "$CHECK_SHA" 2>&1); then
+        fail "release CI check unexpectedly passed"
+    fi
+    if ! grep -Fq "$expected" <<<"$output"; then
+        fail "expected '$expected' in CI check output: $output"
+    fi
+}
+
+write_check_runs completed '"success"'
+GH_BIN="$FAKE_GH" CHECK_RUNS_FIXTURE="$TMP_DIR/check-runs.json" \
+    "$SCRIPT_DIR/check-release-ci.sh" "$CHECK_SHA" >/dev/null
+
+write_check_runs in_progress null
+assert_ci_fails_with "required check 'Test' has not succeeded"
+
+write_check_runs completed '"success"' 2222222222222222222222222222222222222222
+assert_ci_fails_with "required check 'Test' is associated with another commit"
+
+write_check_runs completed '"success"' "$CHECK_SHA" untrusted-checks example
+assert_ci_fails_with "required check 'Test' is from an untrusted app"
+
+printf '{"check_runs":[]}' > "$TMP_DIR/check-runs.json"
+assert_ci_fails_with "required check 'Check & Lint' is missing"
 
 make_fixture() {
     local changelog=$1
@@ -26,7 +140,10 @@ make_fixture() {
 
     rm -rf "$fixture"
     mkdir -p "$fixture/scripts"
-    cp "$SCRIPT_DIR/release.sh" "$SCRIPT_DIR/check-release-metadata.sh" \
+    cp "$SCRIPT_DIR/release.sh" "$SCRIPT_DIR/changelog-excerpt.sh" \
+        "$SCRIPT_DIR/check-release-ci.sh" \
+        "$SCRIPT_DIR/check-release-remote.sh" \
+        "$SCRIPT_DIR/check-release-metadata.sh" \
         "$SCRIPT_DIR/supply-chain-tool-versions.sh" "$fixture/scripts/"
     printf '[workspace.package]\nversion = "0.27.1"\n' > "$fixture/Cargo.toml"
     mkdir -p "$fixture/fuzz"
@@ -38,6 +155,7 @@ make_fixture() {
     git -C "$fixture" init -q -b main
     git -C "$fixture" config user.name "ShellDAO Release Test"
     git -C "$fixture" config user.email "release-test@shelldao.org"
+    git -C "$fixture" remote add origin https://github.com/ShellDAO/shell-chain.git
     git -C "$fixture" add .
     git -C "$fixture" commit -qm "test fixture"
     printf '%s\n' "$fixture"
@@ -112,7 +230,10 @@ assert_fails_with "$fixture" '0.27.1' "cargo fmt check failed"
 fixture=$(make_fixture $'## [Unreleased]\n\n## [0.27.1] - test release')
 git -C "$fixture" switch -q --orphan release/v0.27.1
 mkdir -p "$fixture/scripts"
-cp "$SCRIPT_DIR/release.sh" "$SCRIPT_DIR/check-release-metadata.sh" \
+cp "$SCRIPT_DIR/release.sh" "$SCRIPT_DIR/changelog-excerpt.sh" \
+    "$SCRIPT_DIR/check-release-ci.sh" \
+    "$SCRIPT_DIR/check-release-remote.sh" \
+    "$SCRIPT_DIR/check-release-metadata.sh" \
     "$SCRIPT_DIR/supply-chain-tool-versions.sh" "$fixture/scripts/"
 printf '[workspace.package]\nversion = "0.27.1"\n' > "$fixture/Cargo.toml"
 mkdir -p "$fixture/fuzz"
