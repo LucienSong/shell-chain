@@ -55,7 +55,7 @@ impl<S: KvStore + 'static> Node<S> {
         let excess_blob_gas =
             calc_excess_blob_gas(head.header.excess_blob_gas, head.header.blob_gas_used);
         let blob_base_fee = calc_blob_gas_price(excess_blob_gas);
-        let candidates = mem_pool.pending_for_block(max_txs, base_fee);
+        let candidates = mem_pool.pending_for_block(max_txs, base_fee, blob_base_fee);
 
         // Create an isolated EVM instance at the current state root.
         let (state_db, current_root) = block_store.isolated_state_db()?;
@@ -405,31 +405,29 @@ impl<S: KvStore + 'static> Node<S> {
 
         // Compute block-level logs bloom by OR-ing all receipt blooms.
         {
-            let receipt_blooms: Vec<shell_pqvm::bloom::Bloom> = receipts
-                .iter()
-                .map(|r| {
-                    let mut bloom = [0u8; shell_pqvm::bloom::BLOOM_SIZE];
-                    let bytes = r.logs_bloom.as_ref();
-                    let len = bytes.len().min(shell_pqvm::bloom::BLOOM_SIZE);
-                    bloom[..len].copy_from_slice(&bytes[..len]);
-                    bloom
-                })
-                .collect();
-            let block_bloom = shell_pqvm::bloom::bloom_union(&receipt_blooms);
+            let block_bloom = shell_pqvm::bloom::bloom_union_bytes(
+                receipts.iter().map(|receipt| receipt.logs_bloom.as_ref()),
+            );
             header.logs_bloom = Bytes::from(block_bloom.to_vec());
         }
 
         // Apply algorithm activations whose timelock has elapsed (WP §6.5).
         // Must run BEFORE state_root so activations are committed to the Merkle root.
-        {
+        let activation_result = {
             let mut ws = self.world_state.write();
             let mut registry = AlgorithmRegistry::global_mut();
-            if let Err(e) = process_pending_activations(header.number, &mut *ws, &mut registry) {
+            apply_pending_activations(header.number, &mut *ws, &mut registry, "production")
+        };
+        if let Err(err) = activation_result {
+            prover.restore_pending_stark_settlements(drained_stark_settlements);
+            if let Err(rollback_err) = block_store.rollback_world_state(&current_root) {
                 warn!(
-                    block = header.number,
-                    "process_pending_activations failed during production: {e}"
+                    error = %rollback_err,
+                    target_root = %current_root,
+                    "produce_block: failed to roll back world state after activation error"
                 );
             }
+            return Err(err);
         }
 
         // Compute state root from the updated world state (includes any activations above).

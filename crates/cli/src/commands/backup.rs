@@ -179,6 +179,119 @@ pub fn restore_backup(
 // ---------------------------------------------------------------------------
 
 /// Recursively copy a directory tree (used for restore).
+#[cfg(unix)]
+fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    let source = open_backup_directory(src)?;
+    copy_dir_from_handle(source, src, dst)
+}
+
+#[cfg(unix)]
+fn open_backup_directory(src: &std::path::Path) -> std::io::Result<std::os::fd::OwnedFd> {
+    use rustix::fs::{Mode, OFlags};
+
+    rustix::fs::open(
+        src,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(std::io::Error::from)
+}
+
+#[cfg(unix)]
+fn copy_dir_from_handle(
+    source: std::os::fd::OwnedFd,
+    source_path: &std::path::Path,
+    dst: &std::path::Path,
+) -> std::io::Result<()> {
+    use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags};
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    std::fs::create_dir_all(dst)?;
+    let mut entries = Dir::read_from(&source).map_err(std::io::Error::from)?;
+    while let Some(entry) = entries.read() {
+        let entry = entry.map_err(std::io::Error::from)?;
+        let name = entry.file_name();
+        if name.to_bytes() == b"." || name.to_bytes() == b".." {
+            continue;
+        }
+
+        let entry_path = source_path.join(OsStr::from_bytes(name.to_bytes()));
+        let dest = dst.join(OsStr::from_bytes(name.to_bytes()));
+        let metadata = rustix::fs::statat(&source, name, AtFlags::SYMLINK_NOFOLLOW)
+            .map_err(std::io::Error::from)?;
+        match FileType::from_raw_mode(metadata.st_mode) {
+            FileType::Directory => {
+                let child = rustix::fs::openat(
+                    &source,
+                    name,
+                    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                    Mode::empty(),
+                )
+                .map_err(std::io::Error::from)?;
+                copy_dir_from_handle(child, &entry_path, &dest)?;
+            }
+            FileType::RegularFile => {
+                let mut input = open_backup_file(&source, name, &entry_path)?;
+                let permissions = input.metadata()?.permissions();
+                let mut output = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(dest)?;
+                std::io::copy(&mut input, &mut output)?;
+                output.set_permissions(permissions)?;
+            }
+            FileType::Symlink => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("backup contains a symbolic link: {}", entry_path.display()),
+                ));
+            }
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "backup contains an unsupported entry: {}",
+                        entry_path.display()
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn open_backup_file(
+    source: &std::os::fd::OwnedFd,
+    name: &std::ffi::CStr,
+    entry_path: &std::path::Path,
+) -> std::io::Result<std::fs::File> {
+    use rustix::fs::{FileType, Mode, OFlags};
+
+    // NONBLOCK prevents a regular-file-to-FIFO swap from hanging before fstat.
+    let child = rustix::fs::openat(
+        source,
+        name,
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(std::io::Error::from)?;
+    let opened = rustix::fs::fstat(&child).map_err(std::io::Error::from)?;
+    if FileType::from_raw_mode(opened.st_mode) != FileType::RegularFile {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "backup entry changed while opening: {}",
+                entry_path.display()
+            ),
+        ));
+    }
+
+    Ok(std::fs::File::from(child))
+}
+
+#[cfg(not(unix))]
 fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
     let source_meta = std::fs::symlink_metadata(src)?;
     if source_meta.file_type().is_symlink() || !source_meta.is_dir() {
@@ -363,6 +476,74 @@ mod tests {
             std::fs::read(db_path.join("CURRENT")).unwrap(),
             b"live database"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn backup_copy_rejects_nested_directory_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("backup");
+        let outside = root.path().join("outside");
+        let destination = root.path().join("staged");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("MANIFEST-1"), b"outside data").unwrap();
+        symlink(&outside, source.join("nested")).unwrap();
+
+        let error = copy_dir_all(&source, &destination).unwrap_err();
+
+        assert!(error.to_string().contains("symbolic link"));
+        assert!(!destination.join("nested/MANIFEST-1").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn backup_copy_stays_anchored_after_source_path_replacement() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("backup");
+        let moved_source = root.path().join("moved-backup");
+        let destination = root.path().join("staged");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("ORIGINAL"), b"original data").unwrap();
+        let source_handle = open_backup_directory(&source).unwrap();
+
+        std::fs::rename(&source, &moved_source).unwrap();
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("REPLACEMENT"), b"replacement data").unwrap();
+
+        copy_dir_from_handle(source_handle, &source, &destination).unwrap();
+
+        assert_eq!(
+            std::fs::read(destination.join("ORIGINAL")).unwrap(),
+            b"original data"
+        );
+        assert!(!destination.join("REPLACEMENT").exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn backup_file_open_rejects_fifo_without_waiting_for_writer() {
+        use rustix::fs::Mode;
+        use std::ffi::CString;
+
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("backup");
+        std::fs::create_dir(&source).unwrap();
+        let source_handle = open_backup_directory(&source).unwrap();
+        let name = CString::new("swapped-entry").unwrap();
+        rustix::fs::mkfifoat(&source_handle, name.as_c_str(), Mode::RUSR | Mode::WUSR).unwrap();
+
+        let error = open_backup_file(
+            &source_handle,
+            name.as_c_str(),
+            &source.join("swapped-entry"),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("changed while opening"));
     }
 
     #[test]

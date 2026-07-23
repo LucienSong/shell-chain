@@ -2,7 +2,7 @@
 
 Local single-source-of-truth for AI agents working inside this repository.
 This file is fully self-contained; it does not reference any file outside
-this submodule.
+this repository.
 
 ## What this repo is
 
@@ -113,6 +113,10 @@ A change is mergeable when:
   crate or module name (e.g. `crypto`, `consensus`, `rpc`, `ops/faucet`).
 - Branches: `feat/<feature-id>`, `fix/<issue-id>`, `docs/<topic>`,
   `chore/<topic>`, `release/v<version>`.
+- **Review policy**: PRs authored by the GitHub user `LucienSong` do not
+  require independent maintainer approval. They may merge after all required
+  quality gates pass and there are no requested changes or unresolved review
+  threads. PRs from every other author require maintainer review before merge.
 - Commit messages and code comments are **English**. PR/Issue
   descriptions may be Chinese.
 - AI-authored commits include a `Co-authored-by: Copilot

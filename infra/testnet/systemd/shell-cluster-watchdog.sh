@@ -49,6 +49,7 @@ reset_failures() {
 ready_count=0
 syncing_count=0
 reachable_count=0
+ready=()
 
 for endpoint in "${endpoints[@]}"; do
   health="$(curl --fail --silent --show-error --max-time 5 "${endpoint%/}/health" 2>/dev/null || true)"
@@ -57,13 +58,16 @@ for endpoint in "${endpoints[@]}"; do
   fi
   if [[ "$health" == *'"production_ready":true'* ]]; then
     ((ready_count += 1))
+    ready+=(1)
+  else
+    ready+=(0)
   fi
   if [[ "$health" == *'"syncing":true'* ]]; then
     ((syncing_count += 1))
   fi
 done
 
-if (( ready_count > 0 )); then
+if (( ready_count == ${#endpoints[@]} )); then
   reset_failures
   exit 0
 fi
@@ -87,8 +91,22 @@ if (( failures < SHELL_WATCHDOG_FAILURE_THRESHOLD )); then
   exit 0
 fi
 
-index="$(read_state "$next_file" 0)"
-index=$((index % ${#services[@]}))
+start_index="$(read_state "$next_file" 0)"
+start_index=$((start_index % ${#services[@]}))
+index=-1
+for ((offset = 0; offset < ${#services[@]}; offset += 1)); do
+  candidate=$(((start_index + offset) % ${#services[@]}))
+  if (( ready[candidate] == 0 )); then
+    index="$candidate"
+    break
+  fi
+done
+
+if (( index < 0 )); then
+  reset_failures
+  exit 0
+fi
+
 service="${services[$index]}"
 
 if systemctl is-active --quiet "$service"; then
