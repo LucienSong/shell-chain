@@ -688,6 +688,11 @@ impl<S: KvStore + 'static> Node<S> {
         let witness_store = Arc::new(WitnessStore::new(store.clone()));
         let witness_pruner = WitnessPruner::new(config.pruning.witness_retention);
         let body_pruner = BodyPruner::new(config.pruning.body_retention);
+        let peer_capability_limit = if config.network.max_peers == 0 {
+            crate::historical_sync::MAX_PEER_CAPABILITY_RECORDS
+        } else {
+            config.network.max_peers
+        };
         let stark_aggregation = config.enable_stark_aggregation;
         let metrics = Arc::new(Metrics::new().expect("failed to register Prometheus metrics"));
         let amendment_store = ProofAmendmentStore::new(store.clone());
@@ -763,7 +768,9 @@ impl<S: KvStore + 'static> Node<S> {
                 snapshots: BTreeMap::new(),
             }),
             shutdown_tx,
-            peer_caps: crate::historical_sync::PeerCapabilityTracker::new(),
+            peer_caps: crate::historical_sync::PeerCapabilityTracker::with_max_records(
+                peer_capability_limit,
+            ),
             pending_grace_deletes: parking_lot::Mutex::new(HashMap::new()),
             proof_window_manager: parking_lot::Mutex::new(ProofWindowManager::new(
                 WindowConfig::default(),
