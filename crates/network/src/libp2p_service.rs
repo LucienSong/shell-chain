@@ -1489,10 +1489,7 @@ impl NetworkService for Libp2pNetwork {
     async fn broadcast(&self, msg: NetworkMessage) -> Result<(), NetworkError> {
         let topic = topic_kind_for_message(&msg);
 
-        let data =
-            serde_json::to_vec(&msg).map_err(|e| NetworkError::Serialization(e.to_string()))?;
-        crate::message::validate_message_size(&data, self.max_msg_size)?;
-        crate::message::validate_message_size(&data, msg.max_serialized_size())?;
+        let data = crate::message::serialize_checked(&msg, self.max_msg_size)?;
 
         self.cmd_tx
             .send(SwarmCommand::Publish { topic, data })
@@ -1512,10 +1509,7 @@ impl NetworkService for Libp2pNetwork {
             .0
             .parse::<Libp2pPeerId>()
             .map_err(|error| NetworkError::Transport(format!("invalid peer id: {error}")))?;
-        let data =
-            serde_json::to_vec(&msg).map_err(|e| NetworkError::Serialization(e.to_string()))?;
-        crate::message::validate_message_size(&data, self.max_msg_size)?;
-        crate::message::validate_message_size(&data, msg.max_serialized_size())?;
+        let data = crate::message::serialize_checked(&msg, self.max_msg_size)?;
 
         self.cmd_tx
             .send(SwarmCommand::SendToPeer { peer, topic, data })
@@ -1614,6 +1608,42 @@ mod tests {
             }
             _ => panic!("send_to_peer must not fall back to gossip broadcast"),
         }
+    }
+
+    #[tokio::test]
+    async fn send_to_peer_rejects_invalid_sync_request_before_queueing() {
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(1);
+        let (_event_tx, event_rx) = mpsc::channel(1);
+        let network = Libp2pNetwork {
+            cmd_tx,
+            event_rx,
+            peer_count: Arc::new(AtomicUsize::new(0)),
+            bandwidth: Arc::new(BandwidthTracker::new(0, 0)),
+            max_msg_size: crate::message::MAX_MESSAGE_SIZE,
+        };
+        let target = Libp2pPeerId::random();
+
+        let error = network
+            .send_to_peer(
+                &PeerId(target.to_string()),
+                NetworkMessage::BodyRequest {
+                    start_number: 1,
+                    count: 0,
+                    nonce: 1,
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            NetworkError::Serialization(message)
+                if message.contains("request count must be between")
+        ));
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
     }
 
     #[test]
@@ -1872,6 +1902,37 @@ mod tests {
             other => panic!("unexpected error: {other:?}"),
         }
 
+        network.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn libp2p_broadcast_rejects_invalid_sync_request() {
+        let config = NetworkConfig {
+            listen_addr: "127.0.0.1:0".parse().unwrap(),
+            enable_mdns: false,
+            enable_kademlia: false,
+            enable_peer_scoring: false,
+            enable_relay: false,
+            enable_dcutr: false,
+            enable_autonat: false,
+            ..Default::default()
+        };
+        let network = Libp2pNetwork::new(&config).await.unwrap();
+
+        let error = network
+            .broadcast(NetworkMessage::BodyRequest {
+                start_number: 1,
+                count: 0,
+                nonce: 1,
+            })
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            NetworkError::Serialization(message)
+                if message.contains("request count must be between")
+        ));
         network.shutdown().await.unwrap();
     }
 

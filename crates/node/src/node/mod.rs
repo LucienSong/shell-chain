@@ -31,7 +31,8 @@ pub(crate) use shell_core::{
     WitnessBundle, MAX_BLOB_GAS_PER_BLOCK,
 };
 pub(crate) use shell_crypto::{
-    AlgorithmRegistry, BatchVerifier, MultiVerifier, PreVerified, Signer, Verifier, VerifyItem,
+    infer_signature_type_from_address, AlgorithmRegistry, BatchVerifier, MultiVerifier,
+    PQSignature, PreVerified, Signer, Verifier, VerifyItem, ALLOWED_ALGORITHMS,
 };
 pub(crate) use shell_mempool::TxPool;
 pub(crate) use shell_network::{NetworkMessage, NetworkService};
@@ -52,7 +53,7 @@ pub(crate) use crate::error::NodeError;
 pub(crate) use crate::metrics::Metrics;
 pub(crate) use crate::prover_service::{ProverConfig, ProverService, ProverServiceHandle};
 pub(crate) use crate::pruning::{
-    prune_state_trie, retention_cutoff, StateRootTracker, StorageProfile,
+    prune_state_trie, retention_cutoff, state_trie_pruned_below, StateRootTracker, StorageProfile,
 };
 pub(crate) use chain_state_machine::{BlockImportTransition, ChainStateMachine};
 pub(crate) use challenge_lifecycle::{
@@ -149,10 +150,14 @@ fn canonical_mapping_prune_boundary(
     finalized_number: u64,
     body_pruned_below: u64,
     witness_pruned_below: u64,
+    state_trie_pruned_below: Option<u64>,
 ) -> u64 {
-    finalized_number
+    let dependent_boundary = finalized_number
         .min(body_pruned_below)
-        .min(witness_pruned_below)
+        .min(witness_pruned_below);
+    state_trie_pruned_below.map_or(dependent_boundary, |trie_boundary| {
+        dependent_boundary.min(trie_boundary)
+    })
 }
 
 fn state_trie_prune_boundary(finalized_number: u64, keep_recent: u64) -> Option<u64> {
@@ -1407,11 +1412,27 @@ impl<S: KvStore + 'static> Node<S> {
             // Canonical mappings are required to resume body and witness pruning.
             // A delayed STARK settlement can hold the witness cursor behind the
             // configured retention window, so never let mapping cleanup overtake
-            // either dependent pruner.
+            // any dependent pruner.
+            let state_trie_boundary = if matches!(profile, StorageProfile::Light) && keep_recent > 0
+            {
+                match state_trie_pruned_below(self.store.as_ref()) {
+                    Ok(boundary) => Some(boundary),
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "state pruner: failed to read state-trie pruning cursor"
+                        );
+                        Some(0)
+                    }
+                }
+            } else {
+                None
+            };
             let canonical_prune_boundary = canonical_mapping_prune_boundary(
                 finalized_number,
                 self.body_pruner.read().pruned_below(),
                 self.witness_pruner.read().pruned_below(),
+                state_trie_boundary,
             );
             let mut pruner = self.state_pruner.write();
             let should_prune = finalized_number > 0 && pruner.should_prune(block_number);
@@ -1512,7 +1533,9 @@ mod tests {
     use super::*;
     use crate::pruning::PruningConfig;
     use shell_consensus::{PoaConfig, PoaEngine, WPoaConfig, WPoaEngine};
-    use shell_core::Transaction;
+    use shell_core::{
+        AaBundle, InnerCall, PubkeyMode, SessionAuth, Transaction, AA_BUNDLE_TX_TYPE,
+    };
     use shell_crypto::{DilithiumSigner, MlDsaSigner, Signer};
     use shell_mempool::MempoolConfig;
     use shell_primitives::U256;
@@ -6008,9 +6031,14 @@ mod tests {
 
     #[test]
     fn canonical_mapping_pruning_waits_for_dependent_pruners() {
-        assert_eq!(canonical_mapping_prune_boundary(80, 80, 0), 0);
-        assert_eq!(canonical_mapping_prune_boundary(80, 40, 60), 40);
-        assert_eq!(canonical_mapping_prune_boundary(80, 90, 100), 80);
+        assert_eq!(canonical_mapping_prune_boundary(80, 80, 0, None), 0);
+        assert_eq!(canonical_mapping_prune_boundary(80, 40, 60, None), 40);
+        assert_eq!(canonical_mapping_prune_boundary(80, 90, 100, None), 80);
+        assert_eq!(
+            canonical_mapping_prune_boundary(8_000, 8_000, 8_000, Some(1_024)),
+            1_024,
+            "canonical mappings must not overtake the bounded state-trie cursor"
+        );
 
         let store = Arc::new(MemoryDb::new());
         let chain_store = ChainStore::new(Arc::clone(&store));
@@ -6021,7 +6049,7 @@ mod tests {
             chain_store.set_canonical(number, &root).unwrap();
         }
 
-        pruner.mark_prunable(canonical_mapping_prune_boundary(80, 80, 0));
+        pruner.mark_prunable(canonical_mapping_prune_boundary(80, 80, 0, None));
         assert_eq!(pruner.prune(store.as_ref()).unwrap().pruned_count, 0);
         assert!(chain_store.get_block_hash_by_number(0).unwrap().is_some());
     }
@@ -6154,7 +6182,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_mapping_pruning_uses_current_dependency_cursors() {
+    fn canonical_mapping_pruning_waits_for_state_trie_cursor() {
         let (node, signer) = setup_node_with_retention(2, 2);
         *node.state_pruner.write() = StatePruner::new(32);
         node.state_pruner.write().set_prune_interval(1);
@@ -6187,16 +6215,13 @@ mod tests {
 
         assert_eq!(node.body_pruner.read().pruned_below(), 34);
         assert_eq!(node.witness_pruner.read().pruned_below(), 34);
-        assert!(node
-            .chain_store
-            .get_block_hash_by_number(0)
-            .unwrap()
-            .is_some());
-        assert!(node
-            .chain_store
-            .get_block_hash_by_number(1)
-            .unwrap()
-            .is_none());
+        assert!(
+            node.chain_store
+                .get_block_hash_by_number(1)
+                .unwrap()
+                .is_some(),
+            "state-trie pruning has not advanced, so its canonical mappings remain required"
+        );
     }
 
     #[test]
@@ -6323,7 +6348,7 @@ mod tests {
             .chain_store
             .get_block_hash_by_number(1)
             .unwrap()
-            .is_none());
+            .is_some());
     }
 
     #[test]
@@ -7262,6 +7287,178 @@ mod tests {
             .unwrap()
             .is_none());
         assert!(!node.fork_choice.read().contains(&blob_gas_hash));
+    }
+
+    #[test]
+    fn import_side_fork_with_invalid_transaction_signatures_is_rejected() {
+        let (node, proposer_signer) = setup_node();
+        store_genesis(&node);
+        let proposer = node.config.proposer_address.unwrap();
+        node.register_authority_pubkey(proposer, proposer_signer.public_key().to_vec());
+
+        let tx_signer = DilithiumSigner::generate();
+        let sender = Address::from_public_key(tx_signer.public_key(), tx_signer.sig_type().as_u8());
+        fund_account(&node, &sender, U256::from(100_000_000_000_000u64));
+        let tx = make_embedded_tx(&tx_signer, sender, tx_signer.public_key().to_vec(), 0, 1);
+        {
+            let mut world_state = node.world_state.write();
+            node.tx_pool
+                .insert(
+                    tx,
+                    &mut world_state,
+                    node.chain_store.as_ref(),
+                    &MultiVerifier,
+                )
+                .unwrap();
+        }
+
+        let canonical = node.produce_block(&proposer_signer, 100).unwrap();
+        for (label, mutation) in [("empty", 0), ("corrupt", 1), ("sender", 2)] {
+            let mut side_fork = canonical.clone();
+            side_fork.header.extra_data = Bytes::copy_from_slice(label.as_bytes());
+            side_fork.header.witness_root = None;
+            let transaction = side_fork
+                .transactions
+                .first_mut()
+                .expect("block should include a transaction");
+            match mutation {
+                0 => transaction.signature.data.clear(),
+                1 => transaction.signature.data[0] ^= 1,
+                2 => transaction.from = Address::from([0x44; 20]),
+                _ => unreachable!(),
+            }
+            side_fork.proposer_seal = Some(
+                proposer_signer
+                    .sign(side_fork.header.hash().as_bytes())
+                    .expect("sign side fork"),
+            );
+            let side_fork_hash = side_fork.hash();
+
+            let error = node.import_block(side_fork, &MultiVerifier).unwrap_err();
+
+            let message = error.to_string();
+            assert!(
+                message.contains("empty signature")
+                    || message.contains("batch sig verification failed")
+                    || message.contains("does not match resolved pubkey address"),
+                "unexpected rejection for {label} signature: {message}"
+            );
+            assert!(node
+                .chain_store
+                .get_block_by_hash(&side_fork_hash)
+                .unwrap()
+                .is_none());
+            assert!(!node.fork_choice.read().contains(&side_fork_hash));
+        }
+    }
+
+    #[test]
+    fn import_side_fork_accepts_valid_session_key_signature() {
+        let (node, proposer_signer) = setup_node();
+        store_genesis(&node);
+        let proposer = node.config.proposer_address.unwrap();
+        node.register_authority_pubkey(proposer, proposer_signer.public_key().to_vec());
+
+        let root = MlDsaSigner::generate();
+        let session = DilithiumSigner::generate();
+        let sender = Address::from_public_key(root.public_key(), root.sig_type().as_u8());
+        fund_account(&node, &sender, U256::from(100_000_000_000_000u64));
+
+        let recipient = Address::from([0x45; 20]);
+        let transaction = Transaction {
+            chain_id: 1337,
+            nonce: 0,
+            to: Some(recipient),
+            value: U256::ZERO,
+            data: Bytes::new(),
+            gas_limit: 100_000,
+            max_fee_per_gas: 1_000_000_000,
+            max_priority_fee_per_gas: 100_000_000,
+            access_list: None,
+            tx_type: AA_BUNDLE_TX_TYPE,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
+        };
+        let inner_call = InnerCall {
+            to: Some(recipient),
+            value: U256::ZERO,
+            data: Bytes::new(),
+            gas_limit: 50_000,
+        };
+        let mut session_auth = SessionAuth {
+            session_pubkey: Bytes::from(session.public_key().to_vec()),
+            session_algo: session.sig_type().as_u8(),
+            target: Some(recipient),
+            value_cap: U256::ZERO,
+            expiry_block: 10,
+            root_signature: Bytes::new(),
+            session_signature: Bytes::from(vec![1]),
+        };
+        session_auth.root_signature = Bytes::from(
+            root.sign(session_auth.auth_hash(transaction.chain_id).as_bytes())
+                .unwrap()
+                .data,
+        );
+        let placeholder = session.sign(b"placeholder").unwrap();
+        let unsigned = SignedTransaction::with_aa_bundle(
+            sender,
+            transaction.clone(),
+            placeholder,
+            PubkeyMode::Embedded(root.public_key().to_vec()),
+            AaBundle {
+                inner_calls: vec![inner_call.clone()],
+                session_auth: Some(session_auth.clone()),
+                ..AaBundle::default()
+            },
+        )
+        .unwrap();
+        let session_signature = session
+            .sign(unsigned.sender_signing_hash().as_bytes())
+            .unwrap();
+        session_auth.session_signature = Bytes::from(session_signature.data.clone());
+        let signed = SignedTransaction::with_aa_bundle(
+            sender,
+            transaction,
+            session_signature,
+            PubkeyMode::Embedded(root.public_key().to_vec()),
+            AaBundle {
+                inner_calls: vec![inner_call],
+                session_auth: Some(session_auth),
+                ..AaBundle::default()
+            },
+        )
+        .unwrap();
+        {
+            let mut world_state = node.world_state.write();
+            node.tx_pool
+                .insert(
+                    signed,
+                    &mut world_state,
+                    node.chain_store.as_ref(),
+                    &MultiVerifier,
+                )
+                .unwrap();
+        }
+
+        let canonical = node.produce_block(&proposer_signer, 100).unwrap();
+        let mut side_fork = canonical.clone();
+        side_fork.header.extra_data = Bytes::from_static(b"session-side-fork");
+        side_fork.header.witness_root = None;
+        side_fork.proposer_seal = Some(
+            proposer_signer
+                .sign(side_fork.header.hash().as_bytes())
+                .unwrap(),
+        );
+        let side_fork_hash = side_fork.hash();
+
+        node.import_block(side_fork, &MultiVerifier).unwrap();
+
+        assert!(node
+            .chain_store
+            .get_block_by_hash(&side_fork_hash)
+            .unwrap()
+            .is_some());
+        assert!(node.fork_choice.read().contains(&side_fork_hash));
     }
 
     #[test]

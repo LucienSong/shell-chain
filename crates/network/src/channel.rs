@@ -175,11 +175,7 @@ impl ChannelNetwork {
 #[async_trait]
 impl NetworkService for ChannelNetwork {
     async fn broadcast(&self, msg: NetworkMessage) -> Result<(), NetworkError> {
-        let data =
-            serde_json::to_vec(&msg).map_err(|e| NetworkError::Serialization(e.to_string()))?;
-        // F-069: validate outbound message size.
-        crate::message::validate_message_size(&data, self.max_msg_size)?;
-        crate::message::validate_message_size(&data, msg.max_serialized_size())?;
+        let data = crate::message::serialize_checked(&msg, self.max_msg_size)?;
         self.bus_tx
             .send((self.peer_id.clone(), data))
             .map_err(|_| NetworkError::ChannelClosed)?;
@@ -344,6 +340,27 @@ mod tests {
             NetworkError::MessageTooLarge { limit, .. } => assert_eq!(limit, 1),
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn broadcast_rejects_invalid_sync_request() {
+        let bus = NetworkBus::new(64);
+        let node = bus.join(&NetworkConfig::default());
+
+        let error = node
+            .broadcast(NetworkMessage::BlockRequest {
+                start_number: 1,
+                count: 0,
+                nonce: 1,
+            })
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            NetworkError::Serialization(message)
+                if message.contains("request count must be between")
+        ));
     }
 
     #[tokio::test]
