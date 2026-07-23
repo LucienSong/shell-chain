@@ -99,6 +99,7 @@ ureq = { version = "2", features = ["json"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 rpassword = "7"
+rustix = { version = "1", features = ["fs"] }
 libc = "0.2"
 
 # --- metrics ---

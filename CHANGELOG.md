@@ -6,6 +6,9 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Anchor Unix backup restore traversal to no-follow directory handles and
+  nonblocking, no-follow file handles so source replacement cannot redirect or
+  stall reads.
 - Open sensitive CLI input files with no-follow semantics on Unix, closing the
   final-component symlink race before validating the opened file identity.
 - Remap local build paths out of precompiled release binaries, omit
