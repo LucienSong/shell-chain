@@ -104,7 +104,7 @@ impl LogFilter {
 
 /// Raw JSON representation received from the client.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct RawLogFilter {
     pub from_block: Option<String>,
     pub to_block: Option<String>,
@@ -268,6 +268,14 @@ mod tests {
         };
         let log = make_log(Address::from([0x01; 20]), vec![], b"");
         assert!(filter.matches_log(&log));
+    }
+
+    #[test]
+    fn raw_filter_rejects_unknown_criteria() {
+        let err = serde_json::from_str::<RawLogFilter>(r#"{"fromBlock":"0x1","blockHash":"0x00"}"#)
+            .unwrap_err();
+
+        assert!(err.to_string().contains("unknown field `blockHash`"));
     }
 
     // ── Address filtering ───────────────────────────────────────
