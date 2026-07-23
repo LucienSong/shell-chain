@@ -141,6 +141,29 @@ impl<S: KvStore + 'static> Node<S> {
         Ok(())
     }
 
+    fn verify_import_logs_bloom(
+        &self,
+        block: &Block,
+        receipts: &[TransactionReceipt],
+    ) -> Result<(), NodeError> {
+        let mut expected = [0u8; shell_pqvm::bloom::BLOOM_SIZE];
+        for receipt in receipts {
+            for (combined, byte) in expected.iter_mut().zip(receipt.logs_bloom.as_ref().iter()) {
+                *combined |= *byte;
+            }
+        }
+
+        let actual = block.header.logs_bloom.as_ref();
+        let legacy_empty = actual.is_empty() && expected.iter().all(|byte| *byte == 0);
+        if !legacy_empty && actual != expected {
+            return Err(NodeError::Startup(format!(
+                "block {} logs_bloom mismatch",
+                block.number()
+            )));
+        }
+        Ok(())
+    }
+
     fn verify_side_fork_transaction_signatures(&self, block: &Block) -> Result<(), NodeError> {
         let mut block_pubkeys: HashMap<Address, Vec<u8>> = HashMap::new();
         let mut signing_pubkeys = Vec::with_capacity(block.transactions.len());
@@ -844,6 +867,7 @@ impl<S: KvStore + 'static> Node<S> {
             ws.state_root()
                 .map_err(|e| NodeError::Startup(format!("state_root for empty block: {e}")))?
         };
+        self.verify_import_logs_bloom(&block, &receipts)?;
         if imported_state_root != block.header.state_root {
             return Err(NodeError::Startup(format!(
                 "block {} state root mismatch: expected {:?}, got {:?}",
