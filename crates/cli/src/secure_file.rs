@@ -7,6 +7,14 @@ use std::os::unix::fs::OpenOptionsExt;
 
 const MAX_SENSITIVE_FILE_SIZE: u64 = 1024 * 1024;
 
+fn open_sensitive_file(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW);
+    options.open(path)
+}
+
 pub(crate) fn read_sensitive_file(path: &Path) -> io::Result<String> {
     let path_meta = std::fs::symlink_metadata(path)?;
     if path_meta.file_type().is_symlink() || !path_meta.is_file() {
@@ -26,7 +34,7 @@ pub(crate) fn read_sensitive_file(path: &Path) -> io::Result<String> {
         ));
     }
 
-    let file = File::open(path)?;
+    let file = open_sensitive_file(path)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -125,6 +133,22 @@ mod tests {
         let error = read_sensitive_file(&linked).unwrap_err();
 
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_sensitive_file_does_not_follow_symbolic_links() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.json");
+        let linked = dir.path().join("linked.json");
+        std::fs::write(&target, b"secret").unwrap();
+        symlink(&target, &linked).unwrap();
+
+        let error = open_sensitive_file(&linked).unwrap_err();
+
+        assert_eq!(error.raw_os_error(), Some(libc::ELOOP));
     }
 
     #[test]

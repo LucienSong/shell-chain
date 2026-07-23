@@ -192,10 +192,14 @@ impl FilterRegistry {
 
     /// Spawn a periodic cleanup task. Call this once at startup.
     pub fn start_cleanup(registry: std::sync::Arc<Self>) {
+        let registry = std::sync::Arc::downgrade(&registry);
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
             loop {
                 interval.tick().await;
+                let Some(registry) = registry.upgrade() else {
+                    break;
+                };
                 let before = registry.len();
                 registry.cleanup_expired();
                 let after = registry.len();
@@ -206,6 +210,7 @@ impl FilterRegistry {
                         "cleaned up expired filters"
                     );
                 }
+                drop(registry);
             }
         });
     }
@@ -436,6 +441,18 @@ mod tests {
         let _id = reg.new_filter(FilterKind::Block, 0).unwrap();
         reg.cleanup_expired();
         assert_eq!(reg.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn cleanup_task_does_not_retain_dropped_registry() {
+        let reg = std::sync::Arc::new(FilterRegistry::new());
+        let weak = std::sync::Arc::downgrade(&reg);
+        FilterRegistry::start_cleanup(std::sync::Arc::clone(&reg));
+
+        drop(reg);
+        tokio::task::yield_now().await;
+
+        assert!(weak.upgrade().is_none());
     }
 
     #[test]
