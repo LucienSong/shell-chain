@@ -408,11 +408,13 @@ impl<S: KvStore> ChainStore<S> {
     /// transaction/address indexes that are reserved for canonical lookup.
     pub fn put_side_fork_block(&self, block: &Block) -> Result<(), StorageError> {
         let block_hash = block.hash();
-        self.put_block_parts(block, false)?;
-        self.store.put(
-            &Self::side_fork_key(block.number(), &block_hash),
-            block_hash.as_bytes(),
-        )
+        let mut batch = WriteBatch::new();
+        Self::append_block_parts(&mut batch, block, false);
+        batch.put(
+            Self::side_fork_key(block.number(), &block_hash),
+            block_hash.as_bytes().to_vec(),
+        );
+        self.store.write_batch(batch)
     }
 
     /// Return side-fork block hashes recorded at a given block number.
@@ -2503,6 +2505,37 @@ mod tests {
         assert_eq!(cs.get_block_by_hash(&hash).unwrap().unwrap().hash(), hash);
         assert!(cs.get_block_by_number(7).unwrap().is_none());
         assert!(cs.get_head_hash().unwrap().is_none());
+    }
+
+    #[test]
+    fn side_fork_block_is_written_in_one_batch() {
+        let store = Arc::new(FailingBatchStore::new());
+        let cs = ChainStore::new(Arc::clone(&store));
+        let block = empty_block(7);
+        let hash = block.hash();
+        store.fail_put_after(1);
+
+        cs.put_side_fork_block(&block).unwrap();
+
+        assert_eq!(store.batch_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(store.put_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(cs.get_side_fork_hashes(7).unwrap(), vec![hash]);
+        assert_eq!(cs.get_block_by_hash(&hash).unwrap().unwrap().hash(), hash);
+    }
+
+    #[test]
+    fn side_fork_block_batch_failure_leaves_no_partial_artifacts() {
+        let store = Arc::new(FailingBatchStore::new());
+        let cs = ChainStore::new(Arc::clone(&store));
+        let block = empty_block(7);
+        let hash = block.hash();
+        store.fail_next_batch();
+
+        let err = cs.put_side_fork_block(&block).unwrap_err();
+
+        assert!(err.to_string().contains("injected batch failure"));
+        assert!(cs.get_side_fork_hashes(7).unwrap().is_empty());
+        assert!(cs.get_block_by_hash(&hash).unwrap().is_none());
     }
 
     #[test]
