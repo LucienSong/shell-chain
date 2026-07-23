@@ -1,6 +1,6 @@
 //! Core transaction pool implementation.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use parking_lot::RwLock;
@@ -258,11 +258,13 @@ impl TxPool {
             }
         }
 
-        let evicted_hashes = match evict_hash {
+        let evicted_hashes: HashSet<ShellHash> = match evict_hash {
             Some(hash) if evict_descendants => Self::entry_and_descendant_hashes(&inner, &hash),
             Some(hash) => vec![hash],
             None => Vec::new(),
-        };
+        }
+        .into_iter()
+        .collect();
         let evicted_bytes = evicted_hashes
             .iter()
             .filter_map(|hash| inner.by_hash.get(hash))
@@ -818,7 +820,7 @@ impl TxPool {
         inner: &PoolInner,
         tx: &SignedTransaction,
         world_state: &WorldState<S>,
-        excluded_hashes: &[ShellHash],
+        excluded_hashes: &HashSet<ShellHash>,
     ) -> Result<(), MempoolError> {
         for account in Self::reservation_accounts(tx) {
             let incoming = Self::reserved_cost_for(tx, &account);
