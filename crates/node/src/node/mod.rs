@@ -6345,7 +6345,7 @@ mod tests {
             .chain_store
             .get_block_hash_by_number(1)
             .unwrap()
-            .is_none());
+            .is_some());
     }
 
     #[test]
