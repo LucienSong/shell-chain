@@ -251,6 +251,7 @@ impl Libp2pNetwork {
         let (cmd_tx, cmd_rx) = mpsc::channel(256);
         let (event_tx, event_rx) = mpsc::channel(256);
         let peer_count = Arc::new(AtomicUsize::new(0));
+        let max_msg_size = config.effective_max_message_size();
         let bandwidth = Arc::new(BandwidthTracker::new(
             config.max_inbound_bandwidth,
             config.max_outbound_bandwidth,
@@ -298,7 +299,7 @@ impl Libp2pNetwork {
             proofs_topic,
             bandwidth: Arc::clone(&bandwidth),
             boot_nodes,
-            max_msg_size: config.max_message_size,
+            max_msg_size,
             peer_security: PeerSecurityConfig::from(config),
         };
 
@@ -309,7 +310,7 @@ impl Libp2pNetwork {
             event_rx,
             peer_count,
             bandwidth,
-            max_msg_size: config.max_message_size,
+            max_msg_size,
         })
     }
 
@@ -395,7 +396,7 @@ fn build_swarm_with_identity(
     let txs_topic_name = config.txs_topic.clone();
     let attestation_topic_name = config.attestation_topic.clone();
     let proofs_topic_name = config.proofs_topic.clone();
-    let max_msg_size = config.max_message_size;
+    let max_msg_size = config.effective_max_message_size();
 
     // Build libp2p connection limits from config.
     let mut conn_limits = connection_limits::ConnectionLimits::default();
