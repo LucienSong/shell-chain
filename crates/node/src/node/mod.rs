@@ -7062,6 +7062,87 @@ mod tests {
     }
 
     #[test]
+    fn handle_attestation_does_not_finalize_noncanonical_block() {
+        let (node, signer) = setup_node();
+        store_genesis(&node);
+        let authority = node.config.proposer_address.unwrap();
+        node.register_authority_pubkey(authority, signer.public_key().to_vec());
+
+        let canonical_block = node.produce_block(&signer, 100).unwrap();
+        let canonical_hash = canonical_block.hash();
+        let block_number = canonical_block.header.number;
+
+        let mut side_block = canonical_block.clone();
+        side_block.header.timestamp += 1;
+        side_block.proposer_seal = None;
+        side_block.proposer_seal = Some(
+            signer
+                .sign(side_block.header.hash().as_bytes())
+                .expect("sign side block"),
+        );
+        let side_hash = side_block.hash();
+        assert_ne!(side_hash, canonical_hash);
+        node.chain_store.put_side_fork_block(&side_block).unwrap();
+
+        let attestation = node
+            .create_attestation(side_hash, block_number, &signer)
+            .unwrap();
+        node.handle_attestation(attestation, &MultiVerifier)
+            .unwrap();
+
+        let finality = node.finality.read();
+        assert_eq!(finality.last_finalized_number(), 0);
+        assert_eq!(finality.last_finalized_hash(), &ShellHash::ZERO);
+        assert_eq!(finality.attestation_count(&side_hash), 1);
+        drop(finality);
+        assert_eq!(node.chain_store.get_finalized_number().unwrap(), None);
+        assert_eq!(
+            node.chain_store
+                .get_block_hash_by_number(block_number)
+                .unwrap(),
+            Some(canonical_hash)
+        );
+    }
+
+    #[test]
+    fn handle_attestation_persists_before_advancing_finality_and_retries_duplicate() {
+        let (node, signer, db) = setup_failing_batch_node();
+        store_genesis(&node);
+        let authority = node.config.proposer_address.unwrap();
+        node.register_authority_pubkey(authority, signer.public_key().to_vec());
+
+        let block = node.produce_block(&signer, 100).unwrap();
+        let block_hash = block.hash();
+        let block_number = block.header.number;
+        let attestation = node
+            .create_attestation(block_hash, block_number, &signer)
+            .unwrap();
+
+        db.fail_next_put();
+        let error = node
+            .handle_attestation(attestation.clone(), &MultiVerifier)
+            .unwrap_err();
+        assert!(error.to_string().contains("injected put failure"));
+        assert_eq!(node.finality.read().last_finalized_number(), 0);
+        assert_eq!(node.finality.read().last_finalized_hash(), &ShellHash::ZERO);
+        assert_eq!(
+            node.finality.read().attestation_count(&block_hash),
+            1,
+            "the pending attestation must remain available for retry"
+        );
+        assert_eq!(node.chain_store.get_finalized_number().unwrap(), None);
+
+        node.handle_attestation(attestation, &MultiVerifier)
+            .unwrap();
+        assert_eq!(node.finality.read().last_finalized_number(), block_number);
+        assert_eq!(node.finality.read().last_finalized_hash(), &block_hash);
+        assert_eq!(
+            node.chain_store.get_finalized_number().unwrap(),
+            Some(block_number)
+        );
+    }
+
+    #[test]
     fn handle_attestation_rejects_target_metadata_mismatch() {
         let (node, signer) = setup_node();
         store_genesis(&node);

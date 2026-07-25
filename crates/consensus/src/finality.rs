@@ -225,6 +225,25 @@ impl FinalityState {
         block_number: u64,
         total_weight: u64,
     ) -> bool {
+        if self.can_finalize_weighted(block_hash, block_number, total_weight) {
+            self.last_finalized_number = block_number;
+            self.last_finalized_hash = *block_hash;
+            // Prune attestations for blocks at or below the newly finalized block
+            self.prune_below(block_number);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Check whether a block currently has enough weight to advance finality
+    /// without mutating the finality state.
+    pub fn can_finalize_weighted(
+        &self,
+        block_hash: &ShellHash,
+        block_number: u64,
+        total_weight: u64,
+    ) -> bool {
         if self
             .attestation_store
             .get(block_hash)
@@ -235,17 +254,8 @@ impl FinalityState {
         }
         let attested_weight = self.attested_weight(block_hash);
 
-        if Self::has_weighted_quorum(attested_weight, total_weight)
+        Self::has_weighted_quorum(attested_weight, total_weight)
             && block_number > self.last_finalized_number
-        {
-            self.last_finalized_number = block_number;
-            self.last_finalized_hash = *block_hash;
-            // Prune attestations for blocks at or below the newly finalized block
-            self.prune_below(block_number);
-            true
-        } else {
-            false
-        }
     }
 
     /// Return true when attesting weight is strictly greater than 2/3 of total weight.
