@@ -1447,7 +1447,10 @@ impl<S: KvStore> ChainStore<S> {
         reader: R,
         expected_chain_id: u64,
         expected_genesis_hash: &ShellHash,
-    ) -> Result<crate::SnapshotMetadata, StorageError> {
+    ) -> Result<crate::SnapshotMetadata, StorageError>
+    where
+        S: 'static,
+    {
         let mut snap_reader = crate::SnapshotReader::new(reader)?;
         let metadata = snap_reader.metadata().clone();
 
@@ -1600,6 +1603,27 @@ impl<S: KvStore> ChainStore<S> {
         // Flush remaining
         if !batch.is_empty() {
             self.store.write_batch(batch)?;
+        }
+
+        if head_hash.is_some() && metadata.state_root != ShellHash::ZERO {
+            if self.store.get(metadata.state_root.as_bytes())?.is_none() {
+                return Err(StorageError::State(
+                    "snapshot head state root is unavailable or corrupt: root node is missing"
+                        .into(),
+                ));
+            }
+            let mut world_state = crate::WorldState::at_root(
+                Arc::clone(&self.store),
+                &metadata.state_root,
+            )
+            .map_err(|e| {
+                StorageError::State(format!("snapshot head state root could not be opened: {e}"))
+            })?;
+            world_state.validate().map_err(|e| {
+                StorageError::State(format!(
+                    "snapshot head state root is unavailable or corrupt: {e}"
+                ))
+            })?;
         }
 
         for key in [
@@ -3323,6 +3347,107 @@ mod tests {
         cs.import_snapshot(std::io::Cursor::new(&buf), 1337, &ShellHash::ZERO)
             .unwrap();
         assert_eq!(cs.get_head_hash().unwrap(), Some(block_hash));
+    }
+
+    #[test]
+    fn test_import_snapshot_rejects_missing_head_state_before_publish() {
+        let store = Arc::new(MemoryDb::new());
+        let cs = ChainStore::new(Arc::clone(&store));
+        let old_head = ShellHash::from([0xAA; 32]);
+        cs.set_head(&old_head).unwrap();
+
+        let mut block = empty_block(1);
+        block.header.state_root = ShellHash::from([0xBB; 32]);
+        let block_hash = block.hash();
+        let meta = crate::SnapshotMetadata::new(
+            1337,
+            block.number(),
+            block_hash,
+            block.header.state_root,
+            ShellHash::ZERO,
+        );
+        let mut buf = Vec::new();
+        {
+            let mut writer =
+                crate::SnapshotWriter::new(std::io::Cursor::new(&mut buf), meta).unwrap();
+            writer
+                .write_entry(prefix::HEAD_BLOCK, block_hash.as_bytes())
+                .unwrap();
+            writer
+                .write_entry(
+                    &ChainStore::<MemoryDb>::header_key(&block_hash),
+                    &encode_rlp(&block.header),
+                )
+                .unwrap();
+            writer
+                .write_entry(
+                    &ChainStore::<MemoryDb>::number_key(block.number()),
+                    block_hash.as_bytes(),
+                )
+                .unwrap();
+            writer.finalize().unwrap();
+        }
+
+        let error = cs
+            .import_snapshot(std::io::Cursor::new(buf), 1337, &ShellHash::ZERO)
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("snapshot head state root is unavailable or corrupt"));
+        assert_eq!(cs.get_head_hash().unwrap(), Some(old_head));
+    }
+
+    #[test]
+    fn test_import_snapshot_rejects_corrupt_head_state_before_publish() {
+        let store = Arc::new(MemoryDb::new());
+        let cs = ChainStore::new(Arc::clone(&store));
+        let old_head = ShellHash::from([0xAA; 32]);
+        cs.set_head(&old_head).unwrap();
+
+        let mut block = empty_block(1);
+        block.header.state_root = ShellHash::from([0xBB; 32]);
+        let block_hash = block.hash();
+        let meta = crate::SnapshotMetadata::new(
+            1337,
+            block.number(),
+            block_hash,
+            block.header.state_root,
+            ShellHash::ZERO,
+        );
+        let mut buf = Vec::new();
+        {
+            let mut writer =
+                crate::SnapshotWriter::new(std::io::Cursor::new(&mut buf), meta).unwrap();
+            writer
+                .write_entry(prefix::HEAD_BLOCK, block_hash.as_bytes())
+                .unwrap();
+            writer
+                .write_entry(
+                    &ChainStore::<MemoryDb>::header_key(&block_hash),
+                    &encode_rlp(&block.header),
+                )
+                .unwrap();
+            writer
+                .write_entry(
+                    &ChainStore::<MemoryDb>::number_key(block.number()),
+                    block_hash.as_bytes(),
+                )
+                .unwrap();
+            writer
+                .write_entry(block.header.state_root.as_bytes(), b"invalid trie node")
+                .unwrap();
+            writer.finalize().unwrap();
+        }
+
+        let error = cs
+            .import_snapshot(std::io::Cursor::new(buf), 1337, &ShellHash::ZERO)
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("snapshot head state root is unavailable or corrupt"));
+        assert_eq!(cs.get_head_hash().unwrap(), Some(old_head));
     }
 
     #[test]

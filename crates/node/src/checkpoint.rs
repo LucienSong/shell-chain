@@ -93,7 +93,7 @@ impl Drop for DownloadedSnapshot {
 ///
 /// The snapshot is downloaded to a temporary file inside `datadir`, validated,
 /// imported, and then cleaned up.
-pub async fn checkpoint_sync<S: KvStore>(
+pub async fn checkpoint_sync<S: KvStore + 'static>(
     url: &str,
     chain_store: &ChainStore<S>,
     datadir: &Path,

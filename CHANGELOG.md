@@ -6,6 +6,8 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Validate that an imported snapshot's non-empty head state root is present and
+  readable before publishing its chain progress metadata.
 - Finalize only canonical blocks and persist the finalized cursor before
   advancing volatile finality state, while retaining quorum attestations for
   retry after transient storage failures.
