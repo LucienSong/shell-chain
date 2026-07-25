@@ -6,7 +6,7 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 use tracing::warn;
 
-use shell_core::{calc_blob_gas_price, calc_excess_blob_gas, SignedTransaction};
+use shell_core::{calc_blob_gas_price, calc_excess_blob_gas, miner_tip, SignedTransaction};
 use shell_crypto::Verifier;
 use shell_pqvm::{
     compute_intrinsic_gas, validate_aa_bundle_structure, validate_aa_tx, AaValidationError,
@@ -502,7 +502,7 @@ impl TxPool {
     /// This avoids copying signatures and calldata during candidate selection;
     /// callers only need to clone transactions that are actually included.
     pub fn pending_for_block_shared(&self, limit: usize) -> Vec<Arc<SignedTransaction>> {
-        self.pending_for_block_matching_shared(limit, |_| true)
+        self.pending_for_block_matching_shared(limit, |_| true, |tx| tx.tx.max_priority_fee_per_gas)
     }
 
     /// Collect transactions that can pay the next block's base fee while
@@ -551,27 +551,42 @@ impl TxPool {
         base_fee_per_gas: u64,
         blob_base_fee: u64,
     ) -> Vec<Arc<SignedTransaction>> {
-        self.pending_for_block_matching_shared(limit, |tx| {
-            tx.tx.max_fee_per_gas >= base_fee_per_gas
-                && (tx.tx.tx_type != 3
-                    || tx.tx.max_fee_per_blob_gas.unwrap_or_default() >= blob_base_fee)
-        })
+        self.pending_for_block_matching_shared(
+            limit,
+            |tx| {
+                tx.tx.max_fee_per_gas >= base_fee_per_gas
+                    && (tx.tx.tx_type != 3
+                        || tx.tx.max_fee_per_blob_gas.unwrap_or_default() >= blob_base_fee)
+            },
+            |tx| {
+                miner_tip(
+                    tx.tx.max_fee_per_gas,
+                    tx.tx.max_priority_fee_per_gas,
+                    base_fee_per_gas,
+                )
+            },
+        )
     }
 
     fn pending_for_block_matching_shared(
         &self,
         limit: usize,
         is_eligible: impl Fn(&SignedTransaction) -> bool,
+        priority_fee: impl Fn(&SignedTransaction) -> u64,
     ) -> Vec<Arc<SignedTransaction>> {
         let inner = self.inner.read();
         let mut selected = Vec::with_capacity(limit.min(inner.by_hash.len()));
         let mut ready: BTreeMap<PriorityKey, (Address, ShellHash)> = BTreeMap::new();
+        let selection_key = |entry: &PoolEntry| PriorityKey {
+            neg_priority_fee: -(priority_fee(&entry.tx) as i128),
+            seq: entry.priority_key.seq,
+        };
 
         for (sender, queue) in &inner.by_sender {
             if let Some((_nonce, hash)) = queue.first_key_value() {
                 if let Some(entry) = inner.by_hash.get(hash) {
                     if is_eligible(&entry.tx) {
-                        ready.insert(entry.priority_key, (*sender, *hash));
+                        ready.insert(selection_key(entry), (*sender, *hash));
                     }
                 }
             }
@@ -594,10 +609,10 @@ impl TxPool {
                     {
                         if *queued_nonce == next_nonce {
                             if let Some(next_entry) = inner.by_hash.get(next_hash) {
-                                if next_entry.priority_key != priority_key
-                                    && is_eligible(&next_entry.tx)
+                                let next_priority_key = selection_key(next_entry);
+                                if next_priority_key != priority_key && is_eligible(&next_entry.tx)
                                 {
-                                    ready.insert(next_entry.priority_key, (sender, *next_hash));
+                                    ready.insert(next_priority_key, (sender, *next_hash));
                                 }
                             }
                         }
@@ -1982,6 +1997,38 @@ mod tests {
 
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].hash(), eligible_hash);
+    }
+
+    #[test]
+    fn block_candidates_order_by_effective_priority_fee() {
+        let pool = TxPool::new(make_config());
+        let verifier = DilithiumVerifier;
+        let (mut ws, cs) = setup_validation_ctx();
+
+        let capped_signer = DilithiumSigner::generate();
+        let capped_pubkey = capped_signer.public_key().to_vec();
+        let capped =
+            make_signed_value_tx_with_fees(&capped_signer, &capped_pubkey, 0, 101, 100, U256::ZERO);
+
+        let higher_tip_signer = DilithiumSigner::generate();
+        let higher_tip_pubkey = higher_tip_signer.public_key().to_vec();
+        let higher_tip = make_signed_value_tx_with_fees(
+            &higher_tip_signer,
+            &higher_tip_pubkey,
+            0,
+            200,
+            50,
+            U256::ZERO,
+        );
+        let higher_tip_hash = higher_tip.hash();
+
+        insert_rich(&pool, capped, &verifier, &mut ws, &cs).unwrap();
+        insert_rich(&pool, higher_tip, &verifier, &mut ws, &cs).unwrap();
+
+        let candidates = pool.pending_for_block_at_base_fee(1, 100);
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].hash(), higher_tip_hash);
     }
 
     #[test]
