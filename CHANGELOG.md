@@ -6,6 +6,9 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Finalize only canonical blocks and persist the finalized cursor before
+  advancing volatile finality state, while retaining quorum attestations for
+  retry after transient storage failures.
 - Make polling log and block filters reorg-aware, returning removed logs and
   canonical replacement results before advancing their cursors.
 - Keep pending-balance reservation checks linear when pool-capacity eviction

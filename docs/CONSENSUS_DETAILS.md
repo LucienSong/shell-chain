@@ -164,6 +164,11 @@ be deployed without changing existing block hashes.
 Finality is safety-critical:
 - Blocks at or below `last_finalized_number` cannot be replaced by a different
   hash; import returns `ConflictsWithFinalized`.
+- A quorum advances finality only when its block hash is canonical at the
+  attested height.
+- The durable finalized cursor is written before in-memory finality advances.
+  A failed write leaves the quorum attestations pending so the same vote can
+  safely retry persistence.
 - Validators ignore stale or conflicting votes for finalized heights.
 - Producers refuse to build from a parent that conflicts with the finalized
   chain.

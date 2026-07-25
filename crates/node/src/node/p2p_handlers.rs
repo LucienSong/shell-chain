@@ -113,6 +113,10 @@ impl<S: KvStore + 'static> Node<S> {
             ))
         })?;
         let total_weight: u64 = validator_weights.values().copied().sum();
+        let is_canonical = self
+            .chain_store
+            .get_block_hash_by_number(block_number)?
+            .is_some_and(|canonical_hash| canonical_hash == block_hash);
         let (attested_weight, finalized) = {
             // Check for equivocation, record the attestation, and evaluate
             // finality under one finality write lock to avoid lock-order cycles
@@ -134,12 +138,23 @@ impl<S: KvStore + 'static> Node<S> {
             }
 
             // Record the attestation.
-            if !finality.record_attestation_weighted(attestation, attester_weight) {
-                return Ok(()); // duplicate, already recorded
+            let already_attested = finality.has_attested(&block_hash, &validator);
+            if !finality.record_attestation_weighted(attestation, attester_weight)
+                && !already_attested
+            {
+                return Ok(());
             }
             let attested_weight = finality.attested_weight(&block_hash);
-            let finalized =
-                finality.check_finality_weighted(&block_hash, block_number, total_weight);
+            let can_finalize = is_canonical
+                && finality.can_finalize_weighted(&block_hash, block_number, total_weight);
+            if can_finalize {
+                // Persist first so a failed write cannot leave volatile finality
+                // ahead of the restart-safe finalized cursor. Keeping the
+                // attestation pending allows the same message to retry the write.
+                self.chain_store.set_finalized_number(block_number)?;
+            }
+            let finalized = can_finalize
+                && finality.check_finality_weighted(&block_hash, block_number, total_weight);
             (attested_weight, finalized)
         };
 
@@ -155,7 +170,6 @@ impl<S: KvStore + 'static> Node<S> {
                 hash = %block_hash,
                 "block finalized"
             );
-            let _ = self.chain_store.set_finalized_number(block_number);
             // F-088: Prune fork choice data for old blocks to prevent unbounded growth.
             let mut fc = self.fork_choice.write();
             fc.mark_finalized(&block_hash);
