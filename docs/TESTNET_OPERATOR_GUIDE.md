@@ -702,6 +702,9 @@ shell-node --datadir shell-data export-state --block 1000 --output snapshot.json
 shell-node --datadir shell-data import-state --snapshot snapshot.jsonl
 ```
 
+Import verifies the snapshot checksum, chain identity, canonical head, and
+non-empty head state trie before publishing the imported chain height.
+
 **Remove the database:**
 
 ```bash
