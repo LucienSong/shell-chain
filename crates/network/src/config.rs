@@ -59,6 +59,8 @@ pub struct NetworkConfig {
     /// Maximum outbound bandwidth in bytes/second (0 = unlimited).
     pub max_outbound_bandwidth: u64,
     /// F-069: Maximum allowed incoming message size in bytes.
+    ///
+    /// Values above the protocol-wide raw-message ceiling are clamped.
     pub max_message_size: usize,
     /// F-071: Number of violations before a peer is temporarily banned (0 = disabled).
     pub ban_threshold: u32,
@@ -95,6 +97,12 @@ impl Default for NetworkConfig {
             ban_duration_secs: 600, // 10 minutes
             identity_key_path: None,
         }
+    }
+}
+
+impl NetworkConfig {
+    pub(crate) fn effective_max_message_size(&self) -> usize {
+        self.max_message_size.min(crate::message::MAX_MESSAGE_SIZE)
     }
 }
 
@@ -228,6 +236,29 @@ mod tests {
         assert_eq!(config.max_message_size, 50 * 1024 * 1024);
         assert_eq!(config.ban_threshold, 5);
         assert_eq!(config.ban_duration_secs, 600);
+    }
+
+    #[test]
+    fn configured_message_limit_cannot_raise_protocol_ceiling() {
+        let config = NetworkConfig {
+            max_message_size: usize::MAX,
+            ..NetworkConfig::default()
+        };
+
+        assert_eq!(
+            config.effective_max_message_size(),
+            crate::message::MAX_MESSAGE_SIZE
+        );
+    }
+
+    #[test]
+    fn configured_message_limit_can_lower_protocol_ceiling() {
+        let config = NetworkConfig {
+            max_message_size: 1024,
+            ..NetworkConfig::default()
+        };
+
+        assert_eq!(config.effective_max_message_size(), 1024);
     }
 
     #[test]

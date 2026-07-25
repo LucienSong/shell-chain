@@ -91,7 +91,7 @@ impl NetworkBus {
         let bus_tx = self.tx.clone();
         let running = Arc::new(AtomicBool::new(true));
         let shutdown = Arc::new(Notify::new());
-        let max_msg_size = config.max_message_size;
+        let max_msg_size = config.effective_max_message_size();
         let connected_peer_count = Arc::new(AtomicUsize::new(0));
         self.peer_counts.register(&connected_peer_count);
 
@@ -340,6 +340,19 @@ mod tests {
             NetworkError::MessageTooLarge { limit, .. } => assert_eq!(limit, 1),
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn configured_limit_cannot_raise_raw_message_ceiling() {
+        let bus = NetworkBus::new(64);
+        let config = NetworkConfig {
+            max_message_size: usize::MAX,
+            ..NetworkConfig::default()
+        };
+
+        let node = bus.join(&config);
+
+        assert_eq!(node.max_msg_size, crate::message::MAX_MESSAGE_SIZE);
     }
 
     #[tokio::test]
