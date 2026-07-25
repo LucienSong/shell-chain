@@ -229,12 +229,14 @@ impl FilterRegistry {
         }
     }
 
-    /// Remove a filter. Returns `true` if it existed.
+    /// Remove a filter. Returns `true` if an unexpired filter existed.
     pub fn uninstall(&self, id: &str) -> bool {
         if !is_valid_filter_id(id) {
             return false;
         }
-        self.filters.write().remove(id).is_some()
+        let mut filters = self.filters.write();
+        remove_expired_filter(&mut filters, id, self.ttl_secs);
+        filters.remove(id).is_some()
     }
 
     /// Remove filters that have not been accessed within the TTL window.
@@ -579,6 +581,17 @@ mod tests {
         reg.cleanup_expired();
         assert_eq!(reg.len(), 0);
         assert!(!reg.uninstall(&id));
+    }
+
+    #[test]
+    fn uninstall_expired_filter_returns_false_without_prior_cleanup() {
+        let reg = FilterRegistry::with_ttl(1);
+        let id = reg.new_filter(FilterKind::Block, 0).unwrap();
+        reg.filters.write().get_mut(&id).unwrap().last_access =
+            Instant::now() - Duration::from_secs(2);
+
+        assert!(!reg.uninstall(&id));
+        assert!(reg.is_empty());
     }
 
     #[test]
