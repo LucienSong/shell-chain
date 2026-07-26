@@ -6,6 +6,8 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Index transaction receipts by included block order when earlier mempool
+  candidates are skipped during block assembly.
 - Reject duplicate validator identities in genesis and persisted validator
   registries before they can receive repeated consensus weight.
 - Reject release commits whose workspace manifests and `Cargo.lock` disagree,
