@@ -55,7 +55,11 @@ impl<S: KvStore + 'static> Node<S> {
         let excess_blob_gas =
             calc_excess_blob_gas(head.header.excess_blob_gas, head.header.blob_gas_used);
         let blob_base_fee = calc_blob_gas_price(excess_blob_gas);
-        let candidates = mem_pool.pending_for_block(max_txs, base_fee, blob_base_fee);
+        // Candidate validation and execution can still reject transactions
+        // after mempool selection. Inspect the bounded pool snapshot so skipped
+        // entries do not consume the block's inclusion limit.
+        let candidate_limit = if max_txs == 0 { 0 } else { usize::MAX };
+        let candidates = mem_pool.pending_for_block(candidate_limit, base_fee, blob_base_fee);
 
         // Create an isolated EVM instance at the current state root.
         let (state_db, current_root) = block_store.isolated_state_db()?;
@@ -98,6 +102,9 @@ impl<S: KvStore + 'static> Node<S> {
         let import_cs = ChainStore::new(self.store.clone());
 
         for tx in &candidates {
+            if included_txs.len() >= max_txs {
+                break;
+            }
             if cumulative_gas >= header.gas_limit {
                 break;
             }
