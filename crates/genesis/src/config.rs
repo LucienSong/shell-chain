@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::Path;
 
@@ -484,8 +484,24 @@ impl GenesisConfig {
             .collect()
     }
 
+    /// Validate that each consensus authority identity appears only once.
+    pub fn validate_consensus_authorities(&self) -> Result<(), GenesisError> {
+        let authorities = self.consensus.authorities();
+        let mut seen = HashSet::with_capacity(authorities.len());
+        for (index, authority) in authorities.iter().copied().enumerate() {
+            if !seen.insert(authority) {
+                return Err(GenesisError::Validation(format!(
+                    "duplicate consensus authority at index {index}: {authority}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Validate staking economics and initial supply invariants.
     pub fn validate_economics(&self) -> Result<(), GenesisError> {
+        self.validate_consensus_authorities()?;
+
         let Some(economics) = &self.economics else {
             return Ok(());
         };
