@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Saturate blob base fees at the supported numeric maximum while preserving
+  monotonic pricing at high excess gas.
+
 ## [0.27.2] — 2026-07-26 — Finality safety and correctness hardening
 
 ### Fixed

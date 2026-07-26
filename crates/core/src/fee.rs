@@ -1,3 +1,5 @@
+use shell_primitives::U256;
+
 /// Default initial base fee (1 gwei) used for the first block after genesis.
 pub const INITIAL_BASE_FEE: u64 = 1_000_000_000;
 
@@ -105,21 +107,31 @@ pub fn calc_excess_blob_gas(parent_excess: u64, parent_used: u64) -> u64 {
 ///
 /// Uses Taylor series: sum of factor * numerator^i / (denominator^i * i!)
 fn fake_exponential(factor: u64, numerator: u64, denominator: u64) -> u64 {
-    let mut i: u128 = 1;
-    let mut output: u128 = 0;
-    let mut numerator_accum: u128 = (factor as u128).saturating_mul(denominator as u128);
-    let numerator_128 = numerator as u128;
-    let denominator_128 = denominator as u128;
-
-    while numerator_accum > 0 {
-        output = output.saturating_add(numerator_accum);
-        numerator_accum = numerator_accum
-            .saturating_mul(numerator_128)
-            .checked_div(denominator_128.saturating_mul(i))
-            .unwrap_or(0);
-        i = i.saturating_add(1);
+    if denominator == 0 {
+        return u64::MAX;
     }
-    output.checked_div(denominator_128).unwrap_or(0) as u64
+
+    let denominator = U256::from(denominator);
+    let numerator = U256::from(numerator);
+    let saturation_limit = U256::from(u64::MAX) * denominator;
+    let mut i = 1u64;
+    let mut output = U256::ZERO;
+    let mut numerator_accum = U256::from(factor) * denominator;
+
+    while numerator_accum != U256::ZERO {
+        if numerator_accum >= saturation_limit - output {
+            return u64::MAX;
+        }
+
+        output += numerator_accum;
+        numerator_accum = numerator_accum * numerator / (denominator * U256::from(i));
+        i = match i.checked_add(1) {
+            Some(next) => next,
+            None => return u64::MAX,
+        };
+    }
+
+    (output / denominator).to::<u64>()
 }
 
 #[cfg(test)]
@@ -128,6 +140,22 @@ mod tests {
 
     const GAS_LIMIT: u64 = 30_000_000;
     const GAS_TARGET: u64 = GAS_LIMIT / 2; // 15_000_000
+
+    fn fake_exponential_u128_reference(factor: u64, numerator: u64, denominator: u64) -> u128 {
+        let mut i = 1u128;
+        let mut output = 0u128;
+        let mut numerator_accum = u128::from(factor) * u128::from(denominator);
+        let numerator = u128::from(numerator);
+        let denominator = u128::from(denominator);
+
+        while numerator_accum > 0 {
+            output += numerator_accum;
+            numerator_accum = numerator_accum * numerator / (denominator * i);
+            i += 1;
+        }
+
+        output / denominator
+    }
 
     #[test]
     fn genesis_returns_initial_base_fee() {
@@ -345,6 +373,63 @@ mod tests {
             price2 > price1,
             "blob gas price should keep increasing (got {price2} vs {price1})"
         );
+    }
+
+    #[test]
+    fn blob_gas_price_saturates_instead_of_wrapping() {
+        let below_limit = BLOB_BASE_FEE_UPDATE_FRACTION * 44;
+        let saturation_point = BLOB_BASE_FEE_UPDATE_FRACTION * 45;
+
+        assert!(calc_blob_gas_price(below_limit) < u64::MAX);
+        assert_eq!(calc_blob_gas_price(saturation_point), u64::MAX);
+        assert_eq!(calc_blob_gas_price(u64::MAX), u64::MAX);
+    }
+
+    #[test]
+    fn blob_gas_price_matches_reference_before_saturation() {
+        for multiplier in 0..45 {
+            let excess = BLOB_BASE_FEE_UPDATE_FRACTION * multiplier;
+            assert_eq!(
+                u128::from(calc_blob_gas_price(excess)),
+                fake_exponential_u128_reference(
+                    MIN_BLOB_BASE_FEE,
+                    excess,
+                    BLOB_BASE_FEE_UPDATE_FRACTION,
+                ),
+                "fee changed below saturation at multiplier {multiplier}"
+            );
+        }
+    }
+
+    #[test]
+    fn blob_gas_price_is_monotonic_until_reachable_saturation() {
+        let excess_per_full_block = MAX_BLOB_GAS_PER_BLOCK - TARGET_BLOB_GAS_PER_BLOCK;
+        let blocks_to_saturation =
+            (BLOB_BASE_FEE_UPDATE_FRACTION * 45).div_ceil(excess_per_full_block);
+        let mut previous = calc_blob_gas_price(0);
+
+        for block in 1..=blocks_to_saturation {
+            let excess = block * excess_per_full_block;
+            let price = calc_blob_gas_price(excess);
+            let reference = fake_exponential_u128_reference(
+                MIN_BLOB_BASE_FEE,
+                excess,
+                BLOB_BASE_FEE_UPDATE_FRACTION,
+            );
+            let expected = reference.min(u128::from(u64::MAX)) as u64;
+
+            assert_eq!(
+                price, expected,
+                "blob fee diverged from the saturated reference at block {block}"
+            );
+            assert!(
+                price >= previous,
+                "blob fee decreased at sustained-full block {block}"
+            );
+            previous = price;
+        }
+
+        assert_eq!(previous, u64::MAX);
     }
 
     #[test]
