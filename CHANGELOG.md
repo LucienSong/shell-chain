@@ -6,6 +6,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Enforced paymaster authorization after every sender-account validation path.
 - Enforce the 50 MiB protocol-wide raw P2P message ceiling even when an
   embedding application supplies a larger network configuration value.
 - Validate that an imported snapshot's non-empty head state root is present and

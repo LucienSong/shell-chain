@@ -245,9 +245,9 @@ pub fn validate_tx<S: KvStore + 'static, V: Verifier>(
 
     if let Some(bundle) = signed_tx.aa_bundle.as_ref() {
         if let Some(paymaster) = bundle.paymaster {
-            // Paymaster PQ signature already verified by `validate_aa_tx` above;
-            // skip redundant re-verification here (S-3, defence-in-depth is at
-            // the aa_validation layer). Only the balance check is needed here.
+            // Paymaster authorization already ran in `validate_aa_tx` above,
+            // including either the EOA signature or contract policy. Only the
+            // balance check is needed here.
             let needed_gas = match max_gas_cost {
                 Some(n) => n,
                 None => U256::MAX,
@@ -435,9 +435,8 @@ fn validate_tx_for_import_inner<S: KvStore + 'static, V: Verifier>(
         }
     }
 
-    // Paymaster PQ signature already verified inside validate_aa_tx above
-    // (aa_validation.rs:154-164). No additional verify_paymaster_signature
-    // call needed here; avoid the expensive PQ double-verify at import time.
+    // Paymaster authorization already ran in `validate_aa_tx` above. Avoid
+    // repeating either the expensive EOA signature check or contract policy.
 
     Ok(())
 }
@@ -714,6 +713,10 @@ mod tests {
 
     fn validator_returns_true() -> Vec<u8> {
         vec![0x60, 0x01, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xf3]
+    }
+
+    fn validator_returns_false() -> Vec<u8> {
+        vec![0x60, 0x00, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xf3]
     }
 
     // ── Intrinsic gas ─────────────────────────────────────────
@@ -1051,6 +1054,96 @@ mod tests {
                 got: 5
             })
         ));
+    }
+
+    #[test]
+    fn validate_custom_account_requires_paymaster_authorization() {
+        let signer = make_signer();
+        let (mut ws, cs) = setup_stores();
+        let from = signer_address(&signer);
+
+        let code = validator_returns_true();
+        let code_hash = shell_primitives::keccak256(&code);
+        cs.put_code(&code_hash, &code).unwrap();
+
+        use shell_core::Account;
+        ws.set_account(
+            &from,
+            &Account {
+                pq_pubkey_hash: ShellHash::ZERO,
+                nonce: 0,
+                balance: U256::from(1_000_000),
+                validation_code_hash: Some(code_hash),
+                code_hash: None,
+                storage_root: ShellHash::ZERO,
+            },
+        )
+        .unwrap();
+
+        let paymaster = Address::from([0x88; 20]);
+        fund_account(&mut ws, &paymaster, U256::from(10_000_000));
+        let signed = SignedTransaction::with_aa_bundle(
+            from,
+            aa_outer_tx(test_chain_id(), 0, 200_000, 0),
+            PQSignature::new(SignatureType::MlDsa65, vec![0xAA; 64]),
+            shell_core::PubkeyMode::Reference,
+            AaBundle {
+                inner_calls: vec![inner(0, 50_000)],
+                paymaster: Some(paymaster),
+                paymaster_signature: Some(Bytes::from(vec![1])),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let result = validate_tx(&signed, &mut ws, &cs, &DilithiumVerifier, test_chain_id());
+        assert!(matches!(
+            result,
+            Err(TxValidationError::PaymasterPubkeyNotFound(addr)) if addr == paymaster
+        ));
+        let result =
+            validate_tx_for_import(&signed, &mut ws, &cs, &DilithiumVerifier, test_chain_id());
+        assert!(matches!(
+            result,
+            Err(TxValidationError::PaymasterPubkeyNotFound(addr)) if addr == paymaster
+        ));
+
+        let contract_paymaster = Address::from([0x77; 20]);
+        let code = validator_returns_false();
+        let code_hash = shell_primitives::keccak256(&code);
+        cs.put_code(&code_hash, &code).unwrap();
+        ws.set_account(
+            &contract_paymaster,
+            &Account {
+                pq_pubkey_hash: ShellHash::ZERO,
+                nonce: 0,
+                balance: U256::from(10_000_000),
+                validation_code_hash: None,
+                code_hash: Some(code_hash),
+                storage_root: ShellHash::ZERO,
+            },
+        )
+        .unwrap();
+
+        let signed = SignedTransaction::with_aa_bundle(
+            from,
+            aa_outer_tx(test_chain_id(), 0, 200_000, 0),
+            PQSignature::new(SignatureType::MlDsa65, vec![0xAA; 64]),
+            shell_core::PubkeyMode::Reference,
+            AaBundle {
+                inner_calls: vec![inner(0, 50_000)],
+                paymaster: Some(contract_paymaster),
+                paymaster_context: Some(Bytes::from(vec![1])),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let result = validate_tx(&signed, &mut ws, &cs, &DilithiumVerifier, test_chain_id());
+        assert!(matches!(result, Err(TxValidationError::PaymasterRejected)));
+        let result =
+            validate_tx_for_import(&signed, &mut ws, &cs, &DilithiumVerifier, test_chain_id());
+        assert!(matches!(result, Err(TxValidationError::PaymasterRejected)));
     }
 
     #[test]

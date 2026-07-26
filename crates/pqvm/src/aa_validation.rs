@@ -137,6 +137,8 @@ pub fn validate_aa_tx<S: KvStore + 'static, V: Verifier>(
                 &pubkey,
             )?;
 
+            validate_paymaster_authorization(signed_tx, world_state, chain_store, verifier)?;
+
             return Ok(AaValidationOutcome {
                 pubkey,
                 should_register_pubkey: false,
@@ -223,44 +225,50 @@ pub fn validate_aa_tx<S: KvStore + 'static, V: Verifier>(
         }
     }
 
-    // Paymaster validation — dispatches on type:
-    //   Phase 1 (EOA paymaster): paymaster_signature present → verify PQ sig.
-    //   Phase 2 (contract paymaster): paymaster_context present → staticcall.
-    // Self-sponsored (no paymaster) → no paymaster check needed.
-    if let Some(bundle) = signed_tx.aa_bundle() {
-        if let Some(paymaster) = bundle.paymaster {
-            if paymaster != signed_tx.from {
-                if let Some(context) = bundle.paymaster_context.as_ref().map(|b| b.as_ref()) {
-                    // Phase 2: contract paymaster via staticcall sandbox.
-                    call_paymaster_validate(
-                        signed_tx,
-                        bundle,
-                        &paymaster,
-                        context,
-                        world_state,
-                        chain_store,
-                    )?;
-                } else {
-                    // Phase 1: EOA paymaster PQ signature.
-                    verify_paymaster_signature(signed_tx, &paymaster, chain_store, verifier)
-                        .map_err(|e| match e {
-                            crate::tx_validation::TxValidationError::PaymasterPubkeyNotFound(
-                                addr,
-                            ) => AaValidationError::PaymasterPubkeyNotFound(addr),
-                            other => {
-                                AaValidationError::PaymasterSignatureInvalid(other.to_string())
-                            }
-                        })?;
-                }
-            }
-        }
-    }
+    validate_paymaster_authorization(signed_tx, world_state, chain_store, verifier)?;
 
     Ok(AaValidationOutcome {
         should_register_pubkey: signed_tx.pubkey_mode.is_embedded() && registered_pubkey.is_none(),
         pubkey,
         protocol_checks_nonce: true,
     })
+}
+
+fn validate_paymaster_authorization<S: KvStore + 'static, V: Verifier>(
+    signed_tx: &SignedTransaction,
+    world_state: &WorldState<S>,
+    chain_store: &ChainStore<S>,
+    verifier: &V,
+) -> Result<(), AaValidationError> {
+    let Some(bundle) = signed_tx.aa_bundle() else {
+        return Ok(());
+    };
+    let Some(paymaster) = bundle.paymaster else {
+        return Ok(());
+    };
+    if paymaster == signed_tx.from {
+        return Ok(());
+    }
+
+    if let Some(context) = bundle.paymaster_context.as_ref().map(|b| b.as_ref()) {
+        call_paymaster_validate(
+            signed_tx,
+            bundle,
+            &paymaster,
+            context,
+            world_state,
+            chain_store,
+        )
+    } else {
+        verify_paymaster_signature(signed_tx, &paymaster, chain_store, verifier).map_err(
+            |e| match e {
+                crate::tx_validation::TxValidationError::PaymasterPubkeyNotFound(addr) => {
+                    AaValidationError::PaymasterPubkeyNotFound(addr)
+                }
+                other => AaValidationError::PaymasterSignatureInvalid(other.to_string()),
+            },
+        )
+    }
 }
 
 fn resolve_pubkey(
@@ -1490,6 +1498,85 @@ mod tests {
         assert!(outcome.pubkey.is_empty());
         assert!(!outcome.should_register_pubkey);
         assert!(outcome.protocol_checks_nonce);
+    }
+
+    #[test]
+    fn custom_validation_still_requires_paymaster_authorization() {
+        let signer = DilithiumSigner::generate();
+        let (mut ws, cs) = setup_stores();
+        let from = signer_address(&signer);
+
+        let validator_code = validator_returns_true();
+        let validator_code_hash = keccak256(&validator_code);
+        cs.put_code(&validator_code_hash, &validator_code).unwrap();
+        ws.set_account(
+            &from,
+            &Account {
+                pq_pubkey_hash: ShellHash::ZERO,
+                nonce: 0,
+                balance: U256::from(1_000_000u64),
+                validation_code_hash: Some(validator_code_hash),
+                code_hash: None,
+                storage_root: ShellHash::ZERO,
+            },
+        )
+        .unwrap();
+
+        let paymaster = Address::from([0x77; 20]);
+        install_paymaster(&mut ws, &cs, paymaster, validator_returns_false());
+        let mut tx = base_tx(1337, 0);
+        tx.tx_type = AA_BUNDLE_TX_TYPE;
+        tx.gas_limit = 100_000;
+        let signed = SignedTransaction::with_aa_bundle(
+            from,
+            tx,
+            PQSignature::new(SignatureType::MlDsa65, vec![0xaa; 64]),
+            PubkeyMode::Reference,
+            AaBundle {
+                inner_calls: vec![InnerCall {
+                    to: Some(Address::from([0x01; 20])),
+                    value: U256::ZERO,
+                    data: Bytes::new(),
+                    gas_limit: 50_000,
+                }],
+                paymaster: Some(paymaster),
+                paymaster_context: Some(Bytes::from(vec![1])),
+                ..AaBundle::default()
+            },
+        )
+        .unwrap();
+
+        let err = validate_aa_tx(&signed, &ws, &cs, &DilithiumVerifier).unwrap_err();
+        assert!(matches!(err, AaValidationError::PaymasterRejected));
+
+        let eoa_paymaster = Address::from([0x88; 20]);
+        let mut tx = base_tx(1337, 0);
+        tx.tx_type = AA_BUNDLE_TX_TYPE;
+        tx.gas_limit = 100_000;
+        let signed = SignedTransaction::with_aa_bundle(
+            from,
+            tx,
+            PQSignature::new(SignatureType::MlDsa65, vec![0xaa; 64]),
+            PubkeyMode::Reference,
+            AaBundle {
+                inner_calls: vec![InnerCall {
+                    to: Some(Address::from([0x01; 20])),
+                    value: U256::ZERO,
+                    data: Bytes::new(),
+                    gas_limit: 50_000,
+                }],
+                paymaster: Some(eoa_paymaster),
+                paymaster_signature: Some(Bytes::from(vec![1])),
+                ..AaBundle::default()
+            },
+        )
+        .unwrap();
+
+        let err = validate_aa_tx(&signed, &ws, &cs, &DilithiumVerifier).unwrap_err();
+        assert!(matches!(
+            err,
+            AaValidationError::PaymasterPubkeyNotFound(addr) if addr == eoa_paymaster
+        ));
     }
 
     #[test]
