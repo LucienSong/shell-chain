@@ -1421,7 +1421,7 @@ impl<S: KvStore> ChainStore<S> {
 
     // ── Snapshot import/export ─────────────────────────────────
 
-    /// Export all chain data to a snapshot writer.
+    /// Export all chain data at the current canonical head to a snapshot writer.
     ///
     /// Iterates all key-value entries in the underlying store and writes them
     /// to the snapshot. This is a logical export suitable for any KvStore
@@ -1431,6 +1431,18 @@ impl<S: KvStore> ChainStore<S> {
         metadata: crate::SnapshotMetadata,
         writer: W,
     ) -> Result<crate::SnapshotMetadata, StorageError> {
+        let head = self
+            .get_head_block()?
+            .ok_or_else(|| StorageError::State("cannot export a snapshot without a head".into()))?;
+        if metadata.block_number != head.number()
+            || metadata.block_hash != head.hash()
+            || metadata.state_root != head.header.state_root
+        {
+            return Err(StorageError::State(
+                "snapshot metadata must describe the current canonical head".into(),
+            ));
+        }
+
         let mut snap_writer = crate::SnapshotWriter::new(writer, metadata)?;
         for (key, value) in self.store.scan_all()? {
             snap_writer.write_entry(&key, &value)?;
@@ -3889,7 +3901,7 @@ mod tests {
     }
 
     #[test]
-    fn test_export_snapshot_at_specific_block() {
+    fn test_export_snapshot_at_genesis_head() {
         let store = Arc::new(MemoryDb::new());
         let cs = ChainStore::new(store.clone());
 
@@ -3907,6 +3919,30 @@ mod tests {
         assert_eq!(exported.block_number, 0);
         assert_eq!(exported.block_hash, b0.hash());
         assert!(exported.entry_count > 0);
+    }
+
+    #[test]
+    fn test_export_snapshot_rejects_non_head_metadata() {
+        let store = Arc::new(MemoryDb::new());
+        let cs = ChainStore::new(store.clone());
+
+        let b0 = empty_block(0);
+        put_canonical(&cs, &b0);
+        let mut b1 = empty_block(1);
+        b1.header.parent_hash = b0.hash();
+        put_canonical(&cs, &b1);
+
+        let meta =
+            crate::SnapshotMetadata::new(1337, 0, b0.hash(), b0.header.state_root, b0.hash());
+        let mut buf = Vec::new();
+        let error = cs
+            .export_snapshot(meta, std::io::Cursor::new(&mut buf))
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("metadata must describe the current canonical head"));
+        assert!(buf.is_empty());
     }
 
     #[test]

@@ -293,7 +293,7 @@ enum Commands {
 
     /// Export chain state to a snapshot file.
     ExportState {
-        /// Block number to export state at (default: latest).
+        /// Block number to export; currently must match the canonical head.
         #[arg(long)]
         block: Option<u64>,
 
