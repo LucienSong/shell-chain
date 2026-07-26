@@ -6,6 +6,8 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Reject duplicate validator identities in genesis and persisted validator
+  registries before they can receive repeated consensus weight.
 - Reject release commits whose workspace manifests and `Cargo.lock` disagree,
   before a tag can be created or hosted checks can pass.
 - Avoid cloning every signed transaction during block import when validation

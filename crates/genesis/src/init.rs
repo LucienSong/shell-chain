@@ -133,6 +133,8 @@ pub fn initialize_authority_pubkeys<S: KvStore + 'static>(
     config: &GenesisConfig,
     chain_store: &ChainStore<S>,
 ) -> Result<(), GenesisError> {
+    config.validate_consensus_authorities()?;
+
     let (authorities, authority_pubkeys) = (
         config.consensus.authorities(),
         config.consensus.authority_pubkeys(),
@@ -348,6 +350,48 @@ mod tests {
 
         let loaded = chain_store.get_pubkey(&Address::ZERO).unwrap().unwrap();
         assert_eq!(loaded, vec![0x12, 0x34]);
+    }
+
+    #[test]
+    fn duplicate_authorities_are_rejected_before_genesis_commit() {
+        let mut config = test_genesis();
+        if let ConsensusConfig::PoA {
+            authorities,
+            authority_pubkeys,
+            ..
+        } = &mut config.consensus
+        {
+            authorities.push(authorities[0]);
+            authority_pubkeys.push("0x5678".to_string());
+        }
+
+        let store = Arc::new(MemoryDb::new());
+        let error = initialize_genesis(&config, Arc::clone(&store)).unwrap_err();
+        assert!(error.to_string().contains("duplicate consensus authority"));
+
+        let chain_store = ChainStore::new(store);
+        assert!(chain_store.get_head_hash().unwrap().is_none());
+        assert!(chain_store.get_chain_config().unwrap().is_none());
+    }
+
+    #[test]
+    fn duplicate_authorities_are_rejected_before_pubkey_writes() {
+        let mut config = test_genesis();
+        if let ConsensusConfig::PoA {
+            authorities,
+            authority_pubkeys,
+            ..
+        } = &mut config.consensus
+        {
+            authorities.push(authorities[0]);
+            authority_pubkeys.push("0x5678".to_string());
+        }
+
+        let store = Arc::new(MemoryDb::new());
+        let chain_store = ChainStore::new(Arc::clone(&store));
+        let error = initialize_authority_pubkeys(&config, &chain_store).unwrap_err();
+        assert!(error.to_string().contains("duplicate consensus authority"));
+        assert!(chain_store.get_pubkey(&Address::ZERO).unwrap().is_none());
     }
 
     #[test]

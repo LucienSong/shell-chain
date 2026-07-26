@@ -373,12 +373,18 @@ impl<S: KvStore + 'static> WorldState<S> {
             )));
         }
         let mut validators = Vec::with_capacity(count);
+        let mut seen = HashSet::with_capacity(count);
         for i in 0..count {
             let slot = self.get_storage(&registry, &Self::validator_slot_key(i as u64))?;
             // Address::ZERO is a valid validator (slot value is all zeros).
             // We trust the count field to determine how many validators exist.
             let addr = Address::try_from_slice(slot.as_bytes())
                 .map_err(|e| StorageError::Codec(e.to_string()))?;
+            if !seen.insert(addr) {
+                return Err(StorageError::Codec(format!(
+                    "validator registry contains duplicate address {addr}"
+                )));
+            }
             validators.push(addr);
         }
         Ok(validators)
@@ -394,6 +400,16 @@ impl<S: KvStore + 'static> WorldState<S> {
                 "validator set size {} exceeds maximum {}",
                 validators.len(),
                 Self::MAX_VALIDATORS
+            )));
+        }
+        let mut seen = HashSet::with_capacity(validators.len());
+        if let Some(duplicate) = validators
+            .iter()
+            .copied()
+            .find(|validator| !seen.insert(*validator))
+        {
+            return Err(StorageError::Codec(format!(
+                "validator set contains duplicate address {duplicate}"
             )));
         }
         let registry = validator_registry_addr();
@@ -1004,6 +1020,54 @@ mod tests {
         ws.set_validators(&validators).unwrap();
         let loaded = ws.get_validators().unwrap();
         assert_eq!(loaded, validators);
+    }
+
+    #[test]
+    fn set_validators_rejects_duplicate_addresses() {
+        let store = test_store();
+        let mut ws = WorldState::new(store);
+        let validator = Address::from([0x01; 20]);
+
+        let error = ws.set_validators(&[validator, validator]).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("validator set contains duplicate address"));
+        assert!(ws.get_validators().unwrap().is_empty());
+    }
+
+    #[test]
+    fn get_validators_rejects_duplicate_persisted_addresses() {
+        let store = test_store();
+        let mut ws = WorldState::new(store);
+        let registry = validator_registry_addr();
+        let validator = Address::from([0x01; 20]);
+        let validator_hash = ShellHash::from(validator.0);
+        let mut count_bytes = [0u8; 32];
+        count_bytes[24..].copy_from_slice(&2u64.to_be_bytes());
+
+        ws.set_storage(
+            &registry,
+            &WorldState::<MemoryDb>::validator_slot_key(0),
+            &validator_hash,
+        )
+        .unwrap();
+        ws.set_storage(
+            &registry,
+            &WorldState::<MemoryDb>::validator_slot_key(1),
+            &validator_hash,
+        )
+        .unwrap();
+        ws.set_storage(
+            &registry,
+            &WorldState::<MemoryDb>::validator_count_key(),
+            &ShellHash::from(count_bytes),
+        )
+        .unwrap();
+
+        let error = ws.get_validators().unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("validator registry contains duplicate address"));
     }
 
     #[test]
