@@ -1090,13 +1090,13 @@ fn record_validator_vote<S: KvStore + 'static>(
         )
         .map_err(|e| SystemContractError::Storage(e.to_string()))?;
 
-    let mut voted_weight = 0u64;
-    let mut total_weight = 0u64;
+    let mut voted_weight = 0u128;
+    let mut total_weight = 0u128;
     for validator in validators {
         let weight = world_state
             .get_validator_weight(validator)
             .map_err(|e| SystemContractError::Storage(e.to_string()))?;
-        total_weight = total_weight.saturating_add(weight);
+        total_weight += u128::from(weight);
         let value = world_state
             .get_storage(
                 &registry,
@@ -1104,11 +1104,16 @@ fn record_validator_vote<S: KvStore + 'static>(
             )
             .map_err(|e| SystemContractError::Storage(e.to_string()))?;
         if value != ShellHash::ZERO {
-            voted_weight = voted_weight.saturating_add(weight);
+            voted_weight += u128::from(weight);
         }
     }
 
-    Ok(voted_weight.saturating_mul(2) > total_weight)
+    Ok(match op {
+        ValidatorRegistryOp::Add | ValidatorRegistryOp::Remove => voted_weight * 2 > total_weight,
+        ValidatorRegistryOp::SetWeight(_) | ValidatorRegistryOp::SetStake(_) => {
+            voted_weight * 3 > total_weight * 2
+        }
+    })
 }
 
 fn record_algorithm_vote<S: KvStore + 'static>(
@@ -2610,6 +2615,25 @@ mod tests {
     }
 
     #[test]
+    fn validator_weight_change_requires_strict_supermajority() {
+        let v1 = Address::from([0x01; 20]);
+        let v2 = Address::from([0x02; 20]);
+        let v3 = Address::from([0x03; 20]);
+        let mut ws = setup_with_validators(&[v1, v2, v3]);
+        let calldata = encode_set_validator_weight_calldata(&v1, 2);
+
+        for voter in [v1, v2] {
+            let (output, _) = execute_system_contract(&voter, &calldata, &mut ws).unwrap();
+            assert_eq!(output, encode_bool(false));
+            assert_eq!(ws.get_validator_weight(&v1).unwrap(), 1);
+        }
+
+        let (output, _) = execute_system_contract(&v3, &calldata, &mut ws).unwrap();
+        assert_eq!(output, encode_bool(true));
+        assert_eq!(ws.get_validator_weight(&v1).unwrap(), 2);
+    }
+
+    #[test]
     fn staking_mode_sets_stake_and_derives_weight_after_quorum() {
         let v1 = Address::from([0x01; 20]);
         let v2 = Address::from([0x02; 20]);
@@ -2629,7 +2653,12 @@ mod tests {
         assert_eq!(ws.get_validator_weight(&v1).unwrap(), 1);
 
         let (second_output, _) = execute_system_contract(&v2, &calldata, &mut ws).unwrap();
-        assert_eq!(second_output, encode_bool(true));
+        assert_eq!(second_output, encode_bool(false));
+        assert_eq!(ws.get_validator_stake(&v1).unwrap(), U256::from(1_000u64));
+        assert_eq!(ws.get_validator_weight(&v1).unwrap(), 1);
+
+        let (third_output, _) = execute_system_contract(&v3, &calldata, &mut ws).unwrap();
+        assert_eq!(third_output, encode_bool(true));
         assert_eq!(ws.get_validator_stake(&v1).unwrap(), U256::from(2_500u64));
         assert_eq!(ws.get_validator_weight(&v1).unwrap(), 2);
         assert_eq!(ws.get_total_staked().unwrap(), U256::from(4_500u64));
