@@ -1,4 +1,21 @@
 use super::*;
+use std::borrow::Cow;
+
+fn tx_for_import_validation<'a>(
+    tx: &'a SignedTransaction,
+    validation_pubkeys: &HashMap<Address, Vec<u8>>,
+) -> Cow<'a, SignedTransaction> {
+    let shell_core::PubkeyMode::Reference = &tx.pubkey_mode else {
+        return Cow::Borrowed(tx);
+    };
+    let Some(pubkey) = validation_pubkeys.get(&tx.from) else {
+        return Cow::Borrowed(tx);
+    };
+
+    let mut resolved = tx.clone();
+    resolved.pubkey_mode = shell_core::PubkeyMode::Embedded(pubkey.clone());
+    Cow::Owned(resolved)
+}
 
 impl<S: KvStore + 'static> Node<S> {
     fn wall_clock_secs_for_import() -> u64 {
@@ -659,13 +676,7 @@ impl<S: KvStore + 'static> Node<S> {
             let mut validation_pubkeys: HashMap<Address, Vec<u8>> = HashMap::new();
             let mut validation_nonces: HashMap<Address, u64> = HashMap::new();
             for tx in &block.transactions {
-                let mut tx_for_validation = tx.clone();
-                if tx_for_validation.pubkey_mode.is_reference() {
-                    if let Some(pk) = validation_pubkeys.get(&tx.from) {
-                        tx_for_validation.pubkey_mode =
-                            shell_core::PubkeyMode::Embedded(pk.clone());
-                    }
-                }
+                let tx_for_validation = tx_for_import_validation(tx, &validation_pubkeys);
 
                 let world_state = evm.state_db_mut().world_state_mut();
                 let expected_nonce = match validation_nonces.get(&tx.from) {
@@ -674,7 +685,7 @@ impl<S: KvStore + 'static> Node<S> {
                 };
 
                 validate_tx_for_import_with_expected_nonce(
-                    &tx_for_validation,
+                    tx_for_validation.as_ref(),
                     world_state,
                     &import_cs,
                     &pre_verified,
@@ -995,5 +1006,60 @@ impl<S: KvStore + 'static> Node<S> {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use shell_core::{PubkeyMode, Transaction};
+    use shell_crypto::SignatureType;
+
+    fn transaction() -> Transaction {
+        Transaction {
+            chain_id: 1337,
+            nonce: 0,
+            to: Some(Address::from([0x22; 20])),
+            value: U256::ZERO,
+            data: Bytes::new(),
+            gas_limit: 21_000,
+            max_fee_per_gas: 1,
+            max_priority_fee_per_gas: 0,
+            access_list: None,
+            tx_type: 2,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
+        }
+    }
+
+    #[test]
+    fn import_validation_borrows_transactions_unless_reference_needs_in_block_key() {
+        let sender = Address::from([0x11; 20]);
+        let signature = PQSignature::new(SignatureType::Dilithium3, vec![0x33; 64]);
+        let embedded = SignedTransaction::with_pubkey(
+            sender,
+            transaction(),
+            signature.clone(),
+            vec![0x44; 1_952],
+        );
+        let reference = SignedTransaction::new(sender, transaction(), signature);
+        let mut validation_pubkeys = HashMap::new();
+
+        assert!(matches!(
+            tx_for_import_validation(&embedded, &validation_pubkeys),
+            Cow::Borrowed(_)
+        ));
+        assert!(matches!(
+            tx_for_import_validation(&reference, &validation_pubkeys),
+            Cow::Borrowed(_)
+        ));
+
+        validation_pubkeys.insert(sender, vec![0x55; 1_952]);
+        let resolved = tx_for_import_validation(&reference, &validation_pubkeys);
+        assert!(matches!(&resolved, Cow::Owned(_)));
+        assert_eq!(
+            resolved.pubkey_mode,
+            PubkeyMode::Embedded(vec![0x55; 1_952])
+        );
     }
 }
