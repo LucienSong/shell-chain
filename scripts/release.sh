@@ -127,6 +127,12 @@ else
     fail "cargo fmt check failed — run 'cargo fmt --all' then commit"
 fi
 
+if "$SCRIPT_DIR/check-release-lockfile.sh"; then
+    ok "Cargo.lock matches the workspace manifests"
+else
+    fail "Cargo.lock is stale"
+fi
+
 # Require the hosted CI checks for the exact commit that will be tagged.
 RELEASE_COMMIT=$(git rev-parse HEAD)
 if "$SCRIPT_DIR/check-release-ci.sh" "$RELEASE_COMMIT"; then
