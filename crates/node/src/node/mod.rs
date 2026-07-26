@@ -8251,7 +8251,35 @@ mod tests {
             (node, signer)
         }
 
-        fn store_genesis_wpoa(node: &Node<MemoryDb>) {
+        fn setup_failing_wpoa_node() -> (Node<FailingBatchDb>, DilithiumSigner, Arc<FailingBatchDb>)
+        {
+            let signer = DilithiumSigner::generate();
+            let pubkey = signer.public_key().to_vec();
+            let authority = Address::from_public_key(&pubkey, signer.sig_type().as_u8());
+
+            let db = Arc::new(FailingBatchDb::new());
+            let chain_store = Arc::new(ChainStore::new(db.clone()));
+            let world_state = Arc::new(RwLock::new(WorldState::new(db.clone())));
+            let engine = WPoaEngine::new(
+                WPoaConfig::from_poa(PoaConfig::new(vec![authority], 1)),
+                Arc::new(MultiVerifier),
+            );
+            let consensus: Arc<RwLock<dyn ConsensusEngine>> = Arc::new(RwLock::new(engine));
+            let node = Node::new(
+                NodeConfig::dev(authority),
+                db.clone(),
+                chain_store,
+                world_state,
+                Arc::new(TxPool::new(MempoolConfig {
+                    chain_id: 1337,
+                    ..MempoolConfig::default()
+                })),
+                consensus,
+            );
+            (node, signer, db)
+        }
+
+        fn store_genesis_wpoa<S: KvStore + 'static>(node: &Node<S>) -> ShellHash {
             let proposer = node.config.proposer_address.unwrap();
             let genesis = Block {
                 header: BlockHeader {
@@ -8282,6 +8310,44 @@ mod tests {
             node.chain_store.put_block(&genesis).unwrap();
             node.chain_store.set_canonical(0, &h).unwrap();
             node.chain_store.set_head(&h).unwrap();
+            h
+        }
+
+        fn store_next_wpoa_block<S: KvStore + 'static>(
+            node: &Node<S>,
+            parent_hash: ShellHash,
+        ) -> ShellHash {
+            let proposer = node.config.proposer_address.unwrap();
+            let block = Block {
+                header: BlockHeader {
+                    parent_hash,
+                    state_root: ShellHash::default(),
+                    transactions_root: ShellHash::default(),
+                    receipts_root: ShellHash::default(),
+                    logs_bloom: Bytes::default(),
+                    number: 1,
+                    gas_limit: 30_000_000,
+                    gas_used: 0,
+                    timestamp: 1_700_000_001,
+                    extra_data: Bytes::default(),
+                    proposer,
+                    sig_aggregate_proof: None,
+                    base_fee_per_gas: 0,
+                    withdrawals_root: ShellHash::ZERO,
+                    parent_beacon_block_root: ShellHash::ZERO,
+                    blob_gas_used: 0,
+                    excess_blob_gas: 0,
+                    witness_root: None,
+                },
+                transactions: vec![],
+                system_transactions: vec![],
+                proposer_seal: None,
+            };
+            let block_hash = block.hash();
+            node.chain_store.put_block(&block).unwrap();
+            node.chain_store.set_canonical(1, &block_hash).unwrap();
+            node.chain_store.set_head(&block_hash).unwrap();
+            block_hash
         }
 
         // ── 1. State machine: propose → vote → commit ─────────────────────────
@@ -8301,20 +8367,27 @@ mod tests {
             assert!(matches!(&events[0], WPoaEvent::ProposeAccepted { .. }));
             assert!(matches!(&events[1], WPoaEvent::VoteNeeded { .. }));
 
-            // First vote: not yet quorum (ceil(2/3 * 3) = 2 required)
+            // First vote: not yet strict finality quorum.
             let v1 = round.on_vote(Address::from([1; 32]), bh, dummy_sig());
             assert!(v1.is_empty(), "first vote must not yet trigger commit");
 
-            // Second vote: reaches quorum
+            // Exactly two thirds is not enough to finalize.
             let v2 = round.on_vote(Address::from([2; 32]), bh, dummy_sig());
-            assert_eq!(v2.len(), 1, "second vote should emit BlockCommitted");
-            match &v2[0] {
+            assert!(
+                v2.is_empty(),
+                "two votes must not finalize three validators"
+            );
+
+            // Third vote exceeds two thirds and reaches finality quorum.
+            let v3 = round.on_vote(Address::from([3; 32]), bh, dummy_sig());
+            assert_eq!(v3.len(), 1, "third vote should emit BlockCommitted");
+            match &v3[0] {
                 WPoaEvent::BlockCommitted {
                     block_hash,
                     quorum_signatures,
                 } => {
                     assert_eq!(*block_hash, bh);
-                    assert_eq!(quorum_signatures.len(), 2);
+                    assert_eq!(quorum_signatures.len(), 3);
                 }
                 other => panic!("expected BlockCommitted, got {other:?}"),
             }
@@ -8476,7 +8549,7 @@ mod tests {
                 "should still be Voting after 1 vote"
             );
 
-            // addr3 votes with a valid signature — quorum (2 of 3) reached.
+            // addr3 votes with a valid signature. Exactly two thirds must not finalize.
             let sig3 = signer3.sign(block_hash.as_bytes()).unwrap();
             node.handle_wpoa_vote(addr3, block_hash, block_number, sig3);
             let phase2 = node
@@ -8484,10 +8557,208 @@ mod tests {
                 .lock()
                 .as_ref()
                 .map(|r| r.phase_name().to_string());
+            assert_eq!(phase2.as_deref(), Some("Voting"));
+
+            // addr1's vote raises signed weight strictly above two thirds.
+            let sig1 = signer1.sign(block_hash.as_bytes()).unwrap();
+            node.handle_wpoa_vote(addr1, block_hash, block_number, sig1);
+            let phase3 = node
+                .wpoa_round
+                .lock()
+                .as_ref()
+                .map(|r| r.phase_name().to_string());
             assert_eq!(
-                phase2.as_deref(),
+                phase3.as_deref(),
                 Some("Committed"),
                 "should be Committed after quorum is reached"
+            );
+        }
+
+        #[test]
+        fn wpoa_handle_vote_rejects_zero_total_validator_weight() {
+            let (node, signer) = setup_wpoa_node();
+            let authority = node.config.proposer_address.unwrap();
+            node.register_authority_pubkey(authority, signer.public_key().to_vec());
+            {
+                let mut consensus = node.consensus.write();
+                consensus.poa_config_mut().slash_weight_bps = 10_000;
+                consensus.slash_authority(&authority);
+                assert_eq!(consensus.validator_weights().get(&authority), Some(&0));
+            }
+
+            let block_hash = hash(43);
+            {
+                let weights = node.consensus.read().validator_weights();
+                let mut round = WPoaRound::new(1, 0, weights);
+                let _ = round.on_block_proposed(block_hash, authority);
+                *node.wpoa_round.lock() = Some(round);
+            }
+
+            let signature = signer.sign(block_hash.as_bytes()).unwrap();
+            node.handle_wpoa_vote(authority, block_hash, 1, signature);
+
+            assert_eq!(
+                node.wpoa_round.lock().as_ref().map(WPoaRound::phase_name),
+                Some("Voting")
+            );
+            assert_eq!(node.finality.read().last_finalized_number(), 0);
+            assert!(node
+                .chain_store
+                .get_commit_certificate(&block_hash)
+                .unwrap()
+                .is_none());
+        }
+
+        #[test]
+        fn wpoa_handle_vote_rechecks_weights_changed_mid_round() {
+            let (node, signer) = setup_wpoa_node();
+            let authority = node.config.proposer_address.unwrap();
+            node.register_authority_pubkey(authority, signer.public_key().to_vec());
+
+            let block_hash = hash(44);
+            {
+                let weights = node.consensus.read().validator_weights();
+                let mut round = WPoaRound::new(1, 0, weights);
+                let _ = round.on_block_proposed(block_hash, authority);
+                *node.wpoa_round.lock() = Some(round);
+            }
+            {
+                let mut consensus = node.consensus.write();
+                consensus.poa_config_mut().slash_weight_bps = 10_000;
+                consensus.slash_authority(&authority);
+            }
+
+            let signature = signer.sign(block_hash.as_bytes()).unwrap();
+            node.handle_wpoa_vote(authority, block_hash, 1, signature);
+
+            assert_eq!(
+                node.wpoa_round.lock().as_ref().map(WPoaRound::phase_name),
+                Some("Voting")
+            );
+            assert_eq!(node.finality.read().last_finalized_number(), 0);
+        }
+
+        #[test]
+        fn wpoa_vote_retries_after_atomic_finality_write_failure() {
+            let (node, signer, db) = setup_failing_wpoa_node();
+            let authority = node.config.proposer_address.unwrap();
+            node.register_authority_pubkey(authority, signer.public_key().to_vec());
+            let genesis_hash = store_genesis_wpoa(&node);
+            let block_hash = store_next_wpoa_block(&node, genesis_hash);
+            let mut round = WPoaRound::new(1, 0, node.consensus.read().validator_weights());
+            let _ = round.on_block_proposed(block_hash, authority);
+            *node.wpoa_round.lock() = Some(round);
+
+            db.fail_next_batch();
+            node.handle_wpoa_vote(
+                authority,
+                block_hash,
+                1,
+                signer.sign(block_hash.as_bytes()).unwrap(),
+            );
+
+            assert_eq!(
+                node.wpoa_round.lock().as_ref().map(WPoaRound::phase_name),
+                Some("Voting")
+            );
+            assert_eq!(node.finality.read().last_finalized_number(), 0);
+            assert_eq!(node.chain_store.get_finalized_number().unwrap(), None);
+            assert!(node
+                .chain_store
+                .get_commit_certificate(&block_hash)
+                .unwrap()
+                .is_none());
+
+            node.handle_wpoa_vote(
+                authority,
+                block_hash,
+                1,
+                signer.sign(block_hash.as_bytes()).unwrap(),
+            );
+
+            assert_eq!(
+                node.wpoa_round.lock().as_ref().map(WPoaRound::phase_name),
+                Some("Committed")
+            );
+            assert_eq!(node.finality.read().last_finalized_number(), 1);
+            assert_eq!(node.chain_store.get_finalized_number().unwrap(), Some(1));
+            assert!(node
+                .chain_store
+                .get_commit_certificate(&block_hash)
+                .unwrap()
+                .is_some());
+        }
+
+        #[test]
+        fn wpoa_round_rebuild_preserves_verified_votes() {
+            let signers: Vec<DilithiumSigner> =
+                (0..3).map(|_| DilithiumSigner::generate()).collect();
+            let authorities: Vec<Address> = signers
+                .iter()
+                .map(|signer| {
+                    Address::from_public_key(signer.public_key(), signer.sig_type().as_u8())
+                })
+                .collect();
+            let db = Arc::new(MemoryDb::new());
+            let chain_store = Arc::new(ChainStore::new(db.clone()));
+            let world_state = Arc::new(RwLock::new(WorldState::new(db.clone())));
+            let engine = WPoaEngine::new(
+                WPoaConfig::with_weights(PoaConfig::new(authorities.clone(), 1), vec![2, 1, 1]),
+                Arc::new(MultiVerifier),
+            );
+            let consensus: Arc<RwLock<dyn ConsensusEngine>> = Arc::new(RwLock::new(engine));
+            let node = Node::new(
+                NodeConfig::dev(authorities[0]),
+                db,
+                chain_store,
+                world_state,
+                Arc::new(TxPool::new(MempoolConfig {
+                    chain_id: 1337,
+                    ..MempoolConfig::default()
+                })),
+                consensus,
+            );
+            for (authority, signer) in authorities.iter().zip(&signers) {
+                node.register_authority_pubkey(*authority, signer.public_key().to_vec());
+            }
+
+            let block_hash = hash(45);
+            {
+                let weights = node.consensus.read().validator_weights();
+                let mut round = WPoaRound::new(1, 0, weights);
+                let _ = round.on_block_proposed(block_hash, authorities[0]);
+                *node.wpoa_round.lock() = Some(round);
+            }
+            node.handle_wpoa_vote(
+                authorities[0],
+                block_hash,
+                1,
+                signers[0].sign(block_hash.as_bytes()).unwrap(),
+            );
+
+            node.consensus
+                .write()
+                .set_authorities_with_weights(authorities.clone(), vec![1, 3, 3]);
+            node.handle_wpoa_vote(
+                authorities[1],
+                block_hash,
+                1,
+                signers[1].sign(block_hash.as_bytes()).unwrap(),
+            );
+            assert_eq!(
+                node.wpoa_round.lock().as_ref().map(WPoaRound::phase_name),
+                Some("Voting")
+            );
+
+            node.handle_wpoa_vote(
+                authorities[2],
+                block_hash,
+                1,
+                signers[2].sign(block_hash.as_bytes()).unwrap(),
+            );
+            assert_eq!(
+                node.wpoa_round.lock().as_ref().map(WPoaRound::phase_name),
+                Some("Committed")
             );
         }
 
@@ -8643,6 +8914,113 @@ mod tests {
                 .get_commit_certificate(&block_hash)
                 .unwrap()
                 .is_none());
+        }
+
+        #[test]
+        fn fast_finalize_rejects_exactly_two_thirds_weight() {
+            let signers: Vec<DilithiumSigner> =
+                (0..3).map(|_| DilithiumSigner::generate()).collect();
+            let authorities: Vec<Address> = signers
+                .iter()
+                .map(|signer| {
+                    Address::from_public_key(signer.public_key(), signer.sig_type().as_u8())
+                })
+                .collect();
+            let db = Arc::new(MemoryDb::new());
+            let chain_store = Arc::new(ChainStore::new(db.clone()));
+            let world_state = Arc::new(RwLock::new(WorldState::new(db.clone())));
+            let engine = WPoaEngine::new(
+                WPoaConfig::from_poa(PoaConfig::new(authorities.clone(), 1)),
+                Arc::new(MultiVerifier),
+            );
+            let consensus: Arc<RwLock<dyn ConsensusEngine>> = Arc::new(RwLock::new(engine));
+            let node = Node::new(
+                NodeConfig::dev(authorities[0]),
+                db,
+                chain_store,
+                world_state,
+                Arc::new(TxPool::new(MempoolConfig {
+                    chain_id: 1337,
+                    ..MempoolConfig::default()
+                })),
+                consensus,
+            );
+            for (authority, signer) in authorities.iter().zip(&signers) {
+                node.register_authority_pubkey(*authority, signer.public_key().to_vec());
+            }
+
+            let block_hash = hash(89);
+            let quorum_signatures = authorities
+                .iter()
+                .zip(&signers)
+                .take(2)
+                .map(|(authority, signer)| {
+                    (*authority, signer.sign(block_hash.as_bytes()).unwrap())
+                })
+                .collect();
+            let cert = Node::<MemoryDb>::encode_commit_certificate(&quorum_signatures).unwrap();
+
+            assert!(!node.fast_finalize_with_certificate(1, block_hash, &cert));
+            assert_eq!(node.finality.read().last_finalized_number(), 0);
+            assert!(node
+                .chain_store
+                .get_commit_certificate(&block_hash)
+                .unwrap()
+                .is_none());
+        }
+
+        #[test]
+        fn fast_finalize_rejects_zero_total_validator_weight() {
+            let (node, _) = setup_wpoa_node();
+            let authority = node.config.proposer_address.unwrap();
+            {
+                let mut consensus = node.consensus.write();
+                consensus.poa_config_mut().slash_weight_bps = 10_000;
+                consensus.slash_authority(&authority);
+                assert_eq!(consensus.validator_weights().get(&authority), Some(&0));
+            }
+
+            let block_hash = hash(90);
+            let cert = Node::<MemoryDb>::encode_commit_certificate(&HashMap::new()).unwrap();
+
+            assert!(!node.fast_finalize_with_certificate(1, block_hash, &cert));
+            assert_eq!(node.finality.read().last_finalized_number(), 0);
+            assert!(node
+                .chain_store
+                .get_commit_certificate(&block_hash)
+                .unwrap()
+                .is_none());
+        }
+
+        #[test]
+        fn fast_finalize_does_not_advance_volatile_state_on_atomic_write_failure() {
+            let (node, signer, db) = setup_failing_wpoa_node();
+            let authority = node.config.proposer_address.unwrap();
+            node.register_authority_pubkey(authority, signer.public_key().to_vec());
+            let block_hash = hash(91);
+            let quorum_signatures =
+                HashMap::from([(authority, signer.sign(block_hash.as_bytes()).unwrap())]);
+            let cert =
+                Node::<FailingBatchDb>::encode_commit_certificate(&quorum_signatures).unwrap();
+
+            db.fail_next_batch();
+            assert!(!node.fast_finalize_with_certificate(1, block_hash, &cert));
+            assert_eq!(node.finality.read().last_finalized_number(), 0);
+            assert_eq!(node.chain_store.get_finalized_number().unwrap(), None);
+            assert!(node
+                .chain_store
+                .get_commit_certificate(&block_hash)
+                .unwrap()
+                .is_none());
+
+            assert!(node.fast_finalize_with_certificate(1, block_hash, &cert));
+            assert_eq!(node.finality.read().last_finalized_number(), 1);
+            assert_eq!(node.chain_store.get_finalized_number().unwrap(), Some(1));
+            assert!(node
+                .chain_store
+                .get_commit_certificate(&block_hash)
+                .unwrap()
+                .is_some());
         }
 
         #[test]

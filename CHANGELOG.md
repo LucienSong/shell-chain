@@ -63,6 +63,11 @@ All notable changes to this project will be documented in this file.
   transaction, preserving contiguous sender queues and byte accounting.
 - Make the JSON-RPC response-body limit explicit and configurable across HTTP,
   WebSocket, and combined listeners.
+- Require finality votes and commit certificates to carry strictly more than
+  two thirds of active validator weight, reject zero-total-weight finality and
+  view-change quorums, preserve the nonzero view-change liveness threshold, and
+  atomically persist wPoA certificates and finalized cursors before advancing
+  volatile finality.
 
 ## [0.27.1] — 2026-07-14 — Consensus and RPC correctness fixes
 

@@ -374,6 +374,36 @@ impl<S: KvStore + 'static> Node<S> {
                         block_hash,
                         quorum_signatures,
                     } => {
+                        let current_weights = self.consensus.read().validator_weights();
+                        let current_total_weight = current_weights
+                            .values()
+                            .copied()
+                            .fold(0u64, u64::saturating_add);
+                        let current_signed_weight = quorum_signatures
+                            .keys()
+                            .filter_map(|signer| current_weights.get(signer).copied())
+                            .fold(0u64, u64::saturating_add);
+                        if !FinalityState::has_weighted_quorum(
+                            current_signed_weight,
+                            current_total_weight,
+                        ) {
+                            let round_number = round.round;
+                            let mut refreshed =
+                                WPoaRound::new(block_number, round_number, current_weights);
+                            let _ = refreshed.on_block_proposed(block_hash, voter);
+                            for (signer, signature) in &quorum_signatures {
+                                let _ = refreshed.on_vote(*signer, block_hash, signature.clone());
+                            }
+                            *round = refreshed;
+                            tracing::warn!(
+                                block_number,
+                                %block_hash,
+                                current_signed_weight,
+                                current_total_weight,
+                                "W.5: validator weights changed before commit; refreshed round without finalizing"
+                            );
+                            return;
+                        }
                         tracing::info!(
                             %block_hash,
                             block_number,
@@ -405,10 +435,53 @@ impl<S: KvStore + 'static> Node<S> {
                             .unwrap_or(false);
 
                         if locally_canonical {
-                            let advanced = self
-                                .finality
-                                .write()
-                                .set_finalized_direct(block_number, block_hash);
+                            let encoded = match Self::encode_commit_certificate(&quorum_signatures)
+                            {
+                                Ok(encoded) => encoded,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        %block_hash,
+                                        error = %e,
+                                        "FF.2: failed to encode commit certificate"
+                                    );
+                                    return;
+                                }
+                            };
+                            let advanced = {
+                                let mut finality = self.finality.write();
+                                if block_number <= finality.last_finalized_number() {
+                                    false
+                                } else if let Err(e) =
+                                    self.chain_store.set_finalized_with_certificate(
+                                        block_number,
+                                        &block_hash,
+                                        &encoded,
+                                    )
+                                {
+                                    let round_number = round.round;
+                                    let mut retry_round =
+                                        WPoaRound::new(block_number, round_number, current_weights);
+                                    let _ = retry_round.on_block_proposed(block_hash, voter);
+                                    for (signer, signature) in &quorum_signatures {
+                                        if *signer != voter {
+                                            let _ = retry_round.on_vote(
+                                                *signer,
+                                                block_hash,
+                                                signature.clone(),
+                                            );
+                                        }
+                                    }
+                                    *round = retry_round;
+                                    tracing::warn!(
+                                        block_number,
+                                        error = %e,
+                                        "FF: failed to persist finality; restored voting round for retry"
+                                    );
+                                    return;
+                                } else {
+                                    finality.set_finalized_direct(block_number, block_hash)
+                                }
+                            };
                             if advanced {
                                 let current_head = self
                                     .chain_store
@@ -423,36 +496,6 @@ impl<S: KvStore + 'static> Node<S> {
                                     %block_hash,
                                     "FF: block finalized"
                                 );
-                                if let Err(e) = self.chain_store.set_finalized_number(block_number)
-                                {
-                                    tracing::warn!(
-                                        block_number,
-                                        error = %e,
-                                        "FF: failed to persist finalized number"
-                                    );
-                                }
-                                // FF.2: Store commit certificate sidecar.
-                                match Self::encode_commit_certificate(&quorum_signatures) {
-                                    Ok(encoded) => {
-                                        if let Err(e) = self
-                                            .chain_store
-                                            .set_commit_certificate(&block_hash, &encoded)
-                                        {
-                                            tracing::warn!(
-                                                %block_hash,
-                                                error = %e,
-                                                "FF.2: failed to store commit certificate"
-                                            );
-                                        }
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            %block_hash,
-                                            error = %e,
-                                            "FF.2: failed to encode commit certificate"
-                                        );
-                                    }
-                                }
                             }
                         } else {
                             tracing::warn!(
@@ -549,8 +592,12 @@ impl<S: KvStore + 'static> Node<S> {
             return false;
         };
         let weights = self.consensus.read().validator_weights();
-        let total_weight: u64 = weights.values().sum();
-        let quorum = (2 * total_weight).div_ceil(3);
+        let total_weight = weights.values().copied().fold(0u64, u64::saturating_add);
+        if total_weight == 0 {
+            warn!(block_number, %block_hash, "FF.7: certificate cannot be verified without active validator weight");
+            return false;
+        }
+        let quorum = FinalityState::strict_quorum_weight(total_weight);
         let verifier = MultiVerifier;
         let mut signed_weight = 0u64;
 
@@ -590,7 +637,7 @@ impl<S: KvStore + 'static> Node<S> {
                 return false;
             }
             match verifier.verify(&pubkey, block_hash.as_bytes(), &sig) {
-                Ok(true) => signed_weight += weight,
+                Ok(true) => signed_weight = signed_weight.saturating_add(weight),
                 Ok(false) => {
                     warn!(block_number, %block_hash, %signer, "FF.7: invalid certificate signature");
                     return false;
@@ -613,19 +660,26 @@ impl<S: KvStore + 'static> Node<S> {
             return false;
         }
 
-        if let Err(e) = self.chain_store.set_commit_certificate(&block_hash, cert) {
-            warn!(block_number, %block_hash, error = %e, "FF.7: failed to persist commit certificate");
-            return false;
-        }
-        let advanced = self
-            .finality
-            .write()
-            .set_finalized_direct(block_number, block_hash);
-        if advanced {
-            if let Err(e) = self.chain_store.set_finalized_number(block_number) {
-                warn!(block_number, %block_hash, error = %e, "FF.7: failed to persist finalized number");
-                return false;
+        let advanced = {
+            let mut finality = self.finality.write();
+            if block_number <= finality.last_finalized_number() {
+                if let Err(e) = self.chain_store.set_commit_certificate(&block_hash, cert) {
+                    warn!(block_number, %block_hash, error = %e, "FF.7: failed to persist commit certificate");
+                    return false;
+                }
+                false
+            } else {
+                if let Err(e) =
+                    self.chain_store
+                        .set_finalized_with_certificate(block_number, &block_hash, cert)
+                {
+                    warn!(block_number, %block_hash, error = %e, "FF.7: failed to persist finality");
+                    return false;
+                }
+                finality.set_finalized_direct(block_number, block_hash)
             }
+        };
+        if advanced {
             let current_head = self
                 .chain_store
                 .get_head_block()

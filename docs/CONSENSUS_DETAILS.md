@@ -106,6 +106,10 @@ engine = "wpoa"
 
 If the expected proposer misses its slot, validators broadcast a signed `ViewChangeMessage`. Once the weighted quorum reaches `ceil(2/3 × total_active_weight)`, the engine advances `current_view` and rotates proposer selection across the ordered authority list for that height. The timeout is `max(block_time_ms, 10_000)` milliseconds.
 
+If slashing reduces total active validator weight to zero, no view-change quorum
+can form. Validator weight must be restored through the authority-management
+path before proposer rotation resumes.
+
 ---
 
 ## Validator Set
@@ -143,12 +147,16 @@ A block becomes finalized when votes for the same block hash reach the weighted
 wPoA quorum:
 
 ```text
-quorum = ceil(2 * total_active_validator_weight / 3)
+quorum = floor(2 * total_active_validator_weight / 3) + 1
 ```
 
 For the 3-validator testnet profile with weights `[2, 1, 1]`, total weight is 4
 and quorum is 3. Finality therefore requires the weight-2 validator plus at
 least one weight-1 validator, or all three validators.
+
+A zero total active weight never satisfies finality, even though the numeric
+threshold formula evaluates to zero. Live votes and synchronized commit
+certificates both enforce this nonzero-total invariant.
 
 `FinalityState` tracks:
 - `last_finalized_number` — highest finalized block number
@@ -166,9 +174,9 @@ Finality is safety-critical:
   hash; import returns `ConflictsWithFinalized`.
 - A quorum advances finality only when its block hash is canonical at the
   attested height.
-- The durable finalized cursor is written before in-memory finality advances.
-  A failed write leaves the quorum attestations pending so the same vote can
-  safely retry persistence.
+- The wPoA commit certificate and durable finalized cursor are written
+  atomically before in-memory finality advances. A failed write restores the
+  voting round so the triggering vote can safely retry persistence.
 - Validators ignore stale or conflicting votes for finalized heights.
 - Producers refuse to build from a parent that conflicts with the finalized
   chain.

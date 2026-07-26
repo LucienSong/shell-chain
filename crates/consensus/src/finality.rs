@@ -260,14 +260,19 @@ impl FinalityState {
 
     /// Return true when attesting weight is strictly greater than 2/3 of total weight.
     pub fn has_weighted_quorum(attested_weight: u64, total_weight: u64) -> bool {
-        if total_weight == 0 {
-            return false;
-        }
-        (attested_weight as u128).saturating_mul(3) > (total_weight as u128).saturating_mul(2)
+        attested_weight >= Self::strict_quorum_weight(total_weight) && total_weight > 0
     }
 
-    /// Calculate the quorum threshold for BFT consensus: ceil(2N/3).
-    /// Tolerates up to f Byzantine validators where 2f+1 = ceil(2N/3).
+    /// Minimum weight that is strictly greater than two thirds of the total.
+    pub fn strict_quorum_weight(total_weight: u64) -> u64 {
+        if total_weight == 0 {
+            return 0;
+        }
+        let threshold = (u128::from(total_weight) * 2) / 3 + 1;
+        u64::try_from(threshold).unwrap_or(u64::MAX)
+    }
+
+    /// Calculate the quorum threshold for BFT finality: floor(2N/3) + 1.
     /// Special case: N <= 1 returns 1.
     pub fn quorum_threshold(total_validators: usize) -> usize {
         if total_validators <= 1 {
@@ -276,7 +281,7 @@ impl FinalityState {
         // Use u128 intermediate to prevent overflow when total_validators is very large;
         // saturating_mul caps at u128::MAX rather than wrapping.
         let n = total_validators as u128;
-        usize::try_from(n.saturating_mul(2).div_ceil(3)).unwrap_or(total_validators)
+        usize::try_from(n.saturating_mul(2) / 3 + 1).unwrap_or(total_validators)
     }
 
     /// Last finalized block number.
@@ -472,13 +477,6 @@ mod tests {
         )
     }
 
-    fn strict_quorum_weight(total_weight: u64) -> u64 {
-        if total_weight == 0 {
-            return 0;
-        }
-        total_weight.saturating_mul(2) / 3 + 1
-    }
-
     #[test]
     fn test_attestation_new() {
         let hash = make_hash(1);
@@ -512,14 +510,29 @@ mod tests {
 
     #[test]
     fn test_quorum_threshold() {
-        // BFT quorum: ceil(2N/3) = (2N+2)/3 (integer division)
+        // BFT finality quorum: floor(2N/3) + 1.
         assert_eq!(FinalityState::quorum_threshold(1), 1);
         assert_eq!(FinalityState::quorum_threshold(2), 2);
-        assert_eq!(FinalityState::quorum_threshold(3), 2); // ceil(6/3) = 2
-        assert_eq!(FinalityState::quorum_threshold(4), 3); // ceil(8/3) = 3
-        assert_eq!(FinalityState::quorum_threshold(5), 4); // ceil(10/3) = 4
-        assert_eq!(FinalityState::quorum_threshold(7), 5); // ceil(14/3) = 5
-        assert_eq!(FinalityState::quorum_threshold(10), 7); // ceil(20/3) = 7
+        assert_eq!(FinalityState::quorum_threshold(3), 3);
+        assert_eq!(FinalityState::quorum_threshold(4), 3);
+        assert_eq!(FinalityState::quorum_threshold(5), 4);
+        assert_eq!(FinalityState::quorum_threshold(6), 5);
+        assert_eq!(FinalityState::quorum_threshold(7), 5);
+        assert_eq!(FinalityState::quorum_threshold(10), 7);
+    }
+
+    #[test]
+    fn strict_quorum_weight_handles_numeric_boundaries() {
+        for total in [1, 2, 3, 6, 7, u64::MAX] {
+            let threshold = FinalityState::strict_quorum_weight(total);
+            assert!(FinalityState::has_weighted_quorum(threshold, total));
+            assert!(!FinalityState::has_weighted_quorum(
+                threshold.saturating_sub(1),
+                total
+            ));
+        }
+        assert_eq!(FinalityState::strict_quorum_weight(0), 0);
+        assert!(!FinalityState::has_weighted_quorum(0, 0));
     }
 
     #[test]
@@ -732,7 +745,7 @@ mod tests {
     fn quorum_exactly_at_threshold() {
         // Verify strict >2/3 quorum detection for various uniform validator sets.
         for total in [3u64, 4, 5, 6, 7, 10, 13, 20] {
-            let quorum = strict_quorum_weight(total);
+            let quorum = FinalityState::strict_quorum_weight(total);
             let hash = make_hash(total as u8);
             let mut state = FinalityState::new();
 
@@ -762,7 +775,7 @@ mod tests {
         let mut state = FinalityState::new();
         let hash = make_hash(1);
 
-        // 5 of 10 validators → quorum is 6
+        // 5 of 10 validators is below the strict quorum of 7.
         for i in 0..5 {
             state.record_attestation(make_att(hash, 50, make_addr(i), vec![]));
         }
@@ -809,7 +822,7 @@ mod tests {
         let mut state = FinalityState::new();
         let hash = make_hash(1);
         let total: u64 = 100;
-        let quorum = strict_quorum_weight(total);
+        let quorum = FinalityState::strict_quorum_weight(total);
 
         assert_eq!(quorum, 67);
 

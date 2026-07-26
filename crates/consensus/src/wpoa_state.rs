@@ -6,6 +6,8 @@ use std::time::Instant;
 use shell_crypto::PQSignature;
 use shell_primitives::{Address, ShellHash};
 
+use crate::FinalityState;
+
 /// States for a single consensus round.
 pub enum RoundPhase {
     Idle,
@@ -82,7 +84,10 @@ pub struct WPoaRound {
 impl WPoaRound {
     /// Create a new round in Idle state.
     pub fn new(block_number: u64, round: u64, validator_weights: HashMap<Address, u64>) -> Self {
-        let total_weight = validator_weights.values().sum();
+        let total_weight = validator_weights
+            .values()
+            .copied()
+            .fold(0u64, u64::saturating_add);
         Self {
             round,
             block_number,
@@ -96,9 +101,15 @@ impl WPoaRound {
         }
     }
 
-    /// Compute the quorum threshold: ceiling of 2/3 * total_weight.
-    fn quorum_weight(&self) -> u64 {
-        (2 * self.total_weight).div_ceil(3)
+    /// Compute the finality threshold: strictly greater than 2/3 of total weight.
+    fn finality_quorum_weight(&self) -> u64 {
+        FinalityState::strict_quorum_weight(self.total_weight)
+    }
+
+    /// View changes use the protocol's ceiling-of-two-thirds liveness threshold.
+    fn view_change_quorum_weight(&self) -> u64 {
+        let threshold = (u128::from(self.total_weight) * 2).div_ceil(3);
+        u64::try_from(threshold).unwrap_or(u64::MAX)
     }
 
     /// Handle a block proposal. Transitions Idle → Voting.
@@ -172,9 +183,9 @@ impl WPoaRound {
                 }
                 // Record vote.
                 votes.insert(voter, sig);
-                vote_weight += weight;
+                vote_weight = vote_weight.saturating_add(weight);
 
-                if vote_weight >= self.quorum_weight() {
+                if self.total_weight != 0 && vote_weight >= self.finality_quorum_weight() {
                     // Quorum reached!
                     let quorum_signatures = votes.clone();
                     self.phase = RoundPhase::Committed {
@@ -226,9 +237,9 @@ impl WPoaRound {
                     return vec![];
                 }
                 votes.insert(voter);
-                vote_weight += weight;
+                vote_weight = vote_weight.saturating_add(weight);
 
-                if vote_weight >= self.quorum_weight() {
+                if self.total_weight != 0 && vote_weight >= self.view_change_quorum_weight() {
                     self.phase = RoundPhase::Idle;
                     vec![WPoaEvent::ViewChangeReady { new_view }]
                 } else {
@@ -320,7 +331,8 @@ mod tests {
     fn quorum_uniform_3_validators() {
         let weights = uniform_weights(3);
         let round = WPoaRound::new(1, 0, weights);
-        assert_eq!(round.quorum_weight(), 2);
+        assert_eq!(round.finality_quorum_weight(), 3);
+        assert_eq!(round.view_change_quorum_weight(), 2);
     }
 
     #[test]
@@ -330,7 +342,8 @@ mod tests {
         weights.insert(addr(2), 2u64);
         weights.insert(addr(3), 1u64);
         let round = WPoaRound::new(1, 0, weights);
-        assert_eq!(round.quorum_weight(), 4);
+        assert_eq!(round.finality_quorum_weight(), 5);
+        assert_eq!(round.view_change_quorum_weight(), 4);
     }
 
     #[test]
@@ -363,13 +376,16 @@ mod tests {
         assert!(e1.is_empty());
 
         let e2 = round.on_vote(addr(2), hash(1), sig());
-        assert_eq!(e2.len(), 1);
-        assert!(matches!(e2[0], WPoaEvent::BlockCommitted { .. }));
+        assert!(e2.is_empty());
+
+        let e3 = round.on_vote(addr(3), hash(1), sig());
+        assert_eq!(e3.len(), 1);
+        assert!(matches!(e3[0], WPoaEvent::BlockCommitted { .. }));
         if let WPoaEvent::BlockCommitted {
             quorum_signatures, ..
-        } = &e2[0]
+        } = &e3[0]
         {
-            assert_eq!(quorum_signatures.len(), 2);
+            assert_eq!(quorum_signatures.len(), 3);
         }
         assert_eq!(round.phase_name(), "Committed");
     }
@@ -426,6 +442,32 @@ mod tests {
     }
 
     #[test]
+    fn zero_total_weight_cannot_commit() {
+        let mut round = WPoaRound::new(1, 0, HashMap::from([(addr(1), 0)]));
+        round.on_block_proposed(hash(1), addr(1));
+
+        let events = round.on_vote(addr(1), hash(1), sig());
+
+        assert!(events.is_empty());
+        assert_eq!(round.phase_name(), "Voting");
+    }
+
+    #[test]
+    fn vote_weight_accumulation_saturates_at_numeric_limit() {
+        let weight = u64::MAX / 5 * 3;
+        let mut round = WPoaRound::new(1, 0, HashMap::from([(addr(1), weight), (addr(2), weight)]));
+        round.on_block_proposed(hash(1), addr(1));
+
+        assert!(round.on_vote(addr(1), hash(1), sig()).is_empty());
+        let events = round.on_vote(addr(2), hash(1), sig());
+
+        assert!(matches!(
+            events.as_slice(),
+            [WPoaEvent::BlockCommitted { .. }]
+        ));
+    }
+
+    #[test]
     fn view_change_quorum() {
         let weights = uniform_weights(3);
         let mut round = WPoaRound::new(1, 0, weights);
@@ -449,6 +491,32 @@ mod tests {
         let events = round.on_view_change_vote(addr(1), 2);
         assert!(events.is_empty());
         assert_eq!(round.phase_name(), "ViewChanging");
+    }
+
+    #[test]
+    fn zero_total_weight_cannot_advance_view() {
+        let mut round = WPoaRound::new(1, 0, HashMap::from([(addr(1), 0)]));
+        round.start_view_change(1);
+
+        let events = round.on_view_change_vote(addr(1), 1);
+
+        assert!(events.is_empty());
+        assert_eq!(round.phase_name(), "ViewChanging");
+    }
+
+    #[test]
+    fn view_change_weight_accumulation_saturates_at_numeric_limit() {
+        let weight = u64::MAX / 5 * 3;
+        let mut round = WPoaRound::new(1, 0, HashMap::from([(addr(1), weight), (addr(2), weight)]));
+        round.start_view_change(1);
+
+        assert!(round.on_view_change_vote(addr(1), 1).is_empty());
+        let events = round.on_view_change_vote(addr(2), 1);
+
+        assert!(matches!(
+            events.as_slice(),
+            [WPoaEvent::ViewChangeReady { new_view: 1 }]
+        ));
     }
 
     #[test]
@@ -509,13 +577,16 @@ mod tests {
         assert!(v1.is_empty());
 
         let v2 = round.on_vote(addr(2), hash(42), sig());
-        assert_eq!(v2.len(), 1);
-        let committed_hash = match &v2[0] {
+        assert!(v2.is_empty());
+
+        let v3 = round.on_vote(addr(3), hash(42), sig());
+        assert_eq!(v3.len(), 1);
+        let committed_hash = match &v3[0] {
             WPoaEvent::BlockCommitted {
                 block_hash,
                 quorum_signatures,
             } => {
-                assert_eq!(quorum_signatures.len(), 2);
+                assert_eq!(quorum_signatures.len(), 3);
                 *block_hash
             }
             other => panic!("expected BlockCommitted, got {:?}", other),

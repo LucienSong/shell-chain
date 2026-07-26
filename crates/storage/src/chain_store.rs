@@ -1687,15 +1687,36 @@ impl<S: KvStore> ChainStore<S> {
     /// The certificate encodes the quorum signatures that finalized the block.
     /// Stored separately from the block header to preserve hash compatibility.
     /// Key format: `CERT<32-byte-block-hash>`.
+    fn commit_certificate_key(block_hash: &ShellHash) -> Vec<u8> {
+        let mut key = Vec::with_capacity(4 + 32);
+        key.extend_from_slice(b"CERT");
+        key.extend_from_slice(block_hash.as_bytes());
+        key
+    }
+
     pub fn set_commit_certificate(
         &self,
         block_hash: &ShellHash,
         cert: &[u8],
     ) -> Result<(), StorageError> {
-        let mut key = Vec::with_capacity(4 + 32);
-        key.extend_from_slice(b"CERT");
-        key.extend_from_slice(block_hash.as_bytes());
-        self.store.put(&key, cert)
+        self.store
+            .put(&Self::commit_certificate_key(block_hash), cert)
+    }
+
+    /// Atomically store a wPoA commit certificate and advance the finalized cursor.
+    pub fn set_finalized_with_certificate(
+        &self,
+        number: u64,
+        block_hash: &ShellHash,
+        cert: &[u8],
+    ) -> Result<(), StorageError> {
+        let mut batch = WriteBatch::new();
+        batch.put(
+            prefix::FINALIZED_NUMBER.to_vec(),
+            number.to_be_bytes().to_vec(),
+        );
+        batch.put(Self::commit_certificate_key(block_hash), cert.to_vec());
+        self.store.write_batch(batch)
     }
 
     /// Retrieve the commit certificate for a finalized block, if any.
@@ -1703,10 +1724,7 @@ impl<S: KvStore> ChainStore<S> {
         &self,
         block_hash: &ShellHash,
     ) -> Result<Option<Vec<u8>>, StorageError> {
-        let mut key = Vec::with_capacity(4 + 32);
-        key.extend_from_slice(b"CERT");
-        key.extend_from_slice(block_hash.as_bytes());
-        self.store.get(&key)
+        self.store.get(&Self::commit_certificate_key(block_hash))
     }
 
     /// Store the total transaction count across all canonical blocks.
