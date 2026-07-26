@@ -694,9 +694,12 @@ docker compose -f docker-compose.prod.yml up -d
 
 ```bash
 shell-node --datadir shell-data export-state --output snapshot.jsonl
-# Export at a specific block:
+# Optionally assert the expected canonical head:
 shell-node --datadir shell-data export-state --block 1000 --output snapshot.jsonl
 ```
+
+The command rejects `--block` when it does not match the current canonical
+head; historical snapshots are not exported from a live chain database.
 
 **Import state snapshot:**
 

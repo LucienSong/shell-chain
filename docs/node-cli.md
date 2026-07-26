@@ -246,6 +246,9 @@ shell-node export-state [--block <N>] [--output <PATH>]
 shell-node import-state --snapshot <PATH>
 ```
 
+`--block` may be used to assert the expected canonical head. Historical
+snapshots are not exported from a live chain database.
+
 ---
 
 ### 2.10 `removedb`
