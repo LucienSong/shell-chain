@@ -3809,6 +3809,61 @@ mod tests {
     }
 
     #[test]
+    fn produce_block_indexes_receipts_by_included_transaction_order() {
+        let (node, signer) = setup_node();
+        store_genesis_with_gas_limit(&node, 50_000);
+
+        let receiver = Address::from([0xDD; 32]);
+        let submit = |tx_signer: &DilithiumSigner, gas_limit, priority_fee| {
+            let sender =
+                Address::from_public_key(tx_signer.public_key(), tx_signer.sig_type().as_u8());
+            fund_account(&node, &sender, U256::from(100_000_000_000_000u64));
+            submit_signed_tx(
+                &node,
+                tx_signer,
+                sender,
+                Transaction {
+                    chain_id: 1337,
+                    nonce: 0,
+                    to: Some(receiver),
+                    value: U256::from(1_000u64),
+                    data: Bytes::new(),
+                    gas_limit,
+                    max_fee_per_gas: shell_core::INITIAL_BASE_FEE + priority_fee,
+                    max_priority_fee_per_gas: priority_fee,
+                    access_list: None,
+                    tx_type: 2,
+                    max_fee_per_blob_gas: None,
+                    blob_versioned_hashes: None,
+                },
+            );
+            sender
+        };
+
+        let first_signer = DilithiumSigner::generate();
+        let skipped_signer = DilithiumSigner::generate();
+        let second_signer = DilithiumSigner::generate();
+        let first_sender = submit(&first_signer, 21_000, 300);
+        submit(&skipped_signer, 30_000, 200);
+        let second_sender = submit(&second_signer, 21_000, 100);
+
+        let block = node.produce_block(&signer, 100).unwrap();
+        assert_eq!(block.transactions.len(), 2);
+        assert_eq!(block.transactions[0].sender(), first_sender);
+        assert_eq!(block.transactions[1].sender(), second_sender);
+
+        let receipts = node
+            .chain_store
+            .get_receipts(&block.hash())
+            .unwrap()
+            .expect("produced block receipts");
+        assert_eq!(receipts.len(), 3);
+        assert_eq!(receipts[0].tx_index, 0);
+        assert_eq!(receipts[1].tx_index, 1);
+        assert_eq!(receipts[2].tx_index, 2);
+    }
+
+    #[test]
     fn produce_block_commits_repeated_contract_storage_updates() {
         let (node, signer) = setup_node();
         store_genesis(&node);

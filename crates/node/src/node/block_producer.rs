@@ -97,7 +97,7 @@ impl<S: KvStore + 'static> Node<S> {
         // inside the loop was an unnecessary per-iteration allocation.
         let import_cs = ChainStore::new(self.store.clone());
 
-        for (idx, tx) in candidates.iter().enumerate() {
+        for tx in &candidates {
             if cumulative_gas >= header.gas_limit {
                 break;
             }
@@ -153,10 +153,11 @@ impl<S: KvStore + 'static> Node<S> {
 
             let pre_tx_root = evm.state_db_mut().world_state_mut().state_root()?;
             let is_aa = tx.is_aa_bundle();
+            let tx_index = included_txs.len() as u32;
             let exec_result = if is_aa {
-                evm.execute_aa_bundle(tx, &header, idx as u32, cumulative_gas)
+                evm.execute_aa_bundle(tx, &header, tx_index, cumulative_gas)
             } else {
-                evm.execute_tx(tx, &header, idx as u32, cumulative_gas)
+                evm.execute_tx(tx, &header, tx_index, cumulative_gas)
             };
             match exec_result {
                 Ok(result) => {
