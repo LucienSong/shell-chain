@@ -456,7 +456,7 @@ pub const PQ_VERIFY_GAS: u64 = 10_000;
 ///
 /// ## Validation rules (enforced in `validate_aa_tx`)
 ///
-/// 1. `expiry_block > current_block_number`
+/// 1. `expiry_block > validation_block_number` (the next block after the stored head)
 /// 2. Σ inner_call.value ≤ `value_cap`
 /// 3. If `target` is `Some`: all inner calls must have `to == target`
 /// 4. `root_signature` is valid over [`SessionAuth::auth_hash`]

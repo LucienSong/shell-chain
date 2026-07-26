@@ -86,7 +86,7 @@ pub enum AaValidationError {
     #[error("contract paymaster validation exceeded gas budget (50k limit)")]
     PaymasterGasExceeded,
 
-    #[error("session key expired at block {expiry_block} (current {current_block})")]
+    #[error("session key expired at block {expiry_block} (validation block {current_block})")]
     SessionKeyExpired {
         expiry_block: u64,
         current_block: u64,
@@ -552,7 +552,7 @@ fn is_magic_valid(output: &[u8]) -> bool {
 /// Validate `SessionAuth` in a session-key-signed AA bundle.
 ///
 /// Steps (AA Phase 2 spec §4.2):
-/// 1. Expiry: `session_auth.expiry_block > current_block`
+/// 1. Expiry: `session_auth.expiry_block > validation_block`
 /// 2. Value cap: Σ `inner_call.value ≤ session_auth.value_cap`
 /// 3. Target: if `session_auth.target` is Some, all inner calls must target it
 /// 4. Root authorization: verify `root_signature` over `session_auth.auth_hash(chain_id)`
@@ -571,14 +571,18 @@ fn validate_session_auth<S: KvStore + 'static, V: Verifier>(
     verifier: &V,
 ) -> Result<(), AaValidationError> {
     // 1. Expiry check.
-    let current_block = chain_store
+    // Validation runs against the parent state, so the transaction can only
+    // execute in the next block. Check the candidate height rather than the
+    // stored head height to avoid admitting an authorization at its exclusive
+    // expiry boundary.
+    let validation_block = chain_store
         .get_head_block()?
-        .map(|b| b.header.number)
+        .map(|b| b.header.number.saturating_add(1))
         .unwrap_or(0);
-    if session_auth.expiry_block <= current_block {
+    if session_auth.expiry_block <= validation_block {
         return Err(AaValidationError::SessionKeyExpired {
             expiry_block: session_auth.expiry_block,
-            current_block,
+            current_block: validation_block,
         });
     }
 
@@ -1001,7 +1005,10 @@ impl<S: KvStore + 'static> Database for ValidationStateDb<'_, S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shell_core::{Account, InnerCall, PubkeyMode, SessionAuth, Transaction, AA_BUNDLE_TX_TYPE};
+    use shell_core::{
+        Account, Block, BlockHeader, InnerCall, PubkeyMode, SessionAuth, Transaction,
+        AA_BUNDLE_TX_TYPE,
+    };
     use shell_crypto::{
         DilithiumSigner, DilithiumVerifier, MlDsaSigner, MultiVerifier, PQSignature, Signer,
     };
@@ -1447,6 +1454,27 @@ mod tests {
         let outcome = validate_aa_tx(&signed, &ws, &cs, &MultiVerifier).unwrap();
         assert_eq!(outcome.pubkey, root.public_key());
         assert!(outcome.should_register_pubkey);
+
+        let head = Block {
+            header: BlockHeader {
+                number: 9,
+                ..BlockHeader::default()
+            },
+            transactions: Vec::new(),
+            system_transactions: Vec::new(),
+            proposer_seal: None,
+        };
+        cs.put_block(&head).unwrap();
+        cs.set_head(&head.hash()).unwrap();
+
+        let err = validate_aa_tx(&signed, &ws, &cs, &MultiVerifier).unwrap_err();
+        assert!(matches!(
+            err,
+            AaValidationError::SessionKeyExpired {
+                expiry_block: 10,
+                current_block: 10,
+            }
+        ));
     }
 
     #[test]

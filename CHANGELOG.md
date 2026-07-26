@@ -6,6 +6,8 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Reject session-key transactions at their exclusive expiry height by checking
+  the next candidate block rather than the stored parent height.
 - Enforced paymaster authorization after every sender-account validation path.
 - Enforce the 50 MiB protocol-wide raw P2P message ceiling even when an
   embedding application supplies a larger network configuration value.

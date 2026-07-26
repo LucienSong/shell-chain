@@ -86,7 +86,7 @@ pub enum TxValidationError {
     #[error("contract paymaster validation exceeded gas budget (50k limit)")]
     PaymasterGasExceeded,
 
-    #[error("session key expired at block {expiry_block} (current {current_block})")]
+    #[error("session key expired at block {expiry_block} (validation block {current_block})")]
     SessionKeyExpired {
         expiry_block: u64,
         current_block: u64,
