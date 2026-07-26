@@ -6,6 +6,8 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Count the block transaction limit against included transactions so skipped
+  candidates cannot suppress later eligible transactions.
 - Index transaction receipts by included block order when earlier mempool
   candidates are skipped during block assembly.
 - Reject duplicate validator identities in genesis and persisted validator

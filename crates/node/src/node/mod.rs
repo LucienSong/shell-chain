@@ -3847,8 +3847,12 @@ mod tests {
         submit(&skipped_signer, 30_000, 200);
         let second_sender = submit(&second_signer, 21_000, 100);
 
-        let block = node.produce_block(&signer, 100).unwrap();
-        assert_eq!(block.transactions.len(), 2);
+        let block = node.produce_block(&signer, 2).unwrap();
+        assert_eq!(
+            block.transactions.len(),
+            2,
+            "the skipped candidate must not consume the inclusion limit"
+        );
         assert_eq!(block.transactions[0].sender(), first_sender);
         assert_eq!(block.transactions[1].sender(), second_sender);
 
