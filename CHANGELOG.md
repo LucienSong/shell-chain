@@ -6,6 +6,8 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Avoid cloning every signed transaction during block import when validation
+  can borrow the original block transaction unchanged.
 - Reject session-key transactions at their exclusive expiry height by checking
   the next candidate block rather than the stored parent height.
 - Enforced paymaster authorization after every sender-account validation path.
