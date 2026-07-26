@@ -285,9 +285,6 @@ mod tests {
         let node_a = bus.join(&config);
         let mut node_b = bus.join(&config);
 
-        // Give background tasks a moment to start.
-        tokio::time::sleep(Duration::from_millis(10)).await;
-
         let block = test_block(1);
         node_a
             .broadcast(NetworkMessage::NewBlock(Box::new(block.clone())))
@@ -316,8 +313,6 @@ mod tests {
         let config = NetworkConfig::default();
 
         let mut node_a = bus.join(&config);
-
-        tokio::time::sleep(Duration::from_millis(10)).await;
 
         node_a.broadcast(NetworkMessage::Ping).await.unwrap();
 
@@ -381,8 +376,6 @@ mod tests {
         let bus = NetworkBus::new(64);
         let config = NetworkConfig::default();
         let mut node_b = bus.join(&config);
-
-        tokio::time::sleep(Duration::from_millis(10)).await;
 
         let tx = test_transaction(crate::message::MAX_TX_GOSSIP_SIZE + 1);
         let data = serde_json::to_vec(&NetworkMessage::NewTransaction(Box::new(tx))).unwrap();
@@ -496,8 +489,6 @@ mod tests {
 
         let node_a = bus.join(&config);
         let mut node_b = bus.join(&config);
-
-        tokio::time::sleep(Duration::from_millis(10)).await;
 
         let tx = test_transaction(0);
 
