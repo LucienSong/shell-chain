@@ -6313,6 +6313,14 @@ mod tests {
         let logs = changes.as_array().unwrap();
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0]["blockNumber"], "0x1");
+        assert_eq!(
+            handler
+                .filter_registry
+                .get_filter_info(&filter_id)
+                .unwrap()
+                .1,
+            1
+        );
 
         let changes = EthApiServer::get_filter_changes(&handler, filter_id)
             .await

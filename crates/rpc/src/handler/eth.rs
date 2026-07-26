@@ -1046,6 +1046,30 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
 
         let head = self.chain_store.get_head_block().map_err(internal_err)?;
         let latest = head.as_ref().map(|b| b.number()).unwrap_or(0);
+        let log_poll = if is_log {
+            let raw = self
+                .filter_registry
+                .get_log_filter(&id)
+                .ok_or_else(|| not_found("filter not found"))?;
+            let removed_to_block_is_unbounded = matches!(
+                raw.to_block.as_deref(),
+                None | Some("latest") | Some("pending")
+            );
+            let finalized = *self.finalized_number.read();
+            let filter = raw.into_filter(latest, finalized).map_err(internal_err)?;
+            let removed_to_block = if removed_to_block_is_unbounded {
+                u64::MAX
+            } else {
+                filter.to_block.unwrap_or(latest)
+            };
+            Some((filter, removed_to_block))
+        } else {
+            None
+        };
+        let canonical_latest = log_poll
+            .as_ref()
+            .and_then(|(filter, _)| filter.to_block)
+            .map_or(latest, |to_block| latest.min(to_block));
         let reorg = find_filter_reorg(&self.chain_store, cursor, latest)?;
         let (base_cursor, removed_blocks) = match reorg {
             Some(reorg) => (reorg.ancestor, reorg.removed_blocks),
@@ -1055,9 +1079,10 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
         let canonical_from = base_cursor
             .block_number
             .checked_add(1)
-            .filter(|from| remaining_blocks > 0 && *from <= latest);
-        let canonical_to = canonical_from
-            .map(|from| latest.min(from.saturating_add(remaining_blocks.saturating_sub(1))));
+            .filter(|from| remaining_blocks > 0 && *from <= canonical_latest);
+        let canonical_to = canonical_from.map(|from| {
+            canonical_latest.min(from.saturating_add(remaining_blocks.saturating_sub(1)))
+        });
         let mut new_cursor = base_cursor;
         let mut canonical_blocks = Vec::new();
         let mut expected_parent = base_cursor.block_hash;
@@ -1089,22 +1114,7 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
             }
         }
 
-        if is_log {
-            let raw = self
-                .filter_registry
-                .get_log_filter(&id)
-                .ok_or_else(|| not_found("filter not found"))?;
-            let removed_to_block_is_unbounded = matches!(
-                raw.to_block.as_deref(),
-                None | Some("latest") | Some("pending")
-            );
-            let finalized = *self.finalized_number.read();
-            let filter = raw.into_filter(latest, finalized).map_err(internal_err)?;
-            let removed_to_block = if removed_to_block_is_unbounded {
-                u64::MAX
-            } else {
-                filter.to_block.unwrap_or(latest)
-            };
+        if let Some((filter, removed_to_block)) = log_poll {
             let mut results = Vec::new();
 
             for (block_number, block_hash) in removed_blocks {

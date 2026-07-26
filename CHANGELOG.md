@@ -6,6 +6,8 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Stop fixed-range log filters at their resolved `toBlock` instead of advancing
+  their polling cursors through unrelated later blocks.
 - Count the block transaction limit against included transactions so skipped
   candidates cannot suppress later eligible transactions.
 - Index transaction receipts by included block order when earlier mempool
