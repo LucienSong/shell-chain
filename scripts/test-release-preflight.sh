@@ -12,6 +12,7 @@ fail() {
 }
 
 "$SCRIPT_DIR/check-release-metadata.sh"
+"$SCRIPT_DIR/check-release-lockfile.sh"
 
 if ! grep -Fq 'cargo audit --file tools/tx-generator/Cargo.lock' "$SCRIPT_DIR/release.sh"; then
     fail "release audit does not cover the transaction generator lockfile"
@@ -25,8 +26,31 @@ fi
 if ! grep -Fq 'check-release-remote.sh' "$SCRIPT_DIR/release.sh"; then
     fail "release preflight does not verify the tag push remote"
 fi
+if ! grep -Fq 'check-release-lockfile.sh' "$SCRIPT_DIR/release.sh"; then
+    fail "release preflight does not verify the workspace lockfile"
+fi
 if ! grep -Fq 'git push "$RELEASE_REMOTE" "$TAG"' "$SCRIPT_DIR/release.sh"; then
     fail "release tag push does not use the validated remote"
+fi
+
+LOCK_FIXTURE="$TMP_DIR/lock-fixture"
+mkdir -p "$LOCK_FIXTURE/src"
+printf '[package]\nname = "release-lock-fixture"\nversion = "0.27.1"\nedition = "2021"\n' \
+    > "$LOCK_FIXTURE/Cargo.toml"
+printf 'fn main() {}\n' > "$LOCK_FIXTURE/src/main.rs"
+cargo generate-lockfile --manifest-path "$LOCK_FIXTURE/Cargo.toml"
+"$SCRIPT_DIR/check-release-lockfile.sh" "$LOCK_FIXTURE" >/dev/null
+mkdir -p "$LOCK_FIXTURE/helper/src"
+printf '[package]\nname = "release-lock-helper"\nversion = "0.1.0"\nedition = "2021"\n' \
+    > "$LOCK_FIXTURE/helper/Cargo.toml"
+printf 'pub fn helper() {}\n' > "$LOCK_FIXTURE/helper/src/lib.rs"
+printf '\n[dependencies]\nrelease-lock-helper = { path = "helper" }\n' \
+    >> "$LOCK_FIXTURE/Cargo.toml"
+if LOCK_OUTPUT=$("$SCRIPT_DIR/check-release-lockfile.sh" "$LOCK_FIXTURE" 2>&1); then
+    fail "release lockfile check unexpectedly accepted a stale lockfile"
+fi
+if ! grep -Fq "Cargo.lock does not match the workspace manifests" <<<"$LOCK_OUTPUT"; then
+    fail "stale lockfile rejection was not specific: $LOCK_OUTPUT"
 fi
 
 LONG_CHANGELOG="$TMP_DIR/long-changelog.md"
@@ -142,6 +166,7 @@ make_fixture() {
     mkdir -p "$fixture/scripts"
     cp "$SCRIPT_DIR/release.sh" "$SCRIPT_DIR/changelog-excerpt.sh" \
         "$SCRIPT_DIR/check-release-ci.sh" \
+        "$SCRIPT_DIR/check-release-lockfile.sh" \
         "$SCRIPT_DIR/check-release-remote.sh" \
         "$SCRIPT_DIR/check-release-metadata.sh" \
         "$SCRIPT_DIR/supply-chain-tool-versions.sh" "$fixture/scripts/"
@@ -232,6 +257,7 @@ git -C "$fixture" switch -q --orphan release/v0.27.1
 mkdir -p "$fixture/scripts"
 cp "$SCRIPT_DIR/release.sh" "$SCRIPT_DIR/changelog-excerpt.sh" \
     "$SCRIPT_DIR/check-release-ci.sh" \
+    "$SCRIPT_DIR/check-release-lockfile.sh" \
     "$SCRIPT_DIR/check-release-remote.sh" \
     "$SCRIPT_DIR/check-release-metadata.sh" \
     "$SCRIPT_DIR/supply-chain-tool-versions.sh" "$fixture/scripts/"

@@ -6,6 +6,8 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Reject release commits whose workspace manifests and `Cargo.lock` disagree,
+  before a tag can be created or hosted checks can pass.
 - Avoid cloning every signed transaction during block import when validation
   can borrow the original block transaction unchanged.
 - Reject session-key transactions at their exclusive expiry height by checking
