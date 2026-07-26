@@ -5,8 +5,8 @@ use std::collections::{HashMap, HashSet};
 /// Higher score = preferred chain. Compared lexicographically by fields in order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockScore {
-    /// Whether this block is on the finalized chain (1 = yes, 0 = no).
-    /// Finalized chains always win.
+    /// Whether this block is on or extends the finalized chain (1 = yes, 0 = no).
+    /// Finalized-compatible chains always win.
     pub is_finalized: u8,
     /// Total attesting weight this block has received.
     pub attested_weight: u64,
@@ -46,6 +46,8 @@ pub struct ForkChoice {
     parent_map: HashMap<ShellHash, ShellHash>,
     /// Maps block hash to its score.
     scores: HashMap<ShellHash, BlockScore>,
+    /// Latest finalized checkpoint used to reject incompatible forks.
+    finalized_root: Option<ShellHash>,
     /// Current canonical head.
     head: ShellHash,
     /// Current head score.
@@ -69,6 +71,7 @@ impl ForkChoice {
         Self {
             parent_map,
             scores,
+            finalized_root: None,
             head: genesis_hash,
             head_score: score,
         }
@@ -84,8 +87,15 @@ impl ForkChoice {
         attested_weight: u64,
         is_on_finalized_chain: bool,
     ) -> bool {
+        let is_finalized = match self.finalized_root {
+            Some(_) => self
+                .scores
+                .get(&parent_hash)
+                .is_some_and(|score| score.is_finalized == 1),
+            None => is_on_finalized_chain,
+        };
         let score = BlockScore {
-            is_finalized: if is_on_finalized_chain { 1 } else { 0 },
+            is_finalized: u8::from(is_finalized),
             attested_weight,
             block_number,
             block_hash,
@@ -124,21 +134,44 @@ impl ForkChoice {
 
     /// Mark a block as finalized. Returns true if head changed.
     pub fn mark_finalized(&mut self, block_hash: &ShellHash) -> bool {
-        if let Some(score) = self.scores.get_mut(block_hash) {
-            score.is_finalized = 1;
-            let updated_score = score.clone();
-
-            if block_hash == &self.head {
-                self.head_score = updated_score;
+        if !self.scores.contains_key(block_hash) {
+            return false;
+        }
+        if let Some(finalized_root) = self.finalized_root {
+            if finalized_root != *block_hash
+                && self.chain_between(block_hash, &finalized_root).is_empty()
+            {
                 return false;
             }
-            if updated_score > self.head_score {
-                self.head = *block_hash;
-                self.head_score = updated_score;
-                return true;
+        }
+
+        let old_head = self.head;
+        let mut children: HashMap<ShellHash, Vec<ShellHash>> = HashMap::new();
+        for (child, parent) in &self.parent_map {
+            children.entry(*parent).or_default().push(*child);
+        }
+
+        for score in self.scores.values_mut() {
+            score.is_finalized = 0;
+        }
+        self.finalized_root = Some(*block_hash);
+
+        let mut descendants = vec![*block_hash];
+        let mut marked = HashSet::new();
+        while let Some(parent) = descendants.pop() {
+            if !marked.insert(parent) {
+                continue;
+            }
+            if let Some(score) = self.scores.get_mut(&parent) {
+                score.is_finalized = 1;
+            }
+            if let Some(child_hashes) = children.get(&parent) {
+                descendants.extend(child_hashes);
             }
         }
-        false
+
+        self.recalculate_head();
+        self.head != old_head
     }
 
     /// Get the current canonical head hash.
@@ -254,12 +287,14 @@ impl ForkChoice {
         }
 
         self.scores.retain(|hash, _| protected.contains(hash));
+        for score in self.scores.values_mut() {
+            score.is_finalized = 1;
+        }
         self.parent_map.retain(|hash, _| protected.contains(hash));
         self.parent_map.insert(finalized_hash, ShellHash::ZERO);
+        self.finalized_root = Some(finalized_hash);
 
-        if !protected.contains(&self.head) {
-            self.recalculate_head();
-        }
+        self.recalculate_head();
     }
 
     /// Number of tracked blocks.
@@ -354,10 +389,55 @@ mod tests {
     fn test_mark_finalized() {
         let mut fc = ForkChoice::new(hash(0));
         fc.add_block(hash(1), hash(0), 1, 0, false);
-        fc.add_block(hash(2), hash(1), 2, 5, false); // higher score
-                                                     // is_finalized comparison happens first: 1 > 0, so hash(1) wins
+        fc.add_block(hash(2), hash(1), 2, 5, false);
+
+        assert!(!fc.mark_finalized(&hash(1)));
+        assert_eq!(fc.score(&hash(1)).unwrap().is_finalized, 1);
+        assert_eq!(fc.score(&hash(2)).unwrap().is_finalized, 1);
+        assert_eq!(fc.head(), &hash(2));
+    }
+
+    #[test]
+    fn finality_excludes_incompatible_forks() {
+        let mut fc = ForkChoice::new(hash(0));
+        fc.add_block(hash(1), hash(0), 1, 0, false);
+        fc.add_block(hash(2), hash(1), 2, 0, false);
+        fc.add_block(hash(3), hash(0), 1, 10, true);
+
+        assert!(fc.mark_finalized(&hash(1)));
+        assert_eq!(fc.score(&hash(2)).unwrap().is_finalized, 1);
+        assert_eq!(fc.score(&hash(3)).unwrap().is_finalized, 0);
+        assert_eq!(fc.head(), &hash(2));
+    }
+
+    #[test]
+    fn finality_cannot_move_to_an_incompatible_fork() {
+        let mut fc = ForkChoice::new(hash(0));
+        fc.add_block(hash(1), hash(0), 1, 0, false);
+        fc.add_block(hash(2), hash(1), 2, 0, false);
+        fc.add_block(hash(3), hash(0), 1, 100, false);
+
         fc.mark_finalized(&hash(1));
-        assert_eq!(fc.head(), &hash(1));
+        fc.mark_finalized(&hash(2));
+        assert!(!fc.mark_finalized(&hash(3)));
+        assert_eq!(fc.score(&hash(2)).unwrap().is_finalized, 1);
+        assert_eq!(fc.score(&hash(3)).unwrap().is_finalized, 0);
+        assert_eq!(fc.head(), &hash(2));
+    }
+
+    #[test]
+    fn descendants_added_after_finality_inherit_finalized_chain_status() {
+        let mut fc = ForkChoice::new(hash(0));
+        fc.add_block(hash(1), hash(0), 1, 0, false);
+        fc.mark_finalized(&hash(1));
+
+        assert!(fc.add_block(hash(2), hash(1), 2, 0, false));
+        assert_eq!(fc.score(&hash(2)).unwrap().is_finalized, 1);
+        assert_eq!(fc.head(), &hash(2));
+
+        fc.add_block(hash(3), hash(0), 1, 100, true);
+        assert_eq!(fc.score(&hash(3)).unwrap().is_finalized, 0);
+        assert_eq!(fc.head(), &hash(2));
     }
 
     #[test]
@@ -429,12 +509,12 @@ mod tests {
     }
 
     #[test]
-    fn prune_uses_latest_finalized_height_when_older_block_is_head() {
+    fn prune_keeps_latest_finalized_block_as_head() {
         let mut fc = ForkChoice::new(hash(0));
         fc.add_block(hash(1), hash(0), 1, 100, true);
         fc.add_block(hash(2), hash(1), 2, 67, false);
         fc.mark_finalized(&hash(2));
-        assert_eq!(fc.head(), &hash(1));
+        assert_eq!(fc.head(), &hash(2));
 
         fc.prune_below(2);
 
