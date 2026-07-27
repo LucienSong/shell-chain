@@ -11,6 +11,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Stop retaining expired mDNS discoveries as dialable peer addresses.
 - Reject headless genesis snapshots before they can replace stored chain data
   or clear the published chain head.
 - Reject commit certificates for missing, height-mismatched, or noncanonical
