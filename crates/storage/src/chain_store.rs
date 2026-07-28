@@ -1559,10 +1559,12 @@ impl<S: KvStore> ChainStore<S> {
             ));
         }
 
-        // Resolve the head header in a separate pass so snapshot record order
-        // cannot affect validation.
+        // Resolve the head header and body in a separate pass so snapshot
+        // record order cannot affect validation.
         let mut head_header = None;
+        let mut head_body = None;
         let head_header_key = Self::header_key(&head_hash);
+        let head_body_key = Self::body_key(&head_hash);
         snap_reader.rewind()?;
         while let Some(entry) = snap_reader.next_entry()? {
             if entry.key == head_header_key {
@@ -1572,6 +1574,13 @@ impl<S: KvStore> ChainStore<S> {
                     ));
                 }
                 head_header = Some(decode_versioned::<BlockHeader>(&entry.value)?);
+            } else if entry.key == head_body_key {
+                if head_body.is_some() {
+                    return Err(StorageError::State(
+                        "snapshot contains multiple canonical head bodies".into(),
+                    ));
+                }
+                head_body = Some(decode_versioned::<StrippedBlock>(&entry.value)?);
             }
         }
 
@@ -1584,6 +1593,14 @@ impl<S: KvStore> ChainStore<S> {
         {
             return Err(StorageError::State(
                 "snapshot head metadata does not match the stored head header".into(),
+            ));
+        }
+        let body = head_body.ok_or_else(|| {
+            StorageError::State("snapshot is missing the canonical head body".into())
+        })?;
+        if body.header != head {
+            return Err(StorageError::State(
+                "snapshot canonical head body does not match its stored header".into(),
             ));
         }
 
@@ -2547,6 +2564,19 @@ mod tests {
         }
     }
 
+    fn write_snapshot_body<W: std::io::Write>(
+        writer: &mut crate::SnapshotWriter<W>,
+        block: &Block,
+    ) {
+        let (stripped, _) = StrippedBlock::split(block);
+        writer
+            .write_entry(
+                &ChainStore::<MemoryDb>::body_key(&block.hash()),
+                &encode_rlp(&stripped),
+            )
+            .unwrap();
+    }
+
     /// Helper: put block + set canonical + set head (mimics old behavior).
     fn put_canonical(cs: &ChainStore<MemoryDb>, block: &Block) {
         let hash = block.hash();
@@ -3264,6 +3294,7 @@ mod tests {
                     &encode_rlp(&block.header),
                 )
                 .unwrap();
+            write_snapshot_body(&mut writer, &block);
             writer
                 .write_entry(
                     &ChainStore::<MemoryDb>::number_key(block.number()),
@@ -3279,7 +3310,7 @@ mod tests {
         let imported_meta = cs
             .import_snapshot(std::io::Cursor::new(&buf), 1337, &ShellHash::default())
             .unwrap();
-        assert_eq!(imported_meta.entry_count, 5);
+        assert_eq!(imported_meta.entry_count, 6);
 
         // Verify data was written
         assert_eq!(store.get(b"test-key-1").unwrap(), Some(b"value-1".to_vec()));
@@ -3349,6 +3380,7 @@ mod tests {
                     &encode_rlp(&block.header),
                 )
                 .unwrap();
+            write_snapshot_body(&mut writer, &block);
             writer
                 .write_entry(
                     &ChainStore::<MemoryDb>::number_key(block.number()),
@@ -3428,6 +3460,7 @@ mod tests {
                     &encode_rlp(&block.header),
                 )
                 .unwrap();
+            write_snapshot_body(&mut writer, &block);
             writer
                 .write_entry(prefix::HEAD_BLOCK, block_hash.as_bytes())
                 .unwrap();
@@ -3443,6 +3476,109 @@ mod tests {
         cs.import_snapshot(std::io::Cursor::new(&buf), 1337, &ShellHash::ZERO)
             .unwrap();
         assert_eq!(cs.get_head_hash().unwrap(), Some(block_hash));
+    }
+
+    #[test]
+    fn test_import_snapshot_rejects_missing_head_body_before_publish() {
+        let store = Arc::new(MemoryDb::new());
+        let cs = ChainStore::new(Arc::clone(&store));
+        let old_head = ShellHash::from([0xAA; 32]);
+        cs.set_head(&old_head).unwrap();
+
+        let block = empty_block(1);
+        let block_hash = block.hash();
+        let meta = crate::SnapshotMetadata::new(
+            1337,
+            block.number(),
+            block_hash,
+            block.header.state_root,
+            ShellHash::ZERO,
+        );
+        let mut buf = Vec::new();
+        {
+            let mut writer =
+                crate::SnapshotWriter::new(std::io::Cursor::new(&mut buf), meta).unwrap();
+            writer
+                .write_entry(prefix::HEAD_BLOCK, block_hash.as_bytes())
+                .unwrap();
+            writer
+                .write_entry(
+                    &ChainStore::<MemoryDb>::header_key(&block_hash),
+                    &encode_rlp(&block.header),
+                )
+                .unwrap();
+            writer
+                .write_entry(
+                    &ChainStore::<MemoryDb>::number_key(block.number()),
+                    block_hash.as_bytes(),
+                )
+                .unwrap();
+            writer.write_entry(b"untrusted-key", b"value").unwrap();
+            writer.finalize().unwrap();
+        }
+
+        let error = cs
+            .import_snapshot(std::io::Cursor::new(buf), 1337, &ShellHash::ZERO)
+            .unwrap_err();
+
+        assert!(error.to_string().contains("canonical head body"));
+        assert_eq!(cs.get_head_hash().unwrap(), Some(old_head));
+        assert!(store.get(b"untrusted-key").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_import_snapshot_rejects_head_body_header_mismatch_before_publish() {
+        let store = Arc::new(MemoryDb::new());
+        let cs = ChainStore::new(Arc::clone(&store));
+        let old_head = ShellHash::from([0xAA; 32]);
+        cs.set_head(&old_head).unwrap();
+
+        let block = empty_block(1);
+        let block_hash = block.hash();
+        let (mismatched_body, _) = StrippedBlock::split(&empty_block(2));
+        let meta = crate::SnapshotMetadata::new(
+            1337,
+            block.number(),
+            block_hash,
+            block.header.state_root,
+            ShellHash::ZERO,
+        );
+        let mut buf = Vec::new();
+        {
+            let mut writer =
+                crate::SnapshotWriter::new(std::io::Cursor::new(&mut buf), meta).unwrap();
+            writer
+                .write_entry(prefix::HEAD_BLOCK, block_hash.as_bytes())
+                .unwrap();
+            writer
+                .write_entry(
+                    &ChainStore::<MemoryDb>::header_key(&block_hash),
+                    &encode_rlp(&block.header),
+                )
+                .unwrap();
+            writer
+                .write_entry(
+                    &ChainStore::<MemoryDb>::body_key(&block_hash),
+                    &encode_rlp(&mismatched_body),
+                )
+                .unwrap();
+            writer
+                .write_entry(
+                    &ChainStore::<MemoryDb>::number_key(block.number()),
+                    block_hash.as_bytes(),
+                )
+                .unwrap();
+            writer.write_entry(b"untrusted-key", b"value").unwrap();
+            writer.finalize().unwrap();
+        }
+
+        let error = cs
+            .import_snapshot(std::io::Cursor::new(buf), 1337, &ShellHash::ZERO)
+            .unwrap_err();
+
+        assert!(error.to_string().contains("body does not match"));
+        assert_eq!(cs.get_head_hash().unwrap(), Some(old_head));
+        assert!(store.get(b"untrusted-key").unwrap().is_none());
     }
 
     #[test]
@@ -3475,6 +3611,7 @@ mod tests {
                     &encode_rlp(&block.header),
                 )
                 .unwrap();
+            write_snapshot_body(&mut writer, &block);
             writer
                 .write_entry(
                     &ChainStore::<MemoryDb>::number_key(block.number()),
@@ -3524,6 +3661,7 @@ mod tests {
                     &encode_rlp(&block.header),
                 )
                 .unwrap();
+            write_snapshot_body(&mut writer, &block);
             writer
                 .write_entry(
                     &ChainStore::<MemoryDb>::number_key(block.number()),
@@ -3579,6 +3717,7 @@ mod tests {
                     &encode_rlp(&block.header),
                 )
                 .unwrap();
+            write_snapshot_body(&mut writer, &block);
             writer
                 .write_entry(
                     &ChainStore::<FailingBatchStore>::number_key(block.number()),
