@@ -690,6 +690,59 @@ impl<'a, N: NetworkService + ?Sized> NetworkInterface<'a, N> {
     }
 }
 
+fn restore_fork_choice<S: KvStore>(
+    chain_store: &ChainStore<S>,
+    finalized_number: u64,
+    finalized_hash: ShellHash,
+    head_number: u64,
+) -> ForkChoice {
+    let (root_number, root_hash) = if finalized_number > 0 && finalized_hash != ShellHash::ZERO {
+        (finalized_number, finalized_hash)
+    } else {
+        (
+            0,
+            chain_store
+                .get_block_hash_by_number(0)
+                .ok()
+                .flatten()
+                .unwrap_or(ShellHash::ZERO),
+        )
+    };
+    let mut fork_choice = ForkChoice::new(root_hash);
+    if root_number > 0 {
+        fork_choice.mark_finalized(&root_hash);
+    }
+
+    let Some(first_child) = root_number.checked_add(1) else {
+        return fork_choice;
+    };
+    let mut parent_hash = root_hash;
+    for block_number in first_child..=head_number {
+        let block_hash = match chain_store.get_block_hash_by_number(block_number) {
+            Ok(Some(hash)) => hash,
+            Ok(None) => {
+                warn!(
+                    block_number,
+                    "canonical hash missing while restoring fork choice"
+                );
+                break;
+            }
+            Err(error) => {
+                warn!(
+                    block_number,
+                    %error,
+                    "failed to read canonical hash while restoring fork choice"
+                );
+                break;
+            }
+        };
+        fork_choice.add_block(block_hash, parent_hash, block_number, 0, false);
+        parent_hash = block_hash;
+    }
+
+    fork_choice
+}
+
 impl<S: KvStore + 'static> Node<S> {
     /// Create a new node from pre-built components.
     pub fn new(
@@ -754,6 +807,7 @@ impl<S: KvStore + 'static> Node<S> {
             .unwrap_or(0);
         metrics.block_height.set(current_head as i64);
         metrics.update_finality(current_head, finality_state.last_finalized_number());
+        let fork_choice = restore_fork_choice(&chain_store, fin_number, fin_hash, current_head);
 
         let node = Self {
             config,
@@ -779,7 +833,7 @@ impl<S: KvStore + 'static> Node<S> {
             settled_stark_sources: parking_lot::Mutex::new(HashSet::new()),
             equivocation_queue: parking_lot::Mutex::new(Vec::new()),
             finality: Arc::new(RwLock::new(finality_state)),
-            fork_choice: Arc::new(RwLock::new(ForkChoice::new(ShellHash::ZERO))),
+            fork_choice: Arc::new(RwLock::new(fork_choice)),
             metrics,
             runtime_signer: RwLock::new(None),
             dev_state: RwLock::new(DevState {
@@ -3678,6 +3732,61 @@ mod tests {
         assert_eq!(restarted.metrics.block_height.get(), 1);
         assert_eq!(restarted.metrics.last_finalized_number.get(), 1);
         assert_eq!(restarted.metrics.finality_lag_blocks.get(), 0);
+    }
+
+    #[test]
+    fn node_restores_canonical_fork_choice_from_finality_to_head() {
+        let (node, signer) = setup_node();
+        store_genesis(&node);
+        let finalized = node.produce_block(&signer, 100).unwrap();
+        let finalized_hash = finalized.hash();
+        let block_two = node.produce_block(&signer, 100).unwrap();
+        let block_two_hash = block_two.hash();
+        let block_three = node.produce_block(&signer, 100).unwrap();
+        let block_three_hash = block_three.hash();
+        node.finality
+            .write()
+            .set_finalized_direct(finalized.number(), finalized_hash);
+        node.chain_store
+            .set_finalized_number(finalized.number())
+            .unwrap();
+
+        let db = node.store.clone();
+        let chain_store = Arc::new(ChainStore::new(db.clone()));
+        let world_state = Arc::new(RwLock::new(WorldState::new(db.clone())));
+        let authority = node.config.proposer_address.unwrap();
+        let consensus: Arc<RwLock<dyn ConsensusEngine>> = Arc::new(RwLock::new(PoaEngine::new(
+            PoaConfig::new(vec![authority], 1),
+        )));
+        let tx_pool = Arc::new(TxPool::new(MempoolConfig {
+            chain_id: 1337,
+            ..MempoolConfig::default()
+        }));
+
+        let restarted = Node::new(
+            NodeConfig::dev(authority),
+            db,
+            chain_store,
+            world_state,
+            tx_pool,
+            consensus,
+        );
+
+        let fork_choice = restarted.fork_choice.read();
+        assert_eq!(fork_choice.head(), &block_three_hash);
+        assert_eq!(fork_choice.block_count(), 3);
+        assert_eq!(fork_choice.parent(&finalized_hash), Some(&ShellHash::ZERO));
+        assert_eq!(fork_choice.parent(&block_two_hash), Some(&finalized_hash));
+        assert_eq!(fork_choice.parent(&block_three_hash), Some(&block_two_hash));
+        assert_eq!(
+            fork_choice.find_common_ancestor(&block_two_hash, &block_three_hash),
+            Some(block_two_hash)
+        );
+        assert_eq!(
+            fork_choice.score(&block_three_hash).unwrap().is_finalized,
+            1,
+            "canonical descendants must remain compatible with finalized root"
+        );
     }
 
     #[test]
