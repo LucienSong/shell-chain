@@ -968,6 +968,13 @@ fn seed_and_dial_boot_node(
     }
 }
 
+fn mdns_peer_still_discovered<'a>(
+    peer_id: &Libp2pPeerId,
+    discovered_peers: impl Iterator<Item = &'a Libp2pPeerId>,
+) -> bool {
+    discovered_peers.into_iter().any(|peer| peer == peer_id)
+}
+
 /// Process a single SwarmEvent, forwarding relevant data as NetworkEvents.
 fn handle_swarm_event(
     event: SwarmEvent<ShellBehaviourEvent>,
@@ -1249,12 +1256,17 @@ fn handle_swarm_event(
         }
         // mDNS peer expired.
         SwarmEvent::Behaviour(ShellBehaviourEvent::Mdns(mdns::Event::Expired(peers))) => {
-            for (peer_id, _addr) in peers {
-                debug!("mDNS expired: {peer_id}");
-                swarm
-                    .behaviour_mut()
-                    .gossipsub
-                    .remove_explicit_peer(&peer_id);
+            for (peer_id, addr) in peers {
+                debug!("mDNS expired: peer={peer_id} address={addr}");
+                let still_discovered = swarm.behaviour().mdns.as_ref().is_some_and(|mdns| {
+                    mdns_peer_still_discovered(&peer_id, mdns.discovered_nodes())
+                });
+                if !still_discovered {
+                    swarm
+                        .behaviour_mut()
+                        .gossipsub
+                        .remove_explicit_peer(&peer_id);
+                }
             }
         }
         // Relay client events.
@@ -2324,6 +2336,21 @@ mod tests {
             swarm.dial(peer_id).is_err(),
             "expired mDNS addresses must not remain available for dialing"
         );
+    }
+
+    #[test]
+    fn mdns_peer_remains_explicit_until_its_last_address_expires() {
+        let peer_id = Libp2pPeerId::random();
+        let other_peer = Libp2pPeerId::random();
+
+        assert!(mdns_peer_still_discovered(
+            &peer_id,
+            [&other_peer, &peer_id].into_iter()
+        ));
+        assert!(!mdns_peer_still_discovered(
+            &peer_id,
+            [&other_peer].into_iter()
+        ));
     }
 
     #[test]
