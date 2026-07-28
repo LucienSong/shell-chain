@@ -6,6 +6,8 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- Run advanced CodeQL analysis for fork-based pull requests so every proposed
+  head receives the required GitHub Actions, Python, and Rust security checks.
 - Index pending sender and paymaster balance reservations so transaction
   admission no longer scans the full mempool.
 
