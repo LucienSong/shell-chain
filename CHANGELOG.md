@@ -13,6 +13,9 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Let higher-priority transactions evict enough lower-priority nonce chains to
+  satisfy the aggregate mempool byte limit as well as the transaction-count
+  limit.
 - Reject release cuts when the exact tag already exists on the canonical remote,
   before creating a conflicting local tag.
 - Stop retaining expired mDNS discoveries as dialable peer addresses.
