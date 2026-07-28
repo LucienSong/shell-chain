@@ -1187,7 +1187,7 @@ mod tests {
         let from = test_address(&pubkey);
         let tx = Transaction {
             chain_id: 42,
-            nonce: 0,
+            nonce: u64::default(),
             to: Some(test_address(b"recipient-placeholder-key-data-for-address")),
             value: U256::ZERO,
             data: Bytes::from(vec![1; data_len]),
@@ -2649,8 +2649,9 @@ mod tests {
     fn aggregate_byte_limit_evicts_multiple_lower_priority_transactions() {
         let verifier = DilithiumVerifier;
         let (mut ws, cs) = setup_validation_ctx();
-        let (tx0, _) = make_signed_tx(0, 100);
-        let (tx1, _) = make_signed_tx(0, 101);
+        let nonce = u64::default();
+        let (tx0, _) = make_signed_tx(nonce, 100);
+        let (tx1, _) = make_signed_tx(nonce, 101);
         let high_priority = make_signed_tx_with_data(200, 1024);
         let tx0_size = serde_json::to_vec(&tx0).unwrap().len();
         let tx1_size = serde_json::to_vec(&tx1).unwrap().len();
