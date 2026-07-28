@@ -225,8 +225,6 @@ impl TxPool {
         let sender_q = inner.by_sender.get(&sender);
         let existing_hash = sender_q.and_then(|q| q.get(&nonce).copied());
         let expected_next_nonce = next_expected_nonce(sender_q, chain_nonce);
-        let mut evict_hash = None;
-        let mut evict_descendants = false;
 
         if nonce < chain_nonce {
             return Err(MempoolError::NonceTooLow {
@@ -274,7 +272,6 @@ impl TxPool {
                     });
                 }
             }
-            evict_hash = Some(existing_hash);
         } else if nonce > expected_next_nonce {
             return Err(MempoolError::NonceGap {
                 expected: expected_next_nonce,
@@ -296,46 +293,17 @@ impl TxPool {
             });
         }
 
-        // Pool full — evict lowest priority tx
-        if existing_hash.is_none() && inner.by_hash.len() >= self.config.max_pool_size {
-            let incoming_neg = -(priority_fee as i128);
-            if let Some(candidate) =
-                Self::capacity_eviction_candidate(&inner, incoming_neg, sender, nonce)
-            {
-                evict_hash = Some(candidate);
-                evict_descendants = true;
-            } else {
-                return Err(MempoolError::PoolFull {
-                    capacity: self.config.max_pool_size,
-                });
-            }
-        }
-
-        let evicted_hashes: HashSet<ShellHash> = match evict_hash {
-            Some(hash) if evict_descendants => Self::entry_and_descendant_hashes(&inner, &hash),
-            Some(hash) => vec![hash],
-            None => Vec::new(),
-        }
-        .into_iter()
-        .collect();
-        let evicted_bytes = evicted_hashes
-            .iter()
-            .filter_map(|hash| inner.by_hash.get(hash))
-            .fold(0usize, |total, entry| {
-                total.saturating_add(entry.serialized_size)
-            });
-        let projected_bytes = inner
-            .total_bytes
-            .saturating_sub(evicted_bytes)
-            .checked_add(tx_size)
-            .ok_or(MempoolError::PoolBytesFull {
-                capacity: self.config.max_pool_bytes,
-            })?;
-        if projected_bytes > self.config.max_pool_bytes {
-            return Err(MempoolError::PoolBytesFull {
-                capacity: self.config.max_pool_bytes,
-            });
-        }
+        let initial_evictions = existing_hash.into_iter().collect();
+        let (evicted_hashes, projected_bytes) = Self::capacity_evictions(
+            &inner,
+            initial_evictions,
+            -(priority_fee as i128),
+            sender,
+            nonce,
+            tx_size,
+            self.config.max_pool_size,
+            self.config.max_pool_bytes,
+        )?;
         Self::ensure_pending_balance_available(&inner, &tx, world_state, &evicted_hashes)?;
 
         let Some(next_seq) = inner.seq.checked_add(1) else {
@@ -344,12 +312,8 @@ impl TxPool {
             ));
         };
 
-        if let Some(evict_hash) = evict_hash {
-            if evict_descendants {
-                Self::remove_entry_and_descendants(&mut inner, &evict_hash);
-            } else {
-                Self::remove_entry(&mut inner, &evict_hash);
-            }
+        for evicted_hash in &evicted_hashes {
+            Self::remove_entry(&mut inner, evicted_hash);
         }
 
         // --- Insert ---
@@ -840,28 +804,86 @@ impl TxPool {
         }
     }
 
-    /// Pick the lowest-priority transaction that the incoming transaction can
-    /// evict without breaking its own sender queue's nonce prerequisites.
-    fn capacity_eviction_candidate(
+    /// Plan lower-priority evictions until both count and byte limits fit.
+    ///
+    /// Selecting an entry also selects all later nonces from that sender so
+    /// capacity pressure cannot leave an unexecutable nonce tail behind.
+    #[allow(clippy::too_many_arguments)]
+    fn capacity_evictions(
         inner: &PoolInner,
+        mut evicted_hashes: HashSet<ShellHash>,
         incoming_neg_priority_fee: i128,
         incoming_sender: Address,
         incoming_nonce: u64,
-    ) -> Option<ShellHash> {
-        for (priority_key, hash) in inner.by_priority.iter().rev() {
-            if incoming_neg_priority_fee >= priority_key.neg_priority_fee {
-                return None;
+        incoming_size: usize,
+        max_pool_size: usize,
+        max_pool_bytes: usize,
+    ) -> Result<(HashSet<ShellHash>, usize), MempoolError> {
+        let mut evicted_bytes = evicted_hashes
+            .iter()
+            .filter_map(|hash| inner.by_hash.get(hash))
+            .fold(0usize, |total, entry| {
+                total.saturating_add(entry.serialized_size)
+            });
+        let mut candidates = inner.by_priority.iter().rev();
+
+        loop {
+            let projected_count = inner
+                .by_hash
+                .len()
+                .saturating_sub(evicted_hashes.len())
+                .saturating_add(1);
+            let projected_bytes = inner
+                .total_bytes
+                .saturating_sub(evicted_bytes)
+                .checked_add(incoming_size);
+            let count_fits = projected_count <= max_pool_size;
+            let bytes_fit = projected_bytes.is_some_and(|bytes| bytes <= max_pool_bytes);
+            if count_fits && bytes_fit {
+                return Ok((
+                    evicted_hashes,
+                    projected_bytes.expect("checked by bytes_fit"),
+                ));
             }
 
-            let Some(entry) = inner.by_hash.get(hash) else {
-                continue;
-            };
-            if entry.tx.sender() == incoming_sender && entry.tx.tx.nonce <= incoming_nonce {
-                continue;
+            let mut candidate = None;
+            for (priority_key, hash) in candidates.by_ref() {
+                if evicted_hashes.contains(hash) {
+                    continue;
+                }
+                if incoming_neg_priority_fee >= priority_key.neg_priority_fee {
+                    break;
+                }
+
+                let Some(entry) = inner.by_hash.get(hash) else {
+                    continue;
+                };
+                if entry.tx.sender() == incoming_sender && entry.tx.tx.nonce <= incoming_nonce {
+                    continue;
+                }
+                candidate = Some(*hash);
+                break;
             }
-            return Some(*hash);
+
+            let Some(candidate) = candidate else {
+                return if count_fits {
+                    Err(MempoolError::PoolBytesFull {
+                        capacity: max_pool_bytes,
+                    })
+                } else {
+                    Err(MempoolError::PoolFull {
+                        capacity: max_pool_size,
+                    })
+                };
+            };
+            for hash in Self::entry_and_descendant_hashes(inner, &candidate) {
+                if evicted_hashes.insert(hash) {
+                    if let Some(entry) = inner.by_hash.get(&hash) {
+                        evicted_bytes = evicted_bytes.saturating_add(entry.serialized_size);
+                    }
+                }
+            }
         }
-        None
     }
 
     /// Remove a pool-capacity eviction candidate and all later transactions
@@ -1157,6 +1179,28 @@ mod tests {
         let sig = signer.sign(tx.hash().as_bytes()).unwrap();
         let signed = SignedTransaction::with_pubkey(from, tx, sig, pubkey.clone());
         (signed, pubkey)
+    }
+
+    fn make_signed_tx_with_data(priority_fee: u64, data_len: usize) -> SignedTransaction {
+        let signer = DilithiumSigner::generate();
+        let pubkey = signer.public_key().to_vec();
+        let from = test_address(&pubkey);
+        let tx = Transaction {
+            chain_id: 42,
+            nonce: 0,
+            to: Some(test_address(b"recipient-placeholder-key-data-for-address")),
+            value: U256::ZERO,
+            data: Bytes::from(vec![1; data_len]),
+            gas_limit: 21_000 + 16 * data_len as u64,
+            max_fee_per_gas: priority_fee + 10,
+            max_priority_fee_per_gas: priority_fee,
+            access_list: None,
+            tx_type: 2,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
+        };
+        let sig = signer.sign(tx.hash().as_bytes()).unwrap();
+        SignedTransaction::with_pubkey(from, tx, sig, pubkey)
     }
 
     fn make_blob_tx(max_fee_per_blob_gas: u64) -> SignedTransaction {
@@ -2563,15 +2607,18 @@ mod tests {
     }
 
     #[test]
-    fn aggregate_byte_limit_rejects_and_reclaims_capacity() {
+    fn aggregate_byte_limit_evicts_lower_priority_and_reclaims_capacity() {
         let verifier = DilithiumVerifier;
         let (mut ws, cs) = setup_validation_ctx();
         let nonce = u64::default();
         let (tx0, _) = make_signed_tx(nonce, 100);
         let (tx1, _) = make_signed_tx(nonce, 101);
+        let (tx2, _) = make_signed_tx(nonce, 100);
         let tx0_size = serde_json::to_vec(&tx0).unwrap().len();
         let tx1_size = serde_json::to_vec(&tx1).unwrap().len();
+        let tx2_size = serde_json::to_vec(&tx2).unwrap().len();
         assert_eq!(tx0_size, tx1_size);
+        assert_eq!(tx0_size, tx2_size);
         let pool = TxPool::new(MempoolConfig {
             max_pool_bytes: tx0_size,
             ..make_config()
@@ -2580,16 +2627,52 @@ mod tests {
         let hash0 = insert_rich(&pool, tx0, &verifier, &mut ws, &cs).unwrap();
         assert_eq!(pool.size_bytes(), tx0_size);
 
-        let err = insert_rich(&pool, tx1.clone(), &verifier, &mut ws, &cs).unwrap_err();
-        assert!(matches!(err, MempoolError::PoolBytesFull { .. }), "{err:?}");
-        assert_eq!(pool.size_bytes(), tx0_size);
-
-        assert!(pool.remove(&hash0));
-        assert_eq!(pool.size_bytes(), 0);
-        insert_rich(&pool, tx1, &verifier, &mut ws, &cs).unwrap();
+        let hash1 = insert_rich(&pool, tx1, &verifier, &mut ws, &cs).unwrap();
+        assert!(!pool.contains(&hash0));
+        assert!(pool.contains(&hash1));
         assert_eq!(pool.size_bytes(), tx1_size);
+
+        let err = insert_rich(&pool, tx2.clone(), &verifier, &mut ws, &cs).unwrap_err();
+        assert!(matches!(err, MempoolError::PoolBytesFull { .. }), "{err:?}");
+        assert!(pool.contains(&hash1));
+        assert_eq!(pool.size_bytes(), tx1_size);
+
+        assert!(pool.remove(&hash1));
+        assert_eq!(pool.size_bytes(), 0);
+        insert_rich(&pool, tx2, &verifier, &mut ws, &cs).unwrap();
+        assert_eq!(pool.size_bytes(), tx2_size);
         pool.clear();
         assert_eq!(pool.size_bytes(), 0);
+    }
+
+    #[test]
+    fn aggregate_byte_limit_evicts_multiple_lower_priority_transactions() {
+        let verifier = DilithiumVerifier;
+        let (mut ws, cs) = setup_validation_ctx();
+        let (tx0, _) = make_signed_tx(0, 100);
+        let (tx1, _) = make_signed_tx(0, 101);
+        let high_priority = make_signed_tx_with_data(200, 1024);
+        let tx0_size = serde_json::to_vec(&tx0).unwrap().len();
+        let tx1_size = serde_json::to_vec(&tx1).unwrap().len();
+        let high_priority_size = serde_json::to_vec(&high_priority).unwrap().len();
+        let byte_capacity = tx0_size + tx1_size;
+        assert!(high_priority_size > tx0_size);
+        assert!(high_priority_size <= byte_capacity);
+        let pool = TxPool::new(MempoolConfig {
+            max_pool_bytes: byte_capacity,
+            ..make_config()
+        });
+
+        let hash0 = insert_rich(&pool, tx0, &verifier, &mut ws, &cs).unwrap();
+        let hash1 = insert_rich(&pool, tx1, &verifier, &mut ws, &cs).unwrap();
+        let high_priority_hash =
+            insert_rich(&pool, high_priority, &verifier, &mut ws, &cs).unwrap();
+
+        assert_eq!(pool.len(), 1);
+        assert!(!pool.contains(&hash0));
+        assert!(!pool.contains(&hash1));
+        assert!(pool.contains(&high_priority_hash));
+        assert_eq!(pool.size_bytes(), high_priority_size);
     }
 
     // --- F-020: Balance check tests ---
