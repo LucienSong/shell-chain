@@ -13,6 +13,8 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Keep an mDNS peer explicit in GossipSub until all of its discovered addresses
+  have expired.
 - Reject checkpoint snapshots with a missing or mismatched canonical head body
   before importing any snapshot records.
 - Start finality-bounded log filters at their resolved upper bound so blocks
