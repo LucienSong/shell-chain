@@ -1242,7 +1242,8 @@ fn handle_swarm_event(
         SwarmEvent::Behaviour(ShellBehaviourEvent::Mdns(mdns::Event::Discovered(peers))) => {
             for (peer_id, addr) in peers {
                 info!("discovered peer on address peer={peer_id} address={addr}");
-                swarm.add_peer_address(peer_id, addr);
+                // The mDNS behaviour supplies live addresses during dial resolution and
+                // removes them on expiry, so they must not enter persistent peer caches.
                 swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
             }
         }
@@ -2258,6 +2259,70 @@ mod tests {
         assert!(
             entry_count >= 1,
             "boot node should be added to Kademlia routing table"
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_mdns_discovery_does_not_remain_dialable() {
+        let config = NetworkConfig {
+            enable_mdns: true,
+            enable_kademlia: true,
+            enable_peer_scoring: false,
+            enable_relay: false,
+            enable_dcutr: false,
+            enable_autonat: false,
+            ..Default::default()
+        };
+        let mut swarm = build_swarm(&config).expect("build_swarm should succeed");
+        let peer_id = Libp2pPeerId::random();
+        let addr: Multiaddr = "/ip4/192.0.2.1/tcp/30303".parse().unwrap();
+        let (event_tx, _event_rx) = mpsc::channel(1);
+        let loop_config = SwarmLoopConfig {
+            peer_count: Arc::new(AtomicUsize::new(0)),
+            blocks_topic: IdentTopic::new(&config.blocks_topic),
+            txs_topic: IdentTopic::new(&config.txs_topic),
+            attestation_topic: IdentTopic::new(&config.attestation_topic),
+            proofs_topic: IdentTopic::new(&config.proofs_topic),
+            bandwidth: Arc::new(BandwidthTracker::new(0, 0)),
+            boot_nodes: Vec::new(),
+            max_msg_size: config.max_message_size,
+            peer_security: PeerSecurityConfig::from(&config),
+        };
+        let mut peer_tracker = crate::security::PeerTracker::new(config.max_peers);
+        let mut peer_ban_list = crate::security::PeerBanList::new(
+            config.ban_threshold,
+            Duration::from_secs(config.ban_duration_secs),
+        );
+        let mut pending_direct_messages =
+            PendingDirectMessages::new(MAX_PENDING_DIRECT_MESSAGES, MAX_PENDING_DIRECT_BYTES);
+
+        handle_swarm_event(
+            SwarmEvent::Behaviour(ShellBehaviourEvent::Mdns(mdns::Event::Discovered(vec![(
+                peer_id,
+                addr.clone(),
+            )]))),
+            &mut swarm,
+            &event_tx,
+            &loop_config,
+            &mut peer_tracker,
+            &mut peer_ban_list,
+            &mut pending_direct_messages,
+        );
+        handle_swarm_event(
+            SwarmEvent::Behaviour(ShellBehaviourEvent::Mdns(mdns::Event::Expired(vec![(
+                peer_id, addr,
+            )]))),
+            &mut swarm,
+            &event_tx,
+            &loop_config,
+            &mut peer_tracker,
+            &mut peer_ban_list,
+            &mut pending_direct_messages,
+        );
+
+        assert!(
+            swarm.dial(peer_id).is_err(),
+            "expired mDNS addresses must not remain available for dialing"
         );
     }
 
