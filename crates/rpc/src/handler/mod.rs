@@ -6177,6 +6177,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn log_filter_delivers_blocks_as_finality_advances() {
+        let handler = setup();
+        let address = Address::from([0xE3; 20]);
+        let log = || shell_core::Log::new(address, vec![], Bytes::new()).unwrap();
+        store_block_with_logs(&handler, 0, vec![vec![]]);
+        store_block_with_logs(&handler, 1, vec![vec![log()]]);
+        store_block_with_logs(&handler, 2, vec![vec![log()]]);
+        *handler.finalized_number.write() = 0;
+
+        let raw: RawLogFilter = serde_json::from_str(&format!(
+            r#"{{"fromBlock":"0x0","toBlock":"finalized","address":"{}"}}"#,
+            address
+        ))
+        .unwrap();
+        let filter_id = EthApiServer::new_filter(&handler, raw).await.unwrap();
+
+        assert_eq!(
+            EthApiServer::get_filter_changes(&handler, filter_id.clone())
+                .await
+                .unwrap(),
+            serde_json::json!([])
+        );
+
+        *handler.finalized_number.write() = 1;
+        let first = EthApiServer::get_filter_changes(&handler, filter_id.clone())
+            .await
+            .unwrap();
+        assert_eq!(first.as_array().unwrap().len(), 1);
+        assert_eq!(first[0]["blockNumber"], "0x1");
+
+        *handler.finalized_number.write() = 2;
+        let second = EthApiServer::get_filter_changes(&handler, filter_id)
+            .await
+            .unwrap();
+        assert_eq!(second.as_array().unwrap().len(), 1);
+        assert_eq!(second[0]["blockNumber"], "0x2");
+    }
+
+    #[tokio::test]
     async fn log_filter_preserves_cursor_when_matching_block_receipts_are_missing() {
         let handler = setup();
         let address = Address::from([0xE1; 20]);
