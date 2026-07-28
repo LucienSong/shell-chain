@@ -11,6 +11,31 @@ fail() {
     exit 1
 }
 
+CODEQL_WORKFLOW="$ROOT_DIR/.github/workflows/codeql.yml"
+if [ ! -f "$CODEQL_WORKFLOW" ]; then
+    fail "the advanced CodeQL workflow is missing"
+fi
+for required_entry in \
+    "  pull_request:" \
+    "  security-events: write" \
+    "          - language: actions" \
+    "          - language: python" \
+    "          - language: rust"; do
+    if ! grep -Fqx "$required_entry" "$CODEQL_WORKFLOW"; then
+        fail "the advanced CodeQL workflow is missing: $required_entry"
+    fi
+done
+for required_action in \
+    "      - uses: github/codeql-action/init@" \
+    "      - uses: github/codeql-action/analyze@"; do
+    if ! grep -Fq "$required_action" "$CODEQL_WORKFLOW"; then
+        fail "the advanced CodeQL workflow is missing: $required_action"
+    fi
+done
+if grep -Eq '^[[:space:]]*pull_request_target:' "$CODEQL_WORKFLOW"; then
+    fail "the CodeQL workflow must not execute pull request code with a write token"
+fi
+
 "$SCRIPT_DIR/check-release-metadata.sh"
 "$SCRIPT_DIR/check-release-lockfile.sh"
 
