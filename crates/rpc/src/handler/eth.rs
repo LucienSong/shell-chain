@@ -1031,12 +1031,20 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
             .clone()
             .into_filter(latest, finalized)
             .map_err(invalid_params)?;
+        let initial_block = latest.min(resolved.to_block.unwrap_or(latest));
+        let initial_hash = if initial_block == latest {
+            head_hash
+        } else {
+            self.chain_store
+                .get_block_hash_by_number(initial_block)
+                .map_err(internal_err)?
+        };
         // Resolve fromBlock at creation so dynamic tags cannot skip blocks
         // between polls and get_filter_logs has a stable lower bound.
         filter.from_block = Some(format!("0x{:x}", resolved.from_block.unwrap_or(latest)));
         let id = self
             .filter_registry
-            .new_filter_at(FilterKind::Log(filter), latest, head_hash)
+            .new_filter_at(FilterKind::Log(filter), initial_block, initial_hash)
             .ok_or_else(|| internal_err("filter limit reached"))?;
         Ok(id)
     }

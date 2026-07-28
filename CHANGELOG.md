@@ -13,6 +13,8 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Start finality-bounded log filters at their resolved upper bound so blocks
+  already above that bound are delivered when finality later advances.
 - Let higher-priority transactions evict enough lower-priority nonce chains to
   satisfy the aggregate mempool byte limit as well as the transaction-count
   limit.
