@@ -173,6 +173,8 @@ fi
 git -C "$TAG_FIXTURE" tag -a v0.27.1 -m "existing release"
 git -C "$TAG_FIXTURE" push -q canonical v0.27.1
 git clone -q --no-tags "$TAG_REMOTE" "$TAG_CHECKOUT"
+git -C "$TAG_CHECKOUT" config user.name "ShellDAO Release Test"
+git -C "$TAG_CHECKOUT" config user.email "release-test@shelldao.org"
 if TAG_OUTPUT=$(cd "$TAG_CHECKOUT" && \
     "$SCRIPT_DIR/check-release-tag.sh" origin v0.27.1 2>&1); then
     fail "release tag check unexpectedly accepted an existing remote tag"
