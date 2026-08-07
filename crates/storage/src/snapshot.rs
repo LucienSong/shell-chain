@@ -13,6 +13,8 @@ pub const MAX_SNAPSHOT_KEY_BYTES: usize = 1024 * 1024;
 /// Maximum decoded snapshot value size.
 pub const MAX_SNAPSHOT_VALUE_BYTES: usize = 8 * 1024 * 1024;
 
+const SNAPSHOT_CHECKSUM_DOMAIN: &[u8] = b"shell-chain-snapshot-v2\0";
+
 /// Metadata about a state snapshot.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SnapshotMetadata {
@@ -33,14 +35,15 @@ pub struct SnapshotMetadata {
     /// Total uncompressed data size in bytes.
     pub data_size: u64,
     /// SHA-256 checksum of all entry data (hex-encoded).
-    /// Computed over concatenated (key ++ value) bytes of every entry, in order.
+    /// Computed over domain-separated, length-prefixed key and value bytes in
+    /// entry order.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checksum: Option<String>,
 }
 
 impl SnapshotMetadata {
     /// Current snapshot format version.
-    pub const CURRENT_VERSION: u32 = 1;
+    pub const CURRENT_VERSION: u32 = 2;
 
     /// Create metadata for a new snapshot.
     pub fn new(
@@ -146,6 +149,21 @@ fn saturating_entry_data_size(key: &[u8], value: &[u8]) -> u64 {
     saturating_entry_data_len(key.len(), value.len())
 }
 
+fn snapshot_hasher() -> Sha256 {
+    let mut hasher = Sha256::new();
+    hasher.update(SNAPSHOT_CHECKSUM_DOMAIN);
+    hasher
+}
+
+fn update_snapshot_checksum(hasher: &mut Sha256, key: &[u8], value: &[u8]) {
+    let key_len = u64::try_from(key.len()).unwrap_or(u64::MAX);
+    let value_len = u64::try_from(value.len()).unwrap_or(u64::MAX);
+    hasher.update(key_len.to_be_bytes());
+    hasher.update(key);
+    hasher.update(value_len.to_be_bytes());
+    hasher.update(value);
+}
+
 /// Snapshot writer: exports key-value data in a streaming format.
 ///
 /// Format: newline-separated JSON entries followed by a META: footer line.
@@ -160,12 +178,19 @@ pub struct SnapshotWriter<W: Write> {
 impl<W: Write> SnapshotWriter<W> {
     /// Create a new snapshot writer.
     pub fn new(writer: W, metadata: SnapshotMetadata) -> Result<Self, StorageError> {
+        if metadata.version != SnapshotMetadata::CURRENT_VERSION {
+            return Err(StorageError::State(format!(
+                "unsupported snapshot version: {} (expected {})",
+                metadata.version,
+                SnapshotMetadata::CURRENT_VERSION
+            )));
+        }
         Ok(Self {
             writer,
             metadata,
             entry_count: 0,
             data_size: 0,
-            hasher: Sha256::new(),
+            hasher: snapshot_hasher(),
         })
     }
 
@@ -189,9 +214,7 @@ impl<W: Write> SnapshotWriter<W> {
         self.data_size = self
             .data_size
             .saturating_add(saturating_entry_data_size(key, value));
-        // Feed data into SHA-256 hasher for integrity checksum (F-089).
-        self.hasher.update(key);
-        self.hasher.update(value);
+        update_snapshot_checksum(&mut self.hasher, key, value);
         Ok(())
     }
 
@@ -246,7 +269,7 @@ impl<R: Read + Seek> SnapshotReader<R> {
         let mut metadata: Option<SnapshotMetadata> = None;
         let mut entry_count = 0u64;
         let mut data_size = 0u64;
-        let mut hasher = Sha256::new();
+        let mut hasher = snapshot_hasher();
 
         loop {
             let bytes_read = read_bounded_line(&mut reader, &mut line)?;
@@ -286,12 +309,19 @@ impl<R: Read + Seek> SnapshotReader<R> {
             data_size = data_size
                 .checked_add(saturating_entry_data_size(&entry.key, &entry.value))
                 .ok_or_else(|| StorageError::State("snapshot data size overflow".into()))?;
-            hasher.update(&entry.key);
-            hasher.update(&entry.value);
+            update_snapshot_checksum(&mut hasher, &entry.key, &entry.value);
         }
 
         let metadata = metadata
             .ok_or_else(|| StorageError::Serialization("snapshot missing META footer".into()))?;
+
+        if metadata.version != SnapshotMetadata::CURRENT_VERSION {
+            return Err(StorageError::State(format!(
+                "unsupported snapshot version: {} (expected {})",
+                metadata.version,
+                SnapshotMetadata::CURRENT_VERSION
+            )));
+        }
 
         if metadata.entry_count != entry_count {
             return Err(StorageError::State(format!(
@@ -306,14 +336,23 @@ impl<R: Read + Seek> SnapshotReader<R> {
             )));
         }
 
-        // Verify SHA-256 checksum if present (F-089).
-        if let Some(ref expected_checksum) = metadata.checksum {
-            let actual = hex::encode(hasher.finalize());
-            if actual != *expected_checksum {
-                return Err(StorageError::State(format!(
-                    "snapshot checksum mismatch: expected {expected_checksum}, got {actual}"
-                )));
-            }
+        let expected_checksum = metadata
+            .checksum
+            .as_deref()
+            .ok_or_else(|| StorageError::State("snapshot checksum is missing".into()))?;
+        let expected = hex::decode(expected_checksum)
+            .map_err(|e| StorageError::State(format!("snapshot checksum is invalid: {e}")))?;
+        if expected.len() != 32 {
+            return Err(StorageError::State(
+                "snapshot checksum must contain 32 bytes".into(),
+            ));
+        }
+        let actual = hasher.finalize();
+        if expected.as_slice() != actual.as_slice() {
+            return Err(StorageError::State(format!(
+                "snapshot checksum mismatch: expected {expected_checksum}, got {}",
+                hex::encode(actual)
+            )));
         }
 
         reader
@@ -664,6 +703,45 @@ mod tests {
                 .to_string()
                 .contains("checksum mismatch"));
         }
+    }
+
+    #[test]
+    fn test_checksum_binds_key_and_value_boundaries() {
+        let mut buffer = Vec::new();
+        let mut writer = SnapshotWriter::new(Cursor::new(&mut buffer), test_metadata()).unwrap();
+        writer.write_entry(b"a", b"bc").unwrap();
+        writer.finalize().unwrap();
+
+        let text = String::from_utf8(buffer).unwrap();
+        let tampered = text
+            .replacen("\"YQ==\"", "\"YWI=\"", 1)
+            .replacen("\"YmM=\"", "\"Yw==\"", 1);
+        let error = SnapshotReader::new(Cursor::new(tampered)).unwrap_err();
+
+        assert!(error.to_string().contains("checksum mismatch"));
+    }
+
+    #[test]
+    fn test_current_snapshot_requires_checksum() {
+        let metadata = test_metadata();
+        let snapshot = format!("META:{}\n", serde_json::to_string(&metadata).unwrap());
+
+        let error = SnapshotReader::new(Cursor::new(snapshot)).unwrap_err();
+
+        assert!(error.to_string().contains("checksum is missing"));
+    }
+
+    #[test]
+    fn snapshot_writer_rejects_legacy_format_metadata() {
+        let mut metadata = test_metadata();
+        metadata.version = 1;
+
+        let error = match SnapshotWriter::new(Cursor::new(Vec::new()), metadata) {
+            Ok(_) => panic!("legacy metadata must be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("unsupported snapshot version"));
     }
 
     #[test]
