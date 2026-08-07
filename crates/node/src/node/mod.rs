@@ -394,27 +394,82 @@ impl<'a, S: KvStore + 'static> BlockStoreBoundary<'a, S> {
         Ok(())
     }
 
+    fn schedule_settled_witness_deletes(
+        &self,
+        amendments: &[ProofAmendment],
+        settlement_block: u64,
+        grace: u64,
+    ) {
+        if grace == u64::MAX || amendments.is_empty() {
+            return;
+        }
+
+        let delete_at = settlement_block.saturating_add(grace);
+        let mut grace_map = self.pending_grace_deletes.lock();
+        for amendment in amendments {
+            for hash in amendment.covered_hashes() {
+                grace_map.insert(hash, delete_at);
+            }
+        }
+    }
+
+    fn cancel_settled_witness_deletes(&self, amendments: &[ProofAmendment]) {
+        let mut grace_map = self.pending_grace_deletes.lock();
+        for amendment in amendments {
+            for hash in amendment.covered_hashes() {
+                grace_map.remove(&hash);
+            }
+        }
+    }
+
     fn prune_grace_witnesses(&self, current_head: u64) {
         let mut grace_map = self.pending_grace_deletes.lock();
-        grace_map.retain(|hash, delete_at| {
-            if current_head >= *delete_at {
-                match self.chain_store.delete_witness_bundle(hash) {
-                    Ok(()) => {
-                        info!(
-                            block = *delete_at,
-                            "L2: grace-window expired, witness bundle deleted"
-                        );
-                        false
-                    }
-                    Err(e) => {
-                        warn!(block = *delete_at, "L2: grace-window delete failed: {e}");
-                        true
-                    }
+        let candidates: Vec<_> = grace_map
+            .iter()
+            .filter_map(|(hash, delete_at)| (current_head >= *delete_at).then_some(*hash))
+            .collect();
+        if candidates.is_empty() {
+            return;
+        }
+
+        let mut due = Vec::with_capacity(candidates.len());
+        let mut already_absent = Vec::new();
+        for hash in candidates {
+            match self.chain_store.has_witness_bundle(&hash) {
+                Ok(true) => due.push(hash),
+                Ok(false) => already_absent.push(hash),
+                Err(error) => {
+                    warn!(%hash, %error, "L2: failed to inspect due witness bundle");
                 }
-            } else {
-                true
             }
-        });
+        }
+        for hash in already_absent {
+            grace_map.remove(&hash);
+        }
+        if due.is_empty() {
+            return;
+        }
+
+        match self.chain_store.delete_witness_bundles(&due) {
+            Ok(()) => {
+                for hash in &due {
+                    grace_map.remove(hash);
+                }
+                info!(
+                    count = due.len(),
+                    block = current_head,
+                    "L2: grace-window expired, witness bundles deleted"
+                );
+            }
+            Err(error) => {
+                warn!(
+                    count = due.len(),
+                    block = current_head,
+                    %error,
+                    "L2: grace-window witness batch delete failed"
+                );
+            }
+        }
     }
 }
 
@@ -1840,7 +1895,6 @@ mod tests {
         fail_next_put: AtomicBool,
         fail_next_batch: AtomicBool,
         fail_head_batch: AtomicBool,
-        fail_next_delete: AtomicBool,
     }
 
     impl FailingBatchDb {
@@ -1851,7 +1905,6 @@ mod tests {
                 fail_next_put: AtomicBool::new(false),
                 fail_next_batch: AtomicBool::new(false),
                 fail_head_batch: AtomicBool::new(false),
-                fail_next_delete: AtomicBool::new(false),
             }
         }
 
@@ -1869,10 +1922,6 @@ mod tests {
 
         fn fail_head_batch(&self) {
             self.fail_head_batch.store(true, Ordering::SeqCst);
-        }
-
-        fn fail_next_delete(&self) {
-            self.fail_next_delete.store(true, Ordering::SeqCst);
         }
     }
 
@@ -1892,9 +1941,6 @@ mod tests {
         }
 
         fn delete(&self, key: &[u8]) -> Result<(), StorageError> {
-            if self.fail_next_delete.swap(false, Ordering::SeqCst) {
-                return Err(StorageError::Database("injected delete failure".into()));
-            }
             self.inner.delete(key)
         }
 
@@ -3813,7 +3859,8 @@ mod tests {
 
     #[test]
     fn stark_settled_index_survives_simulated_restart() {
-        let (node, signer) = setup_node();
+        let (mut node, signer) = setup_node();
+        node.config.pruning.proof_replacement_grace = 128;
         store_genesis(&node);
         let genesis_hash = node
             .chain_store
@@ -3827,7 +3874,8 @@ mod tests {
         node.pending_stark_settlements
             .lock()
             .push(amendment.clone());
-        node.produce_block(&signer, 100).unwrap();
+        let settlement_block = node.produce_block(&signer, 100).unwrap();
+        assert!(node.chain_store.has_witness_bundle(&hashes[0]).unwrap());
 
         // Verify settled_stark_sources was populated.
         assert!(
@@ -3847,12 +3895,18 @@ mod tests {
 
         // Simulate restart: clear in-memory set and reload via index (fast path).
         node.settled_stark_sources.lock().clear();
+        node.pending_grace_deletes.lock().clear();
         assert!(
             node.settled_stark_sources.lock().is_empty(),
             "cleared before rebuild"
         );
         let count = node.rebuild_settled_stark_sources_from_chain().unwrap();
         assert_eq!(count, 3, "fast path should restore 3 settled entries");
+        assert_eq!(
+            node.pending_grace_deletes.lock().get(&hashes[0]),
+            Some(&settlement_block.number().saturating_add(128)),
+            "restart rebuild must preserve the original settlement grace deadline"
+        );
 
         // After rebuild, settled_stark_sources should contain all three sources.
         assert!(
@@ -9511,18 +9565,15 @@ mod tests {
 
     // ─── L2: proof-replaces-witness tests ──────────────────────────────────────
 
-    /// L2 basic: when a ProofAmendment network message is handled and grace=0,
-    /// the witness bundle for that block is deleted from chain_store.
+    /// Peer proof artifacts are not canonical settlement evidence and must not
+    /// prune source witnesses before the proof is included on-chain.
     #[test]
-    fn l2_proof_amendment_deletes_witness_bundle_grace_zero() {
+    fn unsettled_stark_amendment_retains_witness_bundle() {
         let (node, signer) = setup_node();
         store_genesis(&node);
         let block = node.produce_block(&signer, 1).unwrap();
         let block_hash = block.hash();
-        let block_num = block.number();
 
-        // Verify witness was written by put_block (block has 0 txs → no bundle)
-        // so write one manually to simulate a block with txs.
         use shell_core::{TxWitness, WitnessBundle};
         use shell_crypto::PQSignature;
         let bundle = WitnessBundle {
@@ -9537,34 +9588,52 @@ mod tests {
             "bundle should exist before amendment"
         );
 
-        // Simulate receiving a ProofAmendment (grace=0 by default).
         let dummy_payload = b"fake-proof".to_vec();
         node.amendment_store
             .put_amendment(&block_hash, &dummy_payload)
             .unwrap();
 
-        // Now manually apply the L2 logic (the network handler calls this inline).
-        let grace = node.config.pruning.proof_replacement_grace;
-        assert_eq!(grace, 0, "default grace should be 0");
-        node.chain_store.delete_witness_bundle(&block_hash).unwrap();
-
         assert!(
-            !node.chain_store.has_witness_bundle(&block_hash).unwrap(),
-            "witness bundle should be gone after proof replacement"
+            node.chain_store.has_witness_bundle(&block_hash).unwrap(),
+            "unsettled peer proof must not prune source witness"
         );
-        // TX detail block body must still be readable.
+    }
+
+    #[test]
+    fn settled_stark_amendment_deletes_witness_bundle_grace_zero() {
+        let (node, signer) = setup_node();
+        store_genesis(&node);
+        let block = node.produce_block(&signer, 1).unwrap();
+        let block_hash = block.hash();
+
+        use shell_core::{TxWitness, WitnessBundle};
+        use shell_crypto::PQSignature;
+        let bundle = WitnessBundle {
+            witnesses: vec![TxWitness::new_reference(PQSignature {
+                sig_type: shell_crypto::SignatureType::Dilithium3,
+                data: vec![0u8; 3309],
+            })],
+        };
+        node.witness_store.put_bundle(&block_hash, &bundle).unwrap();
+        let amendment = dummy_ordered_amendment(1, vec![block_hash], block.number());
+
+        node.block_store()
+            .schedule_settled_witness_deletes(&[amendment], 10, 0);
+        node.block_store().prune_grace_witnesses(10);
+
+        assert!(!node.chain_store.has_witness_bundle(&block_hash).unwrap());
         let retrieved = node.chain_store.get_block_by_hash(&block_hash).unwrap();
         assert!(
             retrieved.is_some(),
             "block body (tx detail) must survive witness deletion"
         );
-        assert_eq!(retrieved.unwrap().number(), block_num);
+        assert_eq!(retrieved.unwrap().number(), block.number());
     }
 
-    /// L2 grace: when grace=2 and proof arrives for block N while head is N+1,
-    /// the witness bundle must NOT be deleted yet.
+    /// The grace window starts at canonical settlement inclusion, not at the
+    /// historical source range height.
     #[test]
-    fn l2_proof_amendment_respects_grace_window() {
+    fn settled_stark_amendment_respects_grace_window() {
         let (node, signer) = setup_node();
         store_genesis(&node);
         let block1 = node.produce_block(&signer, 1).unwrap();
@@ -9579,23 +9648,41 @@ mod tests {
             })],
         };
         node.witness_store.put_bundle(&b1_hash, &bundle).unwrap();
+        let amendment = dummy_ordered_amendment(1, vec![b1_hash], block1.number());
 
-        // Set grace=2; head is at block 1, so head.saturating_sub(1) = 0 < 2.
-        // Simulating the grace check logic from the event loop handler.
-        let grace: u64 = 2;
-        let head = node
-            .chain_store
-            .get_head_block()
-            .ok()
-            .flatten()
-            .map(|b| b.header.number)
-            .unwrap_or(0);
-        let should_delete = head.saturating_sub(block1.number()) >= grace;
-        assert!(!should_delete, "within grace window: should NOT delete");
+        node.block_store()
+            .schedule_settled_witness_deletes(&[amendment], 100, 2);
+        node.block_store().prune_grace_witnesses(101);
         assert!(
             node.chain_store.has_witness_bundle(&b1_hash).unwrap(),
             "witness bundle must survive grace window"
         );
+
+        node.block_store().prune_grace_witnesses(102);
+        assert!(!node.chain_store.has_witness_bundle(&b1_hash).unwrap());
+    }
+
+    #[test]
+    fn reverted_stark_settlement_cancels_scheduled_witness_delete() {
+        let (node, signer) = setup_node();
+        store_genesis(&node);
+        let block = node.produce_block(&signer, 1).unwrap();
+        let block_hash = block.hash();
+        let amendment = dummy_ordered_amendment(1, vec![block_hash], block.number());
+
+        node.block_store().schedule_settled_witness_deletes(
+            std::slice::from_ref(&amendment),
+            100,
+            2,
+        );
+        assert_eq!(
+            node.pending_grace_deletes.lock().get(&block_hash),
+            Some(&102)
+        );
+
+        node.block_store()
+            .cancel_settled_witness_deletes(std::slice::from_ref(&amendment));
+        assert!(!node.pending_grace_deletes.lock().contains_key(&block_hash));
     }
 
     #[test]
@@ -9613,7 +9700,7 @@ mod tests {
         node.witness_store.put_bundle(&block_hash, &bundle).unwrap();
         node.pending_grace_deletes.lock().insert(block_hash, 10);
 
-        db.fail_next_delete();
+        db.fail_next_batch();
         node.block_store().prune_grace_witnesses(10);
 
         assert!(node.pending_grace_deletes.lock().contains_key(&block_hash));
@@ -9623,6 +9710,17 @@ mod tests {
 
         assert!(!node.pending_grace_deletes.lock().contains_key(&block_hash));
         assert!(!node.chain_store.has_witness_bundle(&block_hash).unwrap());
+    }
+
+    #[test]
+    fn grace_window_prune_drops_already_absent_witness_schedule() {
+        let (node, _signer) = setup_node();
+        let block_hash = ShellHash::from([0x43; 32]);
+        node.pending_grace_deletes.lock().insert(block_hash, 10);
+
+        node.block_store().prune_grace_witnesses(10);
+
+        assert!(!node.pending_grace_deletes.lock().contains_key(&block_hash));
     }
 
     #[test]
