@@ -230,7 +230,7 @@ impl<S: KvStore + 'static> Node<S> {
         block_hash: ShellHash,
         block_number: u64,
         sig: shell_crypto::PQSignature,
-    ) {
+    ) -> Option<Vec<u8>> {
         // FF.6: Drop votes for blocks that have already been finalized at a different hash
         // (stale or conflicting vote). Penalise the sender.
         {
@@ -256,7 +256,7 @@ impl<S: KvStore + 'static> Node<S> {
                     self.peer_scorer
                         .lock()
                         .record_event(&peer_id, shell_consensus::PeerEvent::InvalidProofPayload);
-                    return;
+                    return None;
                 }
             }
         }
@@ -273,7 +273,7 @@ impl<S: KvStore + 'static> Node<S> {
                         %voter,
                         "C-3: WPoA vote from unknown validator — rejecting"
                     );
-                    return;
+                    return None;
                 }
             };
             drop(known); // release read lock before potential peer_scorer lock
@@ -290,7 +290,7 @@ impl<S: KvStore + 'static> Node<S> {
                     self.peer_scorer
                         .lock()
                         .record_event(&peer_id, shell_consensus::PeerEvent::InvalidProofPayload);
-                    return;
+                    return None;
                 }
                 None => {
                     tracing::warn!(
@@ -301,7 +301,7 @@ impl<S: KvStore + 'static> Node<S> {
                     self.peer_scorer
                         .lock()
                         .record_event(&peer_id, shell_consensus::PeerEvent::InvalidProofPayload);
-                    return;
+                    return None;
                 }
             };
 
@@ -323,7 +323,7 @@ impl<S: KvStore + 'static> Node<S> {
                 self.peer_scorer
                     .lock()
                     .record_event(&peer_id, shell_consensus::PeerEvent::InvalidProofPayload);
-                return;
+                return None;
             }
 
             let typed_sig = shell_crypto::PQSignature::new(sig_type, sig.data.clone());
@@ -339,7 +339,7 @@ impl<S: KvStore + 'static> Node<S> {
                     self.peer_scorer
                         .lock()
                         .record_event(&peer_id, shell_consensus::PeerEvent::InvalidProofPayload);
-                    return;
+                    return None;
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -351,7 +351,7 @@ impl<S: KvStore + 'static> Node<S> {
                     self.peer_scorer
                         .lock()
                         .record_event(&peer_id, shell_consensus::PeerEvent::InvalidProofPayload);
-                    return;
+                    return None;
                 }
             }
         }
@@ -364,7 +364,7 @@ impl<S: KvStore + 'static> Node<S> {
                     expected = round.block_number,
                     "W.5: WPoaVote for unexpected block number, ignoring"
                 );
-                return;
+                return None;
             }
             let peer_id = shell_consensus::ScoringPeerId::from(format!("{voter:?}"));
             let events = round.on_vote(voter, block_hash, sig);
@@ -402,7 +402,7 @@ impl<S: KvStore + 'static> Node<S> {
                                 current_total_weight,
                                 "W.5: validator weights changed before commit; refreshed round without finalizing"
                             );
-                            return;
+                            return None;
                         }
                         tracing::info!(
                             %block_hash,
@@ -444,20 +444,24 @@ impl<S: KvStore + 'static> Node<S> {
                                         error = %e,
                                         "FF.2: failed to encode commit certificate"
                                     );
-                                    return;
+                                    return None;
                                 }
                             };
                             let advanced = {
                                 let mut finality = self.finality.write();
-                                if block_number <= finality.last_finalized_number() {
-                                    false
-                                } else if let Err(e) =
+                                let already_finalized =
+                                    block_number <= finality.last_finalized_number();
+                                let persist_result = if already_finalized {
+                                    self.chain_store
+                                        .set_commit_certificate(&block_hash, &encoded)
+                                } else {
                                     self.chain_store.set_finalized_with_certificate(
                                         block_number,
                                         &block_hash,
                                         &encoded,
                                     )
-                                {
+                                };
+                                if let Err(e) = persist_result {
                                     let round_number = round.round;
                                     let mut retry_round =
                                         WPoaRound::new(block_number, round_number, current_weights);
@@ -475,9 +479,12 @@ impl<S: KvStore + 'static> Node<S> {
                                     tracing::warn!(
                                         block_number,
                                         error = %e,
-                                        "FF: failed to persist finality; restored voting round for retry"
+                                        "FF: failed to persist finality certificate; restored voting round for retry"
                                     );
-                                    return;
+                                    return None;
+                                }
+                                if already_finalized {
+                                    false
                                 } else {
                                     finality.set_finalized_direct(block_number, block_hash)
                                 }
@@ -497,6 +504,7 @@ impl<S: KvStore + 'static> Node<S> {
                                     "FF: block finalized"
                                 );
                             }
+                            return Some(encoded);
                         } else {
                             tracing::warn!(
                                 block_number,
@@ -525,6 +533,7 @@ impl<S: KvStore + 'static> Node<S> {
                 }
             }
         }
+        None
     }
 
     pub fn encode_commit_certificate(
