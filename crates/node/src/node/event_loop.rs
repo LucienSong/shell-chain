@@ -101,10 +101,6 @@ fn next_block_sync_request_start(last_imported: u64) -> Option<u64> {
     last_imported.checked_add(1)
 }
 
-fn stark_backlog_tail_extends(max_existing: Option<u64>, first_new_block: u64) -> bool {
-    max_existing.and_then(|max| max.checked_add(1)) == Some(first_new_block)
-}
-
 fn proof_amendment_envelope_matches(
     envelope_hash: ShellHash,
     envelope_block: u64,
@@ -466,7 +462,6 @@ impl<S: KvStore + 'static> Node<S> {
             .with_signer(Arc::clone(&signer))
             .with_amendment_sender(prover_amendment_tx)
             .with_readiness(prover_readiness_rx)
-            .with_drain_frontier(Arc::clone(&self.stark_drain_frontier))
             .with_l2_mode(self.config.l2_stark_mode);
             let handle = service.start();
             task_lifecycle.attach_prover_service(handle);
@@ -2494,19 +2489,10 @@ impl<S: KvStore + 'static> Node<S> {
         // The inner loop's contains_source() check deduplicates overlap with
         // blocks already in the backlog or settled.
         //
-        // Also clamp to the drain frontier: if the prover drained tasks before a
-        // permanent gap, we must not re-seed those blocks — they can never
-        // accumulate enough entries to form a valid proof and would cause a
-        // drain-reseed infinite loop.
-        let drain_floor = self
-            .stark_drain_frontier
-            .load(std::sync::atomic::Ordering::Acquire);
-        let scan_start = contiguous_pending_end
-            .saturating_sub(16)  // small lookback for safety
-            .max(drain_floor);
+        let scan_start = contiguous_pending_end.saturating_sub(16);
         info!(
             settled_l1_count,
-            contiguous_pending_end, drain_floor, scan_start, head, "STARK seeding: scan parameters"
+            contiguous_pending_end, scan_start, head, "STARK seeding: scan parameters"
         );
 
         for number in scan_start..=head {
@@ -2544,21 +2530,14 @@ impl<S: KvStore + 'static> Node<S> {
                 if rejected_stored_payloads.contains(&payload_hash) {
                     self.amendment_store.delete_amendment(&hash)?;
                 } else {
-                    match ProofAmendment::from_json(&bytes) {
+                    match self.load_stored_stark_amendment_for_recovery(hash, number, &bytes) {
                         Ok(amendment) => {
                             let covered_hashes = amendment.covered_hashes();
                             let recovered_is_valid = self
                                 .validate_stark_amendment_authentication(&amendment)
                                 .and_then(|()| self.validate_stark_amendment_ordering(&amendment))
                                 .and_then(|()| {
-                                    let original_size =
-                                        amendment.original_size.ok_or_else(|| {
-                                            NodeError::Startup(
-                                                "stored STARK amendment is missing original_size"
-                                                    .into(),
-                                            )
-                                        })?;
-                                    if amendment.is_compression_valid_for(original_size) {
+                                    if amendment.has_valid_embedded_compression() {
                                         Ok(())
                                     } else {
                                         Err(NodeError::Startup(
@@ -2579,7 +2558,7 @@ impl<S: KvStore + 'static> Node<S> {
                                     "discarding invalid stored STARK amendment during recovery"
                                 );
                                 rejected_stored_payloads.insert(payload_hash);
-                                self.amendment_store.delete_amendment(&hash)?;
+                                self.delete_stored_stark_amendment_artifacts(&amendment, hash)?;
                                 // Continue with this canonical source so a fresh proof
                                 // task replaces the invalid persisted artifact.
                             } else {
@@ -2664,7 +2643,6 @@ impl<S: KvStore + 'static> Node<S> {
             let tasks_first = tasks.first().map(|t| t.block_number).unwrap_or(0);
             let tasks_last = tasks.last().map(|t| t.block_number).unwrap_or(0);
             let mut backlog = self.proof_backlog.lock();
-            let first_new_block = tasks[0].block_number;
             let layer = tasks[0].layer;
             let min_existing = backlog.min_block_number_for_layer(layer);
             let max_existing = backlog.max_block_number_for_layer(layer);
@@ -2678,43 +2656,116 @@ impl<S: KvStore + 'static> Node<S> {
                 "STARK seeding: inserting tasks into backlog"
             );
 
-            // Case 1: backlog is empty, or new tasks are at/before the existing
-            // minimum → insert at the front so the prover processes the lowest
-            // numbered block next (priority frontier catch-up).
-            if min_existing.is_none_or(|min| first_new_block <= min) {
-                for task in tasks.into_iter().rev() {
-                    if !task
-                        .source_hashes
-                        .iter()
-                        .any(|source| backlog.contains_source(task.layer, source))
-                    {
-                        backlog.push_front(task);
-                    }
-                }
-            } else if stark_backlog_tail_extends(max_existing, first_new_block) {
-                // Case 2: new tasks start immediately after the backlog tail →
-                // append to the back. This is contiguous extension: the prover
-                // will process the existing window first, then pick up these
-                // blocks without any ordering inversion. Crucially, this is
-                // what breaks the deadlock when blocks 1-1024 are all empty
-                // and block 1025+ contains the first transactions: the
-                // pop_contiguous extension scan can see block 1025 at
-                // pending[1024] and extend the window past max_sources.
-                for task in tasks.into_iter() {
-                    if !task
-                        .source_hashes
-                        .iter()
-                        .any(|source| backlog.contains_source(task.layer, source))
-                    {
-                        backlog.push(task);
-                    }
-                }
-            }
-            // Case 3: new tasks jump the frontier (first_new_block > min + gap)
-            // → skip this seeding pass; the next prover iteration will advance
-            // the frontier and re-seed correctly.
+            // Insert before any already-queued live tip tasks. A global-tail
+            // append test cannot fill a historical hole once tip blocks are in
+            // the queue and previously caused the prover to misclassify that
+            // recoverable hole as a permanent canonical gap.
+            backlog.insert_ordered_batch(tasks);
         }
         Ok(queued)
+    }
+
+    fn load_stored_stark_amendment_for_recovery(
+        &self,
+        source_hash: ShellHash,
+        source_block: u64,
+        bytes: &[u8],
+    ) -> Result<ProofAmendment, NodeError> {
+        match StoredProofArtifact::from_json(bytes).map_err(|error| {
+            NodeError::Startup(format!("malformed stored STARK artifact: {error}"))
+        })? {
+            StoredProofArtifact::Amendment(amendment) => {
+                if amendment.block_hash != source_hash {
+                    return Err(NodeError::Startup(format!(
+                        "stored STARK amendment target {} does not match storage key {source_hash}",
+                        amendment.block_hash
+                    )));
+                }
+                Ok(amendment)
+            }
+            StoredProofArtifact::Pointer(pointer) => {
+                if pointer.source_hash != source_hash
+                    || pointer.source_block != source_block
+                    || pointer.start_block > source_block
+                    || pointer.end_block < source_block
+                    || pointer.end_block != pointer.target_block
+                {
+                    return Err(NodeError::Startup(
+                        "stored STARK proof pointer metadata does not match its canonical source"
+                            .into(),
+                    ));
+                }
+                let target_bytes = self
+                    .amendment_store
+                    .get_amendment(&pointer.target_hash)?
+                    .ok_or_else(|| {
+                        NodeError::Startup(format!(
+                            "stored STARK proof pointer target {} is missing",
+                            pointer.target_hash
+                        ))
+                    })?;
+                let StoredProofArtifact::Amendment(amendment) =
+                    StoredProofArtifact::from_json(&target_bytes).map_err(|error| {
+                        NodeError::Startup(format!(
+                            "stored STARK proof pointer target is malformed: {error}"
+                        ))
+                    })?
+                else {
+                    return Err(NodeError::Startup(
+                        "stored STARK proof pointer target is not a full amendment".into(),
+                    ));
+                };
+                let covered_index = source_block
+                    .checked_sub(pointer.start_block)
+                    .and_then(|offset| usize::try_from(offset).ok())
+                    .ok_or_else(|| {
+                        NodeError::Startup("stored STARK proof pointer range overflows".into())
+                    })?;
+                if amendment.block_hash != pointer.target_hash
+                    || amendment.block_number != pointer.target_block
+                    || amendment.range_start_block() != Some(pointer.start_block)
+                    || amendment.layer != pointer.layer
+                    || amendment.settlement_tx_hash != pointer.settlement_tx_hash
+                    || amendment.covered_hashes().get(covered_index) != Some(&source_hash)
+                {
+                    return Err(NodeError::Startup(
+                        "stored STARK proof pointer does not match its target amendment".into(),
+                    ));
+                }
+                Ok(amendment)
+            }
+        }
+    }
+
+    pub(crate) fn delete_stored_stark_amendment_artifacts(
+        &self,
+        amendment: &ProofAmendment,
+        stored_key: ShellHash,
+    ) -> Result<(), NodeError> {
+        self.amendment_store.delete_amendment(&stored_key)?;
+        for source_hash in amendment
+            .covered_hashes()
+            .into_iter()
+            .filter(|source_hash| *source_hash != stored_key)
+        {
+            let Some(bytes) = self.amendment_store.get_amendment(&source_hash)? else {
+                continue;
+            };
+            let belongs_to_amendment = match StoredProofArtifact::from_json(&bytes) {
+                Ok(StoredProofArtifact::Amendment(stored)) => {
+                    source_hash == amendment.block_hash && stored.block_hash == amendment.block_hash
+                }
+                Ok(StoredProofArtifact::Pointer(pointer)) => {
+                    pointer.source_hash == source_hash
+                        && pointer.target_hash == amendment.block_hash
+                }
+                Err(_) => false,
+            };
+            if belongs_to_amendment {
+                self.amendment_store.delete_amendment(&source_hash)?;
+            }
+        }
+        Ok(())
     }
 
     fn wall_clock_millis() -> u64 {
@@ -2940,14 +2991,6 @@ mod cadence_tests {
     #[test]
     fn next_block_sync_request_start_stops_at_terminal_height() {
         assert_eq!(next_block_sync_request_start(u64::MAX), None);
-    }
-
-    #[test]
-    fn stark_backlog_tail_extends_stops_at_terminal_height() {
-        assert!(stark_backlog_tail_extends(Some(41), 42));
-        assert!(!stark_backlog_tail_extends(Some(41), 43));
-        assert!(!stark_backlog_tail_extends(None, 0));
-        assert!(!stark_backlog_tail_extends(Some(u64::MAX), u64::MAX));
     }
 
     #[test]

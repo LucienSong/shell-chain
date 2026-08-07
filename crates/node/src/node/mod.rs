@@ -106,7 +106,7 @@ pub(crate) use shell_stark_prover::{
     proof::SigBatchProof,
     prover::{compute_batch_root, verify_sig_batch, SigBatchEntry},
     AggregationConfig, AggregationScheduler, AggregationTrigger, ProofAmendment, ProofBacklog,
-    ProofTask, SettledL1Input, DEFAULT_MAX_L1_RANGE_SOURCES, MIN_L1_STARK_TXS,
+    ProofTask, SettledL1Input, StoredProofArtifact, DEFAULT_MAX_L1_RANGE_SOURCES, MIN_L1_STARK_TXS,
 };
 
 fn tx_fits_remaining_block_gas(
@@ -294,13 +294,6 @@ pub struct Node<S: KvStore + 'static> {
     /// Updated on every block import/production; used for offline-slash detection
     /// at epoch boundaries (white paper §5.4 — wPoA offline enforcement).
     pub(crate) last_proposed_by: parking_lot::Mutex<HashMap<Address, u64>>,
-    /// Drain frontier: the highest gap-at-block seen across all prover drain
-    /// operations in this process lifetime.  Shared with ProverService so the
-    /// seeding function can skip blocks that were already drained (and therefore
-    /// can never accumulate enough entries to form a valid proof on their own).
-    /// This prevents the drain-reseed infinite loop where drained sparse blocks
-    /// are immediately re-inserted at the backlog front by the seeder.
-    pub(crate) stark_drain_frontier: Arc<std::sync::atomic::AtomicU64>,
     /// Set after startup synchronization completes so imported catch-up blocks
     /// cannot fill the proof backlog or trigger proof gossip prematurely.
     prover_ready: std::sync::atomic::AtomicBool,
@@ -884,7 +877,6 @@ impl<S: KvStore + 'static> Node<S> {
             )),
             tx_rebroadcast_seen: parking_lot::Mutex::new(HashMap::new()),
             last_proposed_by: parking_lot::Mutex::new(HashMap::new()),
-            stark_drain_frontier: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             prover_ready: std::sync::atomic::AtomicBool::new(false),
             proof_rate_limiter: parking_lot::Mutex::new(ProofRateLimiter::new(RateLimiterConfig {
                 initial_tokens: MAX_PENDING_STARK_SETTLEMENTS as u64,
@@ -9244,6 +9236,78 @@ mod tests {
             .expect("invalid stored amendment must be replaced with a proof task");
         assert_eq!(task.block_number, 0);
         assert_eq!(task.source_hashes, vec![genesis_hash]);
+    }
+
+    #[test]
+    fn stark_frontier_recovery_preserves_valid_proof_pointers() {
+        let (node, proposer_signer) = setup_stark_node();
+        store_genesis(&node);
+        let genesis_hash = node
+            .chain_store
+            .get_block_hash_by_number(0)
+            .unwrap()
+            .expect("genesis must be canonical");
+        let hashes = produce_witnessed_blocks(&node, &proposer_signer, 2);
+        let sources = vec![genesis_hash, hashes[0], hashes[1]];
+        let amendment = dummy_ordered_amendment(1, sources.clone(), 2);
+        while node.proof_backlog.lock().pop().is_some() {}
+        node.store_stark_artifacts(&amendment, None).unwrap();
+
+        assert_eq!(node.enqueue_stark_frontier_backlog(8).unwrap(), 3);
+
+        assert!(node.proof_backlog.lock().is_empty());
+        assert_eq!(
+            node.pending_stark_settlements.lock().as_slice(),
+            std::slice::from_ref(&amendment)
+        );
+        for source_hash in sources {
+            assert!(
+                node.amendment_store
+                    .get_amendment(&source_hash)
+                    .unwrap()
+                    .is_some(),
+                "valid stored artifact must survive recovery"
+            );
+        }
+    }
+
+    #[test]
+    fn rejected_stark_recovery_artifact_does_not_delete_unrelated_proof() {
+        let (node, proposer_signer) = setup_stark_node();
+        store_genesis(&node);
+        let genesis_hash = node
+            .chain_store
+            .get_block_hash_by_number(0)
+            .unwrap()
+            .expect("genesis must be canonical");
+        let block_hash = produce_witnessed_blocks(&node, &proposer_signer, 1)[0];
+        let unrelated = dummy_ordered_amendment(1, vec![block_hash], 1);
+        node.store_stark_artifacts(&unrelated, None).unwrap();
+
+        let mut invalid = dummy_proof_amendment(1, 1_000, 400);
+        invalid.block_hash = genesis_hash;
+        invalid.block_number = 0;
+        invalid.start_block = Some(0);
+        invalid.source_hashes = vec![block_hash];
+        node.amendment_store
+            .put_amendment(&genesis_hash, &invalid.to_json().unwrap())
+            .unwrap();
+
+        node.delete_stored_stark_amendment_artifacts(&invalid, genesis_hash)
+            .unwrap();
+
+        assert!(node
+            .amendment_store
+            .get_amendment(&genesis_hash)
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            node.amendment_store
+                .get_amendment(&block_hash)
+                .unwrap()
+                .expect("unrelated proof must survive rejection cleanup"),
+            unrelated.to_json().unwrap()
+        );
     }
 
     #[test]
