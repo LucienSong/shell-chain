@@ -12,9 +12,25 @@ All notable changes to this project will be documented in this file.
   head receives the required GitHub Actions, Python, and Rust security checks.
 - Index pending sender and paymaster balance reservations so transaction
   admission no longer scans the full mempool.
+- Commit replayed state, receipts, canonical indexes, and the replacement head
+  in one atomic storage transition during branch adoption.
+- Deterministically replay and atomically adopt quorum-preferred forks while
+  keeping candidate execution isolated until every commitment is verified.
+- Back off repeated preferred-fork adoption attempts up to 30 seconds, while
+  retrying immediately when fork choice selects a different head.
+- Reconcile the mempool after fork adoption by removing newly canonical
+  transactions and reinserting valid reverted transactions in nonce order.
+- Remove terminally invalid preferred-fork subtrees from fork choice so
+  production can resume, while retaining backoff for transient failures.
+- Reconstruct signature-algorithm policy from the common ancestor state before
+  validating a preferred branch, with rollback when adoption fails.
+- Journal canonical public-key and guardian-recovery metadata changes so fork
+  replay restores the common-ancestor view before validating either branch.
 
 ### Fixed
 
+- Reject side-fork blocks with malformed or invalid STARK aggregate proofs
+  before persisting them or registering them with fork choice.
 - Keep idle `syncing` subscriptions active until the client unsubscribes or
   disconnects instead of expiring healthy WebSocket sessions.
 - Require owners to cancel an active guardian recovery before replacing its

@@ -26,8 +26,8 @@ pub(crate) use shell_consensus::{
     ViewChangeMessage, WPoaEvent, WPoaRound, WindowConfig, VIEW_CHANGE_TIMEOUT_MS,
 };
 pub(crate) use shell_core::{
-    calc_blob_gas_price, calc_excess_blob_gas, calculate_base_fee, effective_gas_price, Account,
-    Block, BlockHeader, SignedTransaction, SystemTransaction, SystemTxKind, TransactionReceipt,
+    calc_blob_gas_price, calc_excess_blob_gas, calculate_base_fee, effective_gas_price, Block,
+    BlockHeader, SignedTransaction, SystemTransaction, SystemTxKind, TransactionReceipt,
     WitnessBundle, MAX_BLOB_GAS_PER_BLOCK,
 };
 pub(crate) use shell_crypto::{
@@ -37,15 +37,16 @@ pub(crate) use shell_crypto::{
 pub(crate) use shell_mempool::TxPool;
 pub(crate) use shell_network::{NetworkMessage, NetworkService};
 pub(crate) use shell_pqvm::{
-    commit_pqvm_state, process_pending_activations, validate_tx_for_import,
-    validate_tx_for_import_with_expected_nonce, ShellPqvm, ShellStateDb,
+    commit_pqvm_state, load_algorithm_registry, process_pending_activations,
+    validate_tx_for_import, validate_tx_for_import_with_expected_nonce, ExecutorError, ShellPqvm,
+    ShellStateDb, StateDbError, TxValidationError,
 };
 pub(crate) use shell_primitives::{Address, Bytes, ShellHash, U256};
 pub(crate) use shell_rpc::DevRpcControl;
 pub(crate) use shell_storage::{
     validator_registry_addr, BodyPruner, ChainStore, KvStore, L2AggregationJob, L2InputIndex,
-    L2JobStatus, L2JobStore, ProofAmendmentStore, SettledSourceIndex, StatePruner, WitnessPruner,
-    WitnessStore, WorldState,
+    L2JobStatus, L2JobStore, OverlayStore, ProofAmendmentStore, SettledSourceIndex, StatePruner,
+    WitnessPruner, WitnessStore, WorldState,
 };
 
 pub(crate) use crate::config::NodeConfig;
@@ -167,6 +168,38 @@ fn state_trie_prune_boundary(finalized_number: u64, keep_recent: u64) -> Option<
 
     let boundary = retention_cutoff(finalized_number, keep_recent);
     (boundary > 0).then_some(boundary)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ForkAdoptionPlan {
+    preferred_hash: ShellHash,
+    preferred_number: u64,
+    canonical_number: u64,
+    ancestor_hash: ShellHash,
+    ancestor_number: u64,
+    old_chain: Vec<Block>,
+    new_chain: Vec<Block>,
+    reverted_txs: Vec<SignedTransaction>,
+}
+
+fn unique_reverted_transactions(
+    old_chain: &[Block],
+    new_chain: &[Block],
+) -> Vec<SignedTransaction> {
+    let adopted_hashes: HashSet<ShellHash> = new_chain
+        .iter()
+        .flat_map(|block| block.transactions.iter().map(SignedTransaction::hash))
+        .collect();
+    let mut reverted_hashes = HashSet::new();
+    old_chain
+        .iter()
+        .flat_map(|block| block.transactions.iter())
+        .filter(|tx| {
+            let hash = tx.hash();
+            !adopted_hashes.contains(&hash) && reverted_hashes.insert(hash)
+        })
+        .cloned()
+        .collect()
 }
 
 /// A running shell-chain node.
@@ -296,10 +329,7 @@ struct DevState {
     snapshots: BTreeMap<u64, DevSnapshot>,
 }
 
-type NodeStateDb<S> = ShellStateDb<S>;
-
 struct BlockStoreBoundary<'a, S: KvStore + 'static> {
-    store: &'a Arc<S>,
     chain_store: &'a Arc<ChainStore<S>>,
     world_state: &'a Arc<RwLock<WorldState<S>>>,
     pending_grace_deletes: &'a parking_lot::Mutex<HashMap<ShellHash, u64>>,
@@ -330,37 +360,9 @@ impl<'a, S: KvStore + 'static> BlockStoreBoundary<'a, S> {
         Ok(ws.state_root()?)
     }
 
-    fn isolated_state_db(&self) -> Result<(NodeStateDb<S>, ShellHash), NodeError> {
-        let current_root = self.current_state_root()?;
-        let ws = WorldState::at_root(self.store.clone(), &current_root)?;
-        let cs = ChainStore::new(self.store.clone());
-        Ok((ShellStateDb::new(ws, cs), current_root))
-    }
-
-    fn rollback_world_state(&self, root: &ShellHash) -> Result<(), NodeError> {
-        let mut ws = self.world_state.write();
-        ws.rollback_to_root(root)?;
-        Ok(())
-    }
-
     fn replace_world_state(&self, committed_world_state: WorldState<S>) {
         let mut live_ws = self.world_state.write();
         *live_ws = committed_world_state;
-    }
-
-    fn add_balance(&self, address: &Address, balance: U256) -> Result<(), NodeError> {
-        let mut ws = self.world_state.write();
-        ws.add_balance(address, balance)?;
-        Ok(())
-    }
-
-    fn commit_canonical_block(
-        &self,
-        block: &Block,
-        receipts: Option<&[TransactionReceipt]>,
-    ) -> Result<(), NodeError> {
-        self.chain_store.commit_canonical_block(block, receipts)?;
-        Ok(())
     }
 
     fn put_side_fork_block(&self, block: &Block) -> Result<(), NodeError> {
@@ -373,11 +375,6 @@ impl<'a, S: KvStore + 'static> BlockStoreBoundary<'a, S> {
             .get_side_fork_hashes(block_number)
             .map(|hashes| hashes.len())
             .unwrap_or(0)
-    }
-
-    fn store_pubkey(&self, address: &Address, pubkey: &[u8]) -> Result<(), NodeError> {
-        self.chain_store.put_pubkey(address, pubkey)?;
-        Ok(())
     }
 
     fn update_chain_totals(
@@ -874,7 +871,6 @@ impl<S: KvStore + 'static> Node<S> {
 
     fn block_store(&self) -> BlockStoreBoundary<'_, S> {
         BlockStoreBoundary {
-            store: &self.store,
             chain_store: &self.chain_store,
             world_state: &self.world_state,
             pending_grace_deletes: &self.pending_grace_deletes,
@@ -988,54 +984,37 @@ impl<S: KvStore + 'static> Node<S> {
             .unwrap_or(0)
     }
 
-    fn sync_system_contract_state(
-        &self,
-        local_ws: &mut WorldState<S>,
+    fn validate_system_contract_effects<T: KvStore + 'static>(
+        local_ws: &WorldState<T>,
         effects: &shell_pqvm::SystemContractEffects,
     ) -> Result<(), NodeError> {
-        let registry_account = if effects.validator_set_changed {
+        if effects.validator_set_changed {
             let validators = local_ws.get_validators()?;
             if validators.is_empty() {
                 return Err(NodeError::Startup(
                     "system tx produced empty validator set".into(),
                 ));
             }
-            if validators.len() > WorldState::<S>::MAX_VALIDATORS {
+            if validators.len() > WorldState::<T>::MAX_VALIDATORS {
                 return Err(NodeError::Startup(format!(
                     "system tx produced validator set of size {} exceeding max {}",
                     validators.len(),
-                    WorldState::<S>::MAX_VALIDATORS,
+                    WorldState::<T>::MAX_VALIDATORS,
                 )));
             }
-            let registry = validator_registry_addr();
-            Some(local_ws.get_account(&registry)?.ok_or_else(|| {
-                NodeError::Startup("system tx removed validator registry account".into())
-            })?)
-        } else {
-            None
-        };
-
-        let mut updated_accounts: Vec<(Address, Account)> =
-            Vec::with_capacity(effects.updated_accounts.len());
+            if local_ws.get_account(&validator_registry_addr())?.is_none() {
+                return Err(NodeError::Startup(
+                    "system tx removed validator registry account".into(),
+                ));
+            }
+        }
         for address in &effects.updated_accounts {
-            let account = local_ws.get_account(address)?.ok_or_else(|| {
-                NodeError::Startup(format!("system tx updated missing account {address}"))
-            })?;
-            updated_accounts.push((*address, account));
+            if local_ws.get_account(address)?.is_none() {
+                return Err(NodeError::Startup(format!(
+                    "system tx updated missing account {address}"
+                )));
+            }
         }
-
-        if registry_account.is_none() && updated_accounts.is_empty() {
-            return Ok(());
-        }
-
-        let mut ws = self.world_state.write();
-        if let Some(account) = registry_account {
-            ws.set_account(&validator_registry_addr(), &account)?;
-        }
-        for (address, account) in updated_accounts {
-            ws.set_account(&address, &account)?;
-        }
-
         Ok(())
     }
 
@@ -1069,17 +1048,113 @@ impl<S: KvStore + 'static> Node<S> {
             .filter(|weight| *weight > 0)
     }
 
-    fn preferred_fork_ahead(&self) -> Option<(ShellHash, u64, u64)> {
-        let canonical_head = self.chain_store.get_head_block().ok().flatten()?;
+    fn load_fork_segment(
+        &self,
+        label: &str,
+        ancestor_hash: ShellHash,
+        ancestor_number: u64,
+        hashes: &[ShellHash],
+        require_canonical: bool,
+    ) -> Result<Vec<Block>, NodeError> {
+        let mut blocks = Vec::with_capacity(hashes.len());
+        let mut expected_parent = ancestor_hash;
+        for (index, hash) in hashes.iter().enumerate() {
+            let offset = u64::try_from(index)
+                .ok()
+                .and_then(|index| index.checked_add(1))
+                .ok_or_else(|| {
+                    NodeError::Startup(format!("{label} length overflows block height"))
+                })?;
+            let expected_number = ancestor_number.checked_add(offset).ok_or_else(|| {
+                NodeError::Startup(format!("{label} height overflows block number space"))
+            })?;
+            let block = self
+                .chain_store
+                .get_block_by_hash(hash)?
+                .ok_or_else(|| NodeError::Startup(format!("{label} block not found: {hash}")))?;
+            if block.hash() != *hash
+                || block.number() != expected_number
+                || block.header.parent_hash != expected_parent
+            {
+                return Err(NodeError::Startup(format!(
+                    "{label} continuity broken at {hash}: expected hash {hash}, #{expected_number} with parent {expected_parent}, got hash {}, #{} with parent {}",
+                    block.hash(),
+                    block.number(),
+                    block.header.parent_hash,
+                )));
+            }
+            if require_canonical
+                && self.chain_store.get_block_hash_by_number(expected_number)? != Some(*hash)
+            {
+                return Err(NodeError::Startup(format!(
+                    "{label} block {hash} is not canonical at #{expected_number}"
+                )));
+            }
+            expected_parent = *hash;
+            blocks.push(block);
+        }
+        Ok(blocks)
+    }
+
+    fn preferred_fork_plan(&self) -> Result<Option<ForkAdoptionPlan>, NodeError> {
+        let canonical_head = self
+            .chain_store
+            .get_head_block()?
+            .ok_or(NodeError::NoGenesis)?;
         let canonical_number = canonical_head.number();
-        let (preferred_hash, preferred_number, attested_weight) = {
+        let canonical_hash = canonical_head.hash();
+        let (
+            preferred_hash,
+            preferred_number,
+            attested_weight,
+            ancestor_hash,
+            old_hashes,
+            new_hashes,
+        ) = {
             let fork_choice = self.fork_choice.read();
             let preferred_hash = *fork_choice.head();
-            let score = fork_choice.score(&preferred_hash)?;
-            (preferred_hash, score.block_number, score.attested_weight)
+            let score = fork_choice.score(&preferred_hash).ok_or_else(|| {
+                NodeError::Startup(format!(
+                    "fork-choice preferred block {preferred_hash} has no score"
+                ))
+            })?;
+            if preferred_hash == canonical_hash || score.block_number <= canonical_number {
+                return Ok(None);
+            }
+            let ancestor_hash = fork_choice
+                .find_common_ancestor(&canonical_hash, &preferred_hash)
+                .ok_or_else(|| {
+                    NodeError::Startup(format!(
+                        "fork-choice preferred block {preferred_hash} has no common ancestor with canonical head {canonical_hash}"
+                    ))
+                })?;
+            (
+                preferred_hash,
+                score.block_number,
+                score.attested_weight,
+                ancestor_hash,
+                fork_choice.chain_between(&canonical_hash, &ancestor_hash),
+                fork_choice.chain_between(&preferred_hash, &ancestor_hash),
+            )
         };
-        if preferred_hash == canonical_head.hash() {
-            return None;
+        if new_hashes.is_empty() {
+            return Err(NodeError::Startup(format!(
+                "fork-choice path from ancestor {ancestor_hash} to preferred block {preferred_hash} is empty"
+            )));
+        }
+        let new_chain_len = u64::try_from(new_hashes.len()).map_err(|_| {
+            NodeError::Startup("preferred fork length overflows block number space".into())
+        })?;
+        let old_chain_len = u64::try_from(old_hashes.len()).map_err(|_| {
+            NodeError::Startup("canonical rollback length overflows block number space".into())
+        })?;
+        let ancestor_number = preferred_number.checked_sub(new_chain_len).ok_or_else(|| {
+            NodeError::Startup("preferred fork length exceeds preferred block number".into())
+        })?;
+        if canonical_number.checked_sub(ancestor_number) != Some(old_chain_len) {
+            return Err(NodeError::Startup(format!(
+                "fork-choice paths disagree on common ancestor {ancestor_hash} at #{ancestor_number}"
+            )));
         }
         let total_weight = self
             .consensus
@@ -1089,13 +1164,56 @@ impl<S: KvStore + 'static> Node<S> {
             .copied()
             .fold(0u64, u64::saturating_add);
         if !FinalityState::has_weighted_quorum(attested_weight, total_weight) {
-            return None;
+            return Ok(None);
         }
-        (preferred_number > canonical_number).then_some((
+        let (finalized_number, finalized_hash) = {
+            let finality = self.finality.read();
+            (
+                finality.last_finalized_number(),
+                *finality.last_finalized_hash(),
+            )
+        };
+        if ancestor_number < finalized_number
+            || (finalized_number > 0
+                && ancestor_number == finalized_number
+                && ancestor_hash != finalized_hash)
+        {
+            return Err(NodeError::Startup(format!(
+                "preferred fork {preferred_hash} crosses finalized block #{finalized_number} ({finalized_hash})"
+            )));
+        }
+
+        if self.chain_store.get_block_hash_by_number(ancestor_number)? != Some(ancestor_hash) {
+            return Err(NodeError::Startup(format!(
+                "fork ancestor {ancestor_hash} is not canonical at #{ancestor_number}"
+            )));
+        }
+        let old_chain = self.load_fork_segment(
+            "canonical rollback segment",
+            ancestor_hash,
+            ancestor_number,
+            &old_hashes,
+            true,
+        )?;
+        let new_chain = self.load_fork_segment(
+            "preferred fork segment",
+            ancestor_hash,
+            ancestor_number,
+            &new_hashes,
+            false,
+        )?;
+        let reverted_txs = unique_reverted_transactions(&old_chain, &new_chain);
+
+        Ok(Some(ForkAdoptionPlan {
             preferred_hash,
             preferred_number,
             canonical_number,
-        ))
+            ancestor_hash,
+            ancestor_number,
+            old_chain,
+            new_chain,
+            reverted_txs,
+        }))
     }
 
     fn sync_retry_delay_secs(attempts_without_progress: u32) -> u64 {
@@ -1595,7 +1713,7 @@ mod tests {
     use shell_rpc::DevRpcControl;
     use shell_storage::{MemoryDb, StorageError, WriteBatch, WriteBatchOp};
     use std::process::Command;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     struct AuthorityLockCheckingVerifier {
         authorities: Arc<RwLock<HashMap<Address, Vec<u8>>>>,
@@ -1639,8 +1757,6 @@ mod tests {
         inner: MemoryDb,
         fail_next_get: AtomicBool,
         fail_next_put: AtomicBool,
-        put_count: AtomicUsize,
-        fail_on_put: AtomicUsize,
         fail_next_batch: AtomicBool,
         fail_head_batch: AtomicBool,
         fail_next_delete: AtomicBool,
@@ -1652,8 +1768,6 @@ mod tests {
                 inner: MemoryDb::new(),
                 fail_next_get: AtomicBool::new(false),
                 fail_next_put: AtomicBool::new(false),
-                put_count: AtomicUsize::new(0),
-                fail_on_put: AtomicUsize::new(usize::MAX),
                 fail_next_batch: AtomicBool::new(false),
                 fail_head_batch: AtomicBool::new(false),
                 fail_next_delete: AtomicBool::new(false),
@@ -1670,11 +1784,6 @@ mod tests {
 
         fn fail_next_put(&self) {
             self.fail_next_put.store(true, Ordering::SeqCst);
-        }
-
-        fn fail_on_put(&self, put_number: usize) {
-            self.put_count.store(0, Ordering::SeqCst);
-            self.fail_on_put.store(put_number, Ordering::SeqCst);
         }
 
         fn fail_head_batch(&self) {
@@ -1695,10 +1804,7 @@ mod tests {
         }
 
         fn put(&self, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
-            let put_number = self.put_count.fetch_add(1, Ordering::SeqCst) + 1;
-            if self.fail_next_put.swap(false, Ordering::SeqCst)
-                || put_number == self.fail_on_put.load(Ordering::SeqCst)
-            {
+            if self.fail_next_put.swap(false, Ordering::SeqCst) {
                 return Err(StorageError::Database("injected put failure".into()));
             }
             self.inner.put(key, value)
@@ -2042,6 +2148,36 @@ mod tests {
         hash
     }
 
+    fn submit_key_rotation<S: KvStore + 'static>(
+        node: &Node<S>,
+        tx_signer: &impl Signer,
+        sender: Address,
+        new_pubkey: &[u8],
+    ) -> ShellHash {
+        submit_signed_tx(
+            node,
+            tx_signer,
+            sender,
+            Transaction {
+                chain_id: 1337,
+                nonce: 0,
+                to: Some(shell_pqvm::account_manager_address()),
+                value: U256::ZERO,
+                data: Bytes::from(shell_pqvm::encode_rotate_key_calldata(
+                    new_pubkey,
+                    tx_signer.sig_type().as_u8(),
+                )),
+                gas_limit: 100_000,
+                max_fee_per_gas: shell_core::INITIAL_BASE_FEE,
+                max_priority_fee_per_gas: 0,
+                access_list: None,
+                tx_type: 2,
+                max_fee_per_blob_gas: None,
+                blob_versioned_hashes: None,
+            },
+        )
+    }
+
     fn current_state_root<S: KvStore + 'static>(node: &Node<S>) -> ShellHash {
         let mut ws = node.world_state.write();
         ws.state_root().unwrap()
@@ -2272,22 +2408,23 @@ mod tests {
     }
 
     #[test]
-    fn preferred_fork_ahead_requires_quorum_for_noncanonical_branch() {
-        let (node, _signer) = setup_node();
+    fn preferred_fork_plan_requires_quorum_for_noncanonical_branch() {
+        let (node, signer) = setup_node();
         store_genesis(&node);
         let genesis_hash = node.chain_store.get_head_hash().unwrap().unwrap();
         let same_height_fork = ShellHash::from_slice(&[0x21; 32]);
-        let ahead_fork = ShellHash::from_slice(&[0x22; 32]);
+        let ahead_block = make_block_at_1(&node, &signer, None);
+        let ahead_fork = ahead_block.hash();
 
         node.fork_choice
             .write()
             .add_block(same_height_fork, ShellHash::ZERO, 0, 0, false);
-        assert!(node.preferred_fork_ahead().is_none());
+        assert!(node.preferred_fork_plan().unwrap().is_none());
 
         node.fork_choice
             .write()
             .add_block(ahead_fork, genesis_hash, 1, 0, false);
-        assert!(node.preferred_fork_ahead().is_none());
+        assert!(node.preferred_fork_plan().unwrap().is_none());
 
         let total_weight = node
             .consensus
@@ -2302,7 +2439,497 @@ mod tests {
         node.fork_choice
             .write()
             .update_attested_weight(&ahead_fork, quorum_weight);
-        assert_eq!(node.preferred_fork_ahead(), Some((ahead_fork, 1, 0)));
+        let missing_block = node.preferred_fork_plan().unwrap_err();
+        assert!(missing_block.to_string().contains("block not found"));
+
+        node.chain_store.put_side_fork_block(&ahead_block).unwrap();
+        assert_eq!(
+            node.preferred_fork_plan().unwrap(),
+            Some(ForkAdoptionPlan {
+                preferred_hash: ahead_fork,
+                preferred_number: 1,
+                canonical_number: 0,
+                ancestor_hash: genesis_hash,
+                ancestor_number: 0,
+                old_chain: vec![],
+                new_chain: vec![ahead_block],
+                reverted_txs: vec![],
+            })
+        );
+
+        node.finality.write().set_finalized_direct(1, ahead_fork);
+        let finalized_error = node.preferred_fork_plan().unwrap_err();
+        assert!(finalized_error
+            .to_string()
+            .contains("crosses finalized block"));
+    }
+
+    #[test]
+    fn quorum_preferred_state_neutral_fork_is_adopted_atomically() {
+        let (node, signer) = setup_node();
+        store_consistent_genesis(&node);
+        let proposer = node.config.proposer_address.unwrap();
+        node.register_authority_pubkey(proposer, signer.public_key().to_vec());
+        let ancestor_root = current_state_root(&node);
+
+        let canonical = make_block_at_1(&node, &signer, None);
+        node.import_block(canonical.clone(), &MultiVerifier)
+            .unwrap();
+
+        let mut side_one = canonical.clone();
+        side_one.header.timestamp += 1;
+        side_one.proposer_seal = Some(
+            signer
+                .sign(side_one.header.hash().as_bytes())
+                .expect("sign side block"),
+        );
+        let side_one_hash = side_one.hash();
+        node.import_block(side_one.clone(), &MultiVerifier).unwrap();
+
+        let mut side_two = side_one.clone();
+        side_two.header.parent_hash = side_one_hash;
+        side_two.header.number = 2;
+        side_two.header.timestamp += 1;
+        side_two.header.base_fee_per_gas = calculate_base_fee(
+            side_one.header.gas_used,
+            side_one.header.gas_limit,
+            side_one.header.base_fee_per_gas,
+        );
+        side_two.proposer_seal = Some(
+            signer
+                .sign(side_two.header.hash().as_bytes())
+                .expect("sign side-fork child"),
+        );
+        let side_two_hash = side_two.hash();
+        node.import_block(side_two.clone(), &MultiVerifier).unwrap();
+
+        let total_weight = node
+            .consensus
+            .read()
+            .validator_weights()
+            .values()
+            .copied()
+            .fold(0u64, u64::saturating_add);
+        node.fork_choice
+            .write()
+            .update_attested_weight(&side_two_hash, total_weight);
+
+        let plan = node
+            .preferred_fork_plan()
+            .unwrap()
+            .expect("side fork should become preferred");
+        assert_eq!(plan.old_chain, vec![canonical]);
+        assert_eq!(plan.new_chain, vec![side_one.clone(), side_two.clone()]);
+
+        node.adopt_preferred_fork(plan).unwrap();
+
+        assert_eq!(
+            node.chain_store.get_head_hash().unwrap(),
+            Some(side_two_hash)
+        );
+        assert_eq!(
+            node.chain_store.get_block_hash_by_number(1).unwrap(),
+            Some(side_one_hash)
+        );
+        assert_eq!(
+            node.chain_store.get_block_hash_by_number(2).unwrap(),
+            Some(side_two_hash)
+        );
+        assert_eq!(
+            node.chain_store.get_receipts(&side_one_hash).unwrap(),
+            Some(vec![])
+        );
+        assert_eq!(
+            node.chain_store.get_receipts(&side_two_hash).unwrap(),
+            Some(vec![])
+        );
+        assert_eq!(current_state_root(&node), ancestor_root);
+        assert!(node.preferred_fork_plan().unwrap().is_none());
+    }
+
+    #[test]
+    fn reverted_transactions_are_reinserted_in_nonce_order() {
+        let (node, _) = setup_node();
+        let signer = DilithiumSigner::generate();
+        let pubkey = signer.public_key().to_vec();
+        let sender = Address::from_public_key(&pubkey, signer.sig_type().as_u8());
+        fund_account(&node, &sender, U256::from(1_000_000_000_000_000u64));
+        store_consistent_genesis(&node);
+
+        let mut nonces = node.world_state.read().get_nonce(&sender).unwrap()..;
+        let tx0 = make_embedded_tx(&signer, sender, pubkey.clone(), nonces.next().unwrap(), 1);
+        let tx1 = make_embedded_tx(&signer, sender, pubkey, nonces.next().unwrap(), 2);
+        let hash0 = tx0.hash();
+        let hash1 = tx1.hash();
+
+        let (inserted, rejected) = node.reinsert_reverted_transactions(&[tx0.clone(), tx0, tx1]);
+
+        assert_eq!((inserted, rejected), (2, 1));
+        assert_eq!(
+            node.tx_pool
+                .pending_for_block(2)
+                .iter()
+                .map(SignedTransaction::hash)
+                .collect::<Vec<_>>(),
+            vec![hash0, hash1]
+        );
+    }
+
+    #[test]
+    fn preferred_fork_state_root_mismatch_is_rejected_before_canonical_mutation() {
+        let (node, signer) = setup_node();
+        store_consistent_genesis(&node);
+        let proposer = node.config.proposer_address.unwrap();
+        node.register_authority_pubkey(proposer, signer.public_key().to_vec());
+
+        let canonical = make_block_at_1(&node, &signer, None);
+        let canonical_hash = canonical.hash();
+        node.import_block(canonical, &MultiVerifier).unwrap();
+
+        let mut side_one = make_block_at_1(&node, &signer, None);
+        side_one.header.parent_hash = node
+            .chain_store
+            .get_block_hash_by_number(0)
+            .unwrap()
+            .unwrap();
+        side_one.header.timestamp += 1;
+        side_one.header.state_root = ShellHash::from([0x99; 32]);
+        side_one.proposer_seal = Some(
+            signer
+                .sign(side_one.header.hash().as_bytes())
+                .expect("sign stateful side block"),
+        );
+        let side_one_hash = side_one.hash();
+        node.chain_store.put_side_fork_block(&side_one).unwrap();
+        node.fork_choice.write().add_block(
+            side_one_hash,
+            side_one.header.parent_hash,
+            side_one.number(),
+            0,
+            false,
+        );
+
+        let mut side_two = side_one.clone();
+        side_two.header.parent_hash = side_one_hash;
+        side_two.header.number = 2;
+        side_two.header.timestamp += 1;
+        side_two.header.base_fee_per_gas = calculate_base_fee(
+            side_one.header.gas_used,
+            side_one.header.gas_limit,
+            side_one.header.base_fee_per_gas,
+        );
+        side_two.proposer_seal = Some(
+            signer
+                .sign(side_two.header.hash().as_bytes())
+                .expect("sign stateful side-fork child"),
+        );
+        let side_two_hash = side_two.hash();
+        node.chain_store.put_side_fork_block(&side_two).unwrap();
+        node.fork_choice.write().add_block(
+            side_two_hash,
+            side_one_hash,
+            side_two.number(),
+            0,
+            false,
+        );
+
+        let total_weight = node
+            .consensus
+            .read()
+            .validator_weights()
+            .values()
+            .copied()
+            .fold(0u64, u64::saturating_add);
+        node.fork_choice
+            .write()
+            .update_attested_weight(&side_two_hash, total_weight);
+        let plan = node
+            .preferred_fork_plan()
+            .unwrap()
+            .expect("stateful side fork should become preferred");
+
+        let error = node.adopt_preferred_fork(plan).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("state root mismatch after deterministic replay"));
+        assert_eq!(
+            node.chain_store.get_head_hash().unwrap(),
+            Some(canonical_hash)
+        );
+        assert_eq!(
+            node.chain_store.get_block_hash_by_number(1).unwrap(),
+            Some(canonical_hash)
+        );
+        assert_eq!(node.chain_store.get_block_hash_by_number(2).unwrap(), None);
+    }
+
+    #[test]
+    fn stateful_preferred_fork_is_replayed_and_adopted_atomically() {
+        let (node, proposer_signer) = setup_node();
+        let proposer = node.config.proposer_address.unwrap();
+        let fork_node = setup_node_with_authority(proposer);
+        node.register_authority_pubkey(proposer, proposer_signer.public_key().to_vec());
+        fork_node.register_authority_pubkey(proposer, proposer_signer.public_key().to_vec());
+
+        let tx_signer = DilithiumSigner::generate();
+        let sender = Address::from_public_key(tx_signer.public_key(), tx_signer.sig_type().as_u8());
+        let receiver = Address::from([0xBE; 20]);
+        let initial_balance = U256::from(100_000_000_000_000u64);
+        fund_account(&node, &sender, initial_balance);
+        fund_account(&fork_node, &sender, initial_balance);
+        store_consistent_genesis(&node);
+        store_consistent_genesis(&fork_node);
+
+        let canonical = make_block_at_1(&node, &proposer_signer, None);
+        let canonical_hash = canonical.hash();
+        node.import_block(canonical, &MultiVerifier).unwrap();
+
+        let transaction = Transaction {
+            chain_id: 1337,
+            nonce: 0,
+            to: Some(receiver),
+            value: U256::from(1_000u64),
+            data: Bytes::new(),
+            gas_limit: 21_000,
+            max_fee_per_gas: shell_core::INITIAL_BASE_FEE,
+            max_priority_fee_per_gas: 0,
+            access_list: None,
+            tx_type: 2,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
+        };
+        submit_signed_tx(&fork_node, &tx_signer, sender, transaction);
+        let side_one = fork_node.produce_block(&proposer_signer, 100).unwrap();
+        let side_one_hash = side_one.hash();
+        node.import_block(side_one.clone(), &MultiVerifier).unwrap();
+
+        let side_two = fork_node.produce_block(&proposer_signer, 100).unwrap();
+        let side_two_hash = side_two.hash();
+        node.import_block(side_two.clone(), &MultiVerifier).unwrap();
+
+        let total_weight = node
+            .consensus
+            .read()
+            .validator_weights()
+            .values()
+            .copied()
+            .fold(0u64, u64::saturating_add);
+        node.fork_choice
+            .write()
+            .update_attested_weight(&side_two_hash, total_weight);
+        let plan = node
+            .preferred_fork_plan()
+            .unwrap()
+            .expect("stateful side fork should become preferred");
+
+        node.adopt_preferred_fork(plan).unwrap();
+
+        assert_eq!(
+            node.chain_store.get_head_hash().unwrap(),
+            Some(side_two_hash)
+        );
+        assert_eq!(
+            node.chain_store.get_block_hash_by_number(1).unwrap(),
+            Some(side_one_hash)
+        );
+        assert_ne!(
+            node.chain_store.get_block_hash_by_number(1).unwrap(),
+            Some(canonical_hash)
+        );
+        assert_eq!(node.world_state.read().get_nonce(&sender).unwrap(), 1);
+        assert_eq!(
+            node.world_state.read().get_balance(&receiver).unwrap(),
+            U256::from(1_000u64)
+        );
+        assert_eq!(
+            node.chain_store
+                .get_receipts(&side_one_hash)
+                .unwrap()
+                .expect("replayed receipts")
+                .len(),
+            side_one.transactions.len() + side_one.system_transactions.len()
+        );
+        assert_eq!(current_state_root(&node), side_two.header.state_root);
+    }
+
+    #[test]
+    fn preferred_fork_replay_restores_ancestor_public_key() {
+        let (node, proposer_signer) = setup_node();
+        let proposer = node.config.proposer_address.unwrap();
+        let fork_node = setup_node_with_authority(proposer);
+        node.register_authority_pubkey(proposer, proposer_signer.public_key().to_vec());
+        fork_node.register_authority_pubkey(proposer, proposer_signer.public_key().to_vec());
+
+        let tx_signer = DilithiumSigner::generate();
+        let sender = Address::from_public_key(tx_signer.public_key(), tx_signer.sig_type().as_u8());
+        let initial_pubkey = tx_signer.public_key().to_vec();
+        let canonical_pubkey = vec![0xC1; 1312];
+        let preferred_pubkey = vec![0xD2; 1312];
+        let initial_balance = U256::from(1_000_000_000_000_000u64);
+        for chain in [&node, &fork_node] {
+            fund_account(chain, &sender, initial_balance);
+            chain
+                .chain_store
+                .put_pubkey(&sender, &initial_pubkey)
+                .unwrap();
+            store_consistent_genesis(chain);
+        }
+        let genesis_hash = node.chain_store.get_head_hash().unwrap().unwrap();
+
+        submit_key_rotation(&node, &tx_signer, sender, &canonical_pubkey);
+        let canonical = node.produce_block(&proposer_signer, 100).unwrap();
+        let canonical_hash = canonical.hash();
+        assert_eq!(
+            node.chain_store.get_pubkey(&sender).unwrap(),
+            Some(canonical_pubkey.clone())
+        );
+
+        submit_key_rotation(&fork_node, &tx_signer, sender, &preferred_pubkey);
+        let side_one = fork_node.produce_block(&proposer_signer, 100).unwrap();
+        let side_one_hash = side_one.hash();
+        let side_two = fork_node.produce_block(&proposer_signer, 100).unwrap();
+        let side_two_hash = side_two.hash();
+        assert_ne!(side_one_hash, canonical_hash);
+
+        for block in [&side_one, &side_two] {
+            node.chain_store.put_side_fork_block(block).unwrap();
+            node.fork_choice.write().add_block(
+                block.hash(),
+                block.header.parent_hash,
+                block.number(),
+                0,
+                false,
+            );
+        }
+        assert_eq!(side_one.header.parent_hash, genesis_hash);
+        let total_weight = node
+            .consensus
+            .read()
+            .validator_weights()
+            .values()
+            .copied()
+            .fold(0u64, u64::saturating_add);
+        node.fork_choice
+            .write()
+            .update_attested_weight(&side_two_hash, total_weight);
+        let plan = node
+            .preferred_fork_plan()
+            .unwrap()
+            .expect("rotated-key side fork should become preferred");
+        assert_eq!(plan.old_chain, vec![canonical]);
+
+        node.adopt_preferred_fork(plan).unwrap();
+
+        assert_eq!(
+            node.chain_store.get_head_hash().unwrap(),
+            Some(side_two_hash)
+        );
+        assert_eq!(
+            node.chain_store.get_pubkey(&sender).unwrap(),
+            Some(preferred_pubkey)
+        );
+        assert_ne!(
+            node.chain_store.get_pubkey(&sender).unwrap(),
+            Some(initial_pubkey)
+        );
+    }
+
+    #[test]
+    fn terminally_invalid_preferred_fork_can_be_removed() {
+        let (node, signer) = setup_node();
+        store_consistent_genesis(&node);
+        let proposer = node.config.proposer_address.unwrap();
+        node.register_authority_pubkey(proposer, signer.public_key().to_vec());
+
+        let canonical = make_block_at_1(&node, &signer, None);
+        let canonical_hash = canonical.hash();
+        node.import_block(canonical.clone(), &MultiVerifier)
+            .unwrap();
+
+        let mut side_one = canonical;
+        side_one.header.timestamp += 1;
+        side_one.header.base_fee_per_gas = side_one.header.base_fee_per_gas.saturating_add(1);
+        side_one.proposer_seal = Some(
+            signer
+                .sign(side_one.header.hash().as_bytes())
+                .expect("sign invalid side block"),
+        );
+        let side_one_hash = side_one.hash();
+        node.chain_store.put_side_fork_block(&side_one).unwrap();
+        node.fork_choice.write().add_block(
+            side_one_hash,
+            side_one.header.parent_hash,
+            side_one.number(),
+            0,
+            false,
+        );
+
+        let mut side_two = side_one.clone();
+        side_two.header.parent_hash = side_one_hash;
+        side_two.header.number = 2;
+        side_two.header.timestamp += 1;
+        side_two.proposer_seal = Some(
+            signer
+                .sign(side_two.header.hash().as_bytes())
+                .expect("sign invalid side-fork child"),
+        );
+        let side_two_hash = side_two.hash();
+        node.chain_store.put_side_fork_block(&side_two).unwrap();
+        node.fork_choice.write().add_block(
+            side_two_hash,
+            side_one_hash,
+            side_two.number(),
+            0,
+            false,
+        );
+
+        let total_weight = node
+            .consensus
+            .read()
+            .validator_weights()
+            .values()
+            .copied()
+            .fold(0u64, u64::saturating_add);
+        node.fork_choice
+            .write()
+            .update_attested_weight(&side_two_hash, total_weight);
+        let plan = node
+            .preferred_fork_plan()
+            .unwrap()
+            .expect("invalid side fork should become preferred before revalidation");
+
+        let error = node.adopt_preferred_fork(plan).unwrap_err();
+
+        assert!(matches!(
+            error,
+            NodeError::InvalidFork {
+                block_hash,
+                ..
+            } if block_hash == side_one_hash
+        ));
+        assert!(node.fork_choice.write().remove_subtree(&side_one_hash));
+        assert!(node.preferred_fork_plan().unwrap().is_none());
+        assert_eq!(
+            node.chain_store.get_head_hash().unwrap(),
+            Some(canonical_hash)
+        );
+    }
+
+    #[test]
+    fn fork_adoption_reverts_only_transactions_absent_from_preferred_chain() {
+        let (node, signer) = setup_node();
+        store_genesis(&node);
+        let old_only = signed_tx_with_gas_limit(21_000);
+        let retained = signed_tx_with_gas_limit(22_000);
+        let mut old_block = make_block_at_1(&node, &signer, None);
+        old_block.transactions = vec![old_only.clone(), retained.clone(), old_only.clone()];
+        let mut new_block = make_block_at_1(&node, &signer, None);
+        new_block.transactions = vec![retained];
+
+        let reverted = unique_reverted_transactions(&[old_block], &[new_block]);
+
+        assert_eq!(reverted, vec![old_only]);
     }
 
     fn dummy_proof_amendment(
@@ -4480,6 +5107,59 @@ mod tests {
     }
 
     #[test]
+    fn produce_block_commit_failure_does_not_persist_key_rotation() {
+        let (node, proposer_signer, failing_db) = setup_failing_batch_node();
+        let tx_signer = DilithiumSigner::generate();
+        let sender = Address::from_public_key(tx_signer.public_key(), tx_signer.sig_type().as_u8());
+        let initial_balance = U256::from(1_000_000_000_000_000u64);
+        fund_account(&node, &sender, initial_balance);
+        node.chain_store
+            .put_pubkey(&sender, tx_signer.public_key())
+            .unwrap();
+        store_consistent_genesis(&node);
+
+        let original_pubkey = tx_signer.public_key().to_vec();
+        let rotated_pubkey = vec![0xAB; 1312];
+        let tx = Transaction {
+            chain_id: 1337,
+            nonce: 0,
+            to: Some(shell_pqvm::account_manager_address()),
+            value: U256::ZERO,
+            data: Bytes::from(shell_pqvm::encode_rotate_key_calldata(
+                &rotated_pubkey,
+                tx_signer.sig_type().as_u8(),
+            )),
+            gas_limit: 100_000,
+            max_fee_per_gas: shell_core::INITIAL_BASE_FEE,
+            max_priority_fee_per_gas: 0,
+            access_list: None,
+            tx_type: 2,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
+        };
+        submit_signed_tx(&node, &tx_signer, sender, tx);
+        let root_before = current_state_root(&node);
+
+        failing_db.fail_next_batch();
+        let error = node.produce_block(&proposer_signer, 100).unwrap_err();
+
+        assert!(matches!(error, NodeError::Storage(_)));
+        assert_eq!(
+            node.chain_store.get_head_block().unwrap().unwrap().number(),
+            0
+        );
+        assert_eq!(current_state_root(&node), root_before);
+        assert_eq!(
+            node.chain_store.get_pubkey(&sender).unwrap(),
+            Some(original_pubkey)
+        );
+        assert_ne!(
+            node.chain_store.get_pubkey(&sender).unwrap(),
+            Some(rotated_pubkey)
+        );
+    }
+
+    #[test]
     fn import_block() {
         let (node, signer) = setup_node();
         store_genesis(&node);
@@ -5894,11 +6574,11 @@ mod tests {
         store_consistent_genesis(&node);
         let canonical_root = node.world_state.write().state_root().unwrap();
         let canonical_head = node.chain_store.get_head_hash().unwrap();
-        db.fail_on_put(2);
+        db.fail_next_batch();
 
         let err = node.produce_block(&signer, 100).unwrap_err();
 
-        assert!(err.to_string().contains("injected put failure"));
+        assert!(err.to_string().contains("injected batch failure"));
         assert_eq!(
             node.world_state.write().state_root().unwrap(),
             canonical_root,
@@ -6156,6 +6836,157 @@ mod tests {
             observed_height >= 3,
             "expected at least 3 blocks, got {}",
             observed_height
+        );
+    }
+
+    #[tokio::test]
+    async fn event_loop_adopts_stateful_preferred_fork_before_resuming_production() {
+        use shell_network::{NetworkBus, NetworkConfig};
+        use std::time::Duration;
+
+        let (mut node, proposer_signer) = setup_node();
+        node.config.block_time_ms = 1_000;
+        node.config.rpc_enabled = false;
+        node.config.metrics.enabled = false;
+        node.config.max_idle_interval_ms = 0;
+
+        let proposer = node.config.proposer_address.unwrap();
+        let fork_node = setup_node_with_authority(proposer);
+        node.register_authority_pubkey(proposer, proposer_signer.public_key().to_vec());
+        fork_node.register_authority_pubkey(proposer, proposer_signer.public_key().to_vec());
+
+        let tx_signer = DilithiumSigner::generate();
+        let sender = Address::from_public_key(tx_signer.public_key(), tx_signer.sig_type().as_u8());
+        let reverted_signer = DilithiumSigner::generate();
+        let reverted_sender = Address::from_public_key(
+            reverted_signer.public_key(),
+            reverted_signer.sig_type().as_u8(),
+        );
+        let receiver = Address::from([0xBE; 20]);
+        let reverted_receiver = Address::from([0xCF; 20]);
+        let initial_balance = U256::from(100_000_000_000_000u64);
+        fund_account(&node, &sender, initial_balance);
+        fund_account(&fork_node, &sender, initial_balance);
+        fund_account(&node, &reverted_sender, initial_balance);
+        fund_account(&fork_node, &reverted_sender, initial_balance);
+        store_consistent_genesis(&node);
+        store_consistent_genesis(&fork_node);
+
+        let reverted_tx_hash = submit_signed_tx(
+            &node,
+            &reverted_signer,
+            reverted_sender,
+            Transaction {
+                chain_id: 1337,
+                nonce: 0,
+                to: Some(reverted_receiver),
+                value: U256::from(2_000u64),
+                data: Bytes::new(),
+                gas_limit: 21_000,
+                max_fee_per_gas: shell_core::INITIAL_BASE_FEE,
+                max_priority_fee_per_gas: 0,
+                access_list: None,
+                tx_type: 2,
+                max_fee_per_blob_gas: None,
+                blob_versioned_hashes: None,
+            },
+        );
+        let canonical = node.produce_block(&proposer_signer, 100).unwrap();
+        let canonical_hash = canonical.hash();
+        assert_eq!(canonical.transactions.len(), 1);
+
+        let transaction = Transaction {
+            chain_id: 1337,
+            nonce: 0,
+            to: Some(receiver),
+            value: U256::from(1_000u64),
+            data: Bytes::new(),
+            gas_limit: 21_000,
+            max_fee_per_gas: shell_core::INITIAL_BASE_FEE,
+            max_priority_fee_per_gas: 0,
+            access_list: None,
+            tx_type: 2,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
+        };
+        submit_signed_tx(&fork_node, &tx_signer, sender, transaction);
+        let side_one = fork_node.produce_block(&proposer_signer, 100).unwrap();
+        let side_one_hash = side_one.hash();
+        node.import_block(side_one, &MultiVerifier).unwrap();
+
+        let side_two = fork_node.produce_block(&proposer_signer, 100).unwrap();
+        let side_two_hash = side_two.hash();
+        node.import_block(side_two, &MultiVerifier).unwrap();
+
+        let total_weight = node
+            .consensus
+            .read()
+            .validator_weights()
+            .values()
+            .copied()
+            .fold(0u64, u64::saturating_add);
+        node.fork_choice
+            .write()
+            .update_attested_weight(&side_two_hash, total_weight);
+
+        let bus = NetworkBus::new(64);
+        let mut network = bus.join(&NetworkConfig::default());
+        let node = Arc::new(node);
+        let node_clone = node.clone();
+        let signer = Arc::new(proposer_signer) as Arc<dyn Signer>;
+        let handle = tokio::spawn(async move { node_clone.run(signer, &mut network).await });
+
+        let observed_height = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match node.chain_store.get_head_block() {
+                    Ok(Some(head)) if head.number() >= 3 => break Ok(head.number()),
+                    Ok(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+                    Err(error) => break Err(error),
+                }
+            }
+        })
+        .await;
+
+        node.shutdown();
+        let result = handle.await.expect("task panicked");
+        assert!(result.is_ok(), "run() returned error: {:?}", result.err());
+
+        let observed_height = observed_height
+            .expect("timed out waiting for production after fork adoption")
+            .expect("failed to read the canonical head");
+        assert!(observed_height >= 3);
+        assert_eq!(
+            node.chain_store.get_block_hash_by_number(1).unwrap(),
+            Some(side_one_hash)
+        );
+        assert_ne!(
+            node.chain_store.get_block_hash_by_number(1).unwrap(),
+            Some(canonical_hash)
+        );
+        assert_eq!(
+            node.chain_store.get_block_hash_by_number(2).unwrap(),
+            Some(side_two_hash)
+        );
+        assert_eq!(node.world_state.read().get_nonce(&sender).unwrap(), 1);
+        assert_eq!(
+            node.world_state.read().get_balance(&receiver).unwrap(),
+            U256::from(1_000u64)
+        );
+        let resumed_block = node
+            .chain_store
+            .get_block_by_number(3)
+            .unwrap()
+            .expect("production should resume at block 3");
+        assert!(resumed_block
+            .transactions
+            .iter()
+            .any(|tx| tx.hash() == reverted_tx_hash));
+        assert_eq!(
+            node.world_state
+                .read()
+                .get_balance(&reverted_receiver)
+                .unwrap(),
+            U256::from(2_000u64)
         );
     }
 
@@ -7735,6 +8566,42 @@ mod tests {
 
         let err = node.import_block(side_fork, &MultiVerifier).unwrap_err();
         assert!(err.to_string().contains("witness_root mismatch"));
+        assert!(node
+            .chain_store
+            .get_block_by_hash(&side_fork_hash)
+            .unwrap()
+            .is_none());
+        assert!(!node.fork_choice.read().contains(&side_fork_hash));
+    }
+
+    #[test]
+    fn import_side_fork_invalid_sig_aggregate_proof_is_rejected() {
+        let (node, signer) = setup_node();
+        store_genesis(&node);
+        node.register_authority_pubkey(
+            node.config.proposer_address.unwrap(),
+            signer.public_key().to_vec(),
+        );
+        let genesis_hash = node.chain_store.get_head_hash().unwrap().unwrap();
+        let canonical = make_block_at_1(&node, &signer, None);
+        node.import_block(canonical, &MultiVerifier).unwrap();
+
+        let mut side_fork = make_block_at_1(&node, &signer, None);
+        side_fork.header.parent_hash = genesis_hash;
+        side_fork.header.extra_data = Bytes::from_static(b"invalid-aggregate-proof");
+        side_fork.header.sig_aggregate_proof = Some(Bytes::from_static(b"not-json"));
+        side_fork.proposer_seal = Some(
+            signer
+                .sign(side_fork.header.hash().as_bytes())
+                .expect("sign side fork"),
+        );
+        let side_fork_hash = side_fork.hash();
+
+        let error = node.import_block(side_fork, &MultiVerifier).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("STARK aggregate proof deserialization failed"));
         assert!(node
             .chain_store
             .get_block_by_hash(&side_fork_hash)
