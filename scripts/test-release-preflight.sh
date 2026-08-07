@@ -60,6 +60,12 @@ fi
 if ! grep -Fq 'check-release-tag.sh' "$SCRIPT_DIR/release.sh"; then
     fail "release preflight does not verify remote tag availability"
 fi
+if ! grep -Fq 'check-release-source.sh' "$SCRIPT_DIR/release.sh"; then
+    fail "release preflight does not revalidate the tagged source"
+fi
+if ! grep -Fq 'git tag -a "$TAG" "$RELEASE_COMMIT"' "$SCRIPT_DIR/release.sh"; then
+    fail "release tag is not pinned to the validated commit"
+fi
 if ! grep -Fq '"$SCRIPT_DIR/build-release-binary.sh"' "$SCRIPT_DIR/release.sh"; then
     fail "release preflight does not build the production binary before tagging"
 fi
@@ -183,6 +189,29 @@ if ! grep -Fq "could not verify tag 'v0.27.2'" <<<"$TAG_OUTPUT"; then
     fail "unavailable remote rejection was not specific: $TAG_OUTPUT"
 fi
 
+SOURCE_COMMIT=$(git -C "$TAG_CHECKOUT" rev-parse HEAD)
+(cd "$TAG_CHECKOUT" && \
+    "$SCRIPT_DIR/check-release-source.sh" "$SOURCE_COMMIT" >/dev/null)
+printf 'advanced\n' > "$TAG_CHECKOUT/source-drift"
+git -C "$TAG_CHECKOUT" add source-drift
+git -C "$TAG_CHECKOUT" commit -qm "advance release source"
+if SOURCE_OUTPUT=$(cd "$TAG_CHECKOUT" && \
+    "$SCRIPT_DIR/check-release-source.sh" "$SOURCE_COMMIT" 2>&1); then
+    fail "release source check unexpectedly accepted a moved HEAD"
+fi
+if ! grep -Fq "HEAD moved after release validation" <<<"$SOURCE_OUTPUT"; then
+    fail "moved HEAD rejection was not specific: $SOURCE_OUTPUT"
+fi
+SOURCE_COMMIT=$(git -C "$TAG_CHECKOUT" rev-parse HEAD)
+touch "$TAG_CHECKOUT/untracked-release-input"
+if SOURCE_OUTPUT=$(cd "$TAG_CHECKOUT" && \
+    "$SCRIPT_DIR/check-release-source.sh" "$SOURCE_COMMIT" 2>&1); then
+    fail "release source check unexpectedly accepted a dirty worktree"
+fi
+if ! grep -Fq "working tree changed after release validation" <<<"$SOURCE_OUTPUT"; then
+    fail "dirty source rejection was not specific: $SOURCE_OUTPUT"
+fi
+
 LINEAGE_REMOTE="$TMP_DIR/lineage-remote.git"
 LINEAGE_FIXTURE="$TMP_DIR/lineage-fixture"
 git init -q --bare "$LINEAGE_REMOTE"
@@ -298,6 +327,7 @@ make_fixture() {
         "$SCRIPT_DIR/check-release-lockfile.sh" \
         "$SCRIPT_DIR/check-release-remote.sh" \
         "$SCRIPT_DIR/check-release-tag.sh" \
+        "$SCRIPT_DIR/check-release-source.sh" \
         "$SCRIPT_DIR/check-release-metadata.sh" \
         "$SCRIPT_DIR/supply-chain-tool-versions.sh" "$fixture/scripts/"
     printf '[workspace.package]\nversion = "0.27.1"\n' > "$fixture/Cargo.toml"
@@ -391,6 +421,7 @@ cp "$SCRIPT_DIR/release.sh" "$SCRIPT_DIR/changelog-excerpt.sh" \
     "$SCRIPT_DIR/check-release-lockfile.sh" \
     "$SCRIPT_DIR/check-release-remote.sh" \
     "$SCRIPT_DIR/check-release-tag.sh" \
+    "$SCRIPT_DIR/check-release-source.sh" \
     "$SCRIPT_DIR/check-release-metadata.sh" \
     "$SCRIPT_DIR/supply-chain-tool-versions.sh" "$fixture/scripts/"
 printf '[workspace.package]\nversion = "0.27.1"\n' > "$fixture/Cargo.toml"

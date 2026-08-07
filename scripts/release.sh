@@ -223,7 +223,13 @@ fi
 
 CHANGELOG_EXCERPT=$("$SCRIPT_DIR/changelog-excerpt.sh" CHANGELOG.md "$VERSION" 30)
 
-git tag -a "$TAG" -m "Release ${TAG}
+if "$SCRIPT_DIR/check-release-source.sh" "$RELEASE_COMMIT"; then
+    ok "Release source is still clean at ${RELEASE_COMMIT}"
+else
+    fail "Release source changed after validation"
+fi
+
+git tag -a "$TAG" "$RELEASE_COMMIT" -m "Release ${TAG}
 
 ${CHANGELOG_EXCERPT}"
 
