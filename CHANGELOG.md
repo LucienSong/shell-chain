@@ -38,6 +38,8 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Prevent custom-validator V2 policy reverts from retrying through the reduced
+  legacy V1 authorization interface.
 - Bind snapshot checksums to framed key and value records and require the
   checksum in snapshot format version 2.
 - Keep historical STARK frontier tasks ordered ahead of live tip tasks and

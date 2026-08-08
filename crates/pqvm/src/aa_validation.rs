@@ -344,7 +344,7 @@ fn should_fallback_to_v1(error: &AaValidationError) -> bool {
     matches!(
         error,
         AaValidationError::ValidationContractRejected(message)
-            if message.starts_with("reverted:")
+            if message == "reverted: 0x"
     )
 }
 
@@ -1123,6 +1123,21 @@ mod tests {
         ]
     }
 
+    fn validator_reverts_v2_and_accepts_other_calls() -> Vec<u8> {
+        let selector = keccak256(VALIDATE_TRANSACTION_SIGNATURE);
+        let mut code = vec![
+            0x5f, 0x35, 0x60, 0xe0, 0x1c, 0x63, // selector = calldataload(0) >> 224
+        ];
+        code.extend_from_slice(&selector.as_bytes()[..4]);
+        code.extend_from_slice(&[
+            0x14, 0x60, 0x18, 0x57, // jump to the policy rejection for V2
+            0x60, 0x01, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xf3, // return true
+            0x5b, 0x60, 0x42, 0x60, 0x00, 0x53, 0x60, 0x01, 0x60, 0x00,
+            0xfd, // revert with one-byte policy error
+        ]);
+        code
+    }
+
     fn set_head_number(cs: &ChainStore<MemoryDb>, number: u64) {
         let head = Block {
             header: BlockHeader {
@@ -1417,10 +1432,45 @@ mod tests {
             &AaValidationError::ValidationContractRejected("reverted: 0x".into())
         ));
         assert!(!should_fallback_to_v1(
+            &AaValidationError::ValidationContractRejected("reverted: 0x42".into())
+        ));
+        assert!(!should_fallback_to_v1(
             &AaValidationError::ValidationContractRejected("halted: OutOfGas".into())
         ));
         assert!(!should_fallback_to_v1(
             &AaValidationError::ValidationContractExecution("database error".into())
+        ));
+    }
+
+    #[test]
+    fn custom_validator_does_not_downgrade_v2_policy_reverts() {
+        let signer = DilithiumSigner::generate();
+        let (mut ws, cs) = setup_stores();
+        let from = signer_address(&signer);
+        let code = validator_reverts_v2_and_accepts_other_calls();
+        let code_hash = keccak256(&code);
+        cs.put_code(&code_hash, &code).unwrap();
+        ws.set_account(
+            &from,
+            &Account {
+                pq_pubkey_hash: ShellHash::ZERO,
+                nonce: 0,
+                balance: U256::from(1_000_000u64),
+                validation_code_hash: Some(code_hash),
+                code_hash: None,
+                storage_root: ShellHash::ZERO,
+            },
+        )
+        .unwrap();
+        let signed = sign_tx(&signer, base_tx(1337, 0), true);
+
+        let error = validate_custom_contract(&signed, &ws, &cs, code_hash, signer.public_key())
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            AaValidationError::ValidationContractRejected(message)
+                if message == "reverted: 0x42"
         ));
     }
 
