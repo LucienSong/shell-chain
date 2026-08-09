@@ -42,6 +42,8 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Revalidate imported transactions against prior in-block state changes so key
+  rotations and account or paymaster policy updates take effect immediately.
 - Propagate authority-registry and equivocation lookup storage failures during
   block import instead of misclassifying them as unknown proposers or missing
   equivocation evidence.

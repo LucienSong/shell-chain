@@ -1,20 +1,41 @@
 use super::*;
 use std::borrow::Cow;
 
-fn tx_for_import_validation<'a>(
+fn tx_for_import_validation<'a, S: KvStore>(
     tx: &'a SignedTransaction,
     validation_pubkeys: &HashMap<Address, Vec<u8>>,
-) -> Cow<'a, SignedTransaction> {
+    chain_store: &ChainStore<S>,
+) -> Result<Cow<'a, SignedTransaction>, shell_storage::StorageError> {
     let shell_core::PubkeyMode::Reference = &tx.pubkey_mode else {
-        return Cow::Borrowed(tx);
+        return Ok(Cow::Borrowed(tx));
     };
+    if chain_store.get_pubkey(&tx.from)?.is_some() {
+        return Ok(Cow::Borrowed(tx));
+    }
     let Some(pubkey) = validation_pubkeys.get(&tx.from) else {
-        return Cow::Borrowed(tx);
+        return Ok(Cow::Borrowed(tx));
     };
 
     let mut resolved = tx.clone();
     resolved.pubkey_mode = shell_core::PubkeyMode::Embedded(pubkey.clone());
-    Cow::Owned(resolved)
+    Ok(Cow::Owned(resolved))
+}
+
+fn validate_import_tx_in_current_state<S: KvStore + 'static>(
+    tx: &SignedTransaction,
+    validation_pubkeys: &HashMap<Address, Vec<u8>>,
+    world_state: &mut WorldState<S>,
+    chain_store: &ChainStore<S>,
+    chain_id: u64,
+) -> Result<(), TxValidationError> {
+    let tx_for_validation = tx_for_import_validation(tx, validation_pubkeys, chain_store)?;
+    validate_tx_for_import(
+        tx_for_validation.as_ref(),
+        world_state,
+        chain_store,
+        &MultiVerifier,
+        chain_id,
+    )
 }
 
 fn batch_signing_pubkey(
@@ -319,7 +340,7 @@ impl<S: KvStore + 'static> Node<S> {
         let mut validation_nonces: HashMap<Address, u64> = HashMap::new();
 
         for tx in &block.transactions {
-            let tx_for_validation = tx_for_import_validation(tx, &validation_pubkeys);
+            let tx_for_validation = tx_for_import_validation(tx, &validation_pubkeys, &import_cs)?;
             let expected_nonce = match validation_nonces.get(&tx.from) {
                 Some(next_nonce) => *next_nonce,
                 None => world_state.get_nonce(&tx.from)?,
@@ -567,7 +588,8 @@ impl<S: KvStore + 'static> Node<S> {
             let mut validation_pubkeys: HashMap<Address, Vec<u8>> = HashMap::new();
             let mut validation_nonces: HashMap<Address, u64> = HashMap::new();
             for tx in &block.transactions {
-                let tx_for_validation = tx_for_import_validation(tx, &validation_pubkeys);
+                let tx_for_validation =
+                    tx_for_import_validation(tx, &validation_pubkeys, &replay_cs)?;
                 let world_state = evm.state_db_mut().world_state_mut();
                 let expected_nonce = validation_nonces
                     .get(&tx.from)
@@ -624,6 +646,26 @@ impl<S: KvStore + 'static> Node<S> {
                         ),
                     ));
                 }
+                // Earlier transactions can rotate keys or change account and
+                // paymaster policy. Revalidate against their resulting state
+                // before trusting the parent-state batch verification.
+                validate_import_tx_in_current_state(
+                    tx,
+                    &validation_pubkeys,
+                    evm.state_db_mut().world_state_mut(),
+                    &replay_cs,
+                    self.config.chain_id,
+                )
+                .map_err(|error| {
+                    Self::invalid_fork(
+                        block.hash(),
+                        format!(
+                            "block {} transaction {} failed sequential validation: {error}",
+                            block.number(),
+                            index,
+                        ),
+                    )
+                })?;
                 let result = if tx.is_aa_bundle() {
                     evm.execute_aa_bundle(tx, &block.header, index as u32, cumulative_gas)
                 } else {
@@ -1469,7 +1511,8 @@ impl<S: KvStore + 'static> Node<S> {
             let mut validation_pubkeys: HashMap<Address, Vec<u8>> = HashMap::new();
             let mut validation_nonces: HashMap<Address, u64> = HashMap::new();
             for tx in &block.transactions {
-                let tx_for_validation = tx_for_import_validation(tx, &validation_pubkeys);
+                let tx_for_validation =
+                    tx_for_import_validation(tx, &validation_pubkeys, &import_cs)?;
 
                 let world_state = evm.state_db_mut().world_state_mut();
                 let expected_nonce = match validation_nonces.get(&tx.from) {
@@ -1519,6 +1562,23 @@ impl<S: KvStore + 'static> Node<S> {
                         block.header.gas_limit.saturating_sub(cumulative_gas)
                     )));
                 }
+                // Re-run policy validation against the state produced by prior
+                // transactions in this block. This makes key revocation and
+                // validator/paymaster policy changes effective immediately.
+                validate_import_tx_in_current_state(
+                    tx,
+                    &validation_pubkeys,
+                    evm.state_db_mut().world_state_mut(),
+                    &import_cs,
+                    self.config.chain_id,
+                )
+                .map_err(|error| {
+                    NodeError::Startup(format!(
+                        "block {} tx {} failed sequential validation: {error}",
+                        block.number(),
+                        idx,
+                    ))
+                })?;
                 let exec_result = if tx.is_aa_bundle() {
                     evm.execute_aa_bundle(tx, &block.header, idx as u32, cumulative_gas)
                 } else {
@@ -1816,8 +1876,8 @@ impl<S: KvStore + 'static> Node<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shell_core::{PubkeyMode, Transaction};
-    use shell_crypto::SignatureType;
+    use shell_core::{Account, PubkeyMode, Transaction};
+    use shell_crypto::{DilithiumSigner, SignatureType, Signer};
     use shell_storage::{MemoryDb, StorageError};
 
     fn transaction() -> Transaction {
@@ -1839,6 +1899,7 @@ mod tests {
 
     #[test]
     fn import_validation_borrows_transactions_unless_reference_needs_in_block_key() {
+        let chain_store = ChainStore::new(Arc::new(MemoryDb::new()));
         let sender = Address::from([0x11; 20]);
         let signature = PQSignature::new(SignatureType::Dilithium3, vec![0x33; 64]);
         let embedded = SignedTransaction::with_pubkey(
@@ -1851,21 +1912,76 @@ mod tests {
         let mut validation_pubkeys = HashMap::new();
 
         assert!(matches!(
-            tx_for_import_validation(&embedded, &validation_pubkeys),
+            tx_for_import_validation(&embedded, &validation_pubkeys, &chain_store).unwrap(),
             Cow::Borrowed(_)
         ));
         assert!(matches!(
-            tx_for_import_validation(&reference, &validation_pubkeys),
+            tx_for_import_validation(&reference, &validation_pubkeys, &chain_store).unwrap(),
             Cow::Borrowed(_)
         ));
 
         validation_pubkeys.insert(sender, vec![0x55; 1_952]);
-        let resolved = tx_for_import_validation(&reference, &validation_pubkeys);
+        let resolved =
+            tx_for_import_validation(&reference, &validation_pubkeys, &chain_store).unwrap();
         assert!(matches!(&resolved, Cow::Owned(_)));
         assert_eq!(
             resolved.pubkey_mode,
             PubkeyMode::Embedded(vec![0x55; 1_952])
         );
+
+        chain_store.put_pubkey(&sender, &vec![0x66; 1_952]).unwrap();
+        let resolved =
+            tx_for_import_validation(&reference, &validation_pubkeys, &chain_store).unwrap();
+        assert!(
+            matches!(resolved, Cow::Borrowed(_)),
+            "the current registry must override the parent-state fallback"
+        );
+    }
+
+    #[test]
+    fn sequential_import_validation_rejects_signature_from_rotated_key() {
+        let store = Arc::new(MemoryDb::new());
+        let chain_store = ChainStore::new(store.clone());
+        let mut world_state = WorldState::new(store);
+        let old_signer = DilithiumSigner::generate();
+        let new_signer = DilithiumSigner::generate();
+        let sender =
+            Address::from_public_key(old_signer.public_key(), old_signer.sig_type().as_u8());
+        world_state
+            .set_account(
+                &sender,
+                &Account {
+                    pq_pubkey_hash: shell_primitives::blake3_hash(new_signer.public_key()),
+                    nonce: 1,
+                    balance: U256::from(1_000_000u64),
+                    validation_code_hash: None,
+                    code_hash: None,
+                    storage_root: ShellHash::ZERO,
+                },
+            )
+            .unwrap();
+        chain_store
+            .put_pubkey(&sender, new_signer.public_key())
+            .unwrap();
+
+        let mut tx = transaction();
+        tx.nonce = 1;
+        let signature = old_signer
+            .sign(tx.signing_hash(old_signer.sig_type().as_u8()).as_bytes())
+            .unwrap();
+        let stale = SignedTransaction::new(sender, tx, signature);
+        let mut parent_pubkeys = HashMap::new();
+        parent_pubkeys.insert(sender, old_signer.public_key().to_vec());
+
+        let error = validate_import_tx_in_current_state(
+            &stale,
+            &parent_pubkeys,
+            &mut world_state,
+            &chain_store,
+            1337,
+        )
+        .unwrap_err();
+        assert!(matches!(error, TxValidationError::SignatureInvalid));
     }
 
     #[test]
