@@ -6,6 +6,8 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Move collected wPoA quorum signatures into the commit event instead of
+  cloning every post-quantum signature when a round reaches finality.
 - Reject session root authorization signatures made with algorithms deprecated
   by the runtime registry while preserving algorithm-agile key rotation.
 - Create persisted libp2p identity keys exclusively with private permissions,
