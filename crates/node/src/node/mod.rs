@@ -2677,7 +2677,7 @@ mod tests {
         assert_eq!(plan.old_chain, vec![canonical]);
         assert_eq!(plan.new_chain, vec![side_one.clone(), side_two.clone()]);
 
-        node.adopt_preferred_fork(plan).unwrap();
+        node.adopt_preferred_fork(&plan).unwrap();
 
         assert_eq!(
             node.chain_store.get_head_hash().unwrap(),
@@ -2757,7 +2757,7 @@ mod tests {
             .preferred_fork_plan()
             .unwrap()
             .expect("attested side fork should become preferred");
-        node.adopt_preferred_fork(plan).unwrap();
+        node.adopt_preferred_fork(&plan).unwrap();
 
         assert_eq!(
             node.chain_store.get_head_hash().unwrap(),
@@ -2880,7 +2880,7 @@ mod tests {
             .unwrap()
             .expect("stateful side fork should become preferred");
 
-        let error = node.adopt_preferred_fork(plan).unwrap_err();
+        let error = node.adopt_preferred_fork(&plan).unwrap_err();
 
         assert!(error
             .to_string()
@@ -2955,7 +2955,7 @@ mod tests {
             .unwrap()
             .expect("stateful side fork should become preferred");
 
-        node.adopt_preferred_fork(plan).unwrap();
+        node.adopt_preferred_fork(&plan).unwrap();
 
         assert_eq!(
             node.chain_store.get_head_hash().unwrap(),
@@ -3051,7 +3051,7 @@ mod tests {
             .expect("rotated-key side fork should become preferred");
         assert_eq!(plan.old_chain, vec![canonical]);
 
-        node.adopt_preferred_fork(plan).unwrap();
+        node.adopt_preferred_fork(&plan).unwrap();
 
         assert_eq!(
             node.chain_store.get_head_hash().unwrap(),
@@ -3131,7 +3131,7 @@ mod tests {
             .unwrap()
             .expect("invalid side fork should become preferred before revalidation");
 
-        let error = node.adopt_preferred_fork(plan).unwrap_err();
+        let error = node.adopt_preferred_fork(&plan).unwrap_err();
 
         assert!(matches!(
             error,

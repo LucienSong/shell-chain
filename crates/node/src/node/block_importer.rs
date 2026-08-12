@@ -1001,7 +1001,7 @@ impl<S: KvStore + 'static> Node<S> {
         Ok(old_chain.len())
     }
 
-    pub(super) fn adopt_preferred_fork(&self, plan: ForkAdoptionPlan) -> Result<(), NodeError> {
+    pub(super) fn adopt_preferred_fork(&self, plan: &ForkAdoptionPlan) -> Result<(), NodeError> {
         let current_head = self
             .chain_store
             .get_head_block()?

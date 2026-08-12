@@ -1,5 +1,6 @@
 use super::*;
 use shell_network::PeerId;
+use shell_rpc::BlockEvent;
 
 const MAX_BLOCK_SYNC_RESPONSE_BLOCKS: usize = 128;
 const MAX_L1_BACKLOG_TASKS: usize = DEFAULT_MAX_L1_RANGE_SOURCES * 2;
@@ -86,6 +87,28 @@ fn block_event_receipts<S: KvStore + 'static>(
             "receipts missing while publishing canonical block event {block_hash}"
         ))
     })
+}
+
+fn reorg_block_events<S: KvStore + 'static>(
+    chain_store: &ChainStore<S>,
+    plan: &ForkAdoptionPlan,
+) -> Result<Vec<BlockEvent>, NodeError> {
+    let mut events = Vec::with_capacity(plan.old_chain.len() + plan.new_chain.len());
+    for block in plan.old_chain.iter().rev() {
+        events.push(BlockEvent::NewBlock {
+            header: block.header.clone(),
+            receipts: block_event_receipts(chain_store, block.hash())?,
+            removed: true,
+        });
+    }
+    for block in &plan.new_chain {
+        events.push(BlockEvent::NewBlock {
+            header: block.header.clone(),
+            receipts: block_event_receipts(chain_store, block.hash())?,
+            removed: false,
+        });
+    }
+    Ok(events)
 }
 
 fn body_response_import_allowed(block_count: usize) -> bool {
@@ -727,8 +750,18 @@ impl<S: KvStore + 'static> Node<S> {
                                 {
                                     continue;
                                 }
-                                match self.adopt_preferred_fork(plan) {
-                                    Ok(()) => fork_adoption_retry.reset(),
+                                match self.adopt_preferred_fork(&plan) {
+                                    Ok(()) => {
+                                        fork_adoption_retry.reset();
+                                        for event in reorg_block_events(&self.chain_store, &plan)? {
+                                            if block_event_tx.send(event).is_err() {
+                                                tracing::warn!(
+                                                    "no active subscribers for reorg block events"
+                                                );
+                                                break;
+                                            }
+                                        }
+                                    }
                                     Err(error) => {
                                         if let NodeError::InvalidFork {
                                             block_hash,
@@ -924,6 +957,7 @@ impl<S: KvStore + 'static> Node<S> {
                                 if block_event_tx.send(BlockEvent::NewBlock {
                                     header: block.header.clone(),
                                     receipts,
+                                    removed: false,
                                 }).is_err() {
                                     tracing::warn!("no active subscribers for block events");
                                 }
@@ -1120,6 +1154,7 @@ impl<S: KvStore + 'static> Node<S> {
                                             if block_event_tx.send(BlockEvent::NewBlock {
                                                 header: saved_header.clone(),
                                                 receipts,
+                                                removed: false,
                                             }).is_err() {
                                                 tracing::warn!("no active subscribers for block events");
                                             }
@@ -1416,6 +1451,7 @@ impl<S: KvStore + 'static> Node<S> {
                                                 if block_event_tx.send(BlockEvent::NewBlock {
                                                     header: hdr,
                                                     receipts,
+                                                    removed: false,
                                                 }).is_err() {
                                                     tracing::warn!("no active subscribers for block events");
                                                 }
@@ -2958,6 +2994,65 @@ mod cadence_tests {
         let receipts = block_event_receipts(&chain_store, block_hash).unwrap();
 
         assert!(receipts.is_empty());
+    }
+
+    #[test]
+    fn reorg_events_remove_old_tip_first_then_add_new_chain() {
+        let chain_store = ChainStore::new(Arc::new(MemoryDb::new()));
+        let ancestor = Block {
+            header: BlockHeader::default(),
+            transactions: vec![],
+            system_transactions: vec![],
+            proposer_seal: None,
+        };
+        let mut old_one = ancestor.clone();
+        old_one.header.number = 1;
+        old_one.header.parent_hash = ancestor.hash();
+        old_one.header.timestamp = 1;
+        let mut old_two = old_one.clone();
+        old_two.header.number = 2;
+        old_two.header.parent_hash = old_one.hash();
+        old_two.header.timestamp = 2;
+        let mut new_one = old_one.clone();
+        new_one.header.timestamp = 3;
+        let mut new_two = new_one.clone();
+        new_two.header.number = 2;
+        new_two.header.parent_hash = new_one.hash();
+        new_two.header.timestamp = 4;
+
+        for block in [&old_one, &old_two, &new_one, &new_two] {
+            chain_store.put_receipts(&block.hash(), &[]).unwrap();
+        }
+        let plan = ForkAdoptionPlan {
+            preferred_hash: new_two.hash(),
+            preferred_number: 2,
+            canonical_number: 2,
+            ancestor_hash: ancestor.hash(),
+            ancestor_number: 0,
+            old_chain: vec![old_one.clone(), old_two.clone()],
+            new_chain: vec![new_one.clone(), new_two.clone()],
+            reverted_txs: vec![],
+        };
+
+        let events = reorg_block_events(&chain_store, &plan).unwrap();
+        let observed = events
+            .into_iter()
+            .map(|event| match event {
+                BlockEvent::NewBlock {
+                    header, removed, ..
+                } => (header.hash(), removed),
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            observed,
+            vec![
+                (old_two.hash(), true),
+                (old_one.hash(), true),
+                (new_one.hash(), false),
+                (new_two.hash(), false),
+            ]
+        );
     }
 
     #[test]
