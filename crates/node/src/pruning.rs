@@ -12,7 +12,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use shell_primitives::ShellHash;
 use shell_storage::{
-    ChainStore, KvStore, StorageError, WorldState, DEFAULT_BODY_RETENTION,
+    ChainStore, KvStore, StorageError, WorldState, WriteBatch, DEFAULT_BODY_RETENTION,
     DEFAULT_WITNESS_RETENTION,
 };
 
@@ -314,6 +314,22 @@ pub(crate) fn state_trie_pruned_below<S: KvStore>(store: &S) -> Result<u64, Stor
     }
 }
 
+fn commit_state_trie_prune<S: KvStore>(
+    store: &S,
+    nodes: &HashSet<ShellHash>,
+    pruned_below: u64,
+) -> Result<(), StorageError> {
+    let mut batch = WriteBatch::new();
+    for hash in nodes {
+        batch.delete(hash.as_bytes().to_vec());
+    }
+    batch.put(
+        STATE_TRIE_PRUNED_BELOW_KEY.to_vec(),
+        pruned_below.to_be_bytes().to_vec(),
+    );
+    store.write_batch(batch)
+}
+
 fn canonical_state_root<S: KvStore>(
     chain_store: &ChainStore<S>,
     block_number: u64,
@@ -389,12 +405,16 @@ pub fn prune_state_trie<S: KvStore + 'static>(
 
     let mut result = StateTriePruneResult::default();
     let mut seen_old_roots = HashSet::new();
+    let mut nodes_to_delete = HashSet::new();
     for root in old_roots {
         if !seen_old_roots.insert(root) {
             continue;
         }
-        let deleted =
-            WorldState::<S>::delete_state_snapshot(store.as_ref(), root, &protected_nodes)?;
+        let deleted = WorldState::<S>::collect_snapshot_node_hashes(store.as_ref(), root)?
+            .into_iter()
+            .filter(|hash| !protected_nodes.contains(hash))
+            .filter(|hash| nodes_to_delete.insert(*hash))
+            .count() as u64;
         if deleted > 0 {
             result.pruned_roots = result.pruned_roots.saturating_add(1);
             result.deleted_nodes = result.deleted_nodes.saturating_add(deleted);
@@ -403,7 +423,7 @@ pub fn prune_state_trie<S: KvStore + 'static>(
         }
     }
 
-    store.put(STATE_TRIE_PRUNED_BELOW_KEY, &pass_end.to_be_bytes())?;
+    commit_state_trie_prune(store.as_ref(), &nodes_to_delete, pass_end)?;
 
     Ok(result)
 }
@@ -414,7 +434,44 @@ mod tests {
 
     use shell_core::{Block, BlockHeader};
     use shell_primitives::{Address, Bytes, U256};
-    use shell_storage::{ChainConfig, MemoryDb};
+    use shell_storage::{ChainConfig, MemoryDb, WriteBatchOp};
+
+    struct CursorFailingStore {
+        inner: MemoryDb,
+    }
+
+    impl KvStore for CursorFailingStore {
+        fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+            self.inner.get(key)
+        }
+
+        fn put(&self, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
+            self.inner.put(key, value)
+        }
+
+        fn delete(&self, key: &[u8]) -> Result<(), StorageError> {
+            self.inner.delete(key)
+        }
+
+        fn flush(&self) -> Result<(), StorageError> {
+            self.inner.flush()
+        }
+
+        fn write_batch(&self, batch: WriteBatch) -> Result<(), StorageError> {
+            if batch.ops().iter().any(|op| {
+                matches!(op, WriteBatchOp::Put { key, .. } if key == STATE_TRIE_PRUNED_BELOW_KEY)
+            }) {
+                return Err(StorageError::Database(
+                    "injected state-trie cursor failure".into(),
+                ));
+            }
+            self.inner.write_batch(batch)
+        }
+
+        fn scan_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
+            self.inner.scan_prefix(prefix)
+        }
+    }
 
     fn dummy_root(n: u8) -> ShellHash {
         ShellHash::from([n; 32])
@@ -452,8 +509,9 @@ mod tests {
         Address::from([seed; 20])
     }
 
-    fn populate_state_chain() -> (Arc<MemoryDb>, Vec<ShellHash>, Vec<Address>) {
-        let store = Arc::new(MemoryDb::new());
+    fn populate_state_chain_with<S: KvStore + 'static>(
+        store: Arc<S>,
+    ) -> (Arc<S>, Vec<ShellHash>, Vec<Address>) {
         let chain_store = ChainStore::new(Arc::clone(&store));
         let mut roots = Vec::new();
         let mut addresses = Vec::new();
@@ -489,8 +547,18 @@ mod tests {
         (store, roots, addresses)
     }
 
-    fn root_balance(
-        store: &Arc<MemoryDb>,
+    fn populate_state_chain() -> (Arc<MemoryDb>, Vec<ShellHash>, Vec<Address>) {
+        populate_state_chain_with(Arc::new(MemoryDb::new()))
+    }
+
+    fn populate_failing_state_chain() -> (Arc<CursorFailingStore>, Vec<ShellHash>, Vec<Address>) {
+        populate_state_chain_with(Arc::new(CursorFailingStore {
+            inner: MemoryDb::new(),
+        }))
+    }
+
+    fn root_balance<S: KvStore + 'static>(
+        store: &Arc<S>,
         root: ShellHash,
         address: Address,
     ) -> Result<U256, StorageError> {
@@ -663,6 +731,23 @@ mod tests {
         assert_eq!(
             store.get(STATE_TRIE_PRUNED_BELOW_KEY).unwrap(),
             Some(2u64.to_be_bytes().to_vec())
+        );
+    }
+
+    #[test]
+    fn state_trie_pruning_commits_node_deletes_with_progress_cursor() {
+        let (store, roots, addresses) = populate_failing_state_chain();
+
+        let result = prune_state_trie(Arc::clone(&store), 2, StorageProfile::Light);
+
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("injected state-trie cursor failure"));
+        assert_eq!(store.get(STATE_TRIE_PRUNED_BELOW_KEY).unwrap(), None);
+        assert_eq!(
+            root_balance(&store, roots[0], addresses[0]).unwrap(),
+            U256::from(1u64)
         );
     }
 
