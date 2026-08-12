@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="${1:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+source "$SCRIPT_DIR/release-version.sh"
 
 fail() {
     echo "release metadata check failed: $1" >&2
@@ -29,10 +30,11 @@ PY
 }
 
 VERSION=$(toml_version "$ROOT_DIR/Cargo.toml" "workspace.package.version")
-if [[ ! "$VERSION" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)(-[0-9A-Za-z.-]+)?$ ]]; then
+if ! release_version_is_valid "$VERSION"; then
     fail "workspace version '$VERSION' is not supported semver"
 fi
-SERIES="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+CORE_VERSION="${VERSION%%-*}"
+SERIES="${CORE_VERSION%.*}"
 
 require_text() {
     local file=$1

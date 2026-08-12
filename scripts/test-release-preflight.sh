@@ -39,6 +39,22 @@ fi
 "$SCRIPT_DIR/check-release-metadata.sh"
 "$SCRIPT_DIR/check-release-lockfile.sh"
 
+source "$SCRIPT_DIR/release-version.sh"
+for version in 0.27.4 0.28.0-rc.1 1.0.0-alpha-1; do
+    release_version_is_valid "$version" \
+        || fail "valid release version was rejected: $version"
+done
+for version in 01.27.4 0.027.4 0.27.04 0.27.4-rc..1 0.27.4-rc.01; do
+    if release_version_is_valid "$version"; then
+        fail "invalid release version was accepted: $version"
+    fi
+done
+release_tag_is_valid v0.27.4-rc.1 \
+    || fail "valid release tag was rejected"
+if release_tag_is_valid 0.27.4 || release_tag_is_valid v0.27.4-rc..1; then
+    fail "invalid release tag was accepted"
+fi
+
 if ! grep -Fq 'cargo audit --file tools/tx-generator/Cargo.lock' "$SCRIPT_DIR/release.sh"; then
     fail "release audit does not cover the transaction generator lockfile"
 fi
@@ -85,6 +101,7 @@ fi
 PUBLICATION_HELPER="$TMP_DIR/publication-helpers"
 mkdir -p "$PUBLICATION_HELPER"
 cp "$SCRIPT_DIR/check-release-publication.sh" "$PUBLICATION_HELPER/"
+cp "$SCRIPT_DIR/release-version.sh" "$PUBLICATION_HELPER/"
 cat > "$PUBLICATION_HELPER/check-release-remote.sh" <<'EOF'
 #!/usr/bin/env bash
 exit 0
@@ -242,7 +259,7 @@ TAG_CHECKOUT="$TMP_DIR/tag-checkout"
 PUSH_HELPER_DIR="$TMP_DIR/push-helpers"
 mkdir -p "$PUSH_HELPER_DIR"
 cp "$SCRIPT_DIR/push-release-tag.sh" "$SCRIPT_DIR/check-release-lineage.sh" \
-    "$PUSH_HELPER_DIR/"
+    "$SCRIPT_DIR/release-version.sh" "$PUSH_HELPER_DIR/"
 cat > "$PUSH_HELPER_DIR/check-release-remote.sh" <<'EOF'
 #!/usr/bin/env bash
 exit 0
@@ -466,6 +483,7 @@ make_fixture() {
         "$SCRIPT_DIR/check-release-tag.sh" \
         "$SCRIPT_DIR/check-release-source.sh" \
         "$SCRIPT_DIR/check-release-metadata.sh" \
+        "$SCRIPT_DIR/release-version.sh" \
         "$SCRIPT_DIR/push-release-tag.sh" \
         "$SCRIPT_DIR/supply-chain-tool-versions.sh" "$fixture/scripts/"
     printf '[workspace.package]\nversion = "0.27.1"\n' > "$fixture/Cargo.toml"
@@ -561,6 +579,7 @@ cp "$SCRIPT_DIR/release.sh" "$SCRIPT_DIR/changelog-excerpt.sh" \
     "$SCRIPT_DIR/check-release-tag.sh" \
     "$SCRIPT_DIR/check-release-source.sh" \
     "$SCRIPT_DIR/check-release-metadata.sh" \
+    "$SCRIPT_DIR/release-version.sh" \
     "$SCRIPT_DIR/push-release-tag.sh" \
     "$SCRIPT_DIR/supply-chain-tool-versions.sh" "$fixture/scripts/"
 printf '[workspace.package]\nversion = "0.27.1"\n' > "$fixture/Cargo.toml"

@@ -17,6 +17,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$PROJECT_DIR"
 source "$SCRIPT_DIR/supply-chain-tool-versions.sh"
+source "$SCRIPT_DIR/release-version.sh"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -33,7 +34,7 @@ if [ -z "$VERSION" ]; then
     echo "  e.g. $0 0.27.4"
     exit 1
 fi
-if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+if ! release_version_is_valid "$VERSION"; then
     fail "Version must be semver without a leading 'v' (for example, 0.27.4 or 0.28.0-rc.1)"
 fi
 

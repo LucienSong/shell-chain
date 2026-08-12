@@ -6,6 +6,8 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Reject malformed semantic versions throughout the release helpers, including
+  leading-zero core numbers and empty or leading-zero prerelease identifiers.
 - Move collected wPoA quorum signatures into the commit event instead of
   cloning every post-quantum signature when a round reaches finality.
 - Reject session root authorization signatures made with algorithms deprecated
