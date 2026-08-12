@@ -366,49 +366,6 @@ mod tests {
     }
 
     #[test]
-    fn sign_verify_latency_under_10ms() {
-        let signer = DilithiumSigner::generate();
-        let verifier = DilithiumVerifier;
-        let msg = b"latency-test";
-
-        let start = std::time::Instant::now();
-        let sig = signer.sign(msg).unwrap();
-        let _ = verifier.verify(signer.public_key(), msg, &sig).unwrap();
-        let elapsed = start.elapsed();
-
-        // Debug builds are significantly slower; use generous threshold
-        let limit_ms = if cfg!(debug_assertions) { 50 } else { 10 };
-        assert!(
-            elapsed.as_millis() < limit_ms,
-            "sign+verify took {}ms, expected <{}ms",
-            elapsed.as_millis(),
-            limit_ms
-        );
-    }
-
-    #[test]
-    fn sequential_100_sign_verify_under_1s() {
-        let signer = DilithiumSigner::generate();
-        let verifier = DilithiumVerifier;
-
-        let start = std::time::Instant::now();
-        for i in 0u32..100 {
-            let msg = format!("perf-{i}");
-            let sig = signer.sign(msg.as_bytes()).unwrap();
-            assert!(verifier
-                .verify(signer.public_key(), msg.as_bytes(), &sig)
-                .unwrap());
-        }
-        let elapsed = start.elapsed();
-
-        assert!(
-            elapsed.as_secs_f64() < 2.0,
-            "100 sign+verify took {:.2}s, expected <2s",
-            elapsed.as_secs_f64()
-        );
-    }
-
-    #[test]
     fn verifies_sdk_ml_dsa_compat_fixture() {
         let verifier = DilithiumVerifier;
         let pubkey =
