@@ -5,8 +5,8 @@
 //! global peer discovery.
 
 use std::collections::{HashMap, HashSet};
-use std::fs;
-use std::io;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -37,6 +37,7 @@ const BOOTNODE_REDIAL_INTERVAL_SECS: u64 = 30;
 const DIRECT_MESSAGE_PROTOCOL: StreamProtocol = StreamProtocol::new("/shell/direct/1");
 const MAX_PENDING_DIRECT_MESSAGES: usize = 256;
 const MAX_PENDING_DIRECT_BYTES: usize = 2 * crate::message::MAX_MESSAGE_SIZE;
+const MAX_IDENTITY_KEY_SIZE: u64 = 64 * 1024;
 
 /// Topic category for gossipsub routing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -390,12 +391,17 @@ impl Libp2pNetwork {
 
 fn load_or_create_identity(path: Option<&Path>) -> Result<libp2p::identity::Keypair, NetworkError> {
     match path {
-        Some(path) if path.exists() => {
-            let bytes = fs::read(path).map_err(|e| NetworkError::Transport(e.to_string()))?;
-            libp2p::identity::Keypair::from_protobuf_encoding(&bytes)
-                .map_err(|e| NetworkError::Transport(format!("invalid libp2p identity: {e}")))
-        }
         Some(path) => {
+            match read_identity_file(path) {
+                Ok(bytes) => {
+                    return libp2p::identity::Keypair::from_protobuf_encoding(&bytes).map_err(
+                        |e| NetworkError::Transport(format!("invalid libp2p identity: {e}")),
+                    );
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(NetworkError::Transport(error.to_string())),
+            }
+
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent).map_err(|e| NetworkError::Transport(e.to_string()))?;
             }
@@ -403,24 +409,86 @@ fn load_or_create_identity(path: Option<&Path>) -> Result<libp2p::identity::Keyp
             let encoded = keypair
                 .to_protobuf_encoding()
                 .map_err(|e| NetworkError::Transport(format!("encode libp2p identity: {e}")))?;
-            {
-                use std::io::Write;
-                #[cfg(unix)]
-                use std::os::unix::fs::OpenOptionsExt;
-                let mut opts = fs::OpenOptions::new();
-                opts.write(true).create(true).truncate(true);
-                #[cfg(unix)]
-                opts.mode(0o600);
-                let mut file = opts
-                    .open(path)
-                    .map_err(|e| NetworkError::Transport(e.to_string()))?;
-                file.write_all(&encoded)
-                    .map_err(|e| NetworkError::Transport(e.to_string()))?;
-            }
+            write_identity_file_new(path, &encoded)
+                .map_err(|e| NetworkError::Transport(e.to_string()))?;
             Ok(keypair)
         }
         None => Ok(libp2p::identity::Keypair::generate_ed25519()),
     }
+}
+
+fn open_identity_file(path: &Path) -> io::Result<File> {
+    let path_meta = fs::symlink_metadata(path)?;
+    if path_meta.file_type().is_symlink() || !path_meta.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("libp2p identity must be a regular file: {}", path.display()),
+        ));
+    }
+    if path_meta.len() > MAX_IDENTITY_KEY_SIZE {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("libp2p identity exceeds {MAX_IDENTITY_KEY_SIZE} bytes"),
+        ));
+    }
+
+    let file = OpenOptions::new().read(true).open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        let opened_meta = file.metadata()?;
+        if path_meta.dev() != opened_meta.dev() || path_meta.ino() != opened_meta.ino() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("libp2p identity changed while opening: {}", path.display()),
+            ));
+        }
+    }
+    Ok(file)
+}
+
+fn read_identity_file(path: &Path) -> io::Result<Vec<u8>> {
+    let file = open_identity_file(path)?;
+    let mut bytes = Vec::new();
+    file.take(MAX_IDENTITY_KEY_SIZE + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_IDENTITY_KEY_SIZE {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("libp2p identity exceeds {MAX_IDENTITY_KEY_SIZE} bytes"),
+        ));
+    }
+    Ok(bytes)
+}
+
+fn write_identity_file_new(path: &Path, encoded: &[u8]) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let parent_meta = fs::symlink_metadata(parent)?;
+    if parent_meta.file_type().is_symlink() || !parent_meta.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "libp2p identity parent must be a real directory: {}",
+                parent.display()
+            ),
+        ));
+    }
+
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(encoded)?;
+    file.sync_all()?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1627,6 +1695,81 @@ mod tests {
     use super::*;
     use crate::config::NetworkConfig;
     use libp2p::futures::io::Cursor;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn identity_test_dir(name: &str) -> std::path::PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "shell-network-identity-{name}-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn identity_file_is_created_once_and_reused() {
+        let dir = identity_test_dir("reuse");
+        let path = dir.join("libp2p.key");
+
+        let created = load_or_create_identity(Some(&path)).unwrap();
+        let loaded = load_or_create_identity(Some(&path)).unwrap();
+
+        assert_eq!(created.public().to_peer_id(), loaded.public().to_peer_id());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn identity_file_uses_private_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = identity_test_dir("permissions");
+        let path = dir.join("libp2p.key");
+        load_or_create_identity(Some(&path)).unwrap();
+
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn identity_file_rejects_symbolic_links() {
+        use std::os::unix::fs::symlink;
+
+        let dir = identity_test_dir("symlink");
+        let target = dir.join("target.key");
+        let linked = dir.join("libp2p.key");
+        let encoded = libp2p::identity::Keypair::generate_ed25519()
+            .to_protobuf_encoding()
+            .unwrap();
+        fs::write(&target, encoded).unwrap();
+        symlink(&target, &linked).unwrap();
+
+        let error = load_or_create_identity(Some(&linked)).unwrap_err();
+
+        assert!(
+            matches!(error, NetworkError::Transport(message) if message.contains("regular file"))
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn identity_file_rejects_oversized_input() {
+        let dir = identity_test_dir("oversized");
+        let path = dir.join("libp2p.key");
+        let file = File::create(&path).unwrap();
+        file.set_len(MAX_IDENTITY_KEY_SIZE + 1).unwrap();
+
+        let error = load_or_create_identity(Some(&path)).unwrap_err();
+
+        assert!(matches!(error, NetworkError::Transport(message) if message.contains("exceeds")));
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     #[tokio::test]
     async fn direct_message_codec_enforces_raw_message_limit() {
