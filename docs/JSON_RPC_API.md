@@ -110,7 +110,7 @@ Subscribe to live events. Returns a subscription ID.
 | Type | Description |
 |------|-------------|
 | `newHeads` | Pushes new block headers when blocks are produced or imported |
-| `logs` | Pushes log events matching a filter (address, topics) |
+| `logs` | Pushes matching log events; reorged logs are replayed with `removed: true` before replacement-chain logs |
 | `newPendingTransactions` | Pushes transaction hashes as they enter the mempool |
 | `syncing` | Pushes sync status changes (syncing/not syncing) |
 

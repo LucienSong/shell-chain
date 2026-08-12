@@ -64,10 +64,12 @@ fn parse_hash_hex(s: &str) -> Result<ShellHash, jsonrpsee::types::ErrorObjectOwn
 /// Events broadcast from the node's block production / import pipeline.
 #[derive(Debug, Clone)]
 pub enum BlockEvent {
-    /// A new block was produced or imported.
+    /// A block entered or left the canonical chain.
     NewBlock {
         header: BlockHeader,
         receipts: Vec<TransactionReceipt>,
+        /// `true` when the block was removed by a canonical reorganization.
+        removed: bool,
     },
 }
 
@@ -534,6 +536,7 @@ fn log_to_json(
     tx_hash: &ShellHash,
     tx_index: u32,
     log_index: usize,
+    removed: bool,
 ) -> serde_json::Value {
     serde_json::json!({
         "address": log.address,
@@ -544,7 +547,7 @@ fn log_to_json(
         "transactionHash": tx_hash,
         "transactionIndex": hex_u64(tx_index as u64),
         "logIndex": hex_u64(log_index as u64),
-        "removed": false,
+        "removed": removed,
     })
 }
 
@@ -559,7 +562,11 @@ async fn forward_new_heads(
             event = rx.recv() => event,
         };
         match event {
-            Ok(BlockEvent::NewBlock { header, .. }) => {
+            Ok(BlockEvent::NewBlock {
+                header,
+                removed: false,
+                ..
+            }) => {
                 consecutive_lags = 0;
                 let value = header_to_json(&header);
                 let Ok(msg) = SubscriptionMessage::from_json(&value) else {
@@ -569,6 +576,9 @@ async fn forward_new_heads(
                 if sink.send(msg).await.is_err() {
                     break;
                 }
+            }
+            Ok(BlockEvent::NewBlock { removed: true, .. }) => {
+                consecutive_lags = 0;
             }
             Err(broadcast::error::RecvError::Lagged(n)) => {
                 consecutive_lags += 1;
@@ -595,7 +605,11 @@ async fn forward_logs(
             event = rx.recv() => event,
         };
         match event {
-            Ok(BlockEvent::NewBlock { header, receipts }) => {
+            Ok(BlockEvent::NewBlock {
+                header,
+                receipts,
+                removed,
+            }) => {
                 consecutive_lags = 0;
                 let mut global_log_index: usize = 0;
                 for receipt in &receipts {
@@ -607,6 +621,7 @@ async fn forward_logs(
                                 &receipt.tx_hash,
                                 receipt.tx_index,
                                 global_log_index,
+                                removed,
                             );
                             let Ok(msg) = SubscriptionMessage::from_json(&value) else {
                                 tracing::error!("failed to serialize log for subscription");
@@ -967,6 +982,24 @@ mod tests {
         assert_eq!(json["gasUsed"], "0x5208");
     }
 
+    #[test]
+    fn removed_log_serialization_marks_reorged_logs() {
+        let address = Address::from([0xCC; 20]);
+        let topic = shell_primitives::keccak256(b"Removed");
+        let receipt = sample_receipt(address, topic);
+
+        let json = log_to_json(
+            &receipt.logs[0],
+            &sample_header(1),
+            &receipt.tx_hash,
+            receipt.tx_index,
+            0,
+            true,
+        );
+
+        assert_eq!(json["removed"], true);
+    }
+
     #[tokio::test]
     async fn broadcast_channel_delivers_events() {
         let (tx, mut rx) = broadcast::channel::<BlockEvent>(16);
@@ -975,6 +1008,7 @@ mod tests {
         tx.send(BlockEvent::NewBlock {
             header: header.clone(),
             receipts: vec![],
+            removed: false,
         })
         .unwrap();
 
@@ -982,9 +1016,11 @@ mod tests {
             BlockEvent::NewBlock {
                 header: h,
                 receipts: r,
+                removed,
             } => {
                 assert_eq!(h.number, 1);
                 assert!(r.is_empty());
+                assert!(!removed);
             }
         }
     }
@@ -998,6 +1034,7 @@ mod tests {
         tx.send(BlockEvent::NewBlock {
             header: sample_header(5),
             receipts: vec![],
+            removed: false,
         })
         .unwrap();
 
