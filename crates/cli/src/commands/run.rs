@@ -732,7 +732,7 @@ async fn run_with_store<S: KvStore + 'static>(
     };
 
     // Build the node (auto-detects existing state via NodeBuilder).
-    let (node, _store) = shell_node::builder::NodeBuilder::new(node_config, store).build();
+    let (node, _store) = shell_node::builder::NodeBuilder::new(node_config, store).build()?;
 
     for (address, pubkey_hex) in authorities.iter().zip(authority_pubkeys.iter()) {
         let trimmed = pubkey_hex.trim_start_matches("0x");
