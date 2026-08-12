@@ -102,6 +102,11 @@ At this stage the chain no longer needs to re-derive the address from the new
 public key, which is what makes **key rotation without address changes**
 possible.
 
+Session root signatures follow the same rotation model. Because the rotated
+key's algorithm is not stored separately, nodes try each algorithm that is
+currently active in the runtime registry. Deprecated and pending algorithms are
+not accepted for new session authorizations.
+
 ### 3.3 Layer 3 — custom validator path
 
 If `account.validation_code_hash` is set, the chain delegates validation to

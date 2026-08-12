@@ -632,8 +632,7 @@ fn is_magic_valid(output: &[u8]) -> bool {
 /// 2. Value cap: Σ `inner_call.value ≤ session_auth.value_cap`
 /// 3. Target: if `session_auth.target` is Some, all inner calls must target it
 /// 4. Root authorization: verify `root_signature` over `session_auth.auth_hash(chain_id)`
-///    using the root pubkey. All `ALLOWED_ALGORITHMS` are tried (root key algo is not
-///    stored separately from the pubkey bytes).
+///    using a currently active root-key algorithm.
 /// 5. Session sig: verify `session_auth.session_signature` (signed by `session_pubkey`)
 ///    over the tx `sender_signing_hash()`. The outer `signed_tx.signature` MUST equal
 ///    `session_auth.session_signature` (same bytes and algo) to prevent injection.
@@ -689,16 +688,17 @@ fn validate_session_auth<V: Verifier>(
 
     // 4. Root authorization: root_signature over session_auth.auth_hash(chain_id).
     //
-    // The root key's algorithm is not stored separately from the pubkey bytes,
-    // so we try all ALLOWED_ALGORITHMS and accept if any succeeds. This handles
-    // the case where the root key and session key use different algorithms.
+    // Key rotation preserves the account address without persisting the new
+    // algorithm, so every active algorithm must be considered. Filtering the
+    // compile-time list is required for runtime deprecation to take effect.
     let auth_hash = session_auth.auth_hash(signed_tx.tx.chain_id);
-    let root_valid = ALLOWED_ALGORITHMS.iter().copied().any(|algo| {
-        let root_sig = PQSignature::new(algo, session_auth.root_signature.as_ref().to_vec());
-        verifier
-            .verify(root_pubkey, auth_hash.as_bytes(), &root_sig)
-            .unwrap_or(false)
-    });
+    let root_valid = verify_session_root_signature(
+        root_pubkey,
+        &auth_hash,
+        session_auth.root_signature.as_ref(),
+        verifier,
+        is_algorithm_allowed,
+    );
     if !root_valid {
         return Err(AaValidationError::SessionRootSignatureInvalid);
     }
@@ -734,6 +734,29 @@ fn validate_session_auth<V: Verifier>(
     }
 
     Ok(())
+}
+
+fn verify_session_root_signature<V, F>(
+    root_pubkey: &[u8],
+    auth_hash: &ShellHash,
+    root_signature: &[u8],
+    verifier: &V,
+    mut algorithm_allowed: F,
+) -> bool
+where
+    V: Verifier,
+    F: FnMut(SignatureType) -> bool,
+{
+    ALLOWED_ALGORITHMS
+        .iter()
+        .copied()
+        .filter(|algo| algorithm_allowed(*algo))
+        .any(|algo| {
+            let root_sig = PQSignature::new(algo, root_signature.to_vec());
+            verifier
+                .verify(root_pubkey, auth_hash.as_bytes(), &root_sig)
+                .unwrap_or(false)
+        })
 }
 
 ///
@@ -1075,7 +1098,8 @@ mod tests {
         AA_BUNDLE_TX_TYPE,
     };
     use shell_crypto::{
-        DilithiumSigner, DilithiumVerifier, MlDsaSigner, MultiVerifier, PQSignature, Signer,
+        CryptoError, DilithiumSigner, DilithiumVerifier, MlDsaSigner, MultiVerifier, PQSignature,
+        Signer,
     };
     use shell_primitives::{Bytes, U256};
     use shell_storage::MemoryDb;
@@ -1677,6 +1701,40 @@ mod tests {
                 current_block: 10,
             }
         ));
+    }
+
+    #[derive(Clone, Copy)]
+    struct CrossAlgorithmVerifier;
+
+    impl Verifier for CrossAlgorithmVerifier {
+        fn verify(
+            &self,
+            _pubkey: &[u8],
+            _message: &[u8],
+            signature: &PQSignature,
+        ) -> Result<bool, CryptoError> {
+            Ok(signature.sig_type == SignatureType::MlDsa65)
+        }
+
+        fn sig_type(&self) -> SignatureType {
+            SignatureType::MlDsa65
+        }
+    }
+
+    #[test]
+    fn session_root_signature_skips_deprecated_algorithms() {
+        let root_pubkey = [0x42; 64];
+        let auth_hash = ShellHash::from([0x24; 32]);
+
+        let verified = verify_session_root_signature(
+            &root_pubkey,
+            &auth_hash,
+            &[1],
+            &CrossAlgorithmVerifier,
+            |algo| algo != SignatureType::MlDsa65,
+        );
+
+        assert!(!verified);
     }
 
     #[test]
