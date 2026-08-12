@@ -150,12 +150,14 @@ impl<S: KvStore + 'static> Node<S> {
             // rotated its sender key. Re-check the signature against the
             // current binding before including it in a later block.
             let verifier = MultiVerifier;
-            if let Err(e) = validate_tx_for_import(
+            if let Err(e) = validate_tx_for_import_at_block(
                 tx,
                 evm.state_db_mut().world_state_mut(),
                 &import_cs,
                 &verifier,
                 self.config.chain_id,
+                None,
+                &header,
             ) {
                 debug!(
                     tx_hash = %tx.tx.hash(),

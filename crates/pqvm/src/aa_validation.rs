@@ -8,7 +8,7 @@ use revm::handler::{ExecuteEvm, MainnetContext};
 use revm::primitives::hardfork::SpecId;
 use revm::primitives::TxKind;
 use revm::state::{AccountInfo, Bytecode};
-use shell_core::{AaBundle, InnerCall, SessionAuth, SignedTransaction};
+use shell_core::{AaBundle, BlockHeader, InnerCall, SessionAuth, SignedTransaction};
 use shell_crypto::{
     infer_signature_type_from_address, is_algorithm_allowed, PQSignature, SignatureType, Verifier,
     ALLOWED_ALGORITHMS,
@@ -33,6 +33,33 @@ fn validation_block_number(head_number: Option<u64>) -> u64 {
     head_number
         .map(|number| number.saturating_add(1))
         .unwrap_or(0)
+}
+
+fn validation_block_env<S: KvStore + 'static>(
+    chain_store: &ChainStore<S>,
+    validation_header: Option<&BlockHeader>,
+    default_gas_limit: u64,
+) -> Result<(u64, u64, u64, u64), AaValidationError> {
+    if let Some(header) = validation_header {
+        return Ok((
+            header.number,
+            header.timestamp,
+            header.gas_limit,
+            header.excess_blob_gas,
+        ));
+    }
+
+    Ok(chain_store
+        .get_head_block()?
+        .map(|block| {
+            (
+                validation_block_number(Some(block.header.number)),
+                block.header.timestamp,
+                block.header.gas_limit,
+                block.header.excess_blob_gas,
+            )
+        })
+        .unwrap_or((0, 0, default_gas_limit, 0)))
 }
 
 #[derive(Debug)]
@@ -123,6 +150,32 @@ pub fn validate_aa_tx<S: KvStore + 'static, V: Verifier>(
     chain_store: &ChainStore<S>,
     verifier: &V,
 ) -> Result<AaValidationOutcome, AaValidationError> {
+    validate_aa_tx_inner(signed_tx, world_state, chain_store, verifier, None)
+}
+
+pub fn validate_aa_tx_at_block<S: KvStore + 'static, V: Verifier>(
+    signed_tx: &SignedTransaction,
+    world_state: &WorldState<S>,
+    chain_store: &ChainStore<S>,
+    verifier: &V,
+    validation_header: &BlockHeader,
+) -> Result<AaValidationOutcome, AaValidationError> {
+    validate_aa_tx_inner(
+        signed_tx,
+        world_state,
+        chain_store,
+        verifier,
+        Some(validation_header),
+    )
+}
+
+fn validate_aa_tx_inner<S: KvStore + 'static, V: Verifier>(
+    signed_tx: &SignedTransaction,
+    world_state: &WorldState<S>,
+    chain_store: &ChainStore<S>,
+    verifier: &V,
+    validation_header: Option<&BlockHeader>,
+) -> Result<AaValidationOutcome, AaValidationError> {
     let account = world_state.get_account(&signed_tx.from)?;
     let registered_pubkey = chain_store.get_pubkey(&signed_tx.from)?;
 
@@ -141,9 +194,16 @@ pub fn validate_aa_tx<S: KvStore + 'static, V: Verifier>(
                 chain_store,
                 validation_code_hash,
                 &pubkey,
+                validation_header,
             )?;
 
-            validate_paymaster_authorization(signed_tx, world_state, chain_store, verifier)?;
+            validate_paymaster_authorization(
+                signed_tx,
+                world_state,
+                chain_store,
+                verifier,
+                validation_header,
+            )?;
 
             return Ok(AaValidationOutcome {
                 pubkey,
@@ -207,14 +267,20 @@ pub fn validate_aa_tx<S: KvStore + 'static, V: Verifier>(
     // verification. See AA Phase 2 spec §4.
     if let Some(bundle) = signed_tx.aa_bundle() {
         if let Some(session_auth) = &bundle.session_auth {
+            let validation_block = match validation_header {
+                Some(header) => header.number,
+                None => {
+                    validation_block_number(chain_store.get_head_block()?.map(|b| b.header.number))
+                }
+            };
             validate_session_auth(
                 signed_tx,
                 session_auth,
                 &pubkey,
                 bundle.inner_calls.as_slice(),
                 &tx_hash,
-                chain_store,
                 verifier,
+                validation_block,
             )?;
             // Paymaster validation runs after session auth.
         } else {
@@ -231,7 +297,13 @@ pub fn validate_aa_tx<S: KvStore + 'static, V: Verifier>(
         }
     }
 
-    validate_paymaster_authorization(signed_tx, world_state, chain_store, verifier)?;
+    validate_paymaster_authorization(
+        signed_tx,
+        world_state,
+        chain_store,
+        verifier,
+        validation_header,
+    )?;
 
     Ok(AaValidationOutcome {
         should_register_pubkey: signed_tx.pubkey_mode.is_embedded() && registered_pubkey.is_none(),
@@ -245,6 +317,7 @@ fn validate_paymaster_authorization<S: KvStore + 'static, V: Verifier>(
     world_state: &WorldState<S>,
     chain_store: &ChainStore<S>,
     verifier: &V,
+    validation_header: Option<&BlockHeader>,
 ) -> Result<(), AaValidationError> {
     let Some(bundle) = signed_tx.aa_bundle() else {
         return Ok(());
@@ -264,6 +337,7 @@ fn validate_paymaster_authorization<S: KvStore + 'static, V: Verifier>(
             context,
             world_state,
             chain_store,
+            validation_header,
         )
     } else {
         verify_paymaster_signature(signed_tx, &paymaster, chain_store, verifier).map_err(
@@ -296,6 +370,7 @@ fn validate_custom_contract<S: KvStore + 'static>(
     chain_store: &ChainStore<S>,
     validation_code_hash: ShellHash,
     pubkey: &[u8],
+    validation_header: Option<&BlockHeader>,
 ) -> Result<(), AaValidationError> {
     if chain_store.get_code(&validation_code_hash)?.is_none() {
         return Err(AaValidationError::ValidationCodeMissing(
@@ -311,6 +386,7 @@ fn validate_custom_contract<S: KvStore + 'static>(
         chain_store,
         validation_code_hash,
         v2_calldata,
+        validation_header,
     ) {
         Ok(output) => output,
         Err(err) if should_fallback_to_v1(&err) => {
@@ -325,6 +401,7 @@ fn validate_custom_contract<S: KvStore + 'static>(
                 chain_store,
                 validation_code_hash,
                 v1_calldata,
+                validation_header,
             )?
         }
         Err(err) => return Err(err),
@@ -354,6 +431,7 @@ fn call_custom_validation_contract<S: KvStore + 'static>(
     chain_store: &ChainStore<S>,
     validation_code_hash: ShellHash,
     calldata: Vec<u8>,
+    validation_header: Option<&BlockHeader>,
 ) -> Result<Vec<u8>, AaValidationError> {
     let state_db = ValidationStateDb::new(
         world_state,
@@ -362,16 +440,8 @@ fn call_custom_validation_contract<S: KvStore + 'static>(
         validation_code_hash,
     );
 
-    let head = chain_store.get_head_block()?;
-    let (number, timestamp, gas_limit, excess_blob_gas) = match head {
-        Some(block) => (
-            validation_block_number(Some(block.header.number)),
-            block.header.timestamp,
-            block.header.gas_limit,
-            block.header.excess_blob_gas,
-        ),
-        None => (0, 0, VALIDATION_GAS_CAP, 0),
-    };
+    let (number, timestamp, gas_limit, excess_blob_gas) =
+        validation_block_env(chain_store, validation_header, VALIDATION_GAS_CAP)?;
 
     let tx_env = TxEnv::builder()
         .caller(Address::ZERO.into())
@@ -567,22 +637,20 @@ fn is_magic_valid(output: &[u8]) -> bool {
 /// 5. Session sig: verify `session_auth.session_signature` (signed by `session_pubkey`)
 ///    over the tx `sender_signing_hash()`. The outer `signed_tx.signature` MUST equal
 ///    `session_auth.session_signature` (same bytes and algo) to prevent injection.
-fn validate_session_auth<S: KvStore + 'static, V: Verifier>(
+fn validate_session_auth<V: Verifier>(
     signed_tx: &SignedTransaction,
     session_auth: &SessionAuth,
     root_pubkey: &[u8],
     inner_calls: &[InnerCall],
     tx_hash: &ShellHash,
-    chain_store: &ChainStore<S>,
     verifier: &V,
+    validation_block: u64,
 ) -> Result<(), AaValidationError> {
     // 1. Expiry check.
     // Validation runs against the parent state, so the transaction can only
     // execute in the next block. Check the candidate height rather than the
     // stored head height to avoid admitting an authorization at its exclusive
     // expiry boundary.
-    let validation_block =
-        validation_block_number(chain_store.get_head_block()?.map(|b| b.header.number));
     if session_auth.expiry_block <= validation_block {
         return Err(AaValidationError::SessionKeyExpired {
             expiry_block: session_auth.expiry_block,
@@ -682,6 +750,7 @@ fn call_paymaster_validate<S: KvStore + 'static>(
     context: &[u8],
     world_state: &WorldState<S>,
     chain_store: &ChainStore<S>,
+    validation_header: Option<&BlockHeader>,
 ) -> Result<(), AaValidationError> {
     let max_gas_cost = U256::from(signed_tx.tx.gas_limit)
         .checked_mul(U256::from(signed_tx.tx.max_fee_per_gas))
@@ -700,16 +769,8 @@ fn call_paymaster_validate<S: KvStore + 'static>(
         paymaster_validation_wrapper_code(paymaster),
     );
 
-    let head = chain_store.get_head_block()?;
-    let (number, timestamp, gas_limit, excess_blob_gas) = match head {
-        Some(block) => (
-            validation_block_number(Some(block.header.number)),
-            block.header.timestamp,
-            block.header.gas_limit,
-            block.header.excess_blob_gas,
-        ),
-        None => (0, 0, PAYMASTER_VALIDATE_GAS_CAP, 0),
-    };
+    let (number, timestamp, gas_limit, excess_blob_gas) =
+        validation_block_env(chain_store, validation_header, PAYMASTER_VALIDATE_GAS_CAP)?;
 
     let tx_env = TxEnv::builder()
         .caller(Address::ZERO.into())
@@ -1123,6 +1184,15 @@ mod tests {
         ]
     }
 
+    fn validator_accepts_at_timestamp(timestamp: u8) -> Vec<u8> {
+        vec![
+            0x42, // timestamp
+            0x60, timestamp, 0x14, // eq(timestamp, expected)
+            0x5f, 0x52, // mstore(0, accepted)
+            0x60, 0x20, 0x5f, 0xf3, // return(0, 32)
+        ]
+    }
+
     fn validator_reverts_v2_and_accepts_other_calls() -> Vec<u8> {
         let selector = keccak256(VALIDATE_TRANSACTION_SIGNATURE);
         let mut code = vec![
@@ -1340,7 +1410,9 @@ mod tests {
         let signed = sign_tx(&signer, base_tx(1337, nonce_from_signer(&signer)), true);
         let bundle = test_contract_paymaster_bundle(paymaster);
 
-        assert!(call_paymaster_validate(&signed, &bundle, &paymaster, &[1], &ws, &cs).is_ok());
+        assert!(
+            call_paymaster_validate(&signed, &bundle, &paymaster, &[1], &ws, &cs, None).is_ok()
+        );
     }
 
     #[test]
@@ -1363,7 +1435,9 @@ mod tests {
         let signed = sign_tx(&signer, base_tx(1337, nonce_from_signer(&signer)), true);
         let bundle = test_contract_paymaster_bundle(paymaster);
 
-        assert!(call_paymaster_validate(&signed, &bundle, &paymaster, &[1], &ws, &cs).is_ok());
+        assert!(
+            call_paymaster_validate(&signed, &bundle, &paymaster, &[1], &ws, &cs, None).is_ok()
+        );
     }
 
     #[test]
@@ -1383,7 +1457,9 @@ mod tests {
         let signed = sign_tx(&signer, base_tx(1337, nonce_from_signer(&signer)), true);
         let bundle = test_contract_paymaster_bundle(paymaster);
 
-        assert!(call_paymaster_validate(&signed, &bundle, &paymaster, &[1], &ws, &cs).is_ok());
+        assert!(
+            call_paymaster_validate(&signed, &bundle, &paymaster, &[1], &ws, &cs, None).is_ok()
+        );
     }
 
     #[test]
@@ -1401,7 +1477,31 @@ mod tests {
         let signed = sign_tx(&signer, base_tx(1337, nonce_from_signer(&signer)), true);
         let bundle = test_contract_paymaster_bundle(paymaster);
 
-        call_paymaster_validate(&signed, &bundle, &paymaster, &[1], &ws, &cs).unwrap();
+        call_paymaster_validate(&signed, &bundle, &paymaster, &[1], &ws, &cs, None).unwrap();
+    }
+
+    #[test]
+    fn paymaster_validation_uses_explicit_candidate_timestamp() {
+        let signer = DilithiumSigner::generate();
+        let (mut ws, cs) = setup_stores();
+        let paymaster = Address::from([0x77; 20]);
+        install_paymaster(&mut ws, &cs, paymaster, validator_accepts_at_timestamp(42));
+        set_head_number(&cs, 9);
+        let signed = sign_tx(&signer, base_tx(1337, nonce_from_signer(&signer)), true);
+        let bundle = test_contract_paymaster_bundle(paymaster);
+        let header = BlockHeader {
+            number: 10,
+            timestamp: 42,
+            gas_limit: PAYMASTER_VALIDATE_GAS_CAP,
+            ..BlockHeader::default()
+        };
+
+        assert!(matches!(
+            call_paymaster_validate(&signed, &bundle, &paymaster, &[1], &ws, &cs, None),
+            Err(AaValidationError::PaymasterRejected)
+        ));
+        call_paymaster_validate(&signed, &bundle, &paymaster, &[1], &ws, &cs, Some(&header))
+            .unwrap();
     }
 
     #[test]
@@ -1418,8 +1518,8 @@ mod tests {
         let signed = sign_tx(&signer, base_tx(1337, nonce_from_signer(&signer)), true);
         let bundle = test_contract_paymaster_bundle(paymaster);
 
-        let error =
-            call_paymaster_validate(&signed, &bundle, &paymaster, &[1], &ws, &cs).unwrap_err();
+        let error = call_paymaster_validate(&signed, &bundle, &paymaster, &[1], &ws, &cs, None)
+            .unwrap_err();
 
         assert!(
             matches!(error, AaValidationError::PaymasterValidationFailed(message) if message.starts_with("reverted:"))
@@ -1464,8 +1564,9 @@ mod tests {
         .unwrap();
         let signed = sign_tx(&signer, base_tx(1337, 0), true);
 
-        let error = validate_custom_contract(&signed, &ws, &cs, code_hash, signer.public_key())
-            .unwrap_err();
+        let error =
+            validate_custom_contract(&signed, &ws, &cs, code_hash, signer.public_key(), None)
+                .unwrap_err();
 
         assert!(matches!(
             error,
@@ -1561,6 +1662,21 @@ mod tests {
                 current_block: 10,
             }
         ));
+
+        let candidate = BlockHeader {
+            number: 10,
+            gas_limit: VALIDATION_GAS_CAP,
+            ..BlockHeader::default()
+        };
+        let err =
+            validate_aa_tx_at_block(&signed, &ws, &cs, &MultiVerifier, &candidate).unwrap_err();
+        assert!(matches!(
+            err,
+            AaValidationError::SessionKeyExpired {
+                expiry_block: 10,
+                current_block: 10,
+            }
+        ));
     }
 
     #[test]
@@ -1642,6 +1758,46 @@ mod tests {
         );
 
         validate_aa_tx(&signed, &ws, &cs, &DilithiumVerifier).unwrap();
+    }
+
+    #[test]
+    fn custom_validation_uses_explicit_candidate_timestamp() {
+        let signer = DilithiumSigner::generate();
+        let (mut ws, cs) = setup_stores();
+        let from = signer_address(&signer);
+        let code = validator_accepts_at_timestamp(42);
+        let code_hash = keccak256(&code);
+        cs.put_code(&code_hash, &code).unwrap();
+        ws.set_account(
+            &from,
+            &Account {
+                pq_pubkey_hash: ShellHash::ZERO,
+                nonce: 0,
+                balance: U256::from(1_000_000u64),
+                validation_code_hash: Some(code_hash),
+                code_hash: None,
+                storage_root: ShellHash::ZERO,
+            },
+        )
+        .unwrap();
+        set_head_number(&cs, 9);
+        let signed = SignedTransaction::new(
+            from,
+            base_tx(1337, 0),
+            PQSignature::new(SignatureType::MlDsa65, vec![0xaa; 64]),
+        );
+        let header = BlockHeader {
+            number: 10,
+            timestamp: 42,
+            gas_limit: VALIDATION_GAS_CAP,
+            ..BlockHeader::default()
+        };
+
+        assert!(matches!(
+            validate_aa_tx(&signed, &ws, &cs, &DilithiumVerifier),
+            Err(AaValidationError::ValidationContractRejected(_))
+        ));
+        validate_aa_tx_at_block(&signed, &ws, &cs, &DilithiumVerifier, &header).unwrap();
     }
 
     #[test]

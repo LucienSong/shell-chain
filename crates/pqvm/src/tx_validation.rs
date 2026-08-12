@@ -7,8 +7,8 @@
 //! 4. **Nonce check** — tx.nonce must equal account.nonce
 //! 5. **Balance check** — sender must afford execution gas, blob gas, and value
 
-use crate::aa_validation::{validate_aa_tx, AaValidationError};
-use shell_core::{SignedTransaction, Transaction};
+use crate::aa_validation::{validate_aa_tx, validate_aa_tx_at_block, AaValidationError};
+use shell_core::{BlockHeader, SignedTransaction, Transaction};
 use shell_crypto::{infer_signature_type_from_address, Verifier};
 use shell_primitives::{
     Address, ACCESS_LIST_ADDRESS_COST, ACCESS_LIST_STORAGE_KEY_COST, GAS_CONTRACT_CREATION,
@@ -353,6 +353,7 @@ pub fn validate_tx_for_import<S: KvStore + 'static, V: Verifier>(
         verifier,
         expected_chain_id,
         None,
+        None,
     )
 }
 
@@ -378,6 +379,27 @@ pub fn validate_tx_for_import_with_expected_nonce<S: KvStore + 'static, V: Verif
         verifier,
         expected_chain_id,
         Some(expected_nonce),
+        None,
+    )
+}
+
+pub fn validate_tx_for_import_at_block<S: KvStore + 'static, V: Verifier>(
+    signed_tx: &SignedTransaction,
+    world_state: &mut WorldState<S>,
+    chain_store: &ChainStore<S>,
+    verifier: &V,
+    expected_chain_id: u64,
+    expected_nonce: Option<u64>,
+    validation_header: &BlockHeader,
+) -> Result<(), TxValidationError> {
+    validate_tx_for_import_inner(
+        signed_tx,
+        world_state,
+        chain_store,
+        verifier,
+        expected_chain_id,
+        expected_nonce,
+        Some(validation_header),
     )
 }
 
@@ -388,6 +410,7 @@ fn validate_tx_for_import_inner<S: KvStore + 'static, V: Verifier>(
     verifier: &V,
     expected_chain_id: u64,
     expected_nonce: Option<u64>,
+    validation_header: Option<&BlockHeader>,
 ) -> Result<(), TxValidationError> {
     let tx = &signed_tx.tx;
 
@@ -420,7 +443,11 @@ fn validate_tx_for_import_inner<S: KvStore + 'static, V: Verifier>(
         return Err(TxValidationError::GasTooLow(tx.gas_limit));
     }
 
-    let validation = validate_aa_tx(signed_tx, world_state, chain_store, verifier)?;
+    let validation = if let Some(header) = validation_header {
+        validate_aa_tx_at_block(signed_tx, world_state, chain_store, verifier, header)?
+    } else {
+        validate_aa_tx(signed_tx, world_state, chain_store, verifier)?
+    };
 
     if validation.protocol_checks_nonce {
         let account_nonce = match expected_nonce {

@@ -27,14 +27,17 @@ fn validate_import_tx_in_current_state<S: KvStore + 'static>(
     world_state: &mut WorldState<S>,
     chain_store: &ChainStore<S>,
     chain_id: u64,
+    validation_header: &BlockHeader,
 ) -> Result<(), TxValidationError> {
     let tx_for_validation = tx_for_import_validation(tx, validation_pubkeys, chain_store)?;
-    validate_tx_for_import(
+    validate_tx_for_import_at_block(
         tx_for_validation.as_ref(),
         world_state,
         chain_store,
         &MultiVerifier,
         chain_id,
+        None,
+        validation_header,
     )
 }
 
@@ -346,13 +349,14 @@ impl<S: KvStore + 'static> Node<S> {
                 None => world_state.get_nonce(&tx.from)?,
             };
 
-            validate_tx_for_import_with_expected_nonce(
+            validate_tx_for_import_at_block(
                 tx_for_validation.as_ref(),
                 &mut world_state,
                 &import_cs,
                 &verifier,
                 self.config.chain_id,
-                expected_nonce,
+                Some(expected_nonce),
+                &block.header,
             )
             .map_err(|error| {
                 NodeError::Startup(format!(
@@ -595,13 +599,14 @@ impl<S: KvStore + 'static> Node<S> {
                     .get(&tx.from)
                     .copied()
                     .unwrap_or(world_state.get_nonce(&tx.from)?);
-                validate_tx_for_import_with_expected_nonce(
+                validate_tx_for_import_at_block(
                     tx_for_validation.as_ref(),
                     world_state,
                     &replay_cs,
                     &pre_verified,
                     self.config.chain_id,
-                    expected_nonce,
+                    Some(expected_nonce),
+                    &block.header,
                 )
                 .map_err(|error| match error {
                     TxValidationError::Storage(error) => NodeError::Storage(error),
@@ -655,6 +660,7 @@ impl<S: KvStore + 'static> Node<S> {
                     evm.state_db_mut().world_state_mut(),
                     &replay_cs,
                     self.config.chain_id,
+                    &block.header,
                 )
                 .map_err(|error| {
                     Self::invalid_fork(
@@ -1502,7 +1508,7 @@ impl<S: KvStore + 'static> Node<S> {
             // Uses PreVerified only for built-in signature checks already
             // covered by the batch pass above; custom validators still execute.
             //
-            // IMPORTANT: validate_tx_for_import is READ-ONLY — it does NOT register
+            // IMPORTANT: import validation is READ-ONLY — it does NOT register
             // pubkeys (unlike validate_tx used in the mempool path). Pubkey registration
             // is deferred to the `new_pubkeys` commit at the end of import_block.
             // The `new_pubkeys` HashMap uses `or_insert_with` (first-write-wins), so
@@ -1510,7 +1516,7 @@ impl<S: KvStore + 'static> Node<S> {
             // only the first pubkey is written — registration is idempotent by design.
             //
             // Reference txs mutated to Embedded here (for validation) do NOT trigger
-            // re-registration because validate_tx_for_import performs no writes.
+            // re-registration because import validation performs no writes.
             let pre_verified = PreVerified;
             let mut validation_pubkeys: HashMap<Address, Vec<u8>> = HashMap::new();
             let mut validation_nonces: HashMap<Address, u64> = HashMap::new();
@@ -1524,13 +1530,14 @@ impl<S: KvStore + 'static> Node<S> {
                     None => world_state.get_nonce(&tx.from)?,
                 };
 
-                validate_tx_for_import_with_expected_nonce(
+                validate_tx_for_import_at_block(
                     tx_for_validation.as_ref(),
                     world_state,
                     &import_cs,
                     &pre_verified,
                     self.config.chain_id,
-                    expected_nonce,
+                    Some(expected_nonce),
+                    &block.header,
                 )
                 .map_err(|e| {
                     NodeError::Startup(format!(
@@ -1575,6 +1582,7 @@ impl<S: KvStore + 'static> Node<S> {
                     evm.state_db_mut().world_state_mut(),
                     &import_cs,
                     self.config.chain_id,
+                    &block.header,
                 )
                 .map_err(|error| {
                     NodeError::Startup(format!(
@@ -1983,6 +1991,10 @@ mod tests {
             &mut world_state,
             &chain_store,
             1337,
+            &BlockHeader {
+                number: 1,
+                ..BlockHeader::default()
+            },
         )
         .unwrap_err();
         assert!(matches!(error, TxValidationError::SignatureInvalid));
