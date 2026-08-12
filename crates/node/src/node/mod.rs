@@ -4725,6 +4725,45 @@ mod tests {
     }
 
     #[test]
+    fn startup_recovery_rejects_broken_canonical_suffix_before_mutation() {
+        let (node, signer) = setup_node();
+        store_genesis(&node);
+        let finalized = node.produce_block(&signer, 100).unwrap();
+        let finalized_hash = finalized.hash();
+        node.finality
+            .write()
+            .set_finalized_direct(finalized.number(), finalized_hash);
+        node.chain_store
+            .set_finalized_number(finalized.number())
+            .unwrap();
+        let block_two = node.produce_block(&signer, 100).unwrap();
+        let block_three = node.produce_block(&signer, 100).unwrap();
+        let head_hash = block_three.hash();
+        node.chain_store
+            .set_canonical(block_two.number(), &head_hash)
+            .unwrap();
+
+        let error = node.recover_unfinalized_head().unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("startup recovery canonical suffix continuity broken"));
+        assert_eq!(node.chain_store.get_head_hash().unwrap(), Some(head_hash));
+        assert_eq!(
+            node.chain_store
+                .get_block_hash_by_number(block_two.number())
+                .unwrap(),
+            Some(head_hash)
+        );
+        assert_eq!(
+            node.chain_store
+                .get_block_hash_by_number(block_three.number())
+                .unwrap(),
+            Some(head_hash)
+        );
+    }
+
+    #[test]
     fn startup_recovery_preserves_head_without_durable_finality() {
         let (node, signer) = setup_node();
         store_genesis(&node);
