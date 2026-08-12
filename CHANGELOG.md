@@ -6,6 +6,8 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Reject session root authorization signatures made with algorithms deprecated
+  by the runtime registry while preserving algorithm-agile key rotation.
 - Create persisted libp2p identity keys exclusively with private permissions,
   and reject symbolic links or oversized identity files when loading them.
 - Restore or clear the durable state-trie pruning cursor during snapshot import
