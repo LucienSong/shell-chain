@@ -6,6 +6,8 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Restore or clear the durable state-trie pruning cursor during snapshot import
+  and reject snapshots whose cursor is ahead of their canonical head.
 - Reject startup when durable finality metadata is malformed or inconsistent
   with the canonical chain instead of restoring volatile genesis finality.
 - Keep round-robin proposer selection deterministic across target pointer widths

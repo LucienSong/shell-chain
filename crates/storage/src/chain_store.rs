@@ -173,6 +173,7 @@ mod prefix {
     pub const TOTAL_TX_COUNT: &[u8] = b"TOTAL_TX_COUNT";
     pub const TOTAL_GAS_USED: &[u8] = b"TOTAL_GAS_USED";
     pub const TOTALS_HEAD: &[u8] = b"TOTALS_HEAD";
+    pub const STATE_TRIE_PRUNED_BELOW: &[u8] = b"STATE_TRIE_PRUNED_BELOW";
     /// Side fork marker: key = "sf/" + block_number(8) + block_hash(32).
     pub const SIDE_FORK_BY_NUMBER: &[u8] = b"sf/";
 }
@@ -1604,6 +1605,7 @@ impl<S: KvStore> ChainStore<S> {
         let mut snapshot_chain_config = None;
         let mut snapshot_finalized_number = None;
         let mut snapshot_metadata_undo_pruned_finalized = None;
+        let mut snapshot_state_trie_pruned_below = None;
         let mut progress_keys = std::collections::HashSet::new();
         while let Some(entry) = snap_reader.next_entry()? {
             if entry.key == prefix::HEAD_BLOCK {
@@ -1626,6 +1628,7 @@ impl<S: KvStore> ChainStore<S> {
                     | prefix::TOTAL_TX_COUNT
                     | prefix::TOTAL_GAS_USED
                     | prefix::TOTALS_HEAD
+                    | prefix::STATE_TRIE_PRUNED_BELOW
             ) {
                 if !progress_keys.insert(entry.key.clone()) {
                     return Err(StorageError::State(
@@ -1656,6 +1659,13 @@ impl<S: KvStore> ChainStore<S> {
                         )
                     })?;
                     snapshot_metadata_undo_pruned_finalized = Some(u64::from_be_bytes(encoded));
+                } else if entry.key == prefix::STATE_TRIE_PRUNED_BELOW {
+                    let encoded: [u8; 8] = entry.value.as_slice().try_into().map_err(|_| {
+                        StorageError::State(
+                            "snapshot chain progress metadata has invalid length".into(),
+                        )
+                    })?;
+                    snapshot_state_trie_pruned_below = Some(u64::from_be_bytes(encoded));
                 }
             } else if entry.key == canonical_head_key {
                 if entry.value.len() != 32 {
@@ -1694,6 +1704,11 @@ impl<S: KvStore> ChainStore<S> {
         {
             return Err(StorageError::State(
                 "snapshot address metadata undo pruning cursor exceeds finalized height".into(),
+            ));
+        }
+        if snapshot_state_trie_pruned_below.unwrap_or(0) > metadata.block_number {
+            return Err(StorageError::State(
+                "snapshot state-trie pruning cursor exceeds canonical head".into(),
             ));
         }
 
@@ -1764,6 +1779,7 @@ impl<S: KvStore> ChainStore<S> {
                     | prefix::TOTAL_TX_COUNT
                     | prefix::TOTAL_GAS_USED
                     | prefix::TOTALS_HEAD
+                    | prefix::STATE_TRIE_PRUNED_BELOW
             ) {
                 pending_publication.put(entry.key, entry.value);
                 continue;
@@ -1810,6 +1826,7 @@ impl<S: KvStore> ChainStore<S> {
             prefix::TOTAL_TX_COUNT,
             prefix::TOTAL_GAS_USED,
             prefix::TOTALS_HEAD,
+            prefix::STATE_TRIE_PRUNED_BELOW,
         ] {
             if !progress_keys.contains(key) {
                 pending_publication.delete(key.to_vec());
@@ -3691,6 +3708,9 @@ mod tests {
         cs.set_total_tx_count(10).unwrap();
         cs.set_total_gas_used(U256::from(11)).unwrap();
         cs.set_chain_totals_head(9).unwrap();
+        store
+            .put(prefix::STATE_TRIE_PRUNED_BELOW, &9u64.to_be_bytes())
+            .unwrap();
         let block = empty_block(0);
         let block_hash = block.hash();
 
@@ -3737,6 +3757,10 @@ mod tests {
         assert_eq!(cs.get_total_tx_count().unwrap(), 0);
         assert_eq!(cs.get_total_gas_used().unwrap(), U256::ZERO);
         assert_eq!(cs.get_chain_totals_head().unwrap(), None);
+        assert!(store
+            .get(prefix::STATE_TRIE_PRUNED_BELOW)
+            .unwrap()
+            .is_none());
         assert_eq!(store.get(b"snapshot-key").unwrap(), Some(b"value".to_vec()));
     }
 
@@ -3811,6 +3835,86 @@ mod tests {
             .to_string()
             .contains("cursor exceeds finalized height"));
         assert!(store.get(b"untrusted-key").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_import_snapshot_rejects_state_trie_cursor_beyond_head_before_writes() {
+        let store = Arc::new(MemoryDb::new());
+        let cs = ChainStore::new(Arc::clone(&store));
+        let meta = crate::SnapshotMetadata::new(
+            1337,
+            1,
+            ShellHash::ZERO,
+            ShellHash::ZERO,
+            ShellHash::ZERO,
+        );
+        let mut buf = Vec::new();
+        {
+            let mut writer =
+                crate::SnapshotWriter::new(std::io::Cursor::new(&mut buf), meta).unwrap();
+            writer.write_entry(b"untrusted-key", b"value").unwrap();
+            writer
+                .write_entry(prefix::STATE_TRIE_PRUNED_BELOW, &2u64.to_be_bytes())
+                .unwrap();
+            writer.finalize().unwrap();
+        }
+
+        let error = cs
+            .import_snapshot(std::io::Cursor::new(buf), 1337, &ShellHash::ZERO)
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("state-trie pruning cursor exceeds canonical head"));
+        assert!(store.get(b"untrusted-key").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_import_snapshot_restores_state_trie_pruning_cursor() {
+        let store = Arc::new(MemoryDb::new());
+        let cs = ChainStore::new(Arc::clone(&store));
+        let block = empty_block(1);
+        let block_hash = block.hash();
+        let meta = crate::SnapshotMetadata::new(
+            1337,
+            block.number(),
+            block_hash,
+            block.header.state_root,
+            ShellHash::ZERO,
+        );
+        let mut buf = Vec::new();
+        {
+            let mut writer =
+                crate::SnapshotWriter::new(std::io::Cursor::new(&mut buf), meta).unwrap();
+            writer
+                .write_entry(prefix::HEAD_BLOCK, block_hash.as_bytes())
+                .unwrap();
+            writer
+                .write_entry(
+                    &ChainStore::<MemoryDb>::header_key(&block_hash),
+                    &encode_rlp(&block.header),
+                )
+                .unwrap();
+            write_snapshot_body(&mut writer, &block);
+            writer
+                .write_entry(
+                    &ChainStore::<MemoryDb>::number_key(block.number()),
+                    block_hash.as_bytes(),
+                )
+                .unwrap();
+            writer
+                .write_entry(prefix::STATE_TRIE_PRUNED_BELOW, &1u64.to_be_bytes())
+                .unwrap();
+            writer.finalize().unwrap();
+        }
+
+        cs.import_snapshot(std::io::Cursor::new(buf), 1337, &ShellHash::ZERO)
+            .unwrap();
+
+        assert_eq!(
+            store.get(prefix::STATE_TRIE_PRUNED_BELOW).unwrap(),
+            Some(1u64.to_be_bytes().to_vec())
+        );
     }
 
     #[test]
