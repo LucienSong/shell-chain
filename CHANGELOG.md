@@ -61,6 +61,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Commit state-trie node deletion and its durable pruning cursor atomically.
 - Validate canonical suffix continuity before startup recovery rewinds to the
   durable finalized checkpoint.
 - Reject `eth_getFilterLogs` results when the filter is uninstalled while the
