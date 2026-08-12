@@ -6,6 +6,8 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Reject startup when durable finality metadata is malformed or inconsistent
+  with the canonical chain instead of restoring volatile genesis finality.
 - Keep round-robin proposer selection deterministic across target pointer widths
   for block numbers above the native `usize` range.
 - Reject published releases whose GitHub prerelease state disagrees with the
