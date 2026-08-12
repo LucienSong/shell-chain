@@ -895,7 +895,13 @@ impl<S: KvStore + 'static> Node<S> {
                     "cannot recover unfinalized head: finalized block {finalized_hash} is unavailable"
                 ))
             })?;
-        let mut old_chain = Vec::with_capacity(
+        if finalized_block.number() != finalized_number || finalized_block.hash() != finalized_hash
+        {
+            return Err(NodeError::Startup(format!(
+                "cannot recover unfinalized head: finalized block metadata does not match canonical checkpoint #{finalized_number} ({finalized_hash})"
+            )));
+        }
+        let mut old_hashes = Vec::with_capacity(
             usize::try_from(head.number().saturating_sub(finalized_number)).unwrap_or(usize::MAX),
         );
         for number in finalized_number.saturating_add(1)..=head.number() {
@@ -907,16 +913,15 @@ impl<S: KvStore + 'static> Node<S> {
                         "cannot recover unfinalized head: canonical mapping for block #{number} is missing"
                     ))
                 })?;
-            let block = self
-                .chain_store
-                .get_block_by_hash(&block_hash)?
-                .ok_or_else(|| {
-                    NodeError::Startup(format!(
-                        "cannot recover unfinalized head: canonical block #{number} ({block_hash}) is unavailable"
-                    ))
-                })?;
-            old_chain.push(block);
+            old_hashes.push(block_hash);
         }
+        let old_chain = self.load_fork_segment(
+            "startup recovery canonical suffix",
+            finalized_hash,
+            finalized_number,
+            &old_hashes,
+            true,
+        )?;
 
         // Preflight the finalized state and algorithm registry before committing
         // the canonical rollback. A malformed or pruned state root must leave the

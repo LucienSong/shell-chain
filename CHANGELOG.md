@@ -61,6 +61,8 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Validate canonical suffix continuity before startup recovery rewinds to the
+  durable finalized checkpoint.
 - Reject `eth_getFilterLogs` results when the filter is uninstalled while the
   query is in progress.
 - Evaluate custom-account, paymaster, and session authorization against the
