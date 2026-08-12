@@ -887,62 +887,6 @@ impl<S: KvStore + 'static> Node<S> {
                                         info!(epoch, block = number, "new epoch started");
                                     }
                                 }
-                                // Reload validators at epoch boundaries (F-041: handle errors).
-                                // F-061: Scope read lock explicitly to prevent deadlock.
-                                let is_epoch = {
-                                    self.consensus.read().poa_config().is_epoch_boundary(number)
-                                };
-                                if is_epoch {
-                                    let validators = {
-                                        let ws = self.world_state.read();
-                                        ws.get_validators()
-                                    };
-                                    match validators {
-                                        Ok(v) if !v.is_empty() => {
-                                            self.consensus.write().set_authorities(v.clone());
-
-                                            // §5.4 offline-slash enforcement: at each epoch
-                                            // boundary, detect validators that haven't proposed
-                                            // for `offline_window_blocks` and slash them.
-                                            let slash_config = SlashingConfig::default();
-                                            let last_by = self.last_proposed_by.lock().clone();
-                                            for addr in &v {
-                                                let last = last_by
-                                                    .get(addr)
-                                                    .copied()
-                                                    .unwrap_or(0);
-                                                if let Some(record) = detect_offline(
-                                                    addr,
-                                                    last,
-                                                    number,
-                                                    &slash_config,
-                                                ) {
-                                                    warn!(
-                                                        validator = %record.validator,
-                                                        last_block = last,
-                                                        current_block = number,
-                                                        "offline-slash: validator has not proposed \
-                                                         since block #{last}; slashing"
-                                                    );
-                                                    self.consensus
-                                                        .write()
-                                                        .slash_authority(&record.validator);
-                                                }
-                                            }
-                                        }
-                                        Ok(_) => {
-                                            // Empty validator set in world state — keep current authorities.
-                                        }
-                                        Err(e) => {
-                                            tracing::error!(
-                                                error = %e,
-                                                block = number,
-                                                "CRITICAL: failed to reload validators at epoch boundary — \
-                                                 continuing with stale validator set may cause consensus divergence"
-                                            );
-                                        }
-                                    }
-                                }
                                 self.slash_timed_out_challenges(number);
                                 self.consensus
                                     .write()
