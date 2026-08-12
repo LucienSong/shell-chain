@@ -6,10 +6,13 @@ fail() {
     exit 1
 }
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/release-version.sh"
+
 REMOTE="${1:-origin}"
 TAG="${2:-}"
 
-if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+if ! release_tag_is_valid "$TAG"; then
     fail "expected a semver tag with a leading 'v'"
 fi
 

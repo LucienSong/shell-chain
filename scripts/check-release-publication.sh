@@ -11,11 +11,12 @@ TAG="${2:-}"
 RELEASE_COMMIT="${3:-}"
 GH_BIN="${GH_BIN:-gh}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/release-version.sh"
 
 if [ -z "$REMOTE" ]; then
     fail "expected a release remote"
 fi
-if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+if ! release_tag_is_valid "$TAG"; then
     fail "expected a semver tag with a leading 'v'"
 fi
 if [[ ! "$RELEASE_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
