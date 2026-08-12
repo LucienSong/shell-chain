@@ -428,6 +428,11 @@ P2P payloads use a two-level size policy. The absolute raw-message ceiling is
 50 MiB so PQ-signed block/body sync responses can still move over the network.
 An embedding application's network configuration may lower this ceiling but
 cannot raise it.
+
+The node persists its libp2p identity as `libp2p.key` beneath the data
+directory. It creates this file exclusively with private permissions and
+refuses symbolic links, non-regular files, and oversized key material.
+
 After decoding, tighter per-message limits apply: transaction gossip is capped
 at 1 MiB, consensus/proof messages at 2 MiB, and control messages at 64 KiB.
 Oversized messages are rejected and repeated violations count against the peer.

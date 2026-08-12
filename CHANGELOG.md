@@ -6,6 +6,8 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Create persisted libp2p identity keys exclusively with private permissions,
+  and reject symbolic links or oversized identity files when loading them.
 - Restore or clear the durable state-trie pruning cursor during snapshot import
   and reject snapshots whose cursor is ahead of their canonical head.
 - Reject startup when durable finality metadata is malformed or inconsistent
