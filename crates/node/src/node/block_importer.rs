@@ -512,7 +512,7 @@ impl<S: KvStore + 'static> Node<S> {
             let tx_hashes = block
                 .transactions
                 .iter()
-                .map(SignedTransaction::hash)
+                .map(SignedTransaction::sender_signing_hash)
                 .collect::<Vec<_>>();
             let mut signing_pubkeys = Vec::with_capacity(block.transactions.len());
             for tx in &block.transactions {
@@ -1412,7 +1412,11 @@ impl<S: KvStore + 'static> Node<S> {
             // executed in the read-only validation pass below.
             let batch_verifier = MultiVerifier;
             let signature_state = WorldState::at_root(import_store.clone(), &current_root)?;
-            let tx_hashes: Vec<ShellHash> = block.transactions.iter().map(|tx| tx.hash()).collect();
+            let tx_hashes: Vec<ShellHash> = block
+                .transactions
+                .iter()
+                .map(SignedTransaction::sender_signing_hash)
+                .collect();
             let mut signing_pubkeys: Vec<Option<Vec<u8>>> =
                 Vec::with_capacity(block.transactions.len());
             for tx in &block.transactions {

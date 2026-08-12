@@ -12,7 +12,7 @@ use shell_core::Block;
 use shell_crypto::{DilithiumSigner, Signer};
 use shell_genesis::{
     initialize_authority_pubkeys, initialize_genesis, AllocEntry, ConsensusConfig, GenesisConfig,
-    NetworkType,
+    NetworkType, TRANSACTION_ID_GENESIS_DOMAIN,
 };
 use shell_keystore::{decrypt_any, EncryptedKey};
 use shell_mempool::{MempoolConfig, DEFAULT_MAX_POOL_BYTES};
@@ -273,6 +273,28 @@ fn repair_head_state_if_needed<S: KvStore + 'static>(
     Ok(true)
 }
 
+fn validate_transaction_id_protocol<S: KvStore + 'static>(
+    chain_store: &ChainStore<S>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(config) = chain_store.get_chain_config()? else {
+        return Ok(());
+    };
+    let genesis = chain_store
+        .get_header_by_hash(&config.genesis_hash)?
+        .ok_or_else(|| "chain configuration references a missing genesis header".to_string())?;
+    if !genesis
+        .extra_data
+        .as_ref()
+        .starts_with(TRANSACTION_ID_GENESIS_DOMAIN)
+    {
+        return Err(
+            "database uses legacy transaction identity rules; this upgrade requires a fresh genesis (back up required data, run `shell-node removedb --force`, then initialize the chain again)"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
 /// Start the node: load genesis, initialize state, and run the event loop.
 pub async fn run(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
     let _: NetworkType = args.network.parse()?;
@@ -377,6 +399,7 @@ async fn run_with_store<S: KvStore + 'static>(
 
     // Check if chain is already initialized (persistent storage resume).
     let chain_store = ChainStore::new(store.clone());
+    validate_transaction_id_protocol(&chain_store)?;
     let mut resumed = match chain_store.get_head_block()? {
         Some(head) => {
             info!(
@@ -875,7 +898,7 @@ mod tests {
     use shell_genesis::initialize_genesis;
     use shell_node::config::ParallelPqvmConfig;
     use shell_primitives::{Bytes, U256};
-    use shell_storage::{MemoryDb, DEFAULT_BODY_RETENTION, DEFAULT_WITNESS_RETENTION};
+    use shell_storage::{ChainConfig, MemoryDb, DEFAULT_BODY_RETENTION, DEFAULT_WITNESS_RETENTION};
     use std::collections::HashMap;
 
     /// Verify that `--parallel-pqvm --parallel-pqvm-workers 4` produces the correct config.
@@ -1120,6 +1143,42 @@ mod tests {
             system_transactions: vec![],
             proposer_seal: None,
         }
+    }
+
+    #[test]
+    fn transaction_id_protocol_accepts_current_genesis() {
+        let store = Arc::new(MemoryDb::new());
+        let authority = Address::from([7u8; 20]);
+        initialize_genesis(&test_genesis(authority), Arc::clone(&store)).unwrap();
+
+        validate_transaction_id_protocol(&ChainStore::new(store)).unwrap();
+    }
+
+    #[test]
+    fn transaction_id_protocol_rejects_legacy_genesis() {
+        let authority = Address::from([7u8; 20]);
+        let config = test_genesis(authority);
+        let source_store = Arc::new(MemoryDb::new());
+        let mut genesis = initialize_genesis(&config, source_store).unwrap();
+        let current_hash = genesis.hash();
+        genesis.header.extra_data = Bytes::copy_from_slice(config.extra_data.as_bytes());
+        let legacy_hash = genesis.hash();
+        assert_ne!(legacy_hash, current_hash);
+
+        let store = Arc::new(MemoryDb::new());
+        let chain_store = ChainStore::new(store);
+        chain_store
+            .commit_genesis_block(
+                &genesis,
+                &ChainConfig {
+                    chain_id: config.chain_id,
+                    genesis_hash: legacy_hash,
+                },
+            )
+            .unwrap();
+
+        let error = validate_transaction_id_protocol(&chain_store).unwrap_err();
+        assert!(error.to_string().contains("requires a fresh genesis"));
     }
 
     #[test]

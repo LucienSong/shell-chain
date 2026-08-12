@@ -177,6 +177,29 @@ curl -s http://localhost:8545 \
   -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
 ```
 
+### v0.27.4 upgrade notes
+
+v0.27.4 changes canonical transaction identifiers and commits the new rules
+into genesis. Existing alpha-testnet databases require a fresh genesis. Back
+up any state you need before upgrading, and use the coordinated genesis
+configuration for every validator.
+
+```bash
+sudo systemctl stop shell-node
+
+git pull origin main
+cargo build --release -p shell-cli --bin shell-node
+sudo install -m 0755 target/release/shell-node /usr/local/bin/shell-node
+
+shell-node --datadir /var/lib/shell-chain removedb --force
+shell-node --datadir /var/lib/shell-chain init \
+  --genesis /etc/shell-chain/genesis.json \
+  --chain-id 10 \
+  --network testnet
+
+sudo systemctl start shell-node
+```
+
 ### v0.24.x upgrade notes
 
 v0.24.0 changed the BLAKE3 wire format. RocksDB data written by v0.23.x is incompatible with v0.24.x and requires a fresh genesis. Back up any state you need before upgrading from v0.23.x or earlier.

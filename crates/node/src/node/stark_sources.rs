@@ -9,7 +9,7 @@
 //!
 //! # Mapping rules
 //!
-//! * `msg_hash` – the 32-byte transaction hash.
+//! * `msg_hash` – the 32-byte sender signing hash.
 //! * `pk_hash`  – for [`PubkeyMode::Embedded`], the first ≤32 bytes of the
 //!   inline public key; for [`PubkeyMode::Reference`], the 20-
 //!   byte sender address (32 bytes in v0.23.0+) zero-padded to 32 bytes.
@@ -25,7 +25,7 @@ use super::{Block, SigBatchEntry, SignedTransaction};
 /// the mapping independently.
 pub(crate) fn tx_to_sig_batch_entry(tx: &SignedTransaction) -> SigBatchEntry {
     let mut msg_hash = [0u8; 32];
-    msg_hash.copy_from_slice(tx.hash().as_bytes());
+    msg_hash.copy_from_slice(tx.sender_signing_hash().as_bytes());
 
     let pk_hash = match &tx.pubkey_mode {
         PubkeyMode::Embedded(pk) => {
@@ -64,4 +64,40 @@ pub(crate) fn entries_from_txs(txs: &[SignedTransaction]) -> Vec<SigBatchEntry> 
 /// Equivalent to [`entries_from_txs`]`(&block.transactions)`.
 pub(crate) fn block_to_sig_batch_entries(block: &Block) -> Vec<SigBatchEntry> {
     entries_from_txs(&block.transactions)
+}
+
+#[cfg(test)]
+mod tests {
+    use shell_core::Transaction;
+    use shell_crypto::{PQSignature, SignatureType};
+    use shell_primitives::{Address, Bytes, U256};
+
+    use super::*;
+
+    #[test]
+    fn signature_entry_uses_sender_signing_hash_not_transaction_id() {
+        let tx = Transaction {
+            chain_id: 10,
+            nonce: 1,
+            to: Some(Address::from([0x11; 20])),
+            value: U256::from(2u64),
+            data: Bytes::new(),
+            gas_limit: 21_000,
+            max_fee_per_gas: 1,
+            max_priority_fee_per_gas: 0,
+            tx_type: 0,
+            access_list: None,
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: None,
+        };
+        let signed = SignedTransaction::new(
+            Address::from([0x22; 20]),
+            tx,
+            PQSignature::new(SignatureType::Dilithium3, vec![0xAA; 32]),
+        );
+
+        let entry = tx_to_sig_batch_entry(&signed);
+        assert_eq!(entry.msg_hash, *signed.sender_signing_hash().as_bytes());
+        assert_ne!(entry.msg_hash, *signed.hash().as_bytes());
+    }
 }

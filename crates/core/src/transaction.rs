@@ -443,6 +443,9 @@ pub const PQTX_BUNDLE_DOMAIN: &[u8; 16] = b"PQTX_BUNDLE_V1\0\0";
 /// Domain tag for the paymaster authorization signing hash.
 pub const PQTX_PAYMASTER_DOMAIN: &[u8; 16] = b"PQTX_PAYMASTER_V";
 
+/// Domain prefix for canonical signed-transaction identifiers.
+pub const PQTX_ID_DOMAIN: &[u8; 16] = b"PQTX_IDENTITY_V1";
+
 /// Domain tag for session key authorization hash.
 pub const PQTX_SESSION_DOMAIN: &[u8; 16] = b"PQTX_SESSION_V2\0";
 
@@ -1637,7 +1640,8 @@ impl SignedTransaction {
     /// Canonical signing hash for AA-bundle senders (WP §AA-spec):
     /// `blake3( PQTX_BUNDLE_V1\0\0(16B) || tx_signing_hash(32B) || rlp(aa_bundle_for_signing) )`.
     ///
-    /// Returns `None` for non-AA transactions (callers should use [`Self::hash`]).
+    /// Returns `None` for non-AA transactions (callers should use
+    /// [`Self::sender_signing_hash`]).
     pub fn batch_signing_hash(&self) -> Option<ShellHash> {
         let bundle = self.aa_bundle.as_ref()?;
         if self.tx.tx_type != AA_BUNDLE_TX_TYPE {
@@ -1667,24 +1671,29 @@ impl SignedTransaction {
         Some(shell_primitives::blake3_hash(&buf))
     }
 
-    /// Legacy transaction ID: the simple tx signing hash independent of AA bundle.
+    /// Legacy/simple signing hash independent of the AA bundle.
     ///
-    /// This remains useful for compatibility and migration logic. New canonical
-    /// AA transaction identity must include the bundle, otherwise two AA
-    /// envelopes with different inner calls collide in mempool/storage indexes.
+    /// This remains useful for compatibility and migration logic, but is not a
+    /// canonical transaction identifier.
     pub fn legacy_hash(&self) -> ShellHash {
         self.tx.signing_hash(self.signature.sig_type.as_u8())
     }
 
     /// Canonical transaction ID.
     ///
-    /// For AA bundles this is the bundle-aware signing hash. For all other
-    /// transactions it remains the simple tx signing hash.
+    /// The authenticated sender is part of the identifier so two accounts with
+    /// identical transaction fields cannot collide in mempool and chain indexes.
+    /// Authentication witnesses remain excluded, keeping the ID stable when an
+    /// embedded public key is later represented by an on-chain reference.
     /// Cached after first computation via `OnceLock`.
     pub fn hash(&self) -> ShellHash {
         *self.tx_hash.get_or_init(|| {
-            self.batch_signing_hash()
-                .unwrap_or_else(|| self.legacy_hash())
+            let signing_hash = self.sender_signing_hash();
+            let mut preimage = Vec::with_capacity(PQTX_ID_DOMAIN.len() + 32 + 32);
+            preimage.extend_from_slice(PQTX_ID_DOMAIN);
+            preimage.extend_from_slice(self.from.as_ref());
+            preimage.extend_from_slice(signing_hash.as_bytes());
+            shell_primitives::blake3_hash(&preimage)
         })
     }
 
@@ -2064,16 +2073,30 @@ mod tests {
     }
 
     #[test]
-    fn signed_tx_hash_excludes_signature() {
+    fn signed_tx_hash_binds_sender_but_excludes_signature() {
         let tx = sample_tx();
-        let hash_before = tx.hash();
-        let from = Address::from([0x42; 20]);
+        let from_a = Address::from([0x42; 20]);
+        let from_b = Address::from([0x43; 20]);
 
-        let sig = PQSignature::new(SignatureType::Dilithium3, vec![0xAA; 100]);
-        let signed = SignedTransaction::new(from, tx, sig);
+        let signed_a = SignedTransaction::new(
+            from_a,
+            tx.clone(),
+            PQSignature::new(SignatureType::Dilithium3, vec![0xAA; 100]),
+        );
+        let signed_a_resigned = SignedTransaction::new(
+            from_a,
+            tx.clone(),
+            PQSignature::new(SignatureType::Dilithium3, vec![0xBB; 100]),
+        );
+        let signed_b = SignedTransaction::new(
+            from_b,
+            tx,
+            PQSignature::new(SignatureType::Dilithium3, vec![0xAA; 100]),
+        );
 
-        assert_eq!(signed.hash(), hash_before);
-        assert_eq!(signed.sender(), from);
+        assert_eq!(signed_a.hash(), signed_a_resigned.hash());
+        assert_ne!(signed_a.hash(), signed_b.hash());
+        assert_eq!(signed_a.sender(), from_a);
     }
 
     #[test]
@@ -3775,7 +3798,7 @@ mod tests {
         let legacy_hash = signed.legacy_hash();
         // Domain byte + bundle bytes guarantee distinct hashes.
         assert_ne!(batch_hash, legacy_hash);
-        assert_eq!(signed.hash(), batch_hash);
+        assert_ne!(signed.hash(), batch_hash);
     }
 
     #[test]

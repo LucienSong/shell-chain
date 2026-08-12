@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Bind the sender-bound transaction identity rules into the genesis header.
+  Existing databases use the legacy identity rules and cannot be resumed by
+  this release.
+
+### Migration Guide
+
+- Alpha testnet operators must stop the node, back up any required state, run
+  `shell-node --datadir <path> removedb --force`, and initialize the chain from
+  the coordinated genesis configuration before restarting. The upgraded node
+  rejects legacy databases with a clear migration error.
+
 ### Changed
 
 - Revalidate canonical `main` and the exact annotated tag source after release
@@ -42,6 +55,10 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Bind canonical signed-transaction identifiers to the authenticated sender so
+  distinct accounts with identical transaction payloads cannot collide in the
+  mempool, receipt, or transaction indexes while authentication witnesses
+  remain excluded from the identifier.
 - Revalidate imported transactions against prior in-block state changes so key
   rotations and account or paymaster policy updates take effect immediately.
 - Propagate authority-registry and equivocation lookup storage failures during

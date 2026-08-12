@@ -4,6 +4,13 @@ use shell_storage::{ChainConfig, ChainStore, KvStore, StorageError, WorldState};
 
 use crate::{AllocEntry, GenesisConfig, GenesisError};
 
+/// Genesis commitment for the sender-bound transaction identity rules.
+///
+/// Including this domain in the genesis header gives upgraded networks a
+/// distinct genesis hash and prevents nodes with incompatible transaction-ID
+/// semantics from sharing canonical history.
+pub const TRANSACTION_ID_GENESIS_DOMAIN: &[u8; 16] = b"SHELL_TXID_V2\0\0\0";
+
 /// Initialize world state from genesis allocations and produce the genesis block.
 ///
 /// Persists the genesis block into `chain_store` and writes chain configuration
@@ -83,6 +90,11 @@ pub fn initialize_genesis<S: KvStore + 'static>(
         .copied()
         .unwrap_or(Address::ZERO);
 
+    let mut genesis_extra_data =
+        Vec::with_capacity(TRANSACTION_ID_GENESIS_DOMAIN.len() + config.extra_data.len());
+    genesis_extra_data.extend_from_slice(TRANSACTION_ID_GENESIS_DOMAIN);
+    genesis_extra_data.extend_from_slice(config.extra_data.as_bytes());
+
     let header = BlockHeader {
         parent_hash: ShellHash::ZERO,
         state_root,
@@ -93,7 +105,7 @@ pub fn initialize_genesis<S: KvStore + 'static>(
         gas_limit: config.gas_limit,
         gas_used: 0,
         timestamp: config.timestamp,
-        extra_data: Bytes::copy_from_slice(config.extra_data.as_bytes()),
+        extra_data: Bytes::from(genesis_extra_data),
         proposer,
         sig_aggregate_proof: None,
         base_fee_per_gas: 0,
@@ -451,7 +463,10 @@ mod tests {
         let store = Arc::new(MemoryDb::new());
         let block = initialize_genesis(&config, store).unwrap();
 
-        assert_eq!(block.header.extra_data.as_ref(), b"genesis");
+        assert_eq!(
+            block.header.extra_data.as_ref(),
+            [TRANSACTION_ID_GENESIS_DOMAIN.as_slice(), b"genesis"].concat()
+        );
     }
 
     #[test]

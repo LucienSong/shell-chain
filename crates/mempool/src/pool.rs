@@ -1507,6 +1507,23 @@ mod tests {
     }
 
     #[test]
+    fn identical_payloads_from_different_senders_do_not_collide() {
+        let pool = TxPool::new(make_config());
+        let verifier = DilithiumVerifier;
+        let (mut ws, cs) = setup_validation_ctx();
+        let (first, _first_pk) = make_signed_tx(0, 100);
+        let (second, _second_pk) = make_signed_tx(0, 100);
+
+        assert_ne!(first.sender(), second.sender());
+        assert_eq!(first.tx, second.tx);
+        assert_ne!(first.hash(), second.hash());
+
+        insert_rich(&pool, first, &verifier, &mut ws, &cs).unwrap();
+        insert_rich(&pool, second, &verifier, &mut ws, &cs).unwrap();
+        assert_eq!(pool.len(), 2);
+    }
+
+    #[test]
     fn reject_wrong_chain_id() {
         let pool = TxPool::new(make_config());
         let verifier = DilithiumVerifier;
