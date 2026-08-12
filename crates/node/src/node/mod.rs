@@ -21,10 +21,9 @@ pub(crate) use tokio::sync::watch;
 pub(crate) use tracing::{debug, info, warn};
 
 pub(crate) use shell_consensus::{
-    detect_offline, Attestation, ConsensusEngine, EngineType, EquivocationProof, FinalityState,
-    ForkChoice, PeerScorer, PeerScoringConfig, ProofRateLimiter, ProofWindowManager,
-    RateLimiterConfig, SlashingConfig, ViewChangeMessage, WPoaEvent, WPoaRound, WindowConfig,
-    VIEW_CHANGE_TIMEOUT_MS,
+    Attestation, ConsensusEngine, EngineType, EquivocationProof, FinalityState, ForkChoice,
+    PeerScorer, PeerScoringConfig, ProofRateLimiter, ProofWindowManager, RateLimiterConfig,
+    ViewChangeMessage, WPoaEvent, WPoaRound, WindowConfig, VIEW_CHANGE_TIMEOUT_MS,
 };
 pub(crate) use shell_core::{
     calc_blob_gas_price, calc_excess_blob_gas, calculate_base_fee, effective_gas_price, Block,
@@ -7493,22 +7492,7 @@ mod tests {
             node.produce_block(&signer, 0).unwrap();
         }
 
-        // Block 3 is an epoch boundary (epoch_length=3).
-        // Simulate the epoch boundary sync that the event loop would do.
-        {
-            let consensus = node.consensus.read();
-            if consensus.poa_config().is_epoch_boundary(3) {
-                drop(consensus);
-                let ws = node.world_state.read();
-                let validators = ws.get_validators().unwrap();
-                drop(ws);
-                if !validators.is_empty() {
-                    node.consensus.write().set_authorities(validators);
-                }
-            }
-        }
-
-        // After epoch boundary reload, consensus should have 2 authorities.
+        // Block production performs the canonical weighted reload at the boundary.
         let consensus_guard = node.consensus.read();
         let authorities = &consensus_guard.poa_config().authorities;
         assert_eq!(authorities.len(), 2);
@@ -7557,21 +7541,7 @@ mod tests {
         // Produce block 2 — epoch boundary (epoch_length=2).
         node.produce_block(&signer, 0).unwrap();
 
-        // Simulate epoch boundary sync.
-        {
-            let consensus = node.consensus.read();
-            if consensus.poa_config().is_epoch_boundary(2) {
-                drop(consensus);
-                let ws = node.world_state.read();
-                let validators = ws.get_validators().unwrap();
-                drop(ws);
-                if !validators.is_empty() {
-                    node.consensus.write().set_authorities(validators);
-                }
-            }
-        }
-
-        // Now the validator set should be updated.
+        // The canonical reload happens inside block production.
         assert_eq!(node.consensus.read().poa_config().authorities.len(), 2);
     }
 
@@ -7588,7 +7558,7 @@ mod tests {
         let db = Arc::new(MemoryDb::new());
         let chain_store = Arc::new(ChainStore::new(db.clone()));
         let world_state = Arc::new(RwLock::new(WorldState::new(db.clone())));
-        let poa = PoaConfig::new(vec![authority], 1);
+        let poa = PoaConfig::new(vec![authority], 1).with_epoch_length(1);
         let consensus: Arc<RwLock<dyn ConsensusEngine>> = Arc::new(RwLock::new(WPoaEngine::new(
             WPoaConfig::with_weights(poa, vec![1]),
             Arc::new(MultiVerifier),
@@ -7607,7 +7577,8 @@ mod tests {
                 .unwrap();
         }
 
-        node.reload_authorities_if_boundary(1).unwrap();
+        store_genesis(&node);
+        node.produce_block(&signer, 0).unwrap();
 
         let consensus = node.consensus.read();
         let weights = consensus.validator_weights();
