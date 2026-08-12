@@ -58,11 +58,36 @@ impl<S: KvStore + 'static> NodeBuilder<S> {
         let store = self.store.take().expect("store must be set");
 
         let chain_store = Arc::new(ChainStore::new(store.clone()));
+        let finalized_number = chain_store.get_finalized_number()?;
+        let head = chain_store.get_head_block()?;
+
+        // Finality is a durable safety boundary. Validate it before constructing
+        // volatile state so malformed metadata cannot be downgraded to genesis.
+        if let Some(finalized_number) = finalized_number {
+            let head = head.as_ref().ok_or_else(|| {
+                NodeError::Startup(format!(
+                    "finalized block #{finalized_number} exists without a canonical head"
+                ))
+            })?;
+            if finalized_number > head.number() {
+                return Err(NodeError::Startup(format!(
+                    "finalized block #{finalized_number} is ahead of canonical head #{}",
+                    head.number()
+                )));
+            }
+            chain_store
+                .get_block_hash_by_number(finalized_number)?
+                .ok_or_else(|| {
+                    NodeError::Startup(format!(
+                        "canonical mapping for finalized block #{finalized_number} is missing"
+                    ))
+                })?;
+        }
 
         let cache_mb = self.config.state_cache_size_mb;
 
         // Resume from existing chain state if available.
-        let world_state = match chain_store.get_head_block()? {
+        let world_state = match head {
             Some(head) => {
                 let state_root = head.header.state_root;
                 let block_number = head.number();
@@ -196,6 +221,91 @@ mod tests {
         assert!(matches!(
             err,
             NodeError::Startup(message) if message.contains("world state validation failed")
+        ));
+    }
+
+    #[test]
+    fn build_rejects_malformed_finalized_number() {
+        let authority = Address::from_public_key(b"test-authority", 0);
+        let config = NodeConfig::dev(authority);
+        let store = Arc::new(MemoryDb::new());
+        store.put(b"FINALIZED", &[0; 7]).unwrap();
+
+        let result = NodeBuilder::new(config, store).build();
+
+        assert!(matches!(
+            result,
+            Err(NodeError::Storage(StorageError::Codec(message)))
+                if message.contains("invalid finalized number encoding")
+        ));
+    }
+
+    #[test]
+    fn build_rejects_finalized_height_without_head() {
+        let authority = Address::from_public_key(b"test-authority", 0);
+        let config = NodeConfig::dev(authority);
+        let store = Arc::new(MemoryDb::new());
+        let chain_store = ChainStore::new(store.clone());
+        chain_store.set_finalized_number(0).unwrap();
+
+        let result = NodeBuilder::new(config, store).build();
+
+        assert!(matches!(
+            result,
+            Err(NodeError::Startup(message))
+                if message.contains("finalized block #0 exists without a canonical head")
+        ));
+    }
+
+    #[test]
+    fn build_rejects_finalized_height_without_canonical_mapping() {
+        let authority = Address::from_public_key(b"test-authority", 0);
+        let config = NodeConfig::dev(authority);
+        let store = Arc::new(MemoryDb::new());
+        let chain_store = ChainStore::new(store.clone());
+        let block = Block {
+            header: BlockHeader::default(),
+            transactions: Vec::new(),
+            system_transactions: Vec::new(),
+            proposer_seal: None,
+        };
+        let block_hash = block.hash();
+        chain_store.put_block(&block).unwrap();
+        chain_store.set_head(&block_hash).unwrap();
+        chain_store.set_finalized_number(0).unwrap();
+
+        let result = NodeBuilder::new(config, store).build();
+
+        assert!(matches!(
+            result,
+            Err(NodeError::Startup(message))
+                if message.contains("canonical mapping for finalized block #0 is missing")
+        ));
+    }
+
+    #[test]
+    fn build_rejects_finalized_height_ahead_of_head() {
+        let authority = Address::from_public_key(b"test-authority", 0);
+        let config = NodeConfig::dev(authority);
+        let store = Arc::new(MemoryDb::new());
+        let chain_store = ChainStore::new(store.clone());
+        let block = Block {
+            header: BlockHeader::default(),
+            transactions: Vec::new(),
+            system_transactions: Vec::new(),
+            proposer_seal: None,
+        };
+        let block_hash = block.hash();
+        chain_store.put_block(&block).unwrap();
+        chain_store.set_head(&block_hash).unwrap();
+        chain_store.set_finalized_number(1).unwrap();
+
+        let result = NodeBuilder::new(config, store).build();
+
+        assert!(matches!(
+            result,
+            Err(NodeError::Startup(message))
+                if message.contains("finalized block #1 is ahead of canonical head #0")
         ));
     }
 }

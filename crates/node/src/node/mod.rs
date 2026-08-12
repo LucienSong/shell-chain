@@ -883,6 +883,8 @@ impl<S: KvStore + 'static> Node<S> {
             parking_lot::Mutex::new(AggregationScheduler::new(AggregationConfig::default(), 0));
 
         // F-094: Recover finalized state from persistent storage on restart.
+        // NodeBuilder validates durable finality before reaching this constructor;
+        // direct construction remains intentionally infallible for tests.
         let (fin_number, fin_hash) = {
             let stored = chain_store
                 .get_finalized_number()
