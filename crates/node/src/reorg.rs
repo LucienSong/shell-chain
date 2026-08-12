@@ -162,7 +162,7 @@ impl ReorgEngine {
         // The committed old blocks are no longer needed. Move their transactions
         // into the result instead of cloning every signature and calldata buffer.
         let mut reverted_txs = Vec::with_capacity(reverted_tx_count);
-        for mut block in old_blocks.into_iter().rev() {
+        for mut block in old_blocks {
             reverted_txs.append(&mut block.transactions);
         }
         *world_state.write() = tip_ws;
@@ -940,7 +940,7 @@ mod tests {
         // Old chain: 2 blocks, each with 1 unique tx.
         let tx_a = make_tx();
         let mut tx_b = make_tx();
-        tx_b.tx.nonce = 99; // different tx
+        tx_b.tx.nonce = tx_a.tx.nonce + 1;
 
         let mut old6 = make_block(6, ancestor_hash, root);
         old6.transactions.push(tx_a.clone());
@@ -969,8 +969,8 @@ mod tests {
 
         // Both txs should be in reverted list since they aren't in the new chain.
         assert_eq!(result.reverted_txs.len(), 2);
-        assert_eq!(result.reverted_txs[0].hash(), tx_b.hash());
-        assert_eq!(result.reverted_txs[1].hash(), tx_a.hash());
+        assert_eq!(result.reverted_txs[0].hash(), tx_a.hash());
+        assert_eq!(result.reverted_txs[1].hash(), tx_b.hash());
     }
 
     #[test]
