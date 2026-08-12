@@ -55,6 +55,9 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Clear block-sync request state when sending the next peer-targeted batch
+  fails, instead of waiting for a response to a request that was never sent.
+- Upgrade `lru` to 0.18.2 to resolve RUSTSEC-2026-0253.
 - Bind canonical signed-transaction identifiers to the authenticated sender so
   distinct accounts with identical transaction payloads cannot collide in the
   mempool, receipt, or transaction indexes while authentication witnesses
