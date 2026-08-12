@@ -146,10 +146,6 @@ fn bounded_finalized_request_numbers(
         .take_while(move |number| *number <= finalized_number)
 }
 
-fn next_block_sync_request_start(last_imported: u64) -> Option<u64> {
-    last_imported.checked_add(1)
-}
-
 fn proof_amendment_envelope_matches(
     envelope_hash: ShellHash,
     envelope_block: u64,
@@ -1436,7 +1432,7 @@ impl<S: KvStore + 'static> Node<S> {
                                     }
                                     // Request next batch if we imported blocks
                                     // (there may be more to catch up on).
-                                    if let Some(last_ok) = last_ok {
+                                    if last_ok.is_some() {
                                         let peers = network.peer_count().await;
                                         if peers == 0 {
                                             sync_requested = false;
@@ -1453,40 +1449,16 @@ impl<S: KvStore + 'static> Node<S> {
                                             ));
                                             continue;
                                         }
-                                        let Some(next_start) =
-                                            next_block_sync_request_start(last_ok)
-                                        else {
-                                            sync_requested = false;
-                                            sync_request = None;
-                                            production_readiness.refresh(
-                                                peers,
-                                                sync_requested,
-                                                self.head_number(),
-                                                std::time::Instant::now(),
-                                            );
-                                            sync_retry_attempts_without_progress = 0;
-                                            sync_retry_timer.reset_after(Duration::from_secs(
-                                                SYNC_RETRY_BASE_INTERVAL_SECS,
-                                            ));
-                                            continue;
-                                        };
-                                        let nonce = std::time::SystemTime::now()
-                                            .duration_since(std::time::UNIX_EPOCH)
-                                            .unwrap_or_default()
-                                            .as_nanos() as u64;
-                                        let req = NetworkMessage::BlockRequest {
-                                            start_number: next_start,
-                                            count: 1, // 1 block at a time — PQ-signed blocks can be several MB
-                                            nonce,
-                                        };
-                                        let _ = network.send_to_peer(&peer, req).await;
-                                        sync_requested = true;
-                                        sync_request = Some(BlockRequestState {
-                                            nonce,
-                                            start_number: next_start,
-                                            peer: Some(peer.clone()),
-                                        });
-                                        if response_matches_sync {
+                                        let request_sent = self
+                                            .request_missing_blocks(
+                                                &network,
+                                                Some(&peer),
+                                                &mut sync_requested,
+                                                &mut sync_request,
+                                                "block-response-next-batch",
+                                            )
+                                            .await;
+                                        if request_sent {
                                             production_readiness.note_sync_requested(
                                                 self.head_number(),
                                                 std::time::Instant::now(),
@@ -1494,11 +1466,11 @@ impl<S: KvStore + 'static> Node<S> {
                                                 "block-response-next-batch",
                                             );
                                         } else {
-                                            production_readiness.note_head_probe(
+                                            production_readiness.refresh(
+                                                peers,
+                                                sync_requested,
                                                 self.head_number(),
                                                 std::time::Instant::now(),
-                                                startup_sync_grace,
-                                                "block-response-next-batch",
                                             );
                                         }
                                         sync_retry_attempts_without_progress = 0;
@@ -3228,17 +3200,6 @@ mod cadence_tests {
         assert!(bounded_finalized_request_numbers(13, 1, 128, 12)
             .next()
             .is_none());
-    }
-
-    #[test]
-    fn next_block_sync_request_start_advances_imported_height() {
-        assert_eq!(next_block_sync_request_start(0), Some(1));
-        assert_eq!(next_block_sync_request_start(41), Some(42));
-    }
-
-    #[test]
-    fn next_block_sync_request_start_stops_at_terminal_height() {
-        assert_eq!(next_block_sync_request_start(u64::MAX), None);
     }
 
     #[test]
