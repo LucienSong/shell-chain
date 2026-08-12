@@ -1212,7 +1212,11 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
             .filter_registry
             .get_log_filter(&id)
             .ok_or_else(|| not_found("filter not found"))?;
-        self.get_logs(raw).await
+        let logs = self.get_logs(raw).await?;
+        if self.filter_registry.get_log_filter(&id).is_none() {
+            return Err(not_found("filter not found"));
+        }
+        Ok(logs)
     }
 
     async fn uninstall_filter(&self, id: String) -> Result<bool, ErrorObjectOwned> {

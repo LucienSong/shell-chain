@@ -1268,6 +1268,7 @@ mod tests {
     use shell_primitives::Bytes;
     use shell_storage::{MemoryDb, ProofAmendmentStore, StorageError, WitnessStore, WriteBatch};
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::{Condvar, Mutex};
 
     #[derive(Default)]
     struct MockDevControl {
@@ -1316,6 +1317,48 @@ mod tests {
                 return Err(StorageError::Database(
                     "injected canonical block read failure".into(),
                 ));
+            }
+            self.inner.get(key)
+        }
+
+        fn put(&self, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
+            self.inner.put(key, value)
+        }
+
+        fn delete(&self, key: &[u8]) -> Result<(), StorageError> {
+            self.inner.delete(key)
+        }
+
+        fn flush(&self) -> Result<(), StorageError> {
+            self.inner.flush()
+        }
+
+        fn write_batch(&self, batch: WriteBatch) -> Result<(), StorageError> {
+            self.inner.write_batch(batch)
+        }
+
+        fn scan_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
+            self.inner.scan_prefix(prefix)
+        }
+    }
+
+    #[derive(Default)]
+    struct BlockingGetStore {
+        inner: MemoryDb,
+        block_next_get: AtomicBool,
+        blocked: Mutex<bool>,
+        changed: Condvar,
+    }
+
+    impl KvStore for BlockingGetStore {
+        fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+            if self.block_next_get.swap(false, Ordering::SeqCst) {
+                let mut blocked = self.blocked.lock().unwrap();
+                *blocked = true;
+                self.changed.notify_all();
+                while *blocked {
+                    blocked = self.changed.wait(blocked).unwrap();
+                }
             }
             self.inner.get(key)
         }
@@ -6604,6 +6647,46 @@ mod tests {
             .unwrap();
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0].address, addr);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn get_filter_logs_rejects_filter_uninstalled_during_query() {
+        let store = Arc::new(BlockingGetStore::default());
+        let handler = setup_with_store(Arc::clone(&store));
+        let raw: RawLogFilter =
+            serde_json::from_str(r#"{"fromBlock":"0x0","toBlock":"0x0"}"#).unwrap();
+        let filter_id = EthApiServer::new_filter(&handler, raw).await.unwrap();
+
+        store.block_next_get.store(true, Ordering::SeqCst);
+        let query_handler = handler.clone();
+        let query_id = filter_id.clone();
+        let query =
+            tokio::spawn(
+                async move { EthApiServer::get_filter_logs(&query_handler, query_id).await },
+            );
+        {
+            let mut blocked = store.blocked.lock().unwrap();
+            while !*blocked {
+                blocked = store.changed.wait(blocked).unwrap();
+            }
+        }
+
+        assert!(EthApiServer::uninstall_filter(&handler, filter_id.clone())
+            .await
+            .unwrap());
+        {
+            let mut blocked = store.blocked.lock().unwrap();
+            *blocked = false;
+            store.changed.notify_all();
+        }
+
+        assert!(query
+            .await
+            .unwrap()
+            .unwrap_err()
+            .message()
+            .contains("filter not found"));
+        assert!(handler.filter_registry.get_log_filter(&filter_id).is_none());
     }
 
     #[tokio::test]

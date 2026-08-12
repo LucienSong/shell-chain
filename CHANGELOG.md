@@ -61,6 +61,8 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Reject `eth_getFilterLogs` results when the filter is uninstalled while the
+  query is in progress.
 - Evaluate custom-account, paymaster, and session authorization against the
   exact candidate block header during block production and import.
 - Clear block-sync request state when sending the next peer-targeted batch
