@@ -177,6 +177,10 @@ Controlled by `state_pruning_experimental = false` (default off).
 
 When enabled, `prune_state_trie()` walks canonical state roots below the light-profile retention floor, computes the set of protected nodes reachable from retained roots, and deletes unreachable snapshot nodes from older roots. The return value reports `pruned_roots`, `deleted_nodes`, and `skipped_roots` so operators can measure how much historical trie data was reclaimed.
 
+Logical snapshots preserve the durable state-trie pruning cursor and publish it
+atomically with imported chain progress. Import clears a stale local cursor when
+the snapshot does not contain one and rejects cursors ahead of the snapshot head.
+
 **Not yet production-ready.** Enable only for testing.
 
 ---
