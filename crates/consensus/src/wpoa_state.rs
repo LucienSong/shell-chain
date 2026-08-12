@@ -186,14 +186,12 @@ impl WPoaRound {
                 vote_weight = vote_weight.saturating_add(weight);
 
                 if self.total_weight != 0 && vote_weight >= self.finality_quorum_weight() {
-                    // Quorum reached!
-                    let quorum_signatures = votes.clone();
                     self.phase = RoundPhase::Committed {
                         block_hash: expected_hash,
                     };
                     vec![WPoaEvent::BlockCommitted {
                         block_hash: expected_hash,
-                        quorum_signatures,
+                        quorum_signatures: votes,
                     }]
                 } else {
                     self.phase = RoundPhase::Voting {

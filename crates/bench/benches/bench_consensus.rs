@@ -3,10 +3,13 @@
 /// Covers PoA seal/verify header and proposer selection.
 /// Run with: `cargo bench --package shell-bench --bench bench_consensus`
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
-use shell_consensus::{ConsensusEngine, PoaConfig, PoaEngine, ValidatorSet, ValidatorSetConfig};
+use shell_consensus::{
+    ConsensusEngine, PoaConfig, PoaEngine, ValidatorSet, ValidatorSetConfig, WPoaRound,
+};
 use shell_core::{Block, BlockHeader};
-use shell_crypto::{DilithiumSigner, Signer};
+use shell_crypto::{DilithiumSigner, PQSignature, SignatureType, Signer};
 use shell_primitives::{Address, Bytes, ShellHash};
+use std::collections::HashMap;
 
 fn make_block(number: u64, proposer: Address) -> Block {
     Block {
@@ -102,5 +105,44 @@ fn bench_poa_proposer_selection(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_poa_sign, bench_poa_proposer_selection);
+fn bench_wpoa_quorum_commit(c: &mut Criterion) {
+    let validators: Vec<Address> = (0u64..1_000)
+        .map(|i| {
+            let mut bytes = [0u8; 20];
+            bytes[12..].copy_from_slice(&i.to_be_bytes());
+            Address::from(bytes)
+        })
+        .collect();
+    let weights: HashMap<_, _> = validators
+        .iter()
+        .copied()
+        .map(|validator| (validator, 1))
+        .collect();
+    let block_hash = ShellHash::from([0x42; 32]);
+    let signature = PQSignature::new(SignatureType::Dilithium3, vec![0x24; 3_309]);
+
+    let mut group = c.benchmark_group("wpoa");
+    group.throughput(Throughput::Elements(validators.len() as u64));
+    group.bench_function("quorum_commit_1000", |b| {
+        b.iter(|| {
+            let mut round = WPoaRound::new(1, 0, weights.clone());
+            round.on_block_proposed(block_hash, validators[0]);
+            for validator in &validators {
+                let events = round.on_vote(*validator, block_hash, signature.clone());
+                if !events.is_empty() {
+                    return black_box(events);
+                }
+            }
+            unreachable!("1,000 unit-weight validators must reach quorum")
+        })
+    });
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_poa_sign,
+    bench_poa_proposer_selection,
+    bench_wpoa_quorum_commit
+);
 criterion_main!(benches);
