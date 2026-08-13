@@ -75,6 +75,23 @@ if not isinstance(release.get("published_at"), str) or not release["published_at
 if not isinstance(release.get("html_url"), str) or not release["html_url"]:
     errors.append("release has no public URL")
 
+assets = release.get("assets")
+if not isinstance(assets, list) or not assets:
+    errors.append("release has no downloadable assets")
+else:
+    for asset in assets:
+        name = asset.get("name") if isinstance(asset, dict) else None
+        if not isinstance(name, str) or not name:
+            errors.append("release has an asset without a name")
+            continue
+        if asset.get("state") != "uploaded":
+            errors.append(f"release asset '{name}' is not fully uploaded")
+        if not isinstance(asset.get("size"), int) or asset["size"] <= 0:
+            errors.append(f"release asset '{name}' is empty")
+        url = asset.get("browser_download_url")
+        if not isinstance(url, str) or not url:
+            errors.append(f"release asset '{name}' has no download URL")
+
 if errors:
     for error in errors:
         print(f"release publication check failed: {error}", file=sys.stderr)
