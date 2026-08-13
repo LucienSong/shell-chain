@@ -160,7 +160,7 @@ fn ensure_nonce_can_advance(nonce: u64) -> Result<(), TxValidationError> {
         .ok_or(TxValidationError::NonceOverflow)
 }
 
-fn ensure_supported_transaction_type(tx_type: u8) -> Result<(), TxValidationError> {
+pub fn validate_transaction_type(tx_type: u8) -> Result<(), TxValidationError> {
     if matches!(tx_type, 0..=3 | shell_core::AA_BUNDLE_TX_TYPE) {
         Ok(())
     } else {
@@ -209,7 +209,7 @@ pub fn validate_tx<S: KvStore + 'static, V: Verifier>(
         });
     }
 
-    ensure_supported_transaction_type(tx.tx_type)?;
+    validate_transaction_type(tx.tx_type)?;
 
     // 1b. Access list size validation
     if let Err(msg) = tx.validate_access_list() {
@@ -436,7 +436,7 @@ fn validate_tx_for_import_inner<S: KvStore + 'static, V: Verifier>(
         });
     }
 
-    ensure_supported_transaction_type(tx.tx_type)?;
+    validate_transaction_type(tx.tx_type)?;
 
     // 2. Access list size
     if let Err(msg) = tx.validate_access_list() {

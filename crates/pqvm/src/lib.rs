@@ -56,6 +56,7 @@ pub use system_contracts::{
 };
 pub use tracer::{decode_revert_reason, CallFrame, TraceResult};
 pub use tx_validation::{
-    compute_intrinsic_gas, validate_aa_bundle_structure, validate_tx, validate_tx_for_import,
-    validate_tx_for_import_at_block, validate_tx_for_import_with_expected_nonce, TxValidationError,
+    compute_intrinsic_gas, validate_aa_bundle_structure, validate_transaction_type, validate_tx,
+    validate_tx_for_import, validate_tx_for_import_at_block,
+    validate_tx_for_import_with_expected_nonce, TxValidationError,
 };

@@ -9,8 +9,8 @@ use tracing::warn;
 use shell_core::{calc_blob_gas_price, calc_excess_blob_gas, miner_tip, SignedTransaction};
 use shell_crypto::Verifier;
 use shell_pqvm::{
-    compute_intrinsic_gas, validate_aa_bundle_structure, validate_aa_tx, AaValidationError,
-    TxValidationError,
+    compute_intrinsic_gas, validate_aa_bundle_structure, validate_aa_tx, validate_transaction_type,
+    AaValidationError, TxValidationError,
 };
 use shell_primitives::{Address, ShellHash, U256};
 use shell_storage::{ChainStore, KvStore, WorldState};
@@ -682,6 +682,9 @@ impl TxPool {
                 got: tx.tx.chain_id,
             });
         }
+
+        validate_transaction_type(tx.tx.tx_type)
+            .map_err(|err| MempoolError::InvalidTransaction(err.to_string()))?;
 
         let mut base_fee_per_gas = 0;
         if let Some(head_hash) = chain_store.get_head_hash().map_err(MempoolError::Storage)? {
@@ -1561,6 +1564,24 @@ mod tests {
 
         let err = insert_rich(&pool, signed, &verifier, &mut ws, &cs).unwrap_err();
         assert!(matches!(err, MempoolError::ChainIdMismatch { .. }));
+    }
+
+    #[test]
+    fn reject_unsupported_transaction_type() {
+        let pool = TxPool::new(make_config());
+        let verifier = DilithiumVerifier;
+        let (mut ws, cs) = setup_validation_ctx();
+        let (mut tx, _pk) = make_signed_tx(u64::default(), 100);
+        tx.tx.tx_type = 4;
+
+        let err = insert_rich(&pool, tx, &verifier, &mut ws, &cs).unwrap_err();
+
+        assert!(matches!(
+            err,
+            MempoolError::InvalidTransaction(message)
+                if message == "unsupported transaction type: 0x4"
+        ));
+        assert!(pool.is_empty());
     }
 
     #[test]
