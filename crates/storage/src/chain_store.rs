@@ -125,10 +125,18 @@ pub(crate) fn decode_versioned<T: Decodable + serde::de::DeserializeOwned>(
     }
     match data.first().copied().unwrap_or(0) {
         format_version::RLP => {
-            let rest = data
+            let mut rest = data
                 .get(1..)
                 .unwrap_or_else(|| unreachable!("data checked non-empty above"));
-            T::decode(&mut &*rest).map_err(|e| StorageError::Codec(format!("RLP decode: {e}")))
+            let value = T::decode(&mut rest)
+                .map_err(|e| StorageError::Codec(format!("RLP decode: {e}")))?;
+            if !rest.is_empty() {
+                return Err(StorageError::Codec(format!(
+                    "RLP decode: {} trailing bytes",
+                    rest.len()
+                )));
+            }
+            Ok(value)
         }
         format_version::JSON => {
             let rest = data
@@ -139,6 +147,19 @@ pub(crate) fn decode_versioned<T: Decodable + serde::de::DeserializeOwned>(
         // Legacy data without version prefix — fall back to JSON.
         _ => serde_json::from_slice(data).map_err(|e| StorageError::Codec(e.to_string())),
     }
+}
+
+fn decode_witness_bundle(data: &[u8]) -> Result<shell_core::WitnessBundle, StorageError> {
+    let mut rest = data;
+    let bundle = shell_core::WitnessBundle::decode(&mut rest)
+        .map_err(|e| StorageError::Codec(format!("witness decode: {e}")))?;
+    if !rest.is_empty() {
+        return Err(StorageError::Codec(format!(
+            "witness decode: {} trailing bytes",
+            rest.len()
+        )));
+    }
+    Ok(bundle)
 }
 
 /// Key prefixes for chain store data. All keys are prefixed to avoid
@@ -973,11 +994,7 @@ impl<S: KvStore> ChainStore<S> {
         };
 
         let bundle = match self.store.get(&Self::witness_key(hash))? {
-            Some(bytes) => {
-                let b = shell_core::WitnessBundle::decode(&mut bytes.as_slice())
-                    .map_err(|e| StorageError::Codec(format!("witness decode: {e}")))?;
-                Some(b)
-            }
+            Some(bytes) => Some(decode_witness_bundle(&bytes)?),
             None => None,
         };
 
@@ -2396,11 +2413,7 @@ impl<S: KvStore> WitnessStore<S> {
     ) -> Result<Option<shell_core::WitnessBundle>, StorageError> {
         match self.store.get(&Self::key(block_hash))? {
             None => Ok(None),
-            Some(bytes) => {
-                let bundle = shell_core::WitnessBundle::decode(&mut bytes.as_slice())
-                    .map_err(|e| StorageError::Codec(format!("witness decode: {e}")))?;
-                Ok(Some(bundle))
-            }
+            Some(bytes) => Ok(Some(decode_witness_bundle(&bytes)?)),
         }
     }
 
@@ -5207,6 +5220,16 @@ mod tests {
     }
 
     #[test]
+    fn versioned_rlp_rejects_trailing_bytes() {
+        let block = empty_block(0);
+        let mut encoded = encode_rlp(&block.header);
+        encoded.push(0x80);
+
+        let error = decode_versioned::<BlockHeader>(&encoded).unwrap_err();
+        assert!(error.to_string().contains("1 trailing bytes"));
+    }
+
+    #[test]
     fn rlp_smaller_than_json() {
         // Verify RLP encoding is smaller than JSON for blocks.
         let block = empty_block(42);
@@ -5254,6 +5277,22 @@ mod tests {
         let ws = WitnessStore::new(store);
         let hash = shell_primitives::keccak256(b"nonexistent");
         assert!(ws.get_bundle(&hash).unwrap().is_none());
+    }
+
+    #[test]
+    fn witness_store_rejects_trailing_bytes() {
+        let store = Arc::new(MemoryDb::default());
+        let ws = WitnessStore::new(Arc::clone(&store));
+        let hash = shell_primitives::keccak256(b"block-with-trailing-witness-data");
+        let bundle = dummy_bundle();
+        let mut encoded = bundle.rlp_encode();
+        encoded.push(0x80);
+        store
+            .put(&WitnessStore::<MemoryDb>::key(&hash), &encoded)
+            .unwrap();
+
+        let error = ws.get_bundle(&hash).unwrap_err();
+        assert!(error.to_string().contains("1 trailing bytes"));
     }
 
     #[test]

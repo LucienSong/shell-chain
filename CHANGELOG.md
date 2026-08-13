@@ -12,6 +12,8 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Reject stored RLP values and witness bundles with trailing bytes instead of
+  silently accepting non-canonical records.
 - Reject a release tag push atomically when canonical `main` advances after
   release lineage validation.
 - Commit canonical STARK settlement artifacts atomically with produced and
