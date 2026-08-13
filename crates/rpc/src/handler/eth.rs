@@ -922,7 +922,8 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
     ) -> Result<Vec<RpcLogWithMeta>, ErrorObjectOwned> {
         // Resolve "latest" block number.
         let head = self.chain_store.get_head_block().map_err(internal_err)?;
-        let latest = head.map(|b| b.number()).unwrap_or(0);
+        let latest = head.as_ref().map(|b| b.number()).unwrap_or(0);
+        let has_head = head.is_some();
         let finalized = *self.finalized_number.read();
 
         let filter = raw_filter
@@ -953,7 +954,12 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
                 .map_err(internal_err)?
             {
                 Some(b) => b,
-                None => continue,
+                None if !has_head || block_num > latest => continue,
+                None => {
+                    return Err(internal_err(format!(
+                        "canonical block {block_num} is unavailable during log query"
+                    )));
+                }
             };
 
             // Fast path: check block-level bloom filter.
