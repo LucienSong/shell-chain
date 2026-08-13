@@ -17,6 +17,9 @@ pub enum CryptoError {
     #[error("signing failed: {0}")]
     SigningFailed(String),
 
+    #[error("key generation failed: {0}")]
+    KeyGenerationFailed(String),
+
     #[error("unsupported signature type: {0:?}")]
     UnsupportedSignatureType(crate::SignatureType),
 

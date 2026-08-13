@@ -165,8 +165,10 @@ pub fn validate_mnemonic(mnemonic: &str) -> bool {
 }
 
 /// Generate a fresh BIP-39 mnemonic (256-bit entropy, 24 words).
-pub fn generate_mnemonic() -> bip39::Mnemonic {
-    bip39::Mnemonic::generate(24).expect("bip39: 24-word mnemonic generation failed")
+pub fn generate_mnemonic() -> Result<bip39::Mnemonic, CryptoError> {
+    bip39::Mnemonic::generate(24).map_err(|error| {
+        CryptoError::KeyGenerationFailed(format!("mnemonic generation failed: {error}"))
+    })
 }
 
 // ── Seed derivation ───────────────────────────────────────────────────────────
@@ -177,13 +179,11 @@ pub fn generate_mnemonic() -> bip39::Mnemonic {
 /// matches the TypeScript implementation for standard BIP-39 mnemonics.
 ///
 /// Returns a 64-byte seed.
-pub fn mnemonic_to_seed(mnemonic: &str, passphrase: &str) -> [u8; 64] {
+pub fn mnemonic_to_seed(mnemonic: &str, passphrase: &str) -> Result<[u8; 64], CryptoError> {
     let m = bip39::Mnemonic::parse_in_normalized(bip39::Language::English, mnemonic)
-        .unwrap_or_else(|_| {
-            // Fall back to parsing without normalization for already-normalized input
-            bip39::Mnemonic::parse_normalized(mnemonic).expect("invalid mnemonic")
-        });
-    m.to_seed(passphrase)
+        .or_else(|_| bip39::Mnemonic::parse_normalized(mnemonic))
+        .map_err(|error| CryptoError::InvalidInput(format!("invalid mnemonic: {error}")))?;
+    Ok(m.to_seed(passphrase))
 }
 
 // ── HD tree ───────────────────────────────────────────────────────────────────
@@ -371,7 +371,7 @@ pub fn derive_account(
 /// ```no_run
 /// use shell_crypto::hd::{derive_session_key, mnemonic_to_seed, HdAlgo};
 ///
-/// let seed = mnemonic_to_seed("word1 word2 ...", "");
+/// let seed = mnemonic_to_seed("word1 word2 ...", "").unwrap();
 /// let session_0 = derive_session_key(&seed, HdAlgo::MlDsa65, 0).unwrap();
 /// let session_1 = derive_session_key(&seed, HdAlgo::MlDsa65, 1).unwrap();
 /// assert_ne!(session_0.public_key, session_1.public_key);
@@ -480,8 +480,14 @@ mod tests {
         let passphrase = v["passphrase"].as_str().unwrap();
         let expected_seed = v["seed_512"].as_str().unwrap();
 
-        let seed = mnemonic_to_seed(mnemonic, passphrase);
+        let seed = mnemonic_to_seed(mnemonic, passphrase).unwrap();
         assert_eq!(bytes_to_hex(&seed), expected_seed, "seed_512 mismatch");
+    }
+
+    #[test]
+    fn invalid_mnemonic_returns_error() {
+        let error = mnemonic_to_seed("not a valid recovery phrase", "").unwrap_err();
+        assert!(matches!(error, CryptoError::InvalidInput(_)));
     }
 
     // ── Master node ────────────────────────────────────────────────────────────

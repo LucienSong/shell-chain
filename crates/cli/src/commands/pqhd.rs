@@ -72,9 +72,9 @@ fn generate(
     let algo = parse_algo(&algo_str)?;
     let password = resolve_new_password(&password_args)?;
 
-    let mnemonic = generate_mnemonic();
+    let mnemonic = generate_mnemonic()?;
     let mnemonic_str = mnemonic.to_string();
-    let seed = mnemonic_to_seed(&mnemonic_str, "");
+    let seed = mnemonic_to_seed(&mnemonic_str, "")?;
     let account = derive_account(&seed, algo, 0, 0, 0)?;
 
     let encrypted = encrypt_hd_seed(&seed, &account.address, password.as_bytes())?;
@@ -135,7 +135,7 @@ fn print_addresses(count: u32, algo_str: String) -> Result<(), Box<dyn std::erro
     std::io::stderr().flush()?;
     let passphrase = rpassword::read_password()?;
 
-    let seed = mnemonic_to_seed(&mnemonic, &passphrase);
+    let seed = mnemonic_to_seed(&mnemonic, &passphrase)?;
 
     println!("Algorithm : {algo_str}");
     println!();
