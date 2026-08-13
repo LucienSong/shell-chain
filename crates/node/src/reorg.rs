@@ -88,14 +88,14 @@ impl ReorgEngine {
             "starting chain reorganization"
         );
 
-        Self::validate_chain_segment(
+        let old_blocks = Self::load_chain_segment(
             chain_store.as_ref(),
             ancestor_hash,
             ancestor_number,
             old_chain,
             "old_chain",
         )?;
-        Self::validate_chain_segment(
+        let new_blocks = Self::load_chain_segment(
             chain_store.as_ref(),
             ancestor_hash,
             ancestor_number,
@@ -113,22 +113,6 @@ impl ReorgEngine {
         let mut ancestor_ws =
             WorldState::at_root(Arc::clone(store), &ancestor_block.header.state_root)?;
         ancestor_ws.validate()?;
-        let old_blocks = old_chain
-            .iter()
-            .map(|hash| {
-                chain_store.get_block_by_hash(hash)?.ok_or_else(|| {
-                    NodeError::Startup(format!("old chain block not found: {:?}", hash))
-                })
-            })
-            .collect::<Result<Vec<_>, NodeError>>()?;
-        let new_blocks = new_chain
-            .iter()
-            .map(|hash| {
-                chain_store.get_block_by_hash(hash)?.ok_or_else(|| {
-                    NodeError::Startup(format!("new chain block not found: {:?}", hash))
-                })
-            })
-            .collect::<Result<Vec<_>, NodeError>>()?;
         let tip_state_root = new_blocks
             .last()
             .map(|block| block.header.state_root)
@@ -208,14 +192,15 @@ impl ReorgEngine {
         Ok(result)
     }
 
-    fn validate_chain_segment<S: KvStore>(
+    fn load_chain_segment<S: KvStore>(
         chain_store: &ChainStore<S>,
         ancestor_hash: ShellHash,
         ancestor_number: u64,
         chain: &[ShellHash],
         label: &str,
-    ) -> Result<(), NodeError> {
+    ) -> Result<Vec<shell_core::Block>, NodeError> {
         let mut expected_parent = ancestor_hash;
+        let mut blocks = Vec::with_capacity(chain.len());
         for (idx, hash) in chain.iter().enumerate() {
             let offset = u64::try_from(idx)
                 .ok()
@@ -245,8 +230,9 @@ impl ReorgEngine {
                 )));
             }
             expected_parent = *hash;
+            blocks.push(block);
         }
-        Ok(())
+        Ok(blocks)
     }
 }
 
@@ -257,7 +243,7 @@ mod tests {
     use shell_crypto::{PQSignature, SignatureType};
     use shell_primitives::{Address, Bytes, U256};
     use shell_storage::{MemoryDb, StorageError, WriteBatch};
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     #[derive(Debug, Default)]
     struct FailingBatchStore {
@@ -265,6 +251,7 @@ mod tests {
         fail_next_batch: AtomicBool,
         fail_block_reads_after_next_batch: AtomicBool,
         fail_block_reads: AtomicBool,
+        block_body_reads: AtomicUsize,
     }
 
     impl FailingBatchStore {
@@ -280,6 +267,9 @@ mod tests {
 
     impl KvStore for FailingBatchStore {
         fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+            if key.starts_with(b"b/") {
+                self.block_body_reads.fetch_add(1, Ordering::SeqCst);
+            }
             if self.fail_block_reads.load(Ordering::SeqCst) && key.starts_with(b"b/") {
                 return Err(StorageError::Database(
                     "injected post-commit block read failure".into(),
@@ -800,6 +790,11 @@ mod tests {
         .unwrap();
 
         assert!(result.reverted_txs.is_empty());
+        assert_eq!(
+            store.block_body_reads.load(Ordering::SeqCst),
+            3,
+            "ancestor and each chain segment block should be loaded once"
+        );
     }
 
     // ── Extended reorg tests ───────────────────────────────────────────
