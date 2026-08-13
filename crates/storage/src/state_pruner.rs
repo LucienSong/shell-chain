@@ -181,17 +181,16 @@ impl StatePruner {
         // Scan persisted canonical mappings so entries evicted from the bounded
         // root tracker remain discoverable. Each pass is capped to bound memory
         // and batch size; later passes resume naturally from mappings that remain.
-        let tracked_to_remove: Vec<u64> = self
+        let mut pruned_count: u64 = 0;
+        let mut protected_count: u64 = 0;
+        let mut batch = WriteBatch::new();
+        let mut tracked_to_remove: HashSet<u64> = self
             .block_roots
             .range(..cutoff)
             .filter_map(|(&block_number, root)| {
                 (!self.active_roots.contains(root)).then_some(block_number)
             })
             .collect();
-
-        let mut pruned_count: u64 = 0;
-        let mut protected_count: u64 = 0;
-        let mut batch = WriteBatch::new();
         let mut after = None;
 
         'pages: loop {
@@ -209,34 +208,30 @@ impl StatePruner {
                 }
                 after = Some(key.clone());
 
-                let root = match self.block_roots.get(&block_number).copied() {
-                    Some(root) => root,
-                    None => {
-                        let block_hash = ShellHash::try_from_slice(&block_hash_bytes)
-                            .map_err(|e| StorageError::Codec(e.to_string()))?;
-                        let header_key = [HEADER_PREFIX, block_hash.as_bytes()].concat();
-                        let header_bytes = store.get(&header_key)?.ok_or_else(|| {
-                            StorageError::Codec(format!(
-                                "canonical block {block_number} is missing its header"
-                            ))
-                        })?;
-                        let header: BlockHeader = decode_versioned(&header_bytes)?;
-                        if header.number != block_number {
-                            return Err(StorageError::Codec(format!(
-                                "canonical block {block_number} header reports block {}",
-                                header.number
-                            )));
-                        }
-                        header.state_root
-                    }
-                };
+                let block_hash = ShellHash::try_from_slice(&block_hash_bytes)
+                    .map_err(|e| StorageError::Codec(e.to_string()))?;
+                let header_key = [HEADER_PREFIX, block_hash.as_bytes()].concat();
+                let header_bytes = store.get(&header_key)?.ok_or_else(|| {
+                    StorageError::Codec(format!(
+                        "canonical block {block_number} is missing its header"
+                    ))
+                })?;
+                let header: BlockHeader = decode_versioned(&header_bytes)?;
+                if header.number != block_number {
+                    return Err(StorageError::Codec(format!(
+                        "canonical block {block_number} header reports block {}",
+                        header.number
+                    )));
+                }
 
-                if self.active_roots.contains(&root) {
+                if self.active_roots.contains(&header.state_root) {
+                    tracked_to_remove.remove(&block_number);
                     protected_count = protected_count.saturating_add(1);
                     continue;
                 }
 
                 batch.delete(key);
+                tracked_to_remove.insert(block_number);
                 pruned_count = pruned_count.saturating_add(1);
                 if batch.len() >= MAX_BLOCK_ROOTS {
                     break 'pages;
@@ -377,9 +372,12 @@ mod tests {
     fn setup_block(pruner: &mut StatePruner, store: &MemoryDb, block_number: u64, root: ShellHash) {
         pruner.register_block(block_number, root);
         // Write canonical mapping so prune() can delete it.
+        let mut hash_bytes = [0u8; 32];
+        hash_bytes[24..].copy_from_slice(&block_number.to_be_bytes());
+        let block_hash = ShellHash::from(hash_bytes);
         let key = canonical_key(block_number);
-        let hash_bytes = root.as_bytes().to_vec();
-        store.put(&key, &hash_bytes).unwrap();
+        store.put(&key, block_hash.as_bytes()).unwrap();
+        store_header(store, block_number, block_hash, root);
     }
 
     // ── Retention policy tests ─────────────────────────────────
@@ -466,6 +464,32 @@ mod tests {
         assert_eq!(result.protected_count, 1);
         // 68 eligible minus 1 protected = 67 pruned.
         assert_eq!(result.pruned_count, 67);
+    }
+
+    #[test]
+    fn canonical_header_root_protects_reorged_tracked_block() {
+        let store = Arc::new(MemoryDb::new());
+        let mut pruner = StatePruner::new(32);
+
+        setup_blocks(&mut pruner, &store, 0..100);
+        let canonical_hash = ShellHash::from([0xA5; 32]);
+        let canonical_root = ShellHash::from([0x5A; 32]);
+        store
+            .put(&canonical_key(10), canonical_hash.as_bytes())
+            .unwrap();
+        store_header(&store, 10, canonical_hash, canonical_root);
+        pruner.mark_active(canonical_root);
+
+        pruner.mark_prunable(80);
+        let result = pruner.prune(&*store).unwrap();
+
+        assert_eq!(result.pruned_count, 67);
+        assert_eq!(result.protected_count, 1);
+        assert_eq!(
+            store.get(&canonical_key(10)).unwrap(),
+            Some(canonical_hash.as_bytes().to_vec())
+        );
+        assert!(pruner.is_tracked(10));
     }
 
     // ── Safety guards ──────────────────────────────────────────
