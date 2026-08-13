@@ -246,11 +246,12 @@ if [ "$CONFIRM" = "y" ] || [ "$CONFIRM" = "Y" ]; then
     ok "Pushed tag ${TAG} to ${RELEASE_REMOTE}"
     echo ""
     echo "Next steps:"
-    echo "  1. Create a GitHub Release at https://github.com/ShellDAO/shell-chain/releases/new?tag=${TAG}"
+    echo "  1. Create a draft GitHub Release at https://github.com/ShellDAO/shell-chain/releases/new?tag=${TAG}"
     echo "  2. Add the CHANGELOG excerpt to the release body"
-    echo "  3. Verify publication: scripts/check-release-publication.sh ${RELEASE_REMOTE} ${TAG} ${RELEASE_COMMIT}"
-    echo "  4. Build the remaining platforms with scripts/build-release-binary.sh and attach the binaries"
-    echo "  5. Publish Docker image: docker buildx build --platform linux/amd64,linux/arm64 -t ghcr.io/shelldao/shell-chain:${TAG} --push ."
+    echo "  3. Build the remaining platforms with scripts/build-release-binary.sh and attach the binaries"
+    echo "  4. Publish the GitHub Release"
+    echo "  5. Verify publication: scripts/check-release-publication.sh ${RELEASE_REMOTE} ${TAG} ${RELEASE_COMMIT}"
+    echo "  6. Publish Docker image: docker buildx build --platform linux/amd64,linux/arm64 -t ghcr.io/shelldao/shell-chain:${TAG} --push ."
 else
     warn "Tag created locally but NOT pushed. Run: scripts/push-release-tag.sh ${RELEASE_REMOTE} ${TAG} ${RELEASE_COMMIT}"
 fi
