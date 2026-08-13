@@ -631,6 +631,7 @@ fn is_permanently_invalid_mempool_tx(error: &TxValidationError) -> bool {
     matches!(
         error,
         TxValidationError::ChainIdMismatch { .. }
+            | TxValidationError::UnsupportedTransactionType(_)
             | TxValidationError::GasTooLow(_)
             | TxValidationError::NonceOverflow
             | TxValidationError::InvalidAccessList(_)
@@ -663,6 +664,9 @@ mod tests {
                 expiry_block: 1,
                 current_block: 2,
             }
+        ));
+        assert!(is_permanently_invalid_mempool_tx(
+            &TxValidationError::UnsupportedTransactionType(4)
         ));
 
         assert!(!is_permanently_invalid_mempool_tx(

@@ -40,6 +40,9 @@ pub enum TxValidationError {
     #[error("chain_id mismatch: expected {expected}, got {got}")]
     ChainIdMismatch { expected: u64, got: u64 },
 
+    #[error("unsupported transaction type: {0:#x}")]
+    UnsupportedTransactionType(u8),
+
     #[error("gas limit below intrinsic: {0}")]
     GasTooLow(u64),
 
@@ -124,6 +127,7 @@ impl TxValidationError {
             Self::NonceOverflow => "nonce_overflow",
             Self::InsufficientBalance { .. } => "insufficient_balance",
             Self::ChainIdMismatch { .. } => "chain_id_mismatch",
+            Self::UnsupportedTransactionType(_) => "unsupported_transaction_type",
             Self::GasTooLow(_) => "gas_too_low",
             Self::PubkeyConflict => "pubkey_conflict",
             Self::DisallowedAlgorithm(_) => "disallowed_algorithm",
@@ -154,6 +158,14 @@ fn ensure_nonce_can_advance(nonce: u64) -> Result<(), TxValidationError> {
         .checked_add(1)
         .map(|_| ())
         .ok_or(TxValidationError::NonceOverflow)
+}
+
+fn ensure_supported_transaction_type(tx_type: u8) -> Result<(), TxValidationError> {
+    if matches!(tx_type, 0..=3 | shell_core::AA_BUNDLE_TX_TYPE) {
+        Ok(())
+    } else {
+        Err(TxValidationError::UnsupportedTransactionType(tx_type))
+    }
 }
 
 fn max_transaction_gas_cost(tx: &Transaction) -> Option<U256> {
@@ -196,6 +208,8 @@ pub fn validate_tx<S: KvStore + 'static, V: Verifier>(
             got: tx.chain_id,
         });
     }
+
+    ensure_supported_transaction_type(tx.tx_type)?;
 
     // 1b. Access list size validation
     if let Err(msg) = tx.validate_access_list() {
@@ -421,6 +435,8 @@ fn validate_tx_for_import_inner<S: KvStore + 'static, V: Verifier>(
             got: tx.chain_id,
         });
     }
+
+    ensure_supported_transaction_type(tx.tx_type)?;
 
     // 2. Access list size
     if let Err(msg) = tx.validate_access_list() {
@@ -1260,6 +1276,30 @@ mod tests {
     }
 
     #[test]
+    fn validate_rejects_unsupported_transaction_type() {
+        let signer = make_signer();
+        let (mut ws, cs) = setup_stores();
+        let from = signer_address(&signer);
+        fund_account(&mut ws, &from, U256::MAX);
+        let mut tx = simple_transfer(test_chain_id(), u64::default());
+        tx.tx_type = 4;
+        let signed = sign_tx(&signer, tx, true);
+
+        let result = validate_tx(&signed, &mut ws, &cs, &DilithiumVerifier, test_chain_id());
+        assert!(matches!(
+            result,
+            Err(TxValidationError::UnsupportedTransactionType(4))
+        ));
+
+        let result =
+            validate_tx_for_import(&signed, &mut ws, &cs, &DilithiumVerifier, test_chain_id());
+        assert!(matches!(
+            result,
+            Err(TxValidationError::UnsupportedTransactionType(4))
+        ));
+    }
+
+    #[test]
     fn validate_overflow_gas_cost_does_not_panic() {
         let signer = make_signer();
         let (mut ws, cs) = setup_stores();
@@ -2034,6 +2074,7 @@ mod tests {
                 expected: 1,
                 got: 2,
             },
+            TxValidationError::UnsupportedTransactionType(4),
             TxValidationError::GasTooLow(21_000),
             TxValidationError::PubkeyConflict,
             TxValidationError::InvalidAccessList("x".into()),
