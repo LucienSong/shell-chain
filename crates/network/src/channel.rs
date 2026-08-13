@@ -335,11 +335,22 @@ mod tests {
         let config = NetworkConfig::default();
 
         let mut node_a = bus.join(&config);
+        let node_b = bus.join(&config);
 
         node_a.broadcast(NetworkMessage::Ping).await.unwrap();
+        node_b.broadcast(NetworkMessage::Ping).await.unwrap();
 
-        let result = timeout(Duration::from_millis(100), node_a.next_event()).await;
-        assert!(result.is_err(), "should not receive own message");
+        let event = timeout(Duration::from_secs(1), node_a.next_event())
+            .await
+            .expect("timeout")
+            .expect("no event");
+        assert!(matches!(
+            event,
+            NetworkEvent::MessageReceived {
+                peer,
+                message: NetworkMessage::Ping,
+            } if peer == *node_b.local_peer_id()
+        ));
     }
 
     #[tokio::test]
