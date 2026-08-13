@@ -12,6 +12,8 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Make oversized transaction-gossip rejection coverage synchronize on a valid
+  peer message instead of passing only after a timeout.
 - Reject stored RLP values and witness bundles with trailing bytes instead of
   silently accepting non-canonical records.
 - Reject a release tag push atomically when canonical `main` advances after
