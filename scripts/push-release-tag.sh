@@ -25,7 +25,10 @@ fi
 if ! "$SCRIPT_DIR/check-release-remote.sh" "$REMOTE" >/dev/null; then
     fail "release remote is not canonical"
 fi
-if ! "$SCRIPT_DIR/check-release-lineage.sh" "$REMOTE" "$RELEASE_COMMIT" >/dev/null; then
+if ! REMOTE_MAIN=$(
+    "$SCRIPT_DIR/check-release-lineage.sh" \
+        "$REMOTE" "$RELEASE_COMMIT" --print-main
+); then
     fail "release commit is stale relative to canonical main"
 fi
 
@@ -43,7 +46,9 @@ if [ "$TAG_COMMIT" != "$RELEASE_COMMIT" ]; then
     fail "tag '${TAG}' does not point to the validated release commit"
 fi
 
-if ! git push "$REMOTE" "${TAG_OBJECT}:${TAG_REF}"; then
+if ! git push --atomic "$REMOTE" \
+    "${REMOTE_MAIN}:refs/heads/main" \
+    "${TAG_OBJECT}:${TAG_REF}"; then
     fail "remote tag state changed after release validation"
 fi
 
