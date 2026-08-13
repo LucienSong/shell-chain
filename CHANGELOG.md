@@ -10,6 +10,8 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Return errors for invalid PQ-HD recovery phrases and mnemonic generation
+  failures instead of terminating the wallet command.
 - Delete rejected STARK proof-range artifacts atomically so a storage failure
   cannot leave a partially removed pointer set.
 - Retry historical body back-fill requests after a response timeout so a
