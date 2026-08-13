@@ -4073,6 +4073,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_logs_rejects_missing_canonical_blocks_below_head() {
+        let handler = setup();
+        let block = Block {
+            header: BlockHeader {
+                number: 1,
+                ..make_genesis_block().header
+            },
+            transactions: vec![],
+            system_transactions: vec![],
+            proposer_seal: None,
+        };
+        let block_hash = block.hash();
+        handler.chain_store.put_block(&block).unwrap();
+        handler.chain_store.set_canonical(1, &block_hash).unwrap();
+        handler.chain_store.set_head(&block_hash).unwrap();
+        let raw: crate::filter::RawLogFilter =
+            serde_json::from_str(r#"{"fromBlock":"0x0","toBlock":"0x1"}"#).unwrap();
+
+        let err = EthApiServer::get_logs(&handler, raw).await.unwrap_err();
+
+        assert_eq!(err.code(), -32603);
+        assert_eq!(err.message(), "Internal server error");
+    }
+
+    #[tokio::test]
+    async fn get_logs_ignores_requested_blocks_above_head() {
+        let handler = setup();
+        store_block_with_logs(&handler, 0, vec![vec![]]);
+        let raw: crate::filter::RawLogFilter =
+            serde_json::from_str(r#"{"fromBlock":"0x0","toBlock":"0x1"}"#).unwrap();
+
+        let result = EthApiServer::get_logs(&handler, raw).await.unwrap();
+
+        assert!(result.is_empty());
+    }
+
+    #[tokio::test]
     async fn get_logs_rejects_missing_receipts_for_matching_nonzero_bloom() {
         let handler = setup();
         let target = Address::from([0xAA; 20]);
