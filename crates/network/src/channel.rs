@@ -408,6 +408,7 @@ mod tests {
     async fn inbound_rejects_variant_specific_oversized_messages() {
         let bus = NetworkBus::new(64);
         let config = NetworkConfig::default();
+        let node_a = bus.join(&config);
         let mut node_b = bus.join(&config);
 
         let tx = test_transaction(crate::message::MAX_TX_GOSSIP_SIZE + 1);
@@ -415,12 +416,19 @@ mod tests {
         assert!(data.len() < crate::message::MAX_MESSAGE_SIZE);
 
         bus.tx.send((PeerId::from("external"), data)).unwrap();
+        node_a.broadcast(NetworkMessage::Ping).await.unwrap();
 
-        let result = timeout(Duration::from_millis(100), node_b.next_event()).await;
-        assert!(
-            result.is_err(),
-            "oversized transaction gossip should be dropped"
-        );
+        let event = timeout(Duration::from_secs(1), node_b.next_event())
+            .await
+            .expect("timeout")
+            .expect("no event");
+        assert!(matches!(
+            event,
+            NetworkEvent::MessageReceived {
+                peer,
+                message: NetworkMessage::Ping,
+            } if peer == *node_a.local_peer_id()
+        ));
     }
 
     #[tokio::test]
