@@ -1172,6 +1172,11 @@ impl<S: KvStore + 'static> Node<S> {
         } else {
             drop(finality);
         }
+        self.metrics.block_height.set(plan.preferred_number as i64);
+        self.metrics.update_finality(
+            plan.preferred_number,
+            self.finality.read().last_finalized_number(),
+        );
 
         self.prover_orchestrator()
             .rewind_settled_frontiers(plan.ancestor_number);
