@@ -283,6 +283,14 @@ fn take_direct_message_fallback(
     }
 }
 
+fn inbound_direct_message_is_peer_violation(error: &request_response::InboundFailure) -> bool {
+    matches!(
+        error,
+        request_response::InboundFailure::Io(error)
+            if error.kind() == io::ErrorKind::InvalidData
+    )
+}
+
 /// Production P2P network service backed by libp2p.
 ///
 /// Spawns a background task running the libp2p Swarm event loop.
@@ -1200,6 +1208,13 @@ fn handle_swarm_event(
             request_response::Event::InboundFailure { peer, error, .. },
         )) => {
             debug!(%peer, %error, "direct message receive failed");
+            if inbound_direct_message_is_peer_violation(&error) {
+                let network_peer = PeerId(peer.to_string());
+                if peer_ban_list.record_violation(&network_peer) {
+                    warn!(peer = %peer, "peer banned for repeated direct-message violations");
+                    let _ = swarm.disconnect_peer_id(peer);
+                }
+            }
         }
         SwarmEvent::Behaviour(ShellBehaviourEvent::DirectMessage(
             request_response::Event::ResponseSent { .. },
@@ -2121,6 +2136,24 @@ mod tests {
                 ban_duration: Duration::from_secs(42),
             }
         );
+    }
+
+    #[test]
+    fn malformed_inbound_direct_messages_are_peer_violations() {
+        let invalid_data = request_response::InboundFailure::Io(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid direct message",
+        ));
+        let connection_reset = request_response::InboundFailure::Io(io::Error::new(
+            io::ErrorKind::ConnectionReset,
+            "connection reset",
+        ));
+
+        assert!(inbound_direct_message_is_peer_violation(&invalid_data));
+        assert!(!inbound_direct_message_is_peer_violation(&connection_reset));
+        assert!(!inbound_direct_message_is_peer_violation(
+            &request_response::InboundFailure::Timeout
+        ));
     }
 
     #[tokio::test]
