@@ -392,6 +392,18 @@ fn validate_pending_tx_params(
     }
 }
 
+fn validate_parameterless_subscription_params(
+    sub_type: &str,
+    params: Option<&serde_json::Value>,
+) -> Result<(), jsonrpsee::types::ErrorObjectOwned> {
+    if params.is_some() {
+        return Err(invalid_params_err(format!(
+            "{sub_type} does not accept subscription parameters"
+        )));
+    }
+    Ok(())
+}
+
 fn unsupported_subscription_type_err(_sub_type: &str) -> jsonrpsee::types::ErrorObjectOwned {
     invalid_params_err(format!(
         "unsupported subscription type: expected {SUPPORTED_SUBSCRIPTION_TYPES}"
@@ -450,6 +462,12 @@ impl<S: KvStore + 'static> EthPubSubServer for RpcHandler<S> {
         match sub_type.as_str() {
             "newHeads" => {
                 let rx = self.block_event_sender().subscribe();
+                if let Err(err) =
+                    validate_parameterless_subscription_params("newHeads", params.as_ref())
+                {
+                    pending.reject(err).await;
+                    return Ok(());
+                }
                 let sink = pending.accept().await?;
                 let forward_guard = SubscriptionSlotGuard::new(tracker.clone(), conn_id);
                 tokio::spawn(async move {
@@ -492,6 +510,12 @@ impl<S: KvStore + 'static> EthPubSubServer for RpcHandler<S> {
             }
             "syncing" => {
                 let rx = self.sync_event_sender().subscribe();
+                if let Err(err) =
+                    validate_parameterless_subscription_params("syncing", params.as_ref())
+                {
+                    pending.reject(err).await;
+                    return Ok(());
+                }
                 let sink = pending.accept().await?;
                 let forward_guard = SubscriptionSlotGuard::new(tracker.clone(), conn_id);
                 tokio::spawn(async move {
@@ -1189,6 +1213,25 @@ mod tests {
             let err = validate_pending_tx_params(Some(&value)).unwrap_err();
             assert_eq!(err.code(), jsonrpsee::types::error::INVALID_PARAMS_CODE);
             assert!(err.message().contains("newPendingTransactions"));
+        }
+    }
+
+    #[test]
+    fn parameterless_subscription_params_reject_values() {
+        for sub_type in ["newHeads", "syncing"] {
+            validate_parameterless_subscription_params(sub_type, None).unwrap();
+
+            for value in [
+                serde_json::Value::Null,
+                serde_json::json!(false),
+                serde_json::json!({}),
+            ] {
+                let err =
+                    validate_parameterless_subscription_params(sub_type, Some(&value)).unwrap_err();
+                assert_eq!(err.code(), jsonrpsee::types::error::INVALID_PARAMS_CODE);
+                assert!(err.message().contains(sub_type));
+                assert!(err.message().contains("does not accept"));
+            }
         }
     }
 
