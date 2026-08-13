@@ -8,6 +8,11 @@ fail() {
 
 REMOTE="${1:-origin}"
 COMMIT="${2:-HEAD}"
+OUTPUT_MODE="${3:-message}"
+
+if [ "$OUTPUT_MODE" != "message" ] && [ "$OUTPUT_MODE" != "--print-main" ]; then
+    fail "unknown output mode '${OUTPUT_MODE}'"
+fi
 
 if ! REMOTE_MAIN_OUTPUT=$(git ls-remote --exit-code --heads "$REMOTE" refs/heads/main); then
     fail "could not resolve current main from remote '$REMOTE'"
@@ -33,4 +38,8 @@ if ! git merge-base --is-ancestor "$REMOTE_MAIN" "$COMMIT"; then
     fail "release commit does not descend from current '$REMOTE/main' (${REMOTE_MAIN})"
 fi
 
-echo "release commit descends from current '$REMOTE/main' (${REMOTE_MAIN})"
+if [ "$OUTPUT_MODE" = "--print-main" ]; then
+    echo "$REMOTE_MAIN"
+else
+    echo "release commit descends from current '$REMOTE/main' (${REMOTE_MAIN})"
+fi

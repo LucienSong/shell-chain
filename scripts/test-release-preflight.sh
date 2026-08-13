@@ -333,6 +333,38 @@ if git --git-dir="$TAG_REMOTE" show-ref --verify --quiet refs/tags/v0.27.4; then
 fi
 
 CURRENT_MAIN=$(git -C "$TAG_FIXTURE" rev-parse HEAD)
+git -C "$TAG_FIXTURE" tag -a v0.27.6 "$CURRENT_MAIN" -m "racing release"
+printf 'race\n' >> "$TAG_FIXTURE/history"
+git -C "$TAG_FIXTURE" commit -qam "advance canonical main during tag push"
+RACING_MAIN=$(git -C "$TAG_FIXTURE" rev-parse HEAD)
+REAL_GIT=$(command -v git)
+RACING_GIT="$TMP_DIR/racing-git"
+mkdir -p "$RACING_GIT"
+cat > "$RACING_GIT/git" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [ "${1:-}" = "push" ]; then
+    "$REAL_GIT" -C "$RACE_SOURCE" push -q canonical \
+        "$RACING_MAIN:refs/heads/main"
+fi
+exec "$REAL_GIT" "$@"
+EOF
+chmod +x "$RACING_GIT/git"
+if PUSH_OUTPUT=$(cd "$TAG_FIXTURE" && \
+    PATH="$RACING_GIT:$PATH" REAL_GIT="$REAL_GIT" \
+    RACE_SOURCE="$TAG_FIXTURE" RACING_MAIN="$RACING_MAIN" \
+    "$PUSH_HELPER_DIR/push-release-tag.sh" \
+        canonical v0.27.6 "$CURRENT_MAIN" 2>&1); then
+    fail "release tag push unexpectedly accepted a concurrent main update"
+fi
+if ! grep -Fq "remote tag state changed after release validation" <<<"$PUSH_OUTPUT"; then
+    fail "concurrent main update rejection was not specific: $PUSH_OUTPUT"
+fi
+if git --git-dir="$TAG_REMOTE" show-ref --verify --quiet refs/tags/v0.27.6; then
+    fail "release push published a tag while canonical main changed"
+fi
+
+CURRENT_MAIN=$(git -C "$TAG_FIXTURE" rev-parse HEAD)
 git -C "$TAG_FIXTURE" tag -a v0.27.5 "$PUSH_COMMIT" -m "wrong release source"
 if PUSH_OUTPUT=$(cd "$TAG_FIXTURE" && "$PUSH_HELPER_DIR/push-release-tag.sh" \
     canonical v0.27.5 "$CURRENT_MAIN" 2>&1); then
