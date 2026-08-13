@@ -2782,6 +2782,9 @@ mod tests {
         assert_eq!(node.finality.read().last_finalized_number(), 2);
         assert_eq!(*node.finality.read().last_finalized_hash(), side_two_hash);
         assert_eq!(node.chain_store.get_finalized_number().unwrap(), Some(2));
+        assert_eq!(node.metrics.block_height.get(), 2);
+        assert_eq!(node.metrics.last_finalized_number.get(), 2);
+        assert_eq!(node.metrics.finality_lag_blocks.get(), 0);
         assert_eq!(
             node.fork_choice
                 .read()
