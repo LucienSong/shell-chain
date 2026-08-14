@@ -12,6 +12,8 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Count malformed direct-message streams as peer violations so repeatedly
+  oversized payloads reach the configured temporary-ban threshold.
 - Make oversized transaction-gossip rejection coverage synchronize on a valid
   peer message instead of passing only after a timeout.
 - Reject stored RLP values and witness bundles with trailing bytes instead of
