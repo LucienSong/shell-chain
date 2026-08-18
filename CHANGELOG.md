@@ -14,6 +14,9 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Apply witness-retention cleanup against finality advanced by preferred-fork
+  adoption instead of waiting for a later finality event.
+- Update `h2` to 0.4.16 to reject unbounded empty DATA frames.
 - Reject unknown `newPendingTransactions` subscription option fields instead
   of silently treating misspelled requests as hash-only subscriptions.
 - Remove the redundant wall-clock batch-verification timing comparison from
