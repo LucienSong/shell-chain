@@ -1200,7 +1200,12 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
                 }
             }
 
-            if !self.filter_registry.update_cursor(&id, cursor, new_cursor) {
+            if !self.filter_registry.update_cursor_with_observed_canonical(
+                &id,
+                cursor,
+                new_cursor,
+                canonical_from,
+            ) {
                 return Err(internal_err(
                     "filter cursor changed during poll; retry the request",
                 ));
@@ -1212,7 +1217,12 @@ impl<S: KvStore + 'static> EthApiServer for RpcHandler<S> {
                 .map(|(_, block_hash)| block_hash)
                 .collect::<Vec<_>>();
 
-            if !self.filter_registry.update_cursor(&id, cursor, new_cursor) {
+            if !self.filter_registry.update_cursor_with_observed_canonical(
+                &id,
+                cursor,
+                new_cursor,
+                canonical_from,
+            ) {
                 return Err(internal_err(
                     "filter cursor changed during poll; retry the request",
                 ));
