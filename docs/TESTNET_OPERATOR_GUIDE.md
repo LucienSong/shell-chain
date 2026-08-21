@@ -177,6 +177,29 @@ curl -s http://localhost:8545 \
   -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
 ```
 
+### Unreleased upgrade notes
+
+The next release changes transaction signing hashes to commit to access lists
+and updates the genesis protocol marker. Existing alpha-testnet databases
+require a fresh genesis. Back up any state you need before upgrading, and use
+the coordinated genesis configuration for every validator.
+
+```bash
+sudo systemctl stop shell-node
+
+git pull origin main
+cargo build --release -p shell-cli --bin shell-node
+sudo install -m 0755 target/release/shell-node /usr/local/bin/shell-node
+
+shell-node --datadir /var/lib/shell-chain removedb --force
+shell-node --datadir /var/lib/shell-chain init \
+  --genesis /etc/shell-chain/genesis.json \
+  --chain-id 10 \
+  --network testnet
+
+sudo systemctl start shell-node
+```
+
 ### v0.27.4 upgrade notes
 
 v0.27.4 changes canonical transaction identifiers and commits the new rules

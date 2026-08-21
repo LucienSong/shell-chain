@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Commit access lists to transaction signing hashes. Existing databases use
+  incompatible transaction signing and identity rules and cannot be resumed by
+  this release.
+
+### Migration Guide
+
+- Alpha testnet operators must stop the node, back up any required state, run
+  `shell-node --datadir <path> removedb --force`, and initialize the chain from
+  the coordinated genesis configuration before restarting.
+
 ### Performance
 
 - Count canonical witness-bundle bytes directly from borrowed transactions
@@ -28,6 +40,8 @@ All notable changes to this project will be documented in this file.
   larger retention window.
 - Validate rollback settlement metadata before committing startup recovery or
   preferred-fork canonical changes.
+- Bind access lists to sender, session-key, and paymaster signatures so a relayer
+  cannot change transaction execution metadata without invalidating authorization.
 - Remove a machine-speed-dependent TPS assertion from the deterministic test
   suite; production throughput remains covered by the load-test harness.
 - Reject unsupported STARK amendment and proof-pointer versions instead of

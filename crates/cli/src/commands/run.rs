@@ -273,7 +273,7 @@ fn repair_head_state_if_needed<S: KvStore + 'static>(
     Ok(true)
 }
 
-fn validate_transaction_id_protocol<S: KvStore + 'static>(
+fn validate_transaction_protocol<S: KvStore + 'static>(
     chain_store: &ChainStore<S>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let Some(config) = chain_store.get_chain_config()? else {
@@ -288,7 +288,7 @@ fn validate_transaction_id_protocol<S: KvStore + 'static>(
         .starts_with(TRANSACTION_ID_GENESIS_DOMAIN)
     {
         return Err(
-            "database uses legacy transaction identity rules; this upgrade requires a fresh genesis (back up required data, run `shell-node removedb --force`, then initialize the chain again)"
+            "database uses legacy transaction signing or identity rules; this upgrade requires a fresh genesis (back up required data, run `shell-node removedb --force`, then initialize the chain again)"
                 .into(),
         );
     }
@@ -399,7 +399,7 @@ async fn run_with_store<S: KvStore + 'static>(
 
     // Check if chain is already initialized (persistent storage resume).
     let chain_store = ChainStore::new(store.clone());
-    validate_transaction_id_protocol(&chain_store)?;
+    validate_transaction_protocol(&chain_store)?;
     let mut resumed = match chain_store.get_head_block()? {
         Some(head) => {
             info!(
@@ -1146,16 +1146,16 @@ mod tests {
     }
 
     #[test]
-    fn transaction_id_protocol_accepts_current_genesis() {
+    fn transaction_protocol_accepts_current_genesis() {
         let store = Arc::new(MemoryDb::new());
         let authority = Address::from([7u8; 20]);
         initialize_genesis(&test_genesis(authority), Arc::clone(&store)).unwrap();
 
-        validate_transaction_id_protocol(&ChainStore::new(store)).unwrap();
+        validate_transaction_protocol(&ChainStore::new(store)).unwrap();
     }
 
     #[test]
-    fn transaction_id_protocol_rejects_legacy_genesis() {
+    fn transaction_protocol_rejects_legacy_genesis() {
         let authority = Address::from([7u8; 20]);
         let config = test_genesis(authority);
         let source_store = Arc::new(MemoryDb::new());
@@ -1177,7 +1177,7 @@ mod tests {
             )
             .unwrap();
 
-        let error = validate_transaction_id_protocol(&chain_store).unwrap_err();
+        let error = validate_transaction_protocol(&chain_store).unwrap_err();
         assert!(error.to_string().contains("requires a fresh genesis"));
     }
 

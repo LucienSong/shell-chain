@@ -697,7 +697,7 @@ impl From<AaValidationError> for TxValidationError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shell_core::Transaction;
+    use shell_core::{AccessListItem, Transaction};
     use shell_crypto::{
         DilithiumSigner, DilithiumVerifier, MlDsaSigner, MultiVerifier, PQSignature, SignatureType,
         Signer,
@@ -973,6 +973,29 @@ mod tests {
 
         let verifier = DilithiumVerifier;
         let result = validate_tx(&signed, &mut ws, &cs, &verifier, test_chain_id());
+        assert!(matches!(result, Err(TxValidationError::SignatureInvalid)));
+    }
+
+    #[test]
+    fn validate_rejects_access_list_added_after_signing() {
+        let signer = make_signer();
+        let (mut ws, cs) = setup_stores();
+        let from = signer_address(&signer);
+        fund_account(&mut ws, &from, U256::from(1_000_000));
+
+        let mut tx = simple_transfer(test_chain_id(), u64::default());
+        tx.gas_limit = 30_000;
+        let mut signed = sign_tx(&signer, tx, true);
+        signed.tx.access_list = Some(vec![AccessListItem {
+            address: Address::from([0x22; 32]),
+            storage_keys: vec![ShellHash::from([0x33; 32])],
+        }]);
+
+        let result = validate_tx(&signed, &mut ws, &cs, &DilithiumVerifier, test_chain_id());
+        assert!(matches!(result, Err(TxValidationError::SignatureInvalid)));
+
+        let result =
+            validate_tx_for_import(&signed, &mut ws, &cs, &DilithiumVerifier, test_chain_id());
         assert!(matches!(result, Err(TxValidationError::SignatureInvalid)));
     }
 

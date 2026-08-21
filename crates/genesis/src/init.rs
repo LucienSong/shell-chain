@@ -4,12 +4,12 @@ use shell_storage::{ChainConfig, ChainStore, KvStore, StorageError, WorldState};
 
 use crate::{AllocEntry, GenesisConfig, GenesisError};
 
-/// Genesis commitment for the sender-bound transaction identity rules.
+/// Genesis commitment for the current transaction signing and identity rules.
 ///
 /// Including this domain in the genesis header gives upgraded networks a
-/// distinct genesis hash and prevents nodes with incompatible transaction-ID
+/// distinct genesis hash and prevents nodes with incompatible transaction
 /// semantics from sharing canonical history.
-pub const TRANSACTION_ID_GENESIS_DOMAIN: &[u8; 16] = b"SHELL_TXID_V2\0\0\0";
+pub const TRANSACTION_ID_GENESIS_DOMAIN: &[u8; 16] = b"SHELL_TXID_V3\0\0\0";
 
 /// Initialize world state from genesis allocations and produce the genesis block.
 ///

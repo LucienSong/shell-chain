@@ -341,9 +341,9 @@ impl Transaction {
 
     /// Compute the PQ signing hash using the spec payload and BLAKE3.
     ///
-    /// Preimage: `PQTX_SIGNING_V1\0(16B) || chain_id || nonce || to(32B) || value(32B) || data ||
+    /// Preimage: `PQTX_SIGNING_V2\0(16B) || chain_id || nonce || to(32B) || value(32B) || data ||
     ///            gas_limit || max_fee_per_gas || max_priority_fee_per_gas ||
-    ///            sig_type || tx_type`
+    ///            rlp(access_list) || sig_type || tx_type`
     /// For blob transactions (tx_type == 3), appends: `max_fee_per_blob_gas(8B) || blob_hash_0(32B) || ...`
     pub fn signing_hash(&self, sig_type: u8) -> ShellHash {
         let blob_extra = if self.tx_type == 3 {
@@ -355,7 +355,18 @@ impl Transaction {
             0
         };
         let mut preimage = Vec::with_capacity(
-            16 + 8 + 8 + 32 + 32 + self.data.len() + 8 + 8 + 8 + 1 + 1 + blob_extra,
+            16 + 8
+                + 8
+                + 32
+                + 32
+                + self.data.len()
+                + 8
+                + 8
+                + 8
+                + self.access_list_rlp_len()
+                + 1
+                + 1
+                + blob_extra,
         );
         preimage.extend_from_slice(PQTX_SIGNING_DOMAIN);
         preimage.extend_from_slice(&self.chain_id.to_be_bytes());
@@ -370,6 +381,7 @@ impl Transaction {
         preimage.extend_from_slice(&self.gas_limit.to_be_bytes());
         preimage.extend_from_slice(&self.max_fee_per_gas.to_be_bytes());
         preimage.extend_from_slice(&self.max_priority_fee_per_gas.to_be_bytes());
+        self.encode_access_list(&mut preimage);
         preimage.push(sig_type);
         preimage.push(self.tx_type);
         if self.tx_type == 3 {
@@ -435,7 +447,7 @@ pub const MAX_PAYMASTER_CONTEXT: usize = 4 * 1024;
 pub const MAX_SESSION_PUBKEY: usize = 4 * 1024;
 
 /// Domain prefix for PQTX signing hash (WP §1503-1509).
-pub const PQTX_SIGNING_DOMAIN: &[u8; 16] = b"PQTX_SIGNING_V1\0";
+pub const PQTX_SIGNING_DOMAIN: &[u8; 16] = b"PQTX_SIGNING_V2\0";
 
 /// Domain tag for the canonical batch signing hash (sender PQ sig) (WP §AA-spec).
 pub const PQTX_BUNDLE_DOMAIN: &[u8; 16] = b"PQTX_BUNDLE_V1\0\0";
@@ -2073,6 +2085,21 @@ mod tests {
     }
 
     #[test]
+    fn tx_signing_hash_binds_access_list() {
+        let tx = sample_tx();
+        let mut with_access_list = tx.clone();
+        with_access_list.access_list = Some(vec![AccessListItem {
+            address: Address::from([0x22; 20]),
+            storage_keys: vec![ShellHash::from([0x33; 32])],
+        }]);
+
+        assert_ne!(
+            tx.signing_hash(SignatureType::Dilithium3.as_u8()),
+            with_access_list.signing_hash(SignatureType::Dilithium3.as_u8())
+        );
+    }
+
+    #[test]
     fn signed_tx_hash_binds_sender_but_excludes_signature() {
         let tx = sample_tx();
         let from_a = Address::from([0x42; 20]);
@@ -2303,13 +2330,12 @@ mod tests {
             blob_versioned_hashes: Some(vec![ShellHash::from([0x55; 32])]),
         };
 
-        // Updated golden after adding PQTX_SIGNING_V1\0 domain prefix (WP §1503-1509).
-        // shell-sdk hashTransaction() must be updated to prepend the same 16-byte domain.
-        // Previous (no-domain): 0xf5a14a12f556ff79fff941e944519f1c965b80e53c91503a676ff0a891ef0836
+        // Updated when the signing payload began committing to the access list.
+        // shell-sdk hashTransaction() must use the same domain and field order.
         let expected = ShellHash::from([
-            0x68, 0xee, 0xa4, 0x69, 0x4a, 0xb0, 0xfb, 0xa5, 0x49, 0xe5, 0xb5, 0x2b, 0xe4, 0x72,
-            0x98, 0x4c, 0x61, 0x21, 0xf0, 0x95, 0xd8, 0x3d, 0xb5, 0x51, 0x5a, 0x59, 0xcc, 0x34,
-            0x5c, 0xcc, 0x47, 0x61,
+            0x1c, 0x0e, 0x0e, 0x9b, 0xd5, 0x59, 0xaa, 0xe3, 0x20, 0x4e, 0xb2, 0xfd, 0x11, 0xa7,
+            0x3a, 0xec, 0xdd, 0xa3, 0x4b, 0x92, 0x21, 0xcb, 0xc2, 0x68, 0x98, 0x68, 0x7f, 0x65,
+            0xde, 0xbc, 0xe5, 0x46,
         ]);
 
         assert_eq!(tx.hash(), expected);
@@ -3703,9 +3729,9 @@ mod tests {
         assert_eq!(
             expected.as_bytes(),
             &[
-                0x40, 0x83, 0xd5, 0x07, 0x9c, 0x93, 0x81, 0xba, 0xe7, 0xe2, 0x84, 0x61, 0x73, 0x55,
-                0x9b, 0xf6, 0xa3, 0x5f, 0x43, 0x02, 0x97, 0xc8, 0xf4, 0x6b, 0x0f, 0x79, 0x8c, 0xab,
-                0xb9, 0x6a, 0xda, 0x3d,
+                0xb6, 0x19, 0xda, 0x49, 0x89, 0x89, 0x0f, 0x1a, 0x52, 0x5b, 0x88, 0xe5, 0xaa, 0x59,
+                0x75, 0xe0, 0x3d, 0xe0, 0x2b, 0x80, 0xe5, 0x18, 0xb9, 0x07, 0x68, 0xfa, 0xbd, 0x98,
+                0xf9, 0x3d, 0x99, 0x6f,
             ]
         );
 

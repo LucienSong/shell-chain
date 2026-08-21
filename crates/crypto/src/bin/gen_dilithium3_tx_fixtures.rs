@@ -22,9 +22,9 @@ use pqcrypto_traits::sign::{
 use shell_primitives::{blake3_hash, Address, U256};
 
 /// Signing-hash preimage layout (matches `Transaction::signing_hash`):
-///   PQTX_SIGNING_V1\0(16B) || chain_id(8B be) || nonce(8B be) || to(32B) || value(32B) ||
+///   PQTX_SIGNING_V2\0(16B) || chain_id(8B be) || nonce(8B be) || to(32B) || value(32B) ||
 ///   data || gas_limit(8B be) || max_fee_per_gas(8B be) || max_priority_fee_per_gas(8B be) ||
-///   sig_type(1B) || tx_type(1B)
+///   rlp(access_list) || sig_type(1B) || tx_type(1B)
 /// For tx_type == 3: also max_fee_per_blob_gas(8B be) || blob_hashes...
 #[allow(clippy::too_many_arguments)]
 fn signing_hash(
@@ -41,14 +41,14 @@ fn signing_hash(
     max_fee_per_blob_gas: Option<u64>,
     blob_versioned_hashes: Option<&[[u8; 32]]>,
 ) -> [u8; 32] {
-    const PQTX_SIGNING_DOMAIN: &[u8; 16] = b"PQTX_SIGNING_V1\0";
+    const PQTX_SIGNING_DOMAIN: &[u8; 16] = b"PQTX_SIGNING_V2\0";
     let blob_extra = if tx_type == 3 {
         8 + blob_versioned_hashes.map_or(0, |h| h.len() * 32)
     } else {
         0
     };
     let mut preimage =
-        Vec::with_capacity(16 + 8 + 8 + 32 + 32 + data.len() + 8 + 8 + 8 + 1 + 1 + blob_extra);
+        Vec::with_capacity(16 + 8 + 8 + 32 + 32 + data.len() + 8 + 8 + 8 + 1 + 1 + 1 + blob_extra);
     preimage.extend_from_slice(PQTX_SIGNING_DOMAIN);
     preimage.extend_from_slice(&chain_id.to_be_bytes());
     preimage.extend_from_slice(&nonce.to_be_bytes());
@@ -61,6 +61,7 @@ fn signing_hash(
     preimage.extend_from_slice(&gas_limit.to_be_bytes());
     preimage.extend_from_slice(&max_fee_per_gas.to_be_bytes());
     preimage.extend_from_slice(&max_priority_fee_per_gas.to_be_bytes());
+    preimage.push(0xc0); // canonical RLP encoding of this fixture's empty access list
     preimage.push(sig_type);
     preimage.push(tx_type);
     if tx_type == 3 {
